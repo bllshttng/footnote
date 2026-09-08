@@ -236,7 +236,7 @@ def test_registered_dispatch_budget_sender_matches_the_hosted_envelope(
 
 
 def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
-    from fno.mail import cli
+    from fno.mail import cli, job_lane
     from fno.mail.job_address import JobHolder
 
     job = JobHolder(
@@ -256,11 +256,11 @@ def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
     )
     body = words(79)
 
-    cli._job_lane_send(body, "node:work-1234", from_name="sender")
+    job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
     assert "queued (durable)" in capsys.readouterr().out
 
     with pytest.raises(typer.Exit) as raised:
-        cli._job_lane_send(body, "node:work-1234", from_name="sender")
+        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
 
     assert raised.value.exit_code == 1
     assert "running=79 current=79 projected=158 cap=80 window=10m" in (
@@ -270,7 +270,7 @@ def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
 
 
 def test_job_lane_durable_failure_releases_the_reservation(monkeypatch):
-    from fno.mail import cli
+    from fno.mail import cli, job_lane
     from fno.mail.job_address import JobHolder
 
     job = JobHolder(
@@ -294,7 +294,7 @@ def test_job_lane_durable_failure_releases_the_reservation(monkeypatch):
     body = words(79)
 
     with pytest.raises(typer.Exit) as failed:
-        cli._job_lane_send(body, "node:work-1234", from_name="sender")
+        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
     assert failed.value.exit_code == 12
 
     retry = send("sender", "node:work-1234", 79, "msg-retry")

@@ -84,6 +84,62 @@ Project/cwd is demoted from address to resolver. `fno agents send --to-project X
 
 `ProjectResolution` enforces exactly-one-outcome at construction. `ask` is synchronous, so `ask --to-project` requires exactly one live peer (none/ambiguous is an error; use `send` for the durable path).
 
+## Crown-destination addressing (anycast over the crown)
+
+`fno agents mail send --to-king <scope> <msg>` addresses the ROLE, not the session. The holder is resolved from the registry at SEND time. The resolver is `resolve_to_king` in `cli/src/fno/agents/crown.py`. It uses `crown_scope_matches`, the same territory rule the row-keyed king readers use.
+
+Succession moves the crown row. It does not move the mail handle a peer learned while that handle was crowned. So a handle send after an abdication reaches the wrong session. Both failures are silent: the message was delivered, a session woke, and it answered.
+
+The rule:
+
+- exactly one live crowned row over that scope: deliver live to it.
+- none: refuse, exit 16, queue nothing. A project queue has a future drain that reads it as that project. A vacant crown has no such reader. Queueing strands the message at the address.
+- more than one: refuse, naming both holders. That is the split crown `fno agents court` already reports. It is not a multiplicity to pick between, so there is no `--any` tie-break here.
+
+`resolve_to_king` returns the holder names as a plain list. A list has no illegal state to guard, so unlike `ProjectResolution` there is no construction-time check. The one caller reads the three outcomes off the length.
+
+`--to-king` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The crown deciding that is the point.
+
+A forwarding pointer written at abdication is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer crowned either.
+
+## Recipient crown stamp
+
+Every live-delivered envelope carries the RECIPIENT's own live crown, read at delivery from the same registry:
+
+```
+-- your crown: L1 fno
+-- your crown: none right now
+```
+
+The line sits above the sender-standing trailer. The peer-mail authority notice stays the last line inside the envelope.
+
+It is a trailer, not a tag attribute. The module's field rule reserves attributes for what a recipient cannot cheaply look up. A reader's own crown is exactly what it fails to look up.
+
+Two gates, in order. With no resolved recipient session id, the envelope carries no line at all. `none right now` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) carries no line either, so those envelopes stay byte-unchanged.
+
+## Job-address lane
+
+`fno agents mail send node:<id> <msg>` (or `pr:<n>`, normalized to `node:<id>` by the graph lookup) addresses the WORK, not the process. The lane lives in `cli/src/fno/mail/job_lane.py`.
+
+A job address outlives its holder. That is the structural fix for the dead-handle strand. A session handle expired faster than the message. Mail to it then piled up on a queue the dead session never drained.
+
+Two outcomes, matching the name lane's one-line stdout contract. There is no second delivery-verification receipt, because a receipt claiming delivery happened after the fact is the shape that has lied four times.
+
+- A holder exists (claim live or suspect): live-inject to the holder's session. A confirmed inject IS delivery and writes no durable copy, the same as a hosted name-lane send. A live miss floors to a durable envelope addressed to `node:<id>`, so a successor drains it. The owner is `wake-daemon`. The holder exists and the inject missed, so the message waits for a drain rather than a turn boundary. A `node:<id>` thread surfaces at a holder's SessionStart scan, because the notify-self scan reads only the session's own handle. The receipt must not promise turn-boundary visibility.
+- No holder (free, stale, corrupted, or no node): REFUSE, exit 16, queue nothing. Queueing strands the message at the job address, which is the defect again, one address over.
+
+The inject targets the session id. Both `control.sock` and the codex daemon are keyed by it and cwd-independent, so a holder in another worktree is reachable from the sender's cwd. A bus-only holder is refused inside the injector, so the receipt names the policy rather than a miss.
+
+## Name-lane address resolution
+
+`_name_lane_send` in `cli/src/fno/mail/cli.py` is the one choke point every delivery rung lives in. Two rules there are easy to break by moving a line.
+
+The durable copy must be addressed to the RESOLVED session's canonical handle. Deriving it from the raw token misaddresses every alias. A full session id is the collision escape hatch. It is written verbatim, never canonicalized. Two same-window codex sessions share their first eight characters, so canonicalizing a full id collapses both onto one durable key. `drain-self` reads the full id.
+
+A non-id token, such as a spawn `--name` like `blueprint-auth-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
+
+The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-king` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A crowned row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the crown resolved correctly.
+
 ## `fno inbox` alias + legacy migration
 
 `fno agents send` (with `fno agents send --to-project <project>` for project-destination anycast) routes through `write_new_thread`, which mirrors a canonical envelope into the bus on every write: one log line per send, the md render and the envelope agree (no md-store divergence), and the existing triage drain finds it. The mirror is best-effort (the md render is the durable copy); a mirror failure warns loudly on stderr because a bus reader would otherwise diverge from the md drain until backfill.

@@ -2151,23 +2151,20 @@ def _name_lane_send(
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
-
     Three modes, by which of ``resolved`` / ``token`` is set:
 
     - ``resolved`` (a live ``DiscoveredSession``): live-inject first, mux pane
       next, durable floor on miss, addressed to its canonical handle.
-    - ``token`` (discovery MISSED, but a miss from a liveness-gated listing is
-      not a verdict on reachability): the full ladder -- inject-as-probe, then
-      asleep resolution, then wake-and-deliver, then a durable demotion naming
-      each failed lane. Raises ``UnreachableTokenError`` when no store knows the
-      token at all, so the caller can exit 16 having queued nothing, and
-      ``AmbiguousTokenError`` rather than guessing between two sessions.
-    - neither: durable-only, addressed to ``recipient`` (a reply to an offline
-      sender).
+    - ``token`` (discovery MISSED, which is no verdict on reachability): the
+      full ladder -- inject-as-probe, asleep resolution, wake-and-deliver, then
+      a durable demotion naming each failed lane. Raises
+      ``UnreachableTokenError`` when no store knows the token, so the caller
+      exits 16 having queued nothing, and ``AmbiguousTokenError`` rather than
+      guessing between two sessions.
+    - neither: durable-only, addressed to ``recipient``.
 
-    ``reply_to`` stamps BOTH the wire ``reply_to`` attr and the bus
-    ``in_reply_to`` from ONE msg-id -- never one set, the other null. Exits 12 on
-    a durable-floor write failure."""
+    ``reply_to`` stamps BOTH the wire attr and the bus ``in_reply_to`` from ONE
+    msg-id. Exits 12 on a durable-floor write failure."""
     from fno.agents.dispatch import (
         BUS_ONLY_POLICY,
         _mail_inject_claude,
@@ -2189,16 +2186,19 @@ def _name_lane_send(
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
     self_send = False
+    # The recipient's full session id when a lane resolved one; it stamps that
+    # session's own crown into the live envelope.
+    recipient_session: Optional[str] = None
     if resolved is not None:
+        recipient_session = resolved.session_id
         recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
         self_send = _self_recipient(
             recipient, resolved_session_id=resolved.session_id
         ) is not None
     elif token is not None:
-        # Resolve BEFORE addressing. The durable copy must be addressed to the
-        # resolved session's canonical handle -- deriving it from the raw token
-        # would misaddress every alias. A clean miss may still be this ambient
+        # Resolve BEFORE addressing (docs/architecture/cross-agent-bus-log.md
+        # #name-lane-address-resolution). A clean miss may still be this ambient
         # session's full, canonical, or legacy identity; all three drain under
         # the canonical recipient without attempting to inject into self.
         self_recipient = None
@@ -2219,29 +2219,18 @@ def _name_lane_send(
         if self_recipient is not None:
             recipient = self_recipient
         elif is_full_session_id(token):
-            # The full id is the collision escape hatch: address the durable copy
-            # by the full id (distinct), not canonical_handle. Two same-window
-            # codex sessions share first-8, so canonicalizing a full id would
-            # collapse both onto one durable key. drain-self reads the full id.
+            # The collision escape hatch: address the durable copy by the full
+            # id, never canonical_handle.
             recipient = session_identity_key(token)
         elif token_reachable is not None:
             recipient = canonical_handle(token_reachable.session_id)
         else:
-            # A non-id token (a --name like blueprint-x-ce6e-glm) is not a mail
-            # address, and writing it as a durable recipient strands the message:
-            # the drain is handle-keyed, so a name never matches a session's
-            # handle. Refuse rather than queue a message nobody can drain. A
-            # bare hex short-handle of a session no store currently knows still
-            # earns a durable write (it may yet drain if that session revives).
+            # A non-id token is not a mail address and would strand; --force
+            # is the exception because it writes no durable row. Both rules:
+            # docs/architecture/cross-agent-bus-log.md
+            # #name-lane-address-resolution. A bare hex short-handle of a
+            # session no store knows still earns a durable write.
             if not is_session_shaped(token):
-                # --force is the exception, and the refusal above says why it is
-                # one: a name cannot be a DURABLE recipient because the drain is
-                # handle-keyed. Forcing writes no such row. It types at a pane
-                # the registry names, and the registry is exactly what resolves
-                # a friendly name to the session behind it. Discovery is
-                # liveness-gated, so this arm IS the situation --force exists
-                # for, and refusing here made the flag unusable for the address
-                # its own error text tells you to use.
                 forced_entry = _resolve_pane_entry(None, None, token) if force else None
                 # `harness_session_id` FIRST, matching `_pane_recipient_handle`
                 # and `resolve_pane_recipient`. `AgentEntry.session_id` is a
@@ -2258,8 +2247,12 @@ def _name_lane_send(
                     raise UnreachableTokenError(token)
                 recipient = canonical_handle(forced_session)
                 provider = getattr(forced_entry, "harness", None) or provider
+                recipient_session = forced_session
             else:
                 recipient = token
+        if recipient_session is None:
+            recipient_session = token_reachable.session_id if token_reachable else (
+                session_identity_key(token) if is_full_session_id(token) else None)
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
@@ -2284,28 +2277,31 @@ def _name_lane_send(
     )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
-    # The collision-safe reply address (node x-3a64). `from` stays the compact
-    # display handle; `from_session` is the full id, and it is the one a
-    # recipient can answer when two workers share a head-8 clock bucket. None
-    # when this session's identity is unprovable, and then the attribute is
-    # omitted rather than guessed.
+    # The collision-safe reply address: `from` is the display handle,
+    # `from_session` the full id a recipient can answer when two workers share a
+    # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
-    wrapped = wrap_fno_mail(
-        message,
-        from_=sender,
+    def _envelope(to_session: Optional[str] = None) -> str:
         # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and stamping a raw "claude" here made the
-        # name lane the one producer disagreeing with dispatch, the relay, and
-        # the Rust contract. "cli" survives as the honest no-harness value: the
-        # mapper renders a MISSING provider as "unknown", never a vendor guess.
-        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-        model=sender_model,
-        to=recipient,
-        id=msg_id,
-        reply_to=reply_to,
-        from_session=sender_session,
-        origin=origin,
-    )
+        # vocabulary is claude-code, and a raw "claude" here made the name lane
+        # the one producer disagreeing with dispatch, the relay, and the Rust
+        # contract. "cli" is the honest no-harness value.
+        return wrap_fno_mail(
+            message,
+            from_=sender,
+            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
+            model=sender_model,
+            to=recipient,
+            id=msg_id,
+            reply_to=reply_to,
+            from_session=sender_session,
+            origin=origin,
+            to_session=to_session,
+        )
+
+    # Live carries the recipient's crown; the durable floor below carries none,
+    # being read whenever the recipient drains.
+    wrapped = _envelope(recipient_session)
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -2361,7 +2357,7 @@ def _name_lane_send(
     # node x-1904: the live lane's own cause when a claude inject misses, so the
     # durable receipt names it (e.g. not-confirmed) instead of a bare live-miss.
     live_reason: Optional[str] = None
-    to_session: Optional[str] = resolved.session_id if resolved is not None else None
+    to_session: Optional[str] = recipient_session
     to_harness: Optional[str] = resolved.agent if resolved is not None else None
 
     if resolved is None and token is not None:
@@ -2607,7 +2603,7 @@ def _name_lane_send(
             recipient=recipient,
             sender=stamp_from(from_name),
             kind="send",
-            body=wrapped,
+            body=_envelope(),
             msg_id=msg_id,
             to_kind="name",
             provider_to=provider,
@@ -2683,198 +2679,6 @@ def _name_lane_send(
             == "escalated"
         ):
             print(f"escalated to human ({recipient}) [{esc_reason}]", file=sys.stderr)
-
-
-def _job_lane_send(
-    message: str,
-    token: str,
-    *,
-    from_name: Optional[str],
-    style_exception: Optional[str] = None,
-    origin: Optional[str] = None,
-) -> None:
-    """Deliver to a JOB address (``node:<id>`` / ``pr:<n>``), resolved to whoever
-    holds the claim RIGHT NOW (x-8f8c part 2).
-
-    A job address names the work, not the process: it survives the holder's death
-    because the durable copy is addressed to ``node:<id>`` and a successor drains
-    it at SessionStart. This is the structural fix for the dead-handle strand --
-    a session handle expired faster than the message, so mail to it accumulated on
-    a queue the dead session never drained.
-
-    Two outcomes, matching the name-lane one-line stdout contract (no separate
-    delivery-verification receipt -- the existing receipt is the send-time inject
-    confirmation, and a second receipt claiming delivery happened is the shape
-    that has lied four times):
-
-    - holder exists (claim live/suspect): live-inject to the holder's session. On
-      a confirmed inject, that IS delivery (no durable copy, same as a name-lane
-      hosted send). On a live miss, durable-floor to ``node:<id>`` so a successor
-      drains it.
-    - no holder (free/stale/corrupted/no-node): REFUSE, exit 16, queue nothing.
-      Queueing would strand the message at the job address -- the defect again,
-      one address over.
-
-    ``pr:<n>`` is normalized to ``node:<id>`` by the resolver (graph lookup), so
-    the durable envelope always carries the canonical node address and the drain
-    consumes one address space.
-    """
-    from fno.agents.dispatch import (
-        BUS_ONLY_POLICY,
-        _mail_inject_claude,
-        _mail_inject_codex,
-    )
-    from fno.agents.self_stamp import resolve_self_model, stamp_from
-    from fno.dispatch_flags import infer_invoking_harness
-    from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
-    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
-    from fno.mail.job_address import resolve_job_address
-
-    job = resolve_job_address(token)
-    if job is None:
-        # Not a job address -- should not reach here (cmd_send gates on the
-        # prefix), but fail closed rather than misaddress.
-        print(f"error: not a job address: {token!r}", file=sys.stderr)
-        raise typer.Exit(code=2)
-
-    if not job.has_holder:
-        note = f" ({job.note})" if job.note else ""
-        print(
-            f"mail: {token}{note} has no live holder "
-            f"(claim state: {job.state}); not queued.\n"
-            f"  a job address with no holder would strand. "
-            f"Retry when a /target session holds {job.address}.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=16)
-    # Bound to a local so the type-checker narrows Optional -> str past the
-    # has_holder guard (a property it cannot track across).
-    session_id = job.session_id
-    assert session_id is not None  # has_holder is True iff session_id is set
-
-    msg_id = generate_msg_id()
-    # The durable recipient is the JOB (node:<id>), not the holder's session
-    # handle: this is what makes the address outlive the session. pr:<n> was
-    # already normalized to node:<id> by the resolver.
-    recipient = job.address
-    sender = stamp_from(from_name)
-    _reservation, authored_words = _reserve_budget(
-        sender=sender,
-        recipient=recipient,
-        body=message,
-        msg_id=msg_id,
-        allow_reason=style_exception,
-    )
-    sender_harness = infer_invoking_harness()
-    sender_model = resolve_self_model()
-    # Same collision-safe reply address the name lane carries: a job address
-    # routes the message IN, and the holder still answers the sender, so the
-    # sender needs an id that survives a head-8 collision. Bound to a local
-    # because the wire is not the only place it has to land -- both durable
-    # records below read it too, and a reply consults THOSE, not the envelope.
-    sender_session = _reply_session_for(from_name)
-    wrapped = wrap_fno_mail(
-        message,
-        from_=sender,
-        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-        model=sender_model,
-        to=recipient,
-        node=job.node_id,
-        id=msg_id,
-        from_session=sender_session,
-        origin=origin,
-    )
-
-    # Live-inject to the current holder's session. Inject targets the session id
-    # (control.sock / codex daemon are keyed by it, cwd-independent), so a holder
-    # in another worktree is reachable from this sender's cwd. A bus-only holder
-    # (x-e21e) is refused inside the injector, so the receipt below names the
-    # policy rather than a miss.
-    provider = job.harness or "claude"
-    _job_reason: list = []
-    if provider == "codex":
-        injected = _mail_inject_codex(session_id, wrapped, reason_out=_job_reason)
-    else:
-        injected = _mail_inject_claude(session_id, wrapped, reason_out=_job_reason)
-    bus_only = not injected and BUS_ONLY_POLICY in _job_reason
-
-    holder_tag = f" [holder {provider} {session_id[:8]}]"
-    if injected:
-        from fno.bus.log import record_hosted_delivery
-
-        try:
-            record_hosted_delivery(
-                msg_id=msg_id,
-                sender=sender,
-                recipient=recipient,
-                body=wrapped,
-                provider_from=sender_harness,
-                provider_to=provider,
-                from_session=sender_session,
-                from_model=sender_model,
-                to_kind="node",
-                word_count=authored_words,
-                to_session=session_id,
-                to_harness=provider,
-            )
-        except Exception as exc:  # noqa: BLE001 - delivery already succeeded
-            print(
-                "delivery succeeded; outbox record failed; "
-                f"do not retry: {exc}",
-                file=sys.stderr,
-            )
-        print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
-        return
-
-    # Live miss: durable floor addressed to the JOB, written through the SAME
-    # write_new_thread the name lane uses (node:<id> is a first-class recipient
-    # now that inbox_dir_for admits ':'). A successor (or this holder's next
-    # drain) surfaces it via scan_unread(node:<id>). Owner is wake-daemon: the
-    # holder exists but the inject missed, so the message waits for a drain
-    # (resumable), not a turn boundary -- live-drain's 1h "drains next turn"
-    # assumption does not hold for a job address whose only drain is SessionStart.
-    owner = DurableOwner.WAKE_DAEMON
-    try:
-        th = write_new_thread(
-            recipient=recipient,
-            sender=stamp_from(from_name),
-            kind="send",
-            body=wrapped,
-            msg_id=msg_id,
-            provider_to=provider,
-            to_kind="node",
-            owner=owner.value,
-            from_session=sender_session,
-            origin=origin,
-            word_count=authored_words,
-        )
-    except (OSError, ValueError, RuntimeError) as exc:
-        _release_budget(_reservation)
-        print(
-            f"durable envelope write failed for {recipient!r}: {exc}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=12) from exc
-    # One stdout line (the receipt contract) + an advisory on stderr naming the
-    # recovery: the message waits for the holder's next drain, not a reply
-    # window. A node:<id> thread drains at a holder's SessionStart scan (the
-    # notify-self scan reads only the session's own handle), so the receipt
-    # must not promise turn-boundary visibility.
-    if bus_only:
-        print(
-            "mail: holder is DND (bus-only by delivery policy); queued durable "
-            "until a holder drains",
-            file=sys.stderr,
-        )
-        print(
-            f"{th.thread_id} queued (durable) for {recipient} "
-            f"[bus-only: a holder drains it by policy]{holder_tag}"
-        )
-        return
-    print(f"mail: {recipient} live-inject missed; durable until a holder drains",
-          file=sys.stderr)
-    suffix = _live_miss_age_suffix(recipient)
-    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss{suffix}]{holder_tag}")
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
@@ -3696,6 +3500,56 @@ def _raw_send(
     raise typer.Exit(code=0)
 
 
+def _resolve_to_king_address(
+    scope: str,
+    name: str | None,
+    message: str | None,
+    *,
+    conflict: str | None,
+) -> tuple[str, str]:
+    """Resolve ``--to-king <scope>`` to (holder handle, body), or refuse.
+
+    The body is the sole positional, so it parks in ``name``. A refusal queues
+    nothing: a vacant crown has no reader who answers as king.
+    """
+    from fno.agents.crown import resolve_to_king
+
+    if conflict is not None or message is not None:
+        clash = conflict or "a second positional (the message is the only one)"
+        print(
+            f"error: --to-king and {clash} are mutually exclusive. Run "
+            f"`fno agents court` and address that handle for the other lane.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(2)
+    if not name:
+        print("usage: fno agents mail send --to-king <scope> <message>", file=sys.stderr)
+        raise typer.Exit(2)
+    try:
+        holders = resolve_to_king(scope)
+    except (OSError, ValueError, RuntimeError) as exc:  # RegistryVersionError
+        print(f"error: --to-king {scope!r}: registry unreadable: {exc}", file=sys.stderr)
+        raise typer.Exit(12) from exc
+    if not holders:
+        print(
+            f"--to-king {scope!r} refused: no live row holds this crown right "
+            f"now, and nothing was queued. Run `fno agents court` to see who "
+            f"does, or address a specific handle.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(16)
+    if len(holders) > 1:
+        print(
+            f"--to-king {scope!r} is a split crown: {len(holders)} live rows "
+            f"hold it ({', '.join(holders)}), so it went to none. Run "
+            f"`fno agents court` and resolve it, or address one by name.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(17)
+    print(f"--to-king {scope}: resolved to {holders[0]}", file=sys.stderr)
+    return holders[0], name
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -3760,6 +3614,14 @@ def cmd_send(
         help=(
             "Anycast: deliver to whoever works on this project (live if exactly "
             "one peer, durable queue if none). Use instead of <name>."
+        ),
+    ),
+    to_king: str | None = typer.Option(
+        None, "--to-king",
+        help=(
+            "Anycast over the crown: deliver to whoever holds this crown scope "
+            "RIGHT NOW, resolved at send time. Refuses and queues nothing when no "
+            "live row holds it. Use instead of <name> for the role."
         ),
     ),
     any_live: bool = typer.Option(
@@ -3870,26 +3732,24 @@ def cmd_send(
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
-    Name mode (``send <name> <message>``): requires the agent to already exist;
-    unknown names exit 16. Project mode (``send --to-project <X> <message>``):
-    resolves over the registry - one live peer delivers live, none queues
-    durable for project X, many errors with the candidate list unless ``--any``.
+    Name mode (``send <name> <message>``) requires the agent to already exist;
+    unknown names exit 16. Project mode (``send --to-project <X> <message>``)
+    resolves over the registry: one live peer delivers live, none queues durable
+    for project X, many errors with the candidate list unless ``--any``. Crown
+    mode (``send --to-king <scope> <message>``) resolves the crown holder at
+    send time, then delivers by name; nobody or a split crown refuses.
 
-    Delivery is live-inject-FIRST; the durable envelope is the fallback tier,
-    written when the live lane misses or never runs. Sustained agent-lock
-    contention writes nothing and exits 11 - it says so on stderr rather than
-    implying a receipt.
+    Delivery is live-inject-FIRST; the durable envelope is the fallback tier.
+    Sustained agent-lock contention writes nothing and exits 11.
 
     Address it by the ADDRESS column of ``fno agents list`` (or the full session
-    id). The NAME column is a spawn label and the discovered lane's LABEL is a
-    friendly alias; neither is a mailbox, and a durable write keyed to one
-    queues under a key no drain reads. If a send does strand, ``fno agents mail sent
+    id). The NAME column is a spawn label and a discovered lane's LABEL is an
+    alias; neither is a mailbox. If a send does strand, ``fno agents mail sent
     --unclaimed`` finds it and ``fno agents mail withdraw <id>`` retracts it.
 
-    Stdout contract (US3 AC3-UI / US6 AC6-UI): exactly one line, either
-    ``msg-<id> delivered (hosted)`` or ``msg-<id> queued (durable) [<reason>]``,
-    where ``<reason>`` is the live lane's own cause (node x-1904).
-    Exit 0 for both outcomes. Failures surface on stderr with nonzero exit.
+    Stdout contract: exactly one line, either ``msg-<id> delivered (hosted)`` or
+    ``msg-<id> queued (durable) [<reason>]``, where ``<reason>`` is the live
+    lane's own cause. Exit 0 for both; failures go to stderr with a nonzero exit.
     """
     from fno.agents.dispatch import (
         DispatchAskError,
@@ -3901,11 +3761,35 @@ def cmd_send(
 
     refuse_retired_provider(_provider_tombstone)
 
+    # --to-king addresses a ROLE, resolved HERE at send time and handed to the
+    # ordinary name lane. Any second address would decide the destination, and
+    # the crown deciding it is the point.
+    if to_king is not None:
+        name, message = _resolve_to_king_address(
+            to_king, name, message,
+            conflict=(
+                "--to-project" if to_project is not None
+                else "--to-self" if to_self
+                else "--kind" if kind is not None
+                else "--raw" if raw
+                else "--force" if force
+                else "--any" if any_live
+                else "--ruling" if ruling is not None
+                else None
+            ),
+        )
+
     if ruling is not None:
-        if raw or kind is not None or to_project is not None or to_self:
+        if (
+            raw
+            or kind is not None
+            or to_project is not None
+            or to_king is not None
+            or to_self
+        ):
             print(
                 "error: --ruling supports only send <worker> <message>; drop "
-                "--raw, --kind, --to-project, or --to-self",
+                "--raw, --kind, --to-project, --to-king, or --to-self",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -3925,7 +3809,13 @@ def cmd_send(
         raise typer.Exit(code=2) from exc
     _record_mail_origin(
         origin=classified_origin,
-        lane="raw" if raw else "inbox" if kind is not None else "project" if to_project else "peer",
+        lane=(
+            "raw" if raw
+            else "inbox" if kind is not None
+            else "project" if to_project
+            else "king" if to_king
+            else "peer"
+        ),
         sender=from_name,
         # Under --to-self the positional parks the payload, so `name` is not
         # a handle at this point; recording it wrote the payload into the
@@ -3939,13 +3829,10 @@ def cmd_send(
         None if classified_origin == "unknown" else classified_origin
     )
 
-    # --to-self: the recipient is THIS session, derived from ambient identity, so
-    # the positional parks the payload (positional #1) exactly as under
-    # --to-project. Fail loud without identity - never a silent floor - and refuse
-    # alongside --to-project or a second positional (which reads as a named
-    # recipient, contradicting a self address). After this the rest of cmd_send
-    # sees name=<self handle>, message=<payload>, indistinguishable from a typed
-    # `send <own-id> <payload>`.
+    # --to-self: the recipient is THIS session, so the positional parks the
+    # payload exactly as under --to-project. Fail loud without identity, never a
+    # silent floor. After this the rest of cmd_send sees name=<self handle>,
+    # message=<payload>, indistinguishable from a typed `send <own-id> <body>`.
     if to_self:
         if to_project is not None:
             print(
@@ -3980,34 +3867,17 @@ def cmd_send(
         message = name
         name = canonical_handle(ident.session_id)
 
-    # The codex head-8 refusal belongs up here for the same reason the --force
-    # guard below does: it sat under the --raw, --to-project, --kind and
-    # job-address returns, so `send 01a025f8 '/verb' --raw` still fired a verb at
-    # whichever colliding session discovery happened to list. An address rule
-    # that only covers the lanes reached last is not an address rule.
-    #
-    # Never for --to-self. The rule exists because a head-8 cannot pick between
-    # two sessions in one clock bucket, and self-addressing has nothing to pick
-    # between: --to-self DERIVED this handle from the running session twelve
-    # lines up. Refusing it killed `mail send --to-self --raw '/<verb>'` on
-    # codex, which is the documented self-invocation path and the one the
-    # --force refusal text recommends, and the caller cannot even comply because
-    # --to-self rejects a positional address.
-    # Not on the --to-project lane, where `name` holds the message BODY rather
-    # than an address (the project is the address, and the positional parks the
-    # text). Hoisting the call without that exclusion made an eight-hex body
-    # refuse as an address whenever a live codex row happened to share those
-    # characters, which is a refusal aimed at content nobody was addressing.
-    if not to_project:
+    # The codex head-8 refusal sits ABOVE every lane that returns on its own.
+    # --to-project holds the BODY in the positional, so it has no address to
+    # check. --to-self and --to-king DERIVED theirs, which names one row by
+    # construction, so the ambiguity the rule guards cannot arise. Details:
+    # docs/architecture/cross-agent-bus-log.md#name-lane-address-resolution.
+    if not to_project and not to_king:
         _refuse_unsafe_short_address(name, self_addressed=to_self)
 
-    # --force ABOVE every lane that returns without reading it. Four lanes below
-    # end the command on their own, so a guard placed after any of them leaves
-    # the flag silently dropped there -- which is the defect this guard exists to
-    # close, reintroduced one line at a time. A dropped transport flag is worse
-    # than a refused one, because the receipt reads like a success: the send
-    # prints `queued (durable)` while the sender believes it was typed at a
-    # prompt. Only the name lane can force, because only it names one pane.
+    # --force ABOVE every lane that returns without reading it: a dropped
+    # transport flag reads like a success. Only the name lane can force, because
+    # only it names one pane.
     if force:
         why = None
         if raw:
@@ -4348,12 +4218,9 @@ def cmd_send(
                 f"[project {to_project}]"
             )
         elif result.recipient is not None:
-            # A live peer was resolved but injection demoted to durable: the
-            # envelope is addressed to that peer (its at-least-once copy), NOT
-            # the project. Report it as such so the line is not a peer/project
-            # mismatch (codex P2) - the resolved peer's own drain picks it up.
-            # A bus-only peer demoted by policy gets the designed-queue
-            # receipt, not a recovery warning.
+            # A live peer resolved but injection demoted to durable: the envelope
+            # is addressed to that PEER, not the project, so the receipt says so.
+            # A bus-only peer gets the designed-queue receipt, not a warning.
             from fno.agents.dispatch import BUS_ONLY_POLICY
 
             if result.reason == BUS_ONLY_POLICY:
@@ -4368,10 +4235,7 @@ def cmd_send(
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
-                # lane, so it must carry the same cause. Dropping the reason
-                # here printed "is not live ... fno agents resume" over an
-                # agent-lock timeout, which says nothing about the recipient,
-                # and stamped [live-miss] when no live attempt ever ran.
+                # lane, so it must carry the same cause.
                 _warn_deferred(result.recipient, reason=result.reason)
                 reason_tok = result.reason or "live-miss"
                 if reason_tok == "live-miss":
@@ -4403,7 +4267,9 @@ def cmd_send(
             _refuse_forged_envelope(message)
             _enforce_body_cap(message)
             _enforce_style(message, allow_reason=style_exception)
-            _job_lane_send(
+            from fno.mail.job_lane import job_lane_send
+
+            job_lane_send(
                 message,
                 name,
                 from_name=stamp_from(from_name),

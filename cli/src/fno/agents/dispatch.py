@@ -6302,76 +6302,14 @@ _MUX_PANE_CLAIM_WAIT_S = 4.0
 # retrying the same payload could duplicate a paste whose outcome is unknown.
 _MUX_SEND_UNKNOWN = -2
 
+# Re-exported: the envelope identity context moved to its own module, and
+# `fno.agents.dispatch` stays the import path callers already use.
+from fno.agents.mail_ctx import _MailCtx, _build_mail_ctx  # noqa: E402
+
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
 _WAKE_NAME_PREFIX = "wake-"
-
-
-@dataclass(frozen=True)
-class _MailCtx:
-    """Sender identity stamped into the ``<fno_mail>`` envelope (node x-1f23)."""
-
-    from_: str
-    harness: str
-    model: str
-    node: Optional[str] = None
-    to: Optional[str] = None
-    from_session: Optional[str] = None
-    # This message's own bus msg-id (US1). Rendered as the additive `id` attr on
-    # both the live inject and the durable fallback so a registered-agent send is
-    # reply-correlatable and dedupable like the name-lane path. None on paths that
-    # do not carry a minted id (relay hops), keeping the envelope byte-identical.
-    id: Optional[str] = None
-    origin: Optional[str] = None
-    # The raw sender provider (registry harness) behind `harness`, which is
-    # the one-way wire spelling (harness_for_provider). Carried so a durable
-    # write reusing this ctx stamps the structured provider_from with the
-    # same value the envelope was built from, never a second resolution.
-    provider: Optional[str] = None
-
-
-def _build_mail_ctx(
-    from_name: str,
-    from_session: Optional[str],
-    provider_from: Optional[str],
-    to: Optional[str] = None,
-    id: Optional[str] = None,
-    origin: Optional[str] = None,
-) -> _MailCtx:
-    """Build the ``<fno_mail>`` sender context from the dispatch provenance.
-
-    The ``origin`` kwarg is caller-stated, and an in-process caller never
-    routes through the mail CLI's classify_origin, so the same floor binds
-    here (d-02625dda): an ambient agent identity cannot declare an origin
-    above peer, on any path into an envelope.
-
-    ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
-    the caller is unregistered). ``model`` is the invoking session's real model,
-    resolved from its own transcript store (x-605c); an unresolvable model floors
-    to ``"unknown"`` -- never fabricated.
-
-    ``to`` and ``node`` are OPTIONAL envelope attributes (omitted when None).
-    ``to`` is the recipient's short id -- set for a directed ``fno agents mail send`` so
-    the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
-    backlog node) stays None: dispatch has no truthful source for it today."""
-    from fno.agents.self_stamp import resolve_self_model
-    from fno.harness_identity import canonical_handle
-    from fno.mail.envelope import harness_for_provider
-
-    from_ = canonical_handle(from_session) if from_session else from_name
-    from fno.decide import enforce_origin_floor
-
-    return _MailCtx(
-        origin=enforce_origin_floor(origin),
-        from_=from_,
-        harness=harness_for_provider(provider_from),
-        model=resolve_self_model(),
-        to=to or None,
-        id=id or None,
-        from_session=from_session,
-        provider=provider_from,
-    )
 
 
 def _resolve_sender_entry(
@@ -8035,6 +7973,7 @@ def _deliver_live(
             id=mail.id,
             from_session=mail.from_session,
             origin=mail.origin,
+            to_session=mail.to_session,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -8334,17 +8273,15 @@ def _queue_durable_fallback(
             to=durable_recipient,
             id=msg_id,
             origin=origin,
+            to_session=entry.harness_session_id,
         )
     else:
-        # Reuse the caller's provenance instead of re-deriving it: the
-        # envelope body and the structured thread row must name the same
-        # sender, and a second resolution walk can only agree or diverge.
+        # Reuse the caller's provenance: the envelope body and the structured
+        # thread row must name the same sender.
         provider_from = mail_ctx.provider
         from_session = mail_ctx.from_session
-    # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
-    # fills one whenever the caller passed none, so the envelope is always
-    # wrapped from here on. The guard that used to stand here read as a real
-    # unwrapped-body path and there is none.
+    # No `to_session`: a durable body is read whenever the recipient next
+    # drains, so a crown baked into it outlives its own reading.
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
@@ -8798,6 +8735,7 @@ def dispatch_send(
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
                 origin=origin,
+                to_session=existing.harness_session_id,
             )
             reservation = _reserve_send_budget(
                 sender=mail_ctx.from_,
@@ -8919,6 +8857,7 @@ def dispatch_send(
                             to=mail_ctx.to,
                             id=mail_ctx.id,
                             from_session=mail_ctx.from_session,
+                            to_session=mail_ctx.to_session,
                         )
                         from fno import style as _hstyle
 
