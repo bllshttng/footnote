@@ -156,3 +156,51 @@ fn reload_receipt_counts_squads_members_and_emptied() {
     );
     assert_eq!(core.squad_members[&8], Vec::new());
 }
+
+/// (x-688b) The daemon's cached-row fold agrees with the CLI's file-read
+/// fold: both go through `fold_registry_rows`, so a journal-spawned name the
+/// published rows no longer carry reads Dead - but only while the reader's
+/// read itself succeeded (`read_ok`); a reader that never resolved its stores
+/// keeps every member fail-safe Unknown.
+#[test]
+fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
+    let mut core = empty_core();
+    let member = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("w1".into()),
+        harness: Some("claude".into()),
+        harness_session_id: None,
+    };
+    let journal = crate::spawn_journal::SpawnJournal {
+        receipts: HashMap::new(),
+        never_bound: HashMap::new(),
+        spawned_names: ["w1".to_string()].into_iter().collect(),
+        error: None,
+    };
+    core.handle_msg(CoreMsg::AgentRows {
+        rows: Vec::new(),
+        branches: HashMap::new(),
+        tails: HashMap::new(),
+        read_ok: true,
+    });
+    assert_eq!(
+        core.member_evidence_with_journal(&journal).verdict(&member),
+        crate::squad_store::MemberLiveness::Dead,
+        "the daemon sweep and the CLI apply reap the same reaped worker"
+    );
+    core.handle_msg(CoreMsg::AgentRows {
+        rows: Vec::new(),
+        branches: HashMap::new(),
+        tails: HashMap::new(),
+        read_ok: false,
+    });
+    assert_eq!(
+        core.member_evidence_with_journal(&journal).verdict(&member),
+        crate::squad_store::MemberLiveness::Unknown,
+        "an unresolved read keeps the daemon fail-safe"
+    );
+}

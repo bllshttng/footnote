@@ -895,6 +895,11 @@ enum CoreMsg {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
+        /// (x-688b) The reader's registry+roster read succeeded (parsed bytes,
+        /// last-good, or a confirmed-vanished file; a present-but-unreadable
+        /// file reads false). Gates the daemon-side registry-absence death
+        /// rule, which must stay inert while the read state is unknown.
+        read_ok: bool,
     },
     /// (x-b186) A fresh session-uuid -> message-tail map with no row change
     /// behind it. Transcripts grow independently of the registry, so the tail
@@ -2196,6 +2201,16 @@ pub(crate) struct Core {
     /// fact and squad assignment are joined at layout time, where the live
     /// pane set and the squad catalog live.
     agents: Vec<RegistryAgent>,
+    /// (x-688b) The last `AgentRows` reader's registry+roster read succeeded.
+    /// Starts false (no read yet = unknown), so the registry-absence death
+    /// rule stays inert until a successful read proves it may fire.
+    agents_read_ok: bool,
+    /// (x-688b) The spawn journal as of the last row change. Refreshed only
+    /// when `AgentRows` publishes (row changes are rare; journal appends ride
+    /// them), never on the layout path: `dead_sweep_count` feeds every
+    /// layout push, and a per-push journal scan would read the whole file
+    /// every second.
+    journal: crate::spawn_journal::SpawnJournal,
     /// (x-cd67 US4) Latest cwd -> git-branch map from the off-loop reader,
     /// joined into each agent row's `subline` at layout time. A cwd absent from
     /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
@@ -7901,66 +7916,6 @@ impl Core {
         live_attach_ids_snapshot()
     }
 
-    /// Fold the cached registry rows into the same exact identity evidence the
-    /// standalone workspace-prune verb consumes. Unknown rows contribute no
-    /// verdict; only a positive `Alive` or `Dead` reading enters a set.
-    fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
-        let mut evidence =
-            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
-        for agent in &self.agents {
-            if let (Some(harness), Some(session_id)) =
-                (agent.harness.as_deref(), agent_harness_session_id(agent))
-            {
-                match agent.liveness {
-                    agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
-                    agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
-                    agents_view::Liveness::Unmeasured => {}
-                }
-                continue;
-            }
-            let mut keys = Vec::new();
-            keys.push(agent.name.as_str());
-            if let Some(id) = agent.attach_id.as_deref() {
-                keys.push(id);
-            }
-            if let Some(id) = agent.effective_identity() {
-                keys.push(id);
-            }
-            let target = match agent.liveness {
-                agents_view::Liveness::Alive => true,
-                agents_view::Liveness::Dead => false,
-                agents_view::Liveness::Unmeasured => continue,
-            };
-            for key in keys {
-                if target {
-                    evidence.add_live(key);
-                } else {
-                    evidence.add_dead(key);
-                }
-            }
-        }
-        evidence
-    }
-
-    fn dead_sweep_count(&self) -> usize {
-        let mut evidence = self.member_evidence();
-        for entry in self.panes.values() {
-            if let Some(worker) = &entry.refused_worker {
-                evidence.add_dead(worker.clone());
-            }
-        }
-        self.squad_members
-            .values()
-            .flatten()
-            .filter(|member| {
-                matches!(
-                    evidence.verdict(member),
-                    crate::squad_store::MemberLiveness::Dead
-                )
-            })
-            .count()
-    }
-
     fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
         self.squad_members.values().flatten().any(|member| {
             let Some(worker) = member.worker.as_deref() else {
@@ -8356,6 +8311,7 @@ impl Core {
         let SpawnJournal {
             receipts: spawn_receipts,
             never_bound,
+            spawned_names: _,
             error: receipt_store_error,
         } = journal;
         let mut worker_members_total = 0usize;
@@ -14431,7 +14387,9 @@ impl Core {
                 rows,
                 branches,
                 tails,
+                read_ok,
             } => {
+                self.agents_read_ok = read_ok;
                 let identity_published = self.worker_identity_published(&rows);
                 // (x-07c2) Discoverability, once per server lifetime: the
                 // first paneless live row to appear with no portal open names
@@ -14457,6 +14415,10 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                // (x-688b) Row changes are the journal's change signal: a
+                // spawn or removal writes both. Refresh the cached scan here,
+                // off the per-push paths that read it.
+                self.journal = crate::spawn_journal::scan_spawn_journal();
                 if identity_published {
                     // A registry row can publish after a worker pane was
                     // recorded. Force the existing debounce funnel to flush
@@ -14790,6 +14752,8 @@ async fn serve(
         exit_tx,
         self_tx: core_tx.clone(),
         agents: Vec::new(),
+        agents_read_ok: false,
+        journal: crate::spawn_journal::scan_spawn_journal(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -15044,6 +15008,7 @@ async fn serve(
                             rows,
                             branches,
                             tails,
+                            read_ok: state.read_ok(),
                         })
                         .await
                         .is_err()
@@ -26687,6 +26652,13 @@ mod tests {
             exit_tx,
             self_tx,
             agents: Vec::new(),
+            agents_read_ok: false,
+            journal: crate::spawn_journal::SpawnJournal {
+                receipts: HashMap::new(),
+                never_bound: HashMap::new(),
+                spawned_names: HashSet::new(),
+                error: None,
+            },
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
             truth_by_name: HashMap::new(),

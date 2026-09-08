@@ -6,6 +6,8 @@ use crate::vt::frame_text;
 // file is shrink-only under the file-budget gate.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
+#[path = "client/tests/sweep_both_tests.rs"]
+mod sweep_both_tests;
 
 // The x-9fd0 portal-placement-picker family lives in its own module too.
 #[path = "client/tests/portal_pick_tests.rs"]
@@ -8647,64 +8649,6 @@ fn sideline_menu_names_the_sweep_entry_off_dead() {
         1,
         "the global detach slot remains distinct"
     );
-}
-
-/// The choice modal is centered (not anchored to the menu cell), offers
-/// the choices with live counts, and a zero count greys its entry
-/// out rather than offering a lie. The used-shell half (x-cf97) is its
-/// own row with its own count - never a rider on the tabs half.
-#[test]
-fn sweep_modal_is_centered_with_live_counts_and_inert_zeroes() {
-    let modal = build_sweep_modal(3, 19, 7);
-    assert_eq!(modal.popup.anchor, Anchor::Center);
-    assert_eq!(modal.popup.targets().len(), 4, "{:?}", modal.popup.rows);
-    assert_eq!(
-        modal.actions,
-        vec![
-            AuxAction::SweepTabs,
-            AuxAction::SweepUsedShells,
-            AuxAction::SweepDeadAgents,
-            AuxAction::SweepBoth
-        ]
-    );
-    let labels: Vec<(String, bool)> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|row| match row {
-            PopupRow::Entry { label, enabled, .. } => Some((label.clone(), *enabled)),
-            _ => None,
-        })
-        .collect();
-    assert!(labels.contains(&("tabs (3)".into(), true)), "{labels:?}");
-    assert!(
-        labels.contains(&("+ used shells (19)".into(), true)),
-        "{labels:?}"
-    );
-    assert!(
-        labels.contains(&("dead agents (7)".into(), true)),
-        "{labels:?}"
-    );
-    assert!(labels.contains(&("both".into(), true)), "{labels:?}");
-
-    let half = build_sweep_modal(0, 0, 2);
-    assert_eq!(
-        half.popup.targets().len(),
-        2,
-        "a zero tab count greys its entry out"
-    );
-    assert_eq!(
-        half.actions,
-        vec![AuxAction::SweepDeadAgents, AuxAction::SweepBoth]
-    );
-
-    let empty = build_sweep_modal(0, 0, 0);
-    assert_eq!(empty.popup.targets().len(), 0, "{:?}", empty.popup.rows);
-    assert!(empty
-        .popup
-        .rows
-        .iter()
-        .any(|row| matches!(row, PopupRow::Header(text) if text == "nothing to sweep")));
 }
 
 #[tokio::test]

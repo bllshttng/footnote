@@ -1916,35 +1916,6 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
     Some(crate::server::live_attach_ids_snapshot())
 }
 
-fn add_agent_evidence(
-    agent: &crate::agents_view::RegistryAgent,
-    evidence: &mut crate::squad_store::MemberEvidence,
-    liveness: crate::agents_view::Liveness,
-) {
-    let mut add = |identity: &str| match liveness {
-        crate::agents_view::Liveness::Alive => evidence.add_live(identity),
-        crate::agents_view::Liveness::Dead => evidence.add_dead(identity),
-        crate::agents_view::Liveness::Unmeasured => {}
-    };
-    if let (Some(harness), Some(session_id)) =
-        (agent.harness.as_deref(), agent.effective_identity())
-    {
-        match liveness {
-            crate::agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
-            crate::agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
-            crate::agents_view::Liveness::Unmeasured => {}
-        }
-        return;
-    }
-    add(&agent.name);
-    if let Some(id) = agent.attach_id.as_deref() {
-        add(id);
-    }
-    if let Some(id) = agent.effective_identity() {
-        add(id);
-    }
-}
-
 /// Read exact positive live/dead identities for the squad-member classifier.
 /// Missing stores are the only complete-empty case; a present but malformed or
 /// unreadable store contributes no verdict and therefore keeps unknown members.
@@ -1964,29 +1935,40 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
         std::collections::HashSet::new(),
     );
     let now = crate::squad_store::now_epoch_secs().unwrap_or_default() as u64;
-    if let Ok(raw) = registry {
-        if let Some(rows) = crate::agents_view::derive_rows(&raw, now) {
-            for row in rows {
-                match row.liveness {
-                    crate::agents_view::Liveness::Alive => {
-                        add_agent_evidence(&row, &mut evidence, row.liveness)
-                    }
-                    crate::agents_view::Liveness::Dead => {
-                        add_agent_evidence(&row, &mut evidence, row.liveness)
-                    }
-                    crate::agents_view::Liveness::Unmeasured => {}
-                }
+    // (x-688b) The registry leg: rows when the read parsed, and completeness
+    // only then. A present-but-garbage file is a failed read (fail safe); a
+    // NotFound file is the legitimate absence of any agents system.
+    let mut rows: Vec<crate::agents_view::RegistryAgent> = Vec::new();
+    let registry_read_ok = match &registry {
+        Ok(raw) => {
+            if let Some(derived) = crate::agents_view::derive_rows(raw, now) {
+                rows = derived;
+                true
+            } else {
+                false
             }
         }
-    }
-    if let Ok(raw) = roster {
-        if let Some(rows) = crate::agents_view::parse_roster(&raw) {
-            for row in rows {
-                evidence.add_live(row.name);
-                evidence.add_live(row.short_id);
-            }
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    // (x-688b) Parsed once: the live names fold from the parse, and
+    // completeness requires the parse to have SUCCEEDED - a roster that
+    // reads but does not parse is a failed liveness surface (its live
+    // population is unknown), not a readable one.
+    let roster_parsed = roster
+        .as_ref()
+        .ok()
+        .and_then(|raw| crate::agents_view::parse_roster(raw));
+    if let Some(parsed) = &roster_parsed {
+        for row in parsed {
+            evidence.add_live(row.name.clone());
+            evidence.add_live(row.short_id.clone());
         }
     }
+    let roster_read_ok = match (&roster, &roster_parsed) {
+        (_, Some(_)) => true,
+        (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
+        (Ok(_), None) => false,
+    };
     // (x-6b0b) The same segmented journal read the server sweep uses: a
     // death marker rotated out of the live file is still a marker. This
     // evidence gates the sweep modal and the CLI apply, so it must agree
@@ -2027,13 +2009,21 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
                 evidence.add_dead_pair(harness, value);
             }
         }
-        // The never-bound name set rides the same walk: a member with no
-        // harness and no session id has no pair to match, and its removal
-        // marker is the one identity it will ever have.
-        for name in crate::spawn_journal::parse_never_bound_removals(&journal_raw).into_keys() {
-            evidence.add_dead_name(name);
-        }
     }
+    // The never-bound name set and the reaped-row inputs ride the same
+    // journal text: one walk yields the markers, the spawned names, and the
+    // still-held receipts.
+    let events = crate::spawn_journal::parse_journal_events(&journal_raw);
+    for name in events.never_bound.keys() {
+        evidence.add_dead_name(name.clone());
+    }
+    let held = crate::spawn_journal::held_worker_names(&events.receipts);
+    evidence.fold_registry_rows(
+        &rows,
+        events.spawned_names,
+        held,
+        registry_read_ok && roster_read_ok,
+    );
     if complete_empty {
         evidence.mark_complete_attach_set();
     }
@@ -2082,8 +2072,9 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// candidate list (AC1-UI). `--dry-run` writes nothing. `--tabs-only` runs the
 /// tab fold alone and leaves every squad row and member record untouched;
 /// `--dead-only` reaps dead members alone and removes no squad row; together
-/// they run exactly those two halves, so the sweep modal's "both" can never
-/// remove a squad row the modal never offered to remove.
+/// (x-688b, with `--include-used-shells`) they run every half EXCEPT the
+/// squad-row pass, so the sweep modal's "both" can never remove a squad row
+/// the modal never offered to remove.
 ///
 /// `--include-used-shells` (x-cf97) is the one tab-fold widening, and it is
 /// OPT-IN: a tab of spent bare shells (every pane `cmd: None`, no `fno_id`,
@@ -2094,9 +2085,12 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// (dry-run) or closed (apply) in `tabs_close_named`.
 ///
 /// An orphaned worker tab (v71) - its stored member judged Dead by the
-/// server - closes under the DEFAULT flags, ahead of the pristine test;
-/// `--include-used-shells` stays the opt-in for shells with no worker
-/// history.
+/// server - closes under the DEFAULT flags, ahead of the pristine test. So
+/// does (x-688b) a spawned-name pane: the pane carries the worker name the
+/// spawn captured (`unresolved:spawned-name`), and once the shared evidence
+/// fold judges that name dead the pane routes by the orphan verdict under
+/// default flags too. `--include-used-shells` stays the opt-in for shells
+/// with no worker history at all.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
@@ -2134,7 +2128,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let (tabs, live_cwds, answered_names, unreachable) = live_tabs();
     let answered = answered_names.len();
     let scope = sweep_scope(answered, &unreachable);
-    let tab_outcome = if scope.fold_tabs && !dead_only {
+    // (x-688b) `--dead-only` ALONE skips the tab fold (store-only scope), but
+    // the combined `--tabs-only --dead-only` scope runs BOTH halves - the
+    // sweep modal's "both" queues exactly that pair, and gating tabs on bare
+    // `!dead_only` made it close zero tabs while reporting both.
+    let tab_outcome = if scope.fold_tabs && (!dead_only || tabs_only) {
         prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
     } else {
         TabPruneOutcome {
