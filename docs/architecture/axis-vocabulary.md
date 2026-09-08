@@ -171,6 +171,10 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | agent row `requested_model`, `requested_provider`, `requested_effort` | model, provider, effort | the REQUEST verbatim as typed, stamped once at birth (registry v24) |
 | agent row `model_substituted` | model | the emission-time marker naming both values when request and observation disagree |
 
+## Lane names are keys, not axis values
+
+A lane name (an `agents.profiles.<verb>.lanes` entry) is a `[[routing.models]]` row key and never an axis value. The row carries the axes: `harness`, `model`, `route` and `account`. The name is only the handle a lane list refers to it by. A lane named `flash-zai` asserts nothing about any axis. Reading a lane name as a provider, vendor or model value is the same conflation this document exists to kill.
+
 ## Canonical spawned-session identity
 
 `FNO_HARNESS_NAME` identifies the harness family fno launched, while `FNO_HARNESS_SESSION_ID` carries the exact harness session id only when that id is bound before exec. A launcher clears inherited canonical and vendor identity markers before applying its own values. A name-only canonical stamp is valid and constrains vendor fallback to the same family; a session-id-only or blank partial stamp is invalid. A complete canonical pair that disagrees with the winning vendor resolver marker refuses rather than guessing.

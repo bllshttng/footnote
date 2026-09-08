@@ -15,6 +15,14 @@ from __future__ import annotations
 import pytest
 import typer
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.config_cli import _report_band_routing
 
 
@@ -45,6 +53,29 @@ def _pin_roles(monkeypatch: pytest.MonkeyPatch, roles: dict):
     )
 
 
+def _pin_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    lanes: dict | None = None,
+    rows: list | None = None,
+    roles: dict | None = None,
+):
+    """Settings with declared rows and per-verb lanes for the slot readout."""
+    from types import SimpleNamespace
+
+    profiles = {
+        verb: SimpleNamespace(lanes=verb_lanes, on_exhausted="refuse")
+        for verb, verb_lanes in (lanes or {}).items()
+    }
+    settings = SimpleNamespace(
+        routing=SimpleNamespace(models=rows or []),
+        agents=SimpleNamespace(profiles=profiles),
+        model_routing=SimpleNamespace(roles=roles or {}),
+    )
+    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
+    return settings
+
+
 def test_undeclared_inventory_names_the_gap(monkeypatch):
     _pin_inventory(monkeypatch, declared=False)
     _pin_roles(monkeypatch, {})
@@ -57,14 +88,38 @@ def test_undeclared_inventory_names_the_gap(monkeypatch):
     assert "routing.models" in text
 
 
-def test_declared_inventory_prints_nothing(monkeypatch):
+@requires_rust
+def test_declared_inventory_with_a_resolving_lane_prints_nothing(monkeypatch):
+    """AC4 silence needs an ARMED slot: a declared row PLUS a verb lane that
+    resolves it. A declared inventory with no lanes still says so."""
     _pin_inventory(monkeypatch, declared=True)
-    _pin_roles(monkeypatch, {})
+    _pin_settings(
+        monkeypatch,
+        lanes={"target": ["row-x"]},
+        rows=[{"name": "row-x", "harness": "claude", "model": "m-1"}],
+    )
     out = _capture(monkeypatch)
 
     _report_band_routing()
 
     assert not [line for line in out if "band routing inactive" in line]
+
+
+@requires_rust
+def test_doctor_names_verbs_with_empty_slots(monkeypatch):
+    """AC4-EDGE: the line names BOTH halves - the declared inventory count and
+    every dispatched verb whose slot has no lane."""
+    _pin_inventory(monkeypatch, declared=False)
+    _pin_roles(monkeypatch, {})
+    out = _capture(monkeypatch)
+
+    _report_band_routing()
+
+    text = "\n".join(out)
+    assert "band routing inactive:" in text
+    assert "declares 0 row(s)" in text
+    for verb in ("think", "blueprint", "target", "review", "crown"):
+        assert verb in text
 
 
 def test_roles_set_alongside_an_empty_inventory_says_they_are_a_different_axis(

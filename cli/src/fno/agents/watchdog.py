@@ -41,7 +41,8 @@ from typing import Any, Callable, Iterable, Optional
 from fno.agents.session_truth import classify_tail
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-Row = namedtuple("Row", "row_id name state node cwd", defaults=(None, ""))
+#: ``agent`` (default "claude") resolves the row's transcript store (x-c624).
+Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
@@ -78,13 +79,15 @@ KEEPER = "keeper"
 #: MERGED or CLOSED). Neither acts at any apply level.
 CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
+#: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
+SILENCE = "silence"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: a hand-copied tuple in the CLI - the copy went stale the moment a verdict
 #: was added (`--only unclaimed` once exited 2 on a live verdict).
 VERDICTS = frozenset({
     GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
-    CONTENDED, POLLING_SETTLED,
+    CONTENDED, POLLING_SETTLED, SILENCE,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -553,13 +556,12 @@ def verdicts(
     provider_outages: Optional[dict[str, Any]] = None,
     worktree_check: Optional[Callable[[str], bool]] = None,
     pr_state_for: Optional[Callable[[str, int], Optional[str]]] = None,
+    silence_after_s: Optional[float] = None,
 ) -> list[Verdict]:
-    """One verdict per row, in table precedence (ghost > contended > stale
-    > reroute > wake > leave). Each basis string names the measurement that decided it,
-    so a reader can falsify the call. ``claim_for(node)`` returns the
-    ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
-    returns the graph entry (``{"status", ...}``) or None. ``worktree_check``
-    defaults to the filesystem linked-worktree read; inject a stub."""
+    """One verdict per row, in table precedence (ghost > contended > silence
+    > stale > reroute > wake > leave). ``claim_for(node)`` returns the
+    ``node:<id>`` claim view; ``node_state_for`` returns the graph entry or
+    None. ``silence_after_s`` is None (disabled) unless a caller arms it."""
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -606,6 +608,7 @@ def verdicts(
             now_s=now_s,
             in_quorum_breaker=row.row_id in quorum_row_ids,
             peers=peers,
+            silence_after_s=silence_after_s,
         )
         # polling_settled upgrades a LEAVE like unclaimed: liveness outranks waste.
         if verdict.verdict == LEAVE:
@@ -731,6 +734,7 @@ def _verdict_one(
     now_s: float,
     in_quorum_breaker: bool = False,
     peers: tuple[str, ...] = (),
+    silence_after_s: Optional[float] = None,
 ) -> Verdict:
 
     # ghost: claims working/blocked, no transcript resolves for the id.
@@ -746,6 +750,22 @@ def _verdict_one(
             f"peers {'/'.join(peers)}",
             "report",
         )
+
+    # silence (x-c624): open node, quiet past the drive threshold; node_state_for gated on age.
+    if silence_after_s is not None and facts is not None and facts.last_event_epoch is not None:
+        silence_age_s = max(0.0, now_s - facts.last_event_epoch)
+        if silence_age_s > silence_after_s:
+            try:
+                node_state = node_state_for(row.node) if row.node else None
+            except Exception:  # noqa: BLE001 - unreadable graph condemns nothing
+                return Verdict(row.row_id, row.name, row.state, LEAVE,
+                               "graph unreadable, silence verdict refused", "none")
+            node_open = node_state is not None and str(node_state.get("status") or "") not in ("done", "superseded")
+            if node_open:
+                return Verdict(
+                    row.row_id, row.name, row.state, SILENCE,
+                    f"open node {row.node}, transcript quiet {_mins(now_s, facts.last_event_epoch)}m", "drive",
+                )
 
     window, reset_epoch, stamp = ("none", None, "")
     if facts is not None:
@@ -1257,6 +1277,74 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         ]
     warnings = [*warnings, *sorted(unmapped_states)]
     return out, warnings
+
+
+def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
+    """SILENCE's row set (x-c624): the registry, not ``claude agents --json``."""
+    from fno.agents.registry import load_registry
+    from fno.agents.spawn_gate import LIVE_STATUSES
+
+    root_strs = [str(Path(r).resolve()) for r in roots]
+    out: list[Row] = []
+    try:
+        entries = list(load_registry())
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry scopes nothing
+        return [], [f"registry unreadable, silence sweep refused: {exc!r}"]
+    for e in entries:
+        live = getattr(e, "status", None) in LIVE_STATUSES
+        spawn = getattr(e, "origin", None) == "spawn" and getattr(e, "crown_level", None) is None
+        node = getattr(e, "node", None)
+        scope = str(getattr(e, "project_root", "") or getattr(e, "cwd", "") or "")
+        if not (live and spawn and node and scope):
+            continue
+        try:
+            resolved = str(Path(scope).resolve())
+        except OSError:
+            continue
+        if not any(resolved == r or resolved.startswith(r + "/") for r in root_strs):
+            continue
+        row_id = str(getattr(e, "harness_session_id", None) or getattr(e, "short_id", None) or e.name)
+        cwd, agent = str(getattr(e, "cwd", "") or ""), str(getattr(e, "harness", "") or "claude")
+        state = str(getattr(e, "status", "") or "")
+        out.append(Row(row_id, str(e.name), state, str(node), cwd, agent))
+    return out, []
+
+
+def silence_verdicts(
+    roots: "Iterable[Path]",
+    *,
+    now_s: Optional[float] = None,
+    silence_after_s: Optional[float] = None,
+    claim_for: Optional[Callable[[str], dict]] = None,
+    node_state_for: Optional[Callable[[str], Optional[dict]]] = None,
+) -> tuple[list[Verdict], list[Row]]:
+    """SILENCE's classify step: :func:`silence_rows`, then :func:`verdicts` with the age gate."""
+    from fno.agents.session_truth import resolve_session_truth
+    from fno.config import load_settings
+
+    now_s = now_s if now_s is not None else time.time()
+    if silence_after_s is None:
+        try:
+            silence_after_s = float(load_settings().recovery.idle_threshold_seconds)
+        except Exception:  # noqa: BLE001 - an unreadable config never arms a guess
+            silence_after_s = 900.0
+    rows, _warnings = silence_rows(roots)
+    if not rows:
+        return [], []
+
+    def transcript_for(row_id: str) -> Optional[TailFacts]:
+        row = next((r for r in rows if r.row_id == row_id), None)
+        age_s = resolve_session_truth(row.name).get("last_activity_age_s") if row else None
+        epoch = now_s - float(age_s) if age_s is not None else None
+        return TailFacts((), epoch, "", None, None, ())
+
+    claim_for = claim_for or (lambda node: _answered(_claim_view(node)))
+    if node_state_for is None:
+        index = _graph_index()
+        node_state_for = lambda node: _answered(index).get(node)  # noqa: E731
+    vs = verdicts(rows, transcript_for=transcript_for, claim_for=claim_for,
+                  node_state_for=node_state_for, now_s=now_s, silence_after_s=silence_after_s)
+    return vs, rows
 
 
 #: claude's INPUT spellings folded onto this lane's vocabulary. Derived from
@@ -2604,6 +2692,7 @@ def confirm_wake_landed(
     message: str,
     before_epoch: Optional[float],
     *,
+    agent: str = "claude",
     attempts: Optional[int] = None,
     interval_s: Optional[float] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -2621,15 +2710,15 @@ def confirm_wake_landed(
     for attempt in range(max(1, tries)):
         if attempt:
             sleep(wait)
-        if _confirm_once(row_id, cwd, message, before_epoch):
+        if _confirm_once(row_id, cwd, message, before_epoch, agent=agent):
             return True
     return False
 
 
 def _confirm_once(
-    row_id: str, cwd: str, message: str, before_epoch: Optional[float]
+    row_id: str, cwd: str, message: str, before_epoch: Optional[float], *, agent: str = "claude"
 ) -> bool:
-    facts = tail_facts(row_id, cwd, max_records=_CONFIRM_RECORDS)
+    facts = tail_facts(row_id, cwd, agent=agent, max_records=_CONFIRM_RECORDS)
     if facts is None:
         return False
     for epoch, text in facts.records:
@@ -2648,7 +2737,7 @@ def _confirm_once(
 #: so bare ``--apply`` stops there; reroute respawns, so it needs
 #: ``--apply-all``. ghost NEVER auto-acts (the remedy is a respawn under a
 #: new id, the operator's call).
-LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE})}
+LANES = {"wake": frozenset({WAKE, SILENCE}), "all": frozenset({WAKE, REROUTE, SILENCE})}
 
 #: The one silent outcome: the verdict was outside the lane the caller asked
 #: for, so nothing was attempted and there is nothing to report. Every other
@@ -2671,24 +2760,18 @@ def apply_verdict(
     *,
     lanes: str,
     cwd: str = "",
+    agent: str = "claude",
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
-    """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
-    ``(outcome, detail)``. Exactly ONE outcome is silent - ``SKIPPED``, the
-    verdict was outside the lane asked for - and every other word is news:
-    defaulting to surface means the next outcome added here cannot go silent
-    by omission. Mechanisms delegate (resume for wake, which verifies the
-    state move and holds its own single-writer claim; recovery._redispatch
-    for reroute), and every delegated command runs with ``cwd`` set to the
-    row's worktree: a registry-less row from another project must resolve in
-    its own project, not whatever project launched the sweep."""
+    """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
+    silent. wake/silence resume with ``cwd``/``agent`` set; reroute uses recovery._redispatch."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
-        if v.verdict == WAKE:
-            return _apply_wake(v, cwd=cwd, runner=runner)
+        if v.verdict in (WAKE, SILENCE):
+            return _apply_wake(v, cwd=cwd, runner=runner, agent=agent)
         if v.verdict == REROUTE:
             return _apply_reroute(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
@@ -2698,8 +2781,8 @@ def apply_verdict(
     return SKIPPED, f"{v.verdict} has no auto-action"
 
 
-def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
-    before = tail_facts(v.row_id, cwd)
+def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str = "claude") -> tuple[str, str]:
+    before = tail_facts(v.row_id, cwd, agent=agent)
     before_epoch = before.last_event_epoch if before is not None else None
     proc = runner(
         [*_fno(), "agents", "resume", v.row_id, "--message", WAKE_MESSAGE],
@@ -2709,7 +2792,7 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
-    if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch):
+    if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
         return (
             "refused",
             f"resume reported success but {WAKE_MESSAGE!r} is not in the "

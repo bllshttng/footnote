@@ -73,6 +73,11 @@ class DrainTarget:
     rung: int = 1
     kingless: bool = True
     members: tuple[str, ...] = ()
+    #: Global ceiling on concurrent converge runs across ALL missions, not a
+    #: per-mission budget. Every target carries the same value because the
+    #: daemon holds one gate for the whole drain; it rides on the target only
+    #: because the target list is the daemon's one config channel.
+    max_concurrent: int = 1
 
 
 def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
@@ -285,6 +290,7 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
                 rung=territory["rung"],
                 kingless=territory["kingless"],
                 members=tuple(members),
+                max_concurrent=cfg.max_concurrent,
             )
         )
     return targets
@@ -357,6 +363,7 @@ def drain_targets_as_dicts() -> list[dict]:
             "rung": t.rung,
             "kingless": t.kingless,
             "members": list(t.members),
+            "max_concurrent": t.max_concurrent,
         }
         for t in resolve_drain_targets()
     ]

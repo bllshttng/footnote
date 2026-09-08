@@ -10,8 +10,24 @@ from __future__ import annotations
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)"
+,
+)
+
 from fno import route_resolve as rr
 
+
+
+def _grid(difficulty, priority, capacity, inv=None, **kw):
+    """The grid leg rides the verb: resolve_slot with no lanes grids."""
+    node = {"priority": priority}
+    if difficulty is not None:
+        node["difficulty"] = difficulty
+    return rr.resolve_slot("target", node, capacity, inventory=inv, **kw)
 
 def _inv(rows, objective="cheapest-that-clears", prefer="", snapshot=None):
     return rr.inventory_from_rows(
@@ -34,9 +50,7 @@ _FLEET = [
 def test_config_only_model_resolves_for_its_band():
     """AC1-HP: a model in no built-in table resolves from the declared row."""
     inv = _inv([{"name": "qwen", "harness": "opencode", "model": "qwen3:30b", "band": "low"}])
-    candidate, chain = rr.resolve_grid(
-        "low", "p2", {"opencode": "ok"}, inventory=inv
-    )
+    candidate, chain = _grid("low", "p2", {"opencode": "ok"}, inv=inv)
     assert candidate == {"harness": "opencode", "model": "qwen3:30b"}
     assert any("grid candidate opencode/qwen" in step for step in chain)
 
@@ -67,23 +81,79 @@ def test_band_from_snapshot_percentile_when_row_leaves_it_unset():
     assert inv.rows["weakling"].band == ""  # below every floor: unbanded
 
 
-def test_unbanded_row_is_never_a_grid_candidate():
+def test_unbanded_row_is_a_candidate_at_every_band():
+    """AC1-HP: one unbanded row is the whole inventory and still answers: band
+    is optional, so a single-model fleet is routable with one declared row."""
     inv = _inv([{"name": "mystery", "harness": "claude", "model": "m-1"}])
-    candidate, chain = rr.resolve_grid("low", "p2", {"claude": "ok"}, inventory=inv)
-    assert candidate is None
-    assert chain[-1] == "grid=no-band-candidate"
+    for difficulty in ("low", "high", None):
+        candidate, chain = _grid(difficulty, "p2", {"claude": "ok"}, inv=inv)
+        assert candidate == {"harness": "claude", "model": "m-1"}, difficulty
+        assert any("band=unbanded" in step for step in chain), difficulty
+
+
+def test_banded_row_that_clears_outranks_an_unbanded_one():
+    """AC1-EDGE: unbanded rows rank AFTER the banded rows that clear, in
+    declared order - they are admitted everywhere, never preferred."""
+    inv = _inv([
+        {"name": "banded", "harness": "claude", "model": "b-1", "band": "low"},
+        {"name": "unbanded", "harness": "claude", "model": "u-1"},
+    ])
+    candidate, chain = _grid("low", "p2", {"claude": "ok"}, inv=inv)
+    assert candidate["model"] == "b-1"
+    assert not any("band=unbanded" in step for step in chain)
+    # the unbanded row is still the next candidate once the banded one is out
+    # of range: a high floor the low band cannot clear leaves the unbanded row
+    candidate, chain = _grid("high", "p2", {"claude": "ok"}, inv=inv)
+    assert candidate["model"] == "u-1"
+    assert any("band=unbanded" in step for step in chain)
+
+
+def test_row_naming_no_account_reads_the_harness_aggregate():
+    """AC2-EDGE: an account-less row reads the MAX aggregate exactly as before
+    per-account resolution existed."""
+    inv = _inv([{"name": "any-lane", "harness": "claude", "model": "a-1", "band": "low"}])
+    candidate, chain = _grid("low", "p2", {"claude": {"state": "ok", "accounts": {"a": "exhausted", "b": "exhausted"}}}, inv=inv, )
+    # the accounts are dead but the aggregate the row reads is ok
+    assert candidate is not None
+    assert any("capacity=ok" in step for step in chain)
+
+
+def test_lane_on_an_exhausted_account_is_skipped_when_a_sibling_account_is_healthy():
+    """AC2-HP: quota locks out at the ACCOUNT, so the row pinned to the dead
+    account skips and the sibling on the healthy account wins."""
+    inv = _inv([
+        {"name": "row-a", "harness": "claude", "model": "a-1", "band": "low",
+         "account": "a"},
+        {"name": "row-b", "harness": "claude", "model": "b-1", "band": "low",
+         "account": "b"},
+    ])
+    candidate, chain = _grid("low", "p2", {"claude": {"state": "ok", "accounts": {"a": "exhausted", "b": "ok"}}}, inv=inv, )
+    assert candidate["model"] == "b-1"
+    assert any(
+        "grid skip claude/row-a capacity=exhausted" in step for step in chain
+    )
+
+
+def test_row_account_absent_from_the_snapshot_reads_unknown_and_permits():
+    """An account the capacity snapshot does not name reads unknown, which
+    permits - the same posture the harness-wide unknown already has."""
+    inv = _inv([{"name": "pinned", "harness": "claude", "model": "p-1", "band": "low",
+                 "account": "unlisted"}])
+    candidate, chain = _grid("low", "p2", {"claude": {"state": "ok", "accounts": {"a": "exhausted"}}}, inv=inv, )
+    assert candidate is not None
+    assert any("capacity=unknown-permitted" in step for step in chain)
 
 
 def test_empty_inventory_records_no_inventory_declared():
     """AC4-EDGE: a virgin install says so; the chain terminal is receiptable."""
-    candidate, chain = rr.resolve_grid("high", "p1", {"claude": "ok"}, inventory=rr.Inventory())
+    candidate, chain = _grid("high", "p1", {"claude": "ok"}, inv=rr.Inventory())
     assert candidate is None
     assert chain[-1] == "grid=no-inventory-declared"
 
 
 def test_absent_difficulty_rounds_up_to_the_strong_band():
     inv = _inv([{"name": "flash-x", "harness": "claude", "model": "f", "band": "low"}])
-    candidate, _ = rr.resolve_grid(None, "p2", {"claude": "ok"}, inventory=inv)
+    candidate, _ = _grid(None, "p2", {"claude": "ok"}, inv=inv)
     assert candidate is None  # the low row does not clear the high floor
 
 
@@ -97,7 +167,7 @@ def test_cheapest_that_clears_prefers_declared_cost():
         {"name": "frugal", "harness": "claude", "model": "f", "band": "high",
          "cost_per_mtok_in": 1.1},
     ]
-    candidate, _ = rr.resolve_grid("high", "p2", {"claude": "ok"}, inventory=_inv(rows))
+    candidate, _ = _grid("high", "p2", {"claude": "ok"}, inv=_inv(rows))
     assert candidate["model"] == "f"
 
 
@@ -107,7 +177,7 @@ def test_best_available_prefers_band_then_percentile():
         {"name": "opus-x", "coding_percentile": 99},
     ]}
     inv = _inv(_FLEET, objective="best-available", snapshot=snap)
-    candidate, _ = rr.resolve_grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    candidate, _ = _grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inv=inv)
     assert candidate["model"] == "claude-opus-5"  # high band, top percentile
 
 
@@ -115,7 +185,7 @@ def test_prefer_harness_breaks_ties_without_lowering_the_band():
     inv = _inv(_FLEET, objective="prefer-harness", prefer="claude")
     # medium request: the preferred harness's own >=floor rows come first, so
     # the claude pick wins without ever dipping below the floor.
-    candidate, _ = rr.resolve_grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    candidate, _ = _grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inv=inv)
     assert candidate["harness"] == "claude"
     # never lowered: a low-only preferred lane does not win a medium request
     low_only = _inv(
@@ -123,13 +193,11 @@ def test_prefer_harness_breaks_ties_without_lowering_the_band():
          {"name": "luna-x", "harness": "codex", "model": "gpt-5.6-luna", "band": "medium"}],
         objective="prefer-harness", prefer="claude",
     )
-    candidate, _ = rr.resolve_grid(
-        "medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=low_only
-    )
+    candidate, _ = _grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inv=low_only)
     assert candidate["model"] == "gpt-5.6-luna"
     # high band with claude exhausted: crossing harnesses is allowed without
     # lowering the bar.
-    candidate, _ = rr.resolve_grid("high", "p2", {"claude": "exhausted", "codex": "ok"}, inventory=inv)
+    candidate, _ = _grid("high", "p2", {"claude": "exhausted", "codex": "ok"}, inv=inv)
     assert candidate["model"] == "gpt-5.6-sol"
 
 
@@ -138,8 +206,7 @@ def test_prefer_harness_breaks_ties_without_lowering_the_band():
 
 def test_unknown_capacity_permits_and_records_it():
     """AC10-ERR: all-unknown capacity still returns a candidate."""
-    candidate, chain = rr.resolve_grid(
-        "medium", "p2", {}, inventory=_inv(_FLEET)
+    candidate, chain = _grid("medium", "p2", {}, inv=_inv(_FLEET)
     )
     assert candidate is not None
     assert any("capacity=unknown-permitted" in step for step in chain)
@@ -147,22 +214,18 @@ def test_unknown_capacity_permits_and_records_it():
 
 def test_only_a_positive_exhausted_marker_removes_a_candidate():
     inv = _inv(_FLEET)
-    candidate, _ = rr.resolve_grid(
-        "high", "p1", {"claude": "exhausted", "codex": "ok"}, inventory=inv
-    )
+    candidate, _ = _grid("high", "p1", {"claude": "exhausted", "codex": "ok"}, inv=inv)
     assert candidate["harness"] == "codex"
-    candidate, chain = rr.resolve_grid(
-        "high", "p1", {"claude": "exhausted", "codex": "blocked"}, inventory=inv
-    )
+    candidate, chain = _grid("high", "p1", {"claude": "exhausted", "codex": "blocked"}, inv=inv)
     assert candidate is None
     assert chain[-1] == "grid=no-available-candidate"
 
 
 def test_priority_bends_the_band_p0_high_p3_low():
     inv = _inv(_FLEET)
-    c, _ = rr.resolve_grid("low", "p0", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    c, _ = _grid("low", "p0", {"claude": "ok", "codex": "ok"}, inv=inv)
     assert c["model"] in ("claude-opus-5", "gpt-5.6-sol")  # p0 -> high band
-    c, _ = rr.resolve_grid("high", "p3", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    c, _ = _grid("high", "p3", {"claude": "ok", "codex": "ok"}, inv=inv)
     assert c["model"] == "glm-5.3-flash"  # p3 -> low band
 
 
@@ -171,7 +234,7 @@ def test_grid_does_not_degrade_below_the_requested_band():
     than quietly giving strong work to a weak row (resolve_tier degrades; the
     grid does not)."""
     inv = _inv([{"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash", "band": "low"}])
-    candidate, chain = rr.resolve_grid("high", "p2", {"claude": "ok"}, inventory=inv)
+    candidate, chain = _grid("high", "p2", {"claude": "ok"}, inv=inv)
     assert candidate is None
     assert chain[-1] == "grid=no-band-candidate"
     # the task-pin tier resolver still degrades rather than blocking
@@ -190,8 +253,8 @@ def test_effort_varies_with_band_within_the_same_inventory():
         {"name": "cheap-x", "harness": "codex", "model": "c", "band": "low", "effort": "low"},
     ]
     inv = _inv(rows)
-    hi, _ = rr.resolve_grid("high", "p2", {"codex": "ok"}, inventory=inv)
-    lo, _ = rr.resolve_grid("low", "p2", {"codex": "ok"}, inventory=inv)
+    hi, _ = _grid("high", "p2", {"codex": "ok"}, inv=inv)
+    lo, _ = _grid("low", "p2", {"codex": "ok"}, inv=inv)
     assert hi["effort"] == "high"
     assert lo["effort"] == "low"
 
@@ -204,7 +267,7 @@ def test_no_effort_surface_injects_no_effort_key():
     now injects effort for agy like it does for claude. gemini is the binary
     the deny set actually names."""
     inv = _inv([{"name": "gem-x", "harness": "gemini", "model": "g", "band": "high", "effort": "high"}])
-    candidate, chain = rr.resolve_grid("high", "p2", {"gemini": "ok"}, inventory=inv)
+    candidate, chain = _grid("high", "p2", {"gemini": "ok"}, inv=inv)
     assert candidate is not None
     assert "effort" not in candidate
     assert any("effort omitted" in step for step in chain)
@@ -215,10 +278,7 @@ def test_no_effort_surface_injects_no_effort_key():
 
 def test_constrain_harness_picks_within_the_pinned_harness():
     inv = _inv(_FLEET)
-    candidate, _ = rr.resolve_grid(
-        "high", "p1", {"claude": "ok", "codex": "ok"},
-        constrain_harness="codex", inventory=inv,
-    )
+    candidate, _ = _grid("high", "p1", {"claude": "ok", "codex": "ok"}, inv=inv, constrain_harness="codex", )
     assert candidate["harness"] == "codex"
     assert candidate["model"] == "gpt-5.6-sol"
 
@@ -236,9 +296,7 @@ def test_substrate_filter_empties_the_set_with_a_named_reason():
     inv = _inv([
         {"name": "gem-x", "harness": "gemini", "model": "gm-big", "band": "high"},
     ])
-    candidate, chain = rr.resolve_grid(
-        "high", "p1", {"gemini": "ok"}, substrate="thread", inventory=inv
-    )
+    candidate, chain = _grid("high", "p1", {"gemini": "ok"}, inv=inv, substrate="thread")
     assert candidate is None
     assert chain[-1] == "grid=constrained-empty"
 
@@ -254,9 +312,7 @@ def test_uninstalled_harness_refuses_by_name():
     inv = _inv(
         [{"name": "ghost-x", "harness": "ghostharness", "model": "g", "band": "high"}]
     )
-    candidate, chain = rr.resolve_grid(
-        "high", "p1", {"ghostharness": "ok"}, inventory=inv
-    )
+    candidate, chain = _grid("high", "p1", {"ghostharness": "ok"}, inv=inv)
     assert candidate is None
     assert any("refuses ghost-x" in step and "not installed" in step for step in chain)
 
@@ -266,23 +322,16 @@ def test_uninstalled_harness_refuses_by_name():
 
 def test_planning_role_floors_the_band_at_high():
     inv = _inv(_FLEET)
-    candidate, chain = rr.resolve_grid(
-        "low", "p2", {"claude": "ok", "codex": "ok"}, role="planning", inventory=inv
-    )
+    candidate, chain = _grid("low", "p2", {"claude": "ok", "codex": "ok"}, inv=inv, role="planning")
     assert candidate["model"] != "glm-5.3-flash"
     assert any("role(planning)" in step for step in chain)
-    candidate, _ = rr.resolve_grid(
-        "low", "p2", {"claude": "ok", "codex": "ok"}, role="execution", inventory=inv
-    )
+    candidate, _ = _grid("low", "p2", {"claude": "ok", "codex": "ok"}, inv=inv, role="execution")
     assert candidate["model"] == "glm-5.3-flash"
 
 
 def test_protected_role_forces_best_available_and_the_floor():
     inv = _inv(_FLEET)
-    candidate, chain = rr.resolve_grid(
-        "low", "p2", {"claude": "ok", "codex": "ok"},
-        protected_role="implement", inventory=inv,
-    )
+    candidate, chain = _grid("low", "p2", {"claude": "ok", "codex": "ok"}, inv=inv, protected_role="implement", )
     assert candidate["model"] != "glm-5.3-flash"  # floored to high
     assert any("protected-role(implement)" in step for step in chain)
 
@@ -334,7 +383,7 @@ def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
     _fake_headroom(monkeypatch, {"primary": "exhausted"})
     cap = rr.runtime_capacity(("claude",), settings=_account_settings(), inventory=inv)
     # the harness has one declared account, exhausted -> exhausted
-    assert rr._capacity_state(cap["claude"])[0] == "exhausted"
+    assert cap["claude"]["state"] == "exhausted"
     # a second healthy account (registered record) makes the harness usable
     settings = _account_settings(
         {"id": "primary", "harness": "claude"},
@@ -342,12 +391,12 @@ def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
     )
     _fake_headroom(monkeypatch, {"primary": "exhausted", "backup": "ok"})
     cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
-    assert rr._capacity_state(cap["claude"])[0] == "ok"
+    assert cap["claude"]["state"] == "ok"
     assert cap["claude"]["accounts"] == {"primary": "exhausted", "backup": "ok"}
     # exhausted + UNKNOWN is NOT exhausted: exhaustion requires every account
     _fake_headroom(monkeypatch, {"primary": "exhausted"})
     cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
-    assert rr._capacity_state(cap["claude"])[0] == "unknown"
+    assert cap["claude"]["state"] == "unknown"
 
 
 def test_harness_accounts_expands_rows_then_registered_records(monkeypatch):
@@ -382,16 +431,12 @@ def test_same_model_two_access_paths_two_cost_profiles():
     ]
     inv = _inv(rows)
     assert len(inv.rows) == 2  # both rows kept, nothing averaged or merged
-    candidate, chain = rr.resolve_grid(
-        "medium", "p2", {"claude": "ok", "opencode": "ok"}, inventory=inv
-    )
+    candidate, chain = _grid("medium", "p2", {"claude": "ok", "opencode": "ok"}, inv=inv)
     assert candidate["model"] == "glm-5.3-flash"
     assert candidate["harness"] == "opencode"  # the cheaper ACCESS PATH
     assert any("flash-api" in step for step in chain)
     # the expensive path still stands when the cheap one is exhausted
-    candidate, _ = rr.resolve_grid(
-        "medium", "p2", {"claude": "ok", "opencode": "exhausted"}, inventory=inv
-    )
+    candidate, _ = _grid("medium", "p2", {"claude": "ok", "opencode": "exhausted"}, inv=inv)
     assert candidate["harness"] == "claude"
 
 
@@ -531,8 +576,7 @@ def test_config_extends_the_builtin_table_with_a_new_name():
 def test_the_grid_still_injects_nothing_when_config_declares_nothing():
     """The fallback seeds rows, so the grid reads `declared` rather than
     `rows`. A virgin install stays inert and says why."""
-    candidate, chain = rr.resolve_grid(
-        "high", "p1", {"claude": "ok"}, inventory=_resolved([])
+    candidate, chain = _grid("high", "p1", {"claude": "ok"}, inv=_resolved([])
     )
     assert candidate is None
     assert chain[-1] == "grid=no-inventory-declared"

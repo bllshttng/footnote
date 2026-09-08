@@ -437,3 +437,156 @@ def test_on_confirmed_merge_leaves_graph_untouched_under_external(
     before = g.read_bytes()
     M._on_confirmed_merge(888, str(tmp_path))
     assert g.read_bytes() == before  # no graph write anywhere in the flow
+
+
+# --- the merge mints its own cleanup request (the machine's reap order) ----------
+
+
+def _write_manifest(tmp_path: Path) -> Path:
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir(exist_ok=True)
+    manifest = state_dir / "target-state.md"
+    manifest.write_text("---\nsession_id: sess-abc\nharness: claude\n---\n")
+    return manifest
+
+
+def _patch_events_log(monkeypatch, tmp_path: Path) -> Path:
+    import fno.agents.events as E
+
+    log = tmp_path / "agents-events.jsonl"
+    monkeypatch.setattr(E, "daemon_lifecycle_log", lambda: log)
+    return log
+
+
+def _stub_gh_merged(monkeypatch, module, branch: str = "feature/x-07dc"):
+    class _R:
+        ok = True
+        stderr = ""
+        stdout = ""
+
+    def _gh(args, cwd):
+        r = _R()
+        if "--json" in args and "state,headRefName" in args:
+            r.stdout = json.dumps({"state": "MERGED", "headRefName": branch})
+        return r
+
+    monkeypatch.setattr(module, "_gh", _gh)
+
+
+def _stub_git_root(monkeypatch, module, root: Path):
+    class _R:
+        ok = True
+        stderr = ""
+        stdout = str(root)
+
+    monkeypatch.setattr(module, "_git", lambda args, cwd: _R())
+
+
+def _requested_rows(log: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in log.read_text().splitlines()
+        if json.loads(line).get("type") == "merge_cleanup_requested"
+    ]
+
+
+def test_post_merge_followups_mints_cleanup_request(tmp_path, monkeypatch):
+    # AC1-HP: a confirmed merge with no ritual run writes the request itself,
+    # carrying merged_at, the closed node ids, and the session identity.
+    import fno.agents.events as E
+    import fno.pr._merge as M
+    import fno.worktree_reapable as WR
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh_merged(monkeypatch, M)
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    _write_manifest(tmp_path)
+    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: True)
+    monkeypatch.setattr(
+        E, "rows_for_cleanup",
+        lambda worktree, node_ids, runner=None: ["target-x-07dc-a1"],
+    )
+
+    M._run_post_merge_followups(9, "squash", str(tmp_path), bound_node_ids=["x-07dc"])
+
+    rows = _requested_rows(log)
+    assert len(rows) == 1
+    data = rows[0]["data"]
+    assert data["pr"] == 9
+    assert data["branch"] == "feature/x-07dc"
+    assert data["node_ids"] == ["x-07dc"]
+    assert data["session_id"] == "sess-abc"
+    assert data["harness"] == "claude"
+    assert data["candidate_row_names"] == ["target-x-07dc-a1"]
+    assert data["merged_at"] and data["merged_at"].endswith("Z")
+    assert data["request_id"].startswith("merge-cleanup-")
+
+
+def test_merge_with_no_bound_nodes_still_mints_empty(tmp_path, monkeypatch):
+    # Held shape: a reconcile that bound nothing still mints, with
+    # node_ids [] - the daemon's doneness re-read holds that request.
+    import fno.pr._merge as M
+    import fno.worktree_reapable as WR
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh_merged(monkeypatch, M)
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    _write_manifest(tmp_path)
+    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
+
+    M._run_post_merge_followups(9, "squash", str(tmp_path), bound_node_ids=[])
+
+    rows = _requested_rows(log)
+    assert len(rows) == 1
+    assert rows[0]["data"]["node_ids"] == []
+    assert rows[0]["data"]["worktree"] is None
+
+
+def test_ritual_mint_shares_request_id_with_merge_mint(tmp_path, monkeypatch):
+    # AC1-EDGE: the ritual's mint and the merge's mint carry ONE request id,
+    # so the daemon's fold keeps a single pending request, not two.
+    import fno.agents.events as E
+    import fno.pr._ritual as R
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        R, "rows_for_cleanup",
+        lambda worktree, node_ids, runner=None: ["target-x-07dc-a1"],
+    )
+    monkeypatch.setattr(R, "agents_home_dir", lambda: tmp_path / "agents-home")
+    ritual = R.Ritual.__new__(R.Ritual)
+    ritual.cwd = tmp_path
+    # The mint reads the memoized gh read for the grace anchor; a bare
+    # __new__ ritual has no runner, so seed the cache the legs would have.
+    ritual._merge_state = ("MERGED", "feature/x-07dc", "2026-09-07T15:00:00Z")
+    ritual.ctx = R._Ctx(
+        pr=9,
+        autonomous=False,
+        canon=tmp_path,
+        settings=None,
+        pm=None,
+        project="proj",
+        lane_project="",
+        parking_lot=None,
+        holder="",
+        node_ids=["x-07dc"],
+    )
+    order = ritual._register_cleanup_request(
+        "feature/x-07dc", str(tmp_path / "wt"), "merged-pr"
+    )
+    twin = E.emit_merge_cleanup_requested(
+        repo=str(tmp_path),
+        project="proj",
+        pr=9,
+        branch="feature/x-07dc",
+        worktree=str(tmp_path / "wt"),
+        node_ids=["x-07dc"],
+        session_id=None,
+        harness=None,
+        candidate_row_names=[],
+    )
+    ids = [row["data"]["request_id"] for row in _requested_rows(log)]
+    assert "cleanup-requested" in order
+    assert ids == [twin, twin]

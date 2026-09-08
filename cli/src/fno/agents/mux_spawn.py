@@ -1297,9 +1297,8 @@ def build_pane_argv(
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
     (crates/fno-agents/src/provider.rs), which builds the HEADLESS one-shot
     form for the `--substrate headless` lane; the two intentionally differ
-    (e.g. opencode: bare ``opencode --prompt <msg>`` here vs
-    ``opencode run --auto <msg>`` there) and there is no cross-language
-    parity contract between them - don't go looking for one.
+    (e.g. opencode: bare ``opencode --prompt`` here vs ``opencode run
+    --dangerously-skip-permissions`` there, NOT the stale docs' ``--auto``); no parity contract.
 
     ``model`` (x-c772): an explicit ``--model`` forwarded to the provider's own
     TUI flag (claude/codex/gemini/agy ``--model <m>``; opencode

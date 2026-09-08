@@ -1914,6 +1914,32 @@ class TestReconcileSlot:
         )
         result = _invoke(["doctor"], cwd=store, home=store)
         assert "slot-identity-drift" not in result.output
+        assert "account_identity_unknown" not in result.output
+
+    def test_an_unprovable_slot_is_named_unknown_not_reported_healthy(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3-EDGE: an unreadable slot cannot demonstrate drift, so the check
+        that would have caught a wrong stamp returned nothing and doctor stayed
+        quiet. Silence there reads as a healthy account switch."""
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "readyrule", root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal", lambda blob: (None, "profile-unavailable")
+        )
+
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "account_identity_unknown" in result.output
+        assert "profile-unavailable" in result.output
+        assert "fno config accounts reconcile-slot claude" in result.output
 
     def test_doctor_names_an_unbound_principal_as_the_reason_for_unknown(
         self, store: Path
@@ -2261,3 +2287,91 @@ class TestWindowVerb:
         result = _invoke(["window"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0, result.output
         assert "unknown" in result.output
+
+
+class TestUsageNamesTheServingAccount:
+    """AC2-HP: the usage surface names the identity behind the numbers, and the
+    action an operator takes when they run low. Claude account switching is a
+    deliberate manual act, so this names it and never performs it."""
+
+    @staticmethod
+    def _bind(tmp_path: Path, monkeypatch, principal: dict) -> None:
+        from fno.adapters.providers import binding, managed
+
+        managed.write_record_principal(
+            "readyrule", principal, tmp_path / ".fno" / "providers"
+        )
+        monkeypatch.setattr(binding, "credential_blobs", lambda *_: ["blob"])
+        monkeypatch.setattr(managed, "slot_principal", lambda _b: (principal, None))
+
+    def test_a_proven_account_is_named_with_its_observation_age(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        self._bind(
+            tmp_path, monkeypatch,
+            {"account_uuid": "acct-a", "organization_uuid": "org-1"},
+        )
+        _stub_probe(monkeypatch, {"readyrule": UsageSnapshot(
+            "readyrule", (UsageWindow("5h", 12.0, 1_800_000_000.0),),
+            1_700_000_000.0, "oauth-endpoint",
+        )})
+
+        result = _invoke(["usage", "--refresh"], cwd=tmp_path, home=tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert "identity: readyrule (observed 0m ago)" in result.output
+        assert "manual switch" not in result.output
+
+    def test_a_low_account_is_told_the_manual_switch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        self._bind(
+            tmp_path, monkeypatch,
+            {"account_uuid": "acct-a", "organization_uuid": "org-1"},
+        )
+        _stub_probe(monkeypatch, {"readyrule": UsageSnapshot(
+            "readyrule", (UsageWindow("weekly", 95.0, 1_800_000_000.0),),
+            1_700_000_000.0, "oauth-endpoint",
+        )})
+
+        result = _invoke(["usage", "--refresh"], cwd=tmp_path, home=tmp_path)
+
+        assert "manual switch: sign out of claude" in result.output
+        assert "remote control re-enabled" in result.output
+
+    def test_an_account_whose_dir_serves_someone_else_is_not_named_as_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A receipt naming the wrong account is worse than one naming none."""
+        from fno.adapters.providers import binding, managed
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"},
+            tmp_path / ".fno" / "providers",
+        )
+        monkeypatch.setattr(binding, "credential_blobs", lambda *_: ["blob"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda _b: (
+                {"account_uuid": "acct-b", "organization_uuid": "org-1",
+                 "email": "other@example.com"},
+                None,
+            ),
+        )
+        _stub_probe(monkeypatch, {"readyrule": UsageSnapshot(
+            "readyrule", (UsageWindow("5h", 12.0, 1_800_000_000.0),),
+            1_700_000_000.0, "oauth-endpoint",
+        )})
+
+        result = _invoke(["usage", "--refresh"], cwd=tmp_path, home=tmp_path)
+
+        assert "account_identity_mismatch" in result.output
+        assert "identity: readyrule" not in result.output

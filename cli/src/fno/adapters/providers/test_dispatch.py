@@ -655,3 +655,39 @@ def test_dispatch_env_honors_config_dir(tmp_path: Path) -> None:
     repo_root = _write_settings(tmp_path, [record.model_dump(mode="json", exclude_none=True)])
     env = dispatch_env(record.id, repo_root=repo_root)
     assert env == {"CLAUDE_CONFIG_DIR": "/x/.claude-alt"}
+
+
+def test_dispatch_env_refuses_a_pin_whose_root_serves_another_account(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: the other launch env path emits the same refusal, from the same
+    binding. Two launch paths that disagree about who is billed are two
+    receipts, one of which is wrong."""
+    from fno.adapters.providers import binding, managed
+
+    store = tmp_path / "providers"
+    store.mkdir()
+    record = ProviderRecord(
+        id="makers", name="Makers", harness="claude", auth="managed",
+        config_dir=tmp_path / ".claude-alt",
+    )
+    repo_root = _write_settings(
+        tmp_path, [record.model_dump(mode="json", exclude_none=True)]
+    )
+    managed.write_record_principal(
+        "makers", {"account_uuid": "acc-makers", "organization_uuid": "org-1"}, store
+    )
+    monkeypatch.setattr(binding, "credential_blobs", lambda *_: ["blob"])
+    monkeypatch.setattr(
+        managed, "slot_principal",
+        lambda _b: (
+            {"account_uuid": "acc-readyrule", "organization_uuid": "org-1",
+             "email": "readyrule@x"},
+            None,
+        ),
+    )
+
+    with pytest.raises(ProviderUnavailableError) as exc:
+        dispatch_env(record.id, repo_root=repo_root, root=store)
+
+    assert "account_identity_mismatch" in str(exc.value)

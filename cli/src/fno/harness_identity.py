@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
@@ -780,6 +782,9 @@ class OwnedHarnessIdentity:
                      even the harness is proven, both are ``None``. Never guesses
                      by precedence.
     * ``empty``    - no marker present.
+    * ``spawn_record`` - the session id came from the cwd-keyed agents-registry
+                     spawn record (a codex thread worker), set only when the
+                     walk returned no session id and the harnesses agree.
 
     ``markers_present`` carries every marker seen (with its value) and
     ``rejected`` the ids a live row already owns, so an ambiguous resolve can be
@@ -1226,3 +1231,60 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
     if canonical.disposition == "complete" and canonical.session_id:
         ids.add(canonical.session_id)
     return ids
+
+
+# --- The agents-registry spawn record as an identity source (x-e882) --------
+#: Row statuses under which a session still owns its identity (a held
+#: harness_session_id is provably not another acquiring session's).
+#: Declared here so the registry and the reader cannot drift.
+OWNERSHIP_LIVE_STATUSES = frozenset(
+    {"spawning", "ready", "idle", "busy", "live", "restarting"}
+)
+
+
+def live_thread_row_for_cwd(
+    cwd: str, registry_path: Optional[Path] = None
+) -> Optional[tuple[str, str]]:
+    """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
+
+    A codex thread worker owns no process: N threads share one daemon pid, so
+    the walk cannot name a thread's session id. The spawn record can - the
+    daemon writes the row before the worker's first turn, keyed by the cwd fno
+    named at spawn (one worktree per worker), so a sibling's lookup returns its
+    own row. Exactly one ownership-live ``substrate: thread`` row with a
+    non-empty harness and session id answers; zero and two-plus matches return
+    None, as does an unreadable or absent registry (raise nothing).
+    """
+    if not cwd:
+        return None
+    try:
+        if registry_path is None:
+            from fno.paths import agents_registry_path
+
+            registry_path = agents_registry_path()
+        raw = json.loads(registry_path.read_text(encoding="utf-8"))
+        rows = raw.get("agents") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return None
+        wanted = os.path.realpath(cwd)
+        matches: list[tuple[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
+                continue
+            if row.get("substrate") != "thread":
+                continue
+            harness = row.get("harness")
+            session_id = row.get("harness_session_id")
+            if not harness or not session_id:
+                continue
+            row_cwd = row.get("cwd")
+            if not row_cwd or os.path.realpath(str(row_cwd)) != wanted:
+                continue
+            matches.append((str(harness), str(session_id)))
+    except Exception:  # noqa: BLE001 - identity must degrade, never crash
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return None

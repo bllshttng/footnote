@@ -20,13 +20,13 @@
 # skills/speculate/scripts/worktree-setup.sh to match - the two files are
 # intentional duplicates for portability.
 #
-# DIVERGENCE (worktrees_base migration, x-33e9): the relocation logic in
-# block 0 below (honor config.paths.worktrees_base, else leave harness-native)
-# is intentionally HOOK-ONLY and must NOT be copied to the /speculate
-# duplicate. /speculate deliberately materializes its parallel variations at
-# .claude/worktrees/<name> (a sanctioned exception, like the cross-project
-# pipeline); relocating those to a configured base would break it. The rest of
-# the two files stay in sync.
+# DIVERGENCE (worktrees_base migration, x-33e9): the relocation decision in
+# block 0 below (defer to the resolved worktree policy; relocate only when
+# it reads external) is intentionally HOOK-ONLY and must NOT be copied to the
+# /speculate duplicate. /speculate deliberately materializes its parallel
+# variations at .claude/worktrees/<name> (a sanctioned exception, like the
+# cross-project pipeline); relocating those to a configured base would break
+# it. The rest of the two files stay in sync.
 set -euo pipefail
 
 # Read stdin JSON from CC (contains worktree name, branch, path context).
@@ -44,12 +44,17 @@ fi
 # the second precedence impl the worktree rule forbids.
 _gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 _WT_POLICY=""
+_WT_BASE=""
 if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     # `|| true` is load-bearing: under `set -euo pipefail` a failing fno
     # (stale binary lacking `worktree policy`, misconfigured, etc.) would
     # abort the hook and skip all setup. The old inline `[[ ]]` read absorbed
     # this; the hoisted assignment does not.
-    _WT_POLICY="$( (fno agents workspace worktree policy --repo "$_gate_repo" 2>/dev/null || fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null) | head -1 | tr -d '[:space:]' || true)"
+    # stdout is exactly two clean lines (policy word, base=<path>); the
+    # resolver's deprecation notes go to stderr, never parsed here.
+    _WT_POLICY_OUT="$( (fno agents workspace worktree policy --repo "$_gate_repo" 2>/dev/null || fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null) || true)"
+    _WT_POLICY="$(printf '%s\n' "$_WT_POLICY_OUT" | head -1 | tr -d '[:space:]')"
+    _WT_BASE="$(printf '%s\n' "$_WT_POLICY_OUT" | sed -n 's/^base=//p' | head -1)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then
@@ -149,35 +154,17 @@ wt_config() {
     fi
 }
 
-# 0. Worktree relocation: honor config.paths.worktrees_base (OSS-neutral).
-#
-# Resolution order (x-33e9, worktrees_base migration):
-#   1. config.paths.worktrees_base set -> relocate to <base>/<repo>/<name>.
-#   2. else worktree.use_conductor_canonical: true (DEPRECATED back-compat)
-#      -> relocate to ~/conductor/workspaces/<repo>/<name>.
-#   3. else (unset) -> harness-native: leave the worktree where Claude Code
-#      placed it (`<repo>/.claude/worktrees/<name>`). No relocation. That dir
-#      is gitignored, so rg/Grep already skip it - the old "inside-checkout is
-#      always forbidden" redirect is retired; harness-native is now the default.
-#
-# `worktrees_base` is read as the RAW config field (empty when unset) via
-# `fno config get`. The paths.sh `WORKTREES_BASE` var always carries the
-# ~/.fno/worktrees default, so it cannot distinguish "unset" from "set to the
-# default" - the distinction that decides relocate-vs-leave-in-place.
-WT_BASE_RAW=""
-if command -v fno >/dev/null 2>&1; then
-    WT_BASE_RAW="$(fno config get config.paths.worktrees_base 2>/dev/null || true)"
-fi
-[[ "$WT_BASE_RAW" == "null" ]] && WT_BASE_RAW=""
-USE_CANONICAL="$(wt_config "use_conductor_canonical" "false")"
-
+# 0. Worktree relocation: the RESOLVED policy decides, never a raw config
+# read (x-f96e). `fno agents workspace worktree policy` - the same resolver
+# `worktree ensure` uses - is the one location answer, so an explicit
+# config.paths.worktrees_base relocates here exactly as it does on the
+# autonomous dispatch path (setting the key alone is sufficient; the old
+# raw-key read here made the two paths disagree). external relocates to the
+# resolved base; harness-native stays where Claude Code placed the worktree
+# (`<repo>/.claude/worktrees/<name>`), no relocation.
 RELOCATE_BASE=""
-if [[ -n "$WT_BASE_RAW" ]]; then
-    # Config stores ~ literally; expand a leading ~ to $HOME.
-    RELOCATE_BASE="${WT_BASE_RAW/#\~/$HOME}"
-elif [[ "$USE_CANONICAL" == "true" ]]; then
-    echo "Note: worktree.use_conductor_canonical is DEPRECATED; set config.paths.worktrees_base: ~/conductor/workspaces instead." >&2
-    RELOCATE_BASE="$HOME/conductor/workspaces"
+if [[ "$_WT_POLICY" == "external" && -n "$_WT_BASE" ]]; then
+    RELOCATE_BASE="$_WT_BASE"
 fi
 
 # Worktree name (from stdin; fall back to the path basename, e.g. when the

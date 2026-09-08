@@ -14,6 +14,7 @@ agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents court	T1	agents court	3
 agents court-orphans	T1	agents court-orphans	0
+agents route-slot	T1	agents route-slot	0
 agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
@@ -108,6 +109,7 @@ agents worker review	T1	agents worker review	0
 agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
 agents workspace worktree archive	T1	agents workspace worktree archive	4
+agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
 agents workspace worktree ensure	T1	agents workspace worktree ensure	24
 agents workspace worktree overlap-record	T1	agents workspace worktree overlap-record	3
@@ -165,6 +167,7 @@ backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
 backlog demand	T1	backlog demand	0
 backlog dispatch-lanes	T1	backlog dispatch-lanes	1
+backlog discover	T1	backlog discover	0
 backlog done	KEEP	backlog done	42	deliberate readability slack for a high-traffic distinct operation
 backlog encounter	T1	backlog encounter	0
 backlog epic status	T1	backlog epic status	7
@@ -561,6 +564,7 @@ worker reconcile	T1	worker reconcile	0
 worker review	T1	worker review	0
 worker ship	T1	worker ship	2
 worktree archive	T1	worktree archive	2
+worktree cargo-offload	T1	worktree cargo-offload	0
 worktree cleanup	T1	worktree cleanup	6
 worktree ensure	T1	worktree ensure	30
 worktree overlap-record	T1	worktree overlap-record	3

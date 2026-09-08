@@ -263,3 +263,577 @@ Reactivation is a separate verb from ``undefer`` on purpose: reviving a plan tha
 
 Does NOT re-contain or re-parent children released when the node was superseded: re-adoption is decompose's job, the same policy ``cmd_undefer`` applies to un-containment.
 
+## _encounter_provenance
+
+Model/effort provenance for an encounter record, or nothing.
+
+    Read from the harness's own env, and only for the harness that owns those
+    names. The variables survive a fork, so a codex session launched from a
+    claude shell inherits them; writing them onto a codex vote would attribute
+    it to a model that did not cast it, which reads as measured. A harness with
+    nothing to report omits the keys rather than writing a plausible default.
+
+    The two names are not equally first-party. CLAUDE_EFFORT lives in the
+    claude binary's own namespace, so its presence is claude's doing.
+    ANTHROPIC_MODEL is a provider SDK name a shell can export for unrelated
+    tooling, so it counts only when ANTHROPIC_BASE_URL is exported beside it:
+    the launcher that owns the model string owns the endpoint and sets the
+    pair, and a lone model string says nothing about the route this session
+    actually ran on.
+
+## _cascade_reopen_parents
+
+Reopen ancestor epics the cascade auto-closed. Returns (reopened, warned).
+
+    The inverse of :func:`_cascade_close_parents`, and not a refusal, because a
+    done epic with a live child is not a risky state to correct - it is an
+    inconsistent one. The epic's work IS its children; one of them is open again.
+
+    The judgment call is WHICH ancestors. An epic closed by the cascade carries
+    the ``auto-closed:`` note :func:`_auto_closed_note` wrote, so reopening it
+    just restores what the cascade would compute today. An epic closed WITHOUT
+    that note was closed on its own evidence - a real PR, an operator decision -
+    and silently reopening it would discard a judgment this verb never made. So
+    those are left done and NAMED, which is the refuse-and-say-why rule applied
+    to a case where either silent choice is wrong.
+
+    Walks up under the same 64-deep cap the close path uses, for the same reason.
+
+## _strandable_contained_ids
+
+Open nodes whose delivery unit is ALREADY done - closeable right now.
+
+    ``_cascade_close_contained`` only fires while a unit is being closed, and
+    ``scan_merge_drift`` never returns an already-closed unit, so a node that
+    became contained AFTER its owner shipped is reachable by neither. That is
+    not hypothetical: re-running an `adopt` spec back-fills ``contained_in``
+    onto a node adopted by an older fno, and if that node's owner has already
+    merged, the back-fill removes it from selection (the containment guard) with
+    nothing left that would ever complete it - visible, unbuildable, never done.
+
+    Read-only. The same self-heal role ``_strandable_epic_ids`` plays for
+    all-done epics, and for the same reason: a state the forward path now
+    prevents still has to be swept out of graphs that already carry it. Once
+    migrated this returns empty and the sweep is a no-op.
+
+## _starvation_receipts
+
+Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
+
+    Zero-silent-starvation (, epic Success Definition 2): when ``next``
+    returns null but buildable-looking nodes exist, name why each was excluded
+    so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
+    | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
+    genuinely in review (open PR) or committed to a batch is not starved and
+    gets no line.
+    Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
+
+    Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
+    ``--mission``, ``--roadmap-id``) so a scoped request that returns null never
+    explains itself with an out-of-scope node (codex P2). Only the exclusion
+    filters differ - that is the whole point of the receipt.
+
+## _merge_unconfirmed
+
+True when a done child carries a PR that GitHub never confirmed merged.
+
+    A child reads ``done`` the moment ``/target`` finalizes, not when the PR
+    merges, so at a wave gate the graph can say a dependency landed while its
+    branch is still open. ``merge_status`` is written only by
+    :func:`_apply_completion_fields` when a caller resolved MERGED from gh, so
+    its absence is exactly "nobody confirmed this".
+
+    Deliberately NOT called "unmerged". The absence has two explanations - the
+    PR is genuinely open, or it merged through a path that never stamped the
+    field - and asserting the first from the absence of the second is the
+    absence-as-evidence trap. The caller's wording, and ``--verify-merges``,
+    keep that distinction. Measured 2026-09-01: 16 of 444 done nodes carrying a
+    PR were in this state, spanning 2026-04-28 to 2026-08-26.
+
+## resolve_promise_evidence
+
+Decide whether a node's plan promised work that has not all shipped.
+
+    Fires ONLY on an explicit declaration - a plan that declares neither
+    ``close_probes`` nor ``expected_url_count`` closes exactly as it does today.
+    Inferring "multi-wave" from ``## Wave N`` headings was rejected: the common
+    case (one .md == one PR == one node) uses waves as internal structure and
+    would false-positive identically to a half-ship, parking every such node on
+    autonomous /target. Coverage grows as /blueprint stamps ``expected_url_count``
+    going forward, so nothing retroactively parks.
+
+    Three conditions, first refusal wins. D reads the carve-out ledger and is
+    independent of the plan; B and C read the plan at ``node["plan_path"]``:
+
+      D. Unharvested deferred carve-outs. The project ledger
+         (``.fno/carveouts.jsonl``) still carries a ``deferred`` carve-out -
+         declared scope that did not ship. It must become a node (the retro
+         harvest files and consumes it) or be force-overridden. ``oos-bug`` and
+         ``backfill`` carve-outs do NOT block (genuine discovery, filed by the
+         later harvest); both land in the same ledger and look identical, which
+         is why a deferred item can merge away unnoticed. Checked first and independent of the plan so a close is held
+         even when the plan is absent or unreadable. Scoped to the closing
+         node's OWN rows via the ``node`` field stamped at capture time
+         (``find_held_node`` proven ownership): a row filed by another node's
+         session must not hold this close open (one unrelated
+         carve-out was blocking every close in the repo). Unattributed rows
+         (legacy, ambient shell, harness without a session id) block nothing
+         at close time; they stay visible via ``fno backlog carveout list`` and the
+         retro sweep, which are the repo-wide backstop.
+      B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
+         delegated to ``fno-agents probe-run`` (the same runner the loop uses for
+         ``done_probes``); a declared gate that cannot be evaluated fails closed.
+      C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
+         node's PR refs are MERGED. The right check for multi-repo / split
+         deliveries.
+
+    A gate that only fires on an explicit promise cannot false-positive, which
+    is the reason the count is written at blueprint time rather than inferred
+    afterward. Fails open on an absent/unreadable plan or unparseable
+    frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
+    names the unreadable path so the gap is visible, not silent.
+
+## emit_session_satisfied_for_record
+
+Emit a ``session_satisfied{source:"pr_merge"}`` event for the target
+    session that owns a merged-and-now-closed node (Group 1).
+
+    Today only an in-gate merge through ``scripts/lib/pr-merge.sh`` emits this
+    signal, so an out-of-band merge (web button, bare ``gh pr merge``) leaves the
+    owning session hot and the stop hook hard re-blocks it. After reconcile
+    closes the drifted node, this hands the same auto-complete signal to the
+    owning session.
+
+    The event binds to that session via ``session_id`` + ``gate_state_hash`` (the
+    md5 of the owning target-state.md at emit time), matching the stop hook's
+    staleness check (``check_session_satisfied``). The defensive stop-hook probe
+    (Task 1.2) is the backstop for when this emit is stale or never lands.
+
+    Best-effort and non-fatal: returns the events.jsonl path on a successful
+    emit, or None when there is nothing to satisfy (no cwd, no live state file,
+    already-COMPLETE session, missing session_id) or any failure. A failure here
+    must never abort the reconcile close.
+
+## emit_gate_escape_for_record
+
+Tier-1 auto-emit: a ``gate_escape{reason:dead-bot}`` when
+    reconcile closes an out-of-band-merged node whose required review bot never
+    reviewed.
+
+    Boundary (the #222 rule - the load-bearing correctness surface):
+      - required_bots empty          -> NOT an escape: a no-required-bots repo
+                                        self-merging a green PR is normal (AC2).
+      - every required bot reviewed  -> NOT an escape: the gate was met; only
+                                        the merge happened out of band (AC2b).
+      - some required bot never reviewed -> escape: the loop should have waited
+                                        for / resolved that review (AC1).
+
+    Lands in the CANONICAL events log (``events_path`` overrides for tests) so a
+    closed node's telemetry outlives its worktree and retro aggregates one
+    coherent log. Dedup on (pr, reason) (AC4). Telemetry fails OPEN: any failure
+    logs a durable emit-failure line beside the events log (AC7) and returns
+    None, never raising - the emit must never abort the reconcile close (AC5).
+    Returns the events.jsonl path on a successful emit.
+
+## scan_merge_drift
+
+Find open nodes whose PR has merged outside the ship gate.
+
+    Returns one record per open node that resolves to a MERGED PR, plus
+    records flagged with ``error`` for nodes whose PR state could not be
+    resolved. Nodes whose PRs are all still OPEN (or closed-unmerged) yield no
+    record - they are not drift. ``node_id`` restricts the scan to a single
+    node (a str) or a set of nodes (an iterable of str) - e.g. every node one
+    specific PR's exact trailer names, so a ``--pr-number`` call scans only
+    what that PR could possibly touch instead of the whole graph.
+    Tests inject a ``query`` stub to avoid shelling out to gh.
+
+    A second pass (``reverse_map_unstamped``) covers open nodes with NO PR ref
+    at all - a session that died before the node<->PR stamp - by matching the
+    node id against merged branch names. ``list_merged`` is injected in tests.
+
+## pr_url_for_repo
+
+The canonical PR url for the checkout at ``cwd``, or None.
+
+    A writer must resolve the url at least as capably as the reader resolves
+    the slug, so this shares ``resolve_current_repo_slug``'s origin-then-gh
+    chain: a url-less ``pr_number`` names no repo, and PR numbers collide
+    across repos.
+
+    An absent ``cwd`` resolves against the invocation checkout - the caller is
+    standing in the repo it is stamping. A ``cwd`` that IS recorded but no
+    longer exists returns None instead: that is positive evidence the node
+    belongs to another repo, and `backlog done`/`backlog update` can name any node
+    in the cross-project graph, so falling back would stamp the running repo's
+    slug onto a foreign node.
+
+## _unharvested_deferred_carveouts
+
+Unharvested ``deferred`` carve-outs on the node's project ledger.
+
+    ``deferred`` blocks a close (declared scope did not ship); ``oos-bug`` and
+    ``backfill`` do not (genuine discovery, filed by the later harvest). Both
+    land in the same ``.fno/carveouts.jsonl``, which is why a deferred item can
+    merge away unnoticed. The ledger is resolved from
+    the NODE's project (``cwd``), not the ambient command repo: a cross-project
+    close names a foreign node from this session, and reading the ambient
+    ledger would both miss the foreign carve-out and let an unrelated local one
+    block it. Falls back to the ambient canonical ledger when ``cwd`` is absent
+    or unresolvable (the same-project close, the common case). Fails open on an
+    unreadable ledger: a corrupt ledger must not wedge a close, and the retro
+    harvest is the durable resolution path either way.
+
+## reverse_map_unstamped
+
+Close open nodes with NO PR refs by matching the id in a merged branch.
+
+    A /target session that dies between ``gh pr create`` and the node<->PR
+    stamp leaves an open node with no ``pr_number`` - invisible to the forward
+    ``scan_merge_drift`` (which needs a ref to query). The branch convention
+    (``branch_name()``) still carries the full node id, so one
+    ``gh pr list --state merged`` per repo reverse-maps it. A unique headRef hit
+    synthesizes the same MergeDriftRecord the stamped path emits (so the
+    existing close path applies unchanged); an ambiguous hit (two merged PRs
+    for one id) emits an ``error`` record naming both, never a guess.
+
+    ``list_merged`` is injected in tests to avoid shelling to gh.
+
+## node_cwd_in_repo
+
+Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
+
+    A missing/empty/non-string cwd can't be proven NOT this repo's, and
+    there is no cost to treating it as in-scope here: ``reverse_map_unstamped``
+    (the only caller of this scope) independently skips a missing cwd
+    unconditionally before it would ever fire a gh call, so this branch
+    changes candidate-set membership only - never the observable close/skip
+    outcome for a no-cwd node.
+
+    Module-level (not nested inside a caller) precisely so this predicate is
+    unit-testable on its own, independent of the reverse-map machinery that
+    happens to make its no-cwd branch behaviorally inert today.
+
+## detect_reverted_nodes
+
+(node_id, revert_pr_number) pairs to stamp ``reverted: true``.
+
+    A merged PR whose title starts with ``Revert`` and whose body references
+    a PR number carried by a not-yet-reverted graph node names that node's
+    ship as reverted. Pure (no I/O) so tests need no gh.
+
+    Matching is REPO-SCOPED: the graph is global across projects, so bare PR
+    numbers collide. A candidate node must carry a ``pr_url`` in the SAME
+    repo as the revert PR's own ``url``, a body qualifier
+    (``Reverts other/repo#N``) must match that repo, and an ambiguous match
+    (two same-repo nodes on one number) stamps nothing - the same
+    ambiguity-resolves-to-nothing rule as the W1 backfill.
+
+## verify_pending_supersessions
+
+Verify predecessor cause surfaces against one merged PR's file set.
+
+    Returns positive receipts for predecessors that remain pending. A
+    predecessor never becomes terminal from the relationship alone: every
+    declared repo-relative surface must appear in the merged PR's changed-file
+    evidence.
+
+    ``evidence_complete=False`` says the file list is known to be short of the
+    PR's real one. A surface missing from a truncated list is an absence with
+    two explanations, so neither verdict is available: nothing verifies and the
+    receipt names the truncation rather than blaming the surface.
+
+## successors_owing_verification
+
+Successor id -> successor node, for pending predecessors already owed proof.
+
+    ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
+    successor. A successor that closed at any other moment - an earlier sweep, a
+    hand-run ``fno backlog done``, or a supersede recorded against a node that
+    had already shipped - never passes through that path. Its predecessors stay
+    pending, pending reads as blocked, and nothing in the system ever revisits
+    them: the only escape was ``unsupersede``.
+
+    This finds those rows so the sweep can settle them against the evidence the
+    successor already carries.
+
+## select_lane_fill
+
+Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
+
+    The parallel-mode (group 2) lane-fill selector. With
+    ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
+    group-1 primitive ``acquire_lane_slot``), so the concurrency cap is enforced
+    by claim atomicity, never a counted snapshot (Locked Decision #7). Each
+    returned node already holds a slot keyed ``parallel-lane:<id>``; the caller
+    spawns one worker per node and the worker's ``target init`` reconciles that
+    same slot (Locked Decision #8) rather than acquiring a fresh one.
+
+    Collision-cleanliness is recomputed AFTER each claim from a FRESH ready-list,
+    never a pre-claim snapshot: between two picks a peer may claim a node or a
+    lane may finish, and re-querying reflects that. This is the "stops at
+    a claimed head" hazard - selection must skip claimed heads across every
+    domain. A node a live peer lane already holds is skipped so a
+    not-yet-node-claimed lane is never double-dispatched. (Two dispatchers
+    racing the SAME node are prevented upstream by the singleton
+    ``walker:<root>`` claim, so this stays a single-dispatcher selector, not a
+    distributed lock.)
+
+    Domain is NOT a selection rule: the file-collision gate decides,
+    so two same-domain nodes with disjoint surfaces co-schedule. What remains
+    of domain is the annotation on an unevaluated candidate - see
+    :func:`_classify_lane_candidate`.
+
+    ``max_lanes == 1`` selects a single ready node: this is the retargeted
+    active_backlog daemon's sequential
+    fire-and-forget dispatch. ``max_lanes < 1`` returns ``[]`` with no
+    side effects.
+
+    ``claim=False`` previews the selection (which nodes WOULD dispatch) without
+    holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
+    ``--claim``.
+
+    ``claim=True`` assumes the caller runs under the singleton ``walker:<root>``
+    claim (the dispatch context does): that serialization is what prevents two
+    concurrent callers from both selecting the SAME node and each grabbing a
+    distinct slot for it (which would inflate the cap - the group-1 primitive is
+    idempotent only for a single caller's retries). It is NOT a standalone
+    distributed lock; do not run two ``--claim`` selectors concurrently outside
+    the walker.
+
+## selection_guards
+
+Return a skip-reason for a would-be-selected node, or None to select it.
+
+    The single narrowing choke point shared by ``next`` selection (_pick_ready)
+    and the converge readiness filter (_direct_dependents), so the two paths
+    can never disagree about what is dispatchable. Guards, in order:
+
+      contained: the node carries ``contained_in`` - its work ships inside
+        another node's PR, so it is not a delivery unit and dispatching it
+        would open a second PR for one plan. Returns ``contained:<owner-id>``,
+        which names where the work actually went (``dead-ancestor`` would only
+        say the subtree is dead). First, because containment is a fact about
+        THIS node while every guard below reads its ancestors or its plan.
+        Belt-and-braces: the write-site refusal already stops new
+        double-bindings, so this is a read of a state that should not exist.
+        It is also only HALF the coverage - selection_guards is autonomous-only
+        (see the design-stage note below), so `fno do target init` carries the
+        named-dispatch half. A guard on one of two reachable paths is
+        decorative.
+
+      dead-ancestor: any transitive ``parent`` in {superseded, deferred} - the
+        subtree is abandoned, so building a leaf under a killed epic is wasted
+        work. Returns ``dead-ancestor:<ancestor-id>``. A missing parent id ends
+        the walk with no verdict (select normally). Depth-bounded + cycle-safe.
+
+      stale-quarantine: a ready node with no movement signal older than
+        ``staleness_days`` -> ``stale-quarantine``. The guard only EXCLUDES
+        here; the reversible defer is owned by ``maintain --apply`` (guards
+        never mutate the graph as a selection side effect - epic LD1/LD2).
+
+      design-stage: the linked plan is still a design doc (frontmatter
+        ``status: design``), so the node is planned but not blueprinted ->
+        ``design-stage``. Only AUTONOMOUS selection routes through this
+        function; an explicitly-named node dispatches from any rung, naming
+        being the consent (epic LD8). This is what retires the
+        keep-plans-unlinked workaround: linking a design doc now lands a
+        visible-but-unarmed node instead of arming dispatch.
+
+    Hold reads fail closed before the compatibility guard: an unreadable plan
+    cannot prove a hold is absent. Every remaining guard stays fail-open (epic
+    Errors): a read failure returns None and emits one loud stderr line.
+
+## _join_node
+
+Spawn width-bounded joiners into a held node's worktree.
+
+    Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
+    manifest snapshot), computes the bound plan's ready-graph width, and
+    spawns ``/fno:execute waves <plan>`` workers there via ``fno agents spawn
+    --substrate thread`` - one per distinct wave band when the plan carries
+    bands (highest band first, the lead; each lane resolved per band by
+    ``_grid_lane_for``), else ``min(workers, width - 1)`` shapeless workers
+    (joiner 2). Either way the width rule caps the count: the node holder is
+    one of the width workers. ``workers`` is the requested joiner count;
+    ``None`` (the CLI default) derives the ask from the sizing table - the
+    node's priority against the plan's highest wave band - instead of
+    defaulting to one joiner, which is the default that kept bare joins
+    from ever being worth running. The brief rides TWO channels: the file
+    ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
+    which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
+    that inherit the spawner's env, e.g. panes); a banded brief also carries
+    the per-worker band table, the band's durable channel beside the
+    best-effort ``FNO_WORKER_BAND`` env export. The spawned process exports
+    FNO_WORKER_NAME from ``--name``, so each joiner's task-claim holder is
+    its own roster name (the joiner 1 contract; where the env export cannot
+    reach, resolve_task_holder reads the roster binding). ``model`` rides as
+    an explicit ``--model``: a typed model with no vendor implication
+    overrides a config-injected default whose lane would refuse.
+
+    Returns the receipt ``{"node", "worktree", "width", "priority", "band",
+    "workers", "workers_source", "spawned", "lead", "lanes"}`` - the three
+    sizing inputs ride beside the requested count and where it came from
+    (``derived`` | ``explicit``), so the receipt answers "why this many".
+    ``lanes`` maps each spawned name to its ``band``/``harness``/
+    ``model``/``sandbox`` (``enforced`` | ``overlapping`` | ``unevaluated`` |
+    ``off``, from ``config.join.sandbox`` and the plan's band partition; plus
+    ``"grid": "declined"`` when the grid declined that band
+    and the joiner rides the caller's default lane). Raises JoinRefuse (exit
+    2/3/4/5) on a precondition failure and SpawnError when the lead spawn
+    itself fails; a non-lead spawn failure warns to stderr and shrinks
+    ``spawned`` instead of aborting the join.
+
+## _grid_lane_for
+
+``(harness, model, decline_reason)`` the capacity grid picks for an UNPINNED spawn.
+
+    On a pick the reason is ``None``; on a decline the harness and model are
+    ``None`` and the reason names WHY.
+
+    ``resolve_grid`` already returns ``(candidate, chain)`` whose last element
+    is its terminal reason, and this function used to throw that away as
+    ``_chain``. A bare ``(None, None)`` collapsed three different outcomes into
+    one value - the caller pinned a model, capacity is unknown, or the
+    inventory is empty - so a spawn site could not tell a deliberate pin from a
+    config gap and fell through to the ambient default in silence.
+
+    That is not hypothetical. With ``config.routing.models`` empty no band can
+    ever match: ``resolve_grid`` appends ``grid=no-inventory-declared`` and
+    returns no candidate, so EVERY banded plan buys the ambient fleet forever
+    rather than momentarily. Observed on this node's own joiners, which both
+    spawned on the most expensive lane while the receipt said only "grid
+    declined, harness null, model null".
+
+    The reason is for RECEIPTS, never for refusing. Routing degrades and never
+    blocks a spawn (Locked 10), and an empty inventory is a config gap, not a
+    capacity failure. Naming it is what makes it fixable.
+
+    Deliberately ONE function rather than a two-tuple wrapper around a
+    three-tuple worker. Tests monkeypatch this name, and an internal caller
+    that reached past the wrapper would silently bypass every such patch - the
+    first cut of this change did exactly that and two tests caught it.
+
+    The receiving end of the difficulty deferral: dispatch callers resolve
+    difficulty to nothing precisely so it picks the lane HERE, where live
+    capacity is readable - the spawned argv's explicit --harness can never
+    trigger the spawn-CLI grid. Only a fully unpinned spawn defers (an explicit
+    model or provider stays operator authority); unknown capacity falls back to
+    the caller's defaults (Locked 10: routing degrades, never blocks a spawn).
+    Dispatch sites that make HARNESS-KEYED decisions before spawning (lane
+    worktree placement) must call this first and thread the result through
+    both decisions, so placement and spawn always agree.
+
+## candidates
+
+Union FTS5 and relatedness recall, ranked by relatedness score.
+
+    ``entries`` is an optional narrowed pool for callers such as the filing
+    gate.  The FTS cache still searches the graph bytes, then ids are filtered
+    to that pool.  Relatedness is allowed below the filing floor so an FTS-only
+    vocabulary hit remains visible with its measured score.  ``domain`` is the
+    incoming node's own domain: relatedness grants a same-domain bonus, so a
+    caller that knows it must pass it rather than let every query read as
+    ``code``.
+
+## assess
+
+Assess one node without changing it or making an external mutation.
+
+    ``pr_state`` is the caller's gh-verified answer for whether a PR number is
+    merged.  Deferral clears every node-side completion field, so a shipped
+    node that later expired is only provable through evidence that survives
+    the defer: a verified merged PR, or files recorded in its text that still
+    exist on disk.
+
+## _spawn_worker
+
+Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
+
+    Routes the substrate + the per-harness-normalized command through the shared
+    resolver (``fno.agents.harness_map.resolve_dispatch``) instead of hardcoding
+    ``--substrate bg`` + a ``/target`` f-string. ``harness`` (the selected
+    provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
+    ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
+    worktree, never the pane default that would STALL a fire-and-forget dispatch),
+    ``headless`` for codex/others. A node's ``dispatch_verb``/
+    ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
+    brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
+
+    Merge posture stays a launcher decision, never baked into a node verb:
+    the default builtin bakes ``no-merge``; ``config.auto_merge.grant`` routes the
+    ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
+    ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
+    ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
+    resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
+
+    ``dispatch_account`` is a quota cutover's destination provider RECORD id, and
+    it rides argv. The credentials never do: the spawn front door resolves the
+    record and applies its overlay where the harness is exec'd. That matters
+    because a non-claude record's overlay is a HOME override and footnote reads
+    HOME to find its own state root, so an overlay merged into THIS wrapper's env
+    would file the worker's registry row and claim under the account's home. ``extra_env`` is refused outright for any such key.
+
+    Returns the spawn receipt's LAUNCH IDENTITY: the claude short_id, or for a
+    codex thread the FULL harness_session_id (codex has no short id; a head-8
+    slice is refused by shape - ruling d-513d9d22). Raises SpawnAlreadyRunning
+    on a name-collision (a peer beat us in the boot window),
+    DispatchResolveError on an unresolvable harness/substrate/verb (caught
+    non-fatally by the caller), and SpawnError otherwise.
+
+## _classify_lane_candidate
+
+Classify one ready node for lane-fill. ``None`` = selectable, else a typed
+    exclusion reason. Read-only (acquires no slot): the SINGLE per-candidate
+    truth shared by :func:`select_lane_fill` (live) and :func:`schedule_shadow`
+    (the read-only report), so the two can never disagree about why a node is
+    held back. Duplicating this sequence into a second copy is the drift the
+    codebase's path-uniqueness rule exists to prevent.
+
+    Guard order: peer-lane, then collision, then domain. Domain was a proxy for
+    "these will not collide"; the collision gate is the real measurement, so it
+    runs first and domain NEVER excludes an evaluated candidate - two
+    same-domain nodes with disjoint file surfaces co-schedule.
+
+    Reason tokens (all stable, machine-readable):
+
+      ``peer-lane``              a live peer lane already holds this exact node.
+      ``high-collision:<id>``    a high-severity file overlap with in-flight work.
+      ``unevaluated:no-surface`` the plan states no comparable file surface, so
+        collision safety is UNKNOWN. This is a distinct class, not an exclusion:
+        live dispatch fails open on it (dispatches anyway); the shadow report is
+        conservative and serializes it with this diagnostic (plan Change 1).
+        When the node's domain is already held (by a live lane or an earlier
+        pick) the token carries ``+same-domain:<domain>`` - the domain tiebreak
+        survives only as that annotation, so the report can still explain a
+        serialized unknown. That subclass is the one behavior change inside the
+        class: a held domain excluded such a candidate before the reorder and
+        now it dispatches, loudly (select_lane_fill warns on the annotation),
+        with the mandatory-surface intake refusal as the standing control.
+      ``unevaluated:collision-error`` the collision gate raised, so safety is
+        unknown for the same reason and gets the same fail-open treatment. It is
+        a stated verdict rather than a swallowed error precisely so it cannot
+        reach the frontier looking like a clean comparison. Carries the same
+        ``+same-domain:<domain>`` annotation when the domain is held.
+
+## _strandable_epic_ids
+
+Open epics (parents) whose children are ALL done - closeable right now.
+
+Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
+event, so an epic whose children were all completed BEFORE this code shipped
+(or whose last child closed via a path that did not cascade) is stranded:
+open, all children done, and - now that containers are hidden from
+next/ready - unreachable for closure. This identifies them so reconcile can
+self-heal.
+
+## _sweep_close_done_epics
+
+Close every open epic whose children are all done (self-heal/migration).
+
+Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
+freshly-closed epic heals ITS parent too (grandparent chains). Returns the
+ids it closed so the caller can auto-continue their dependents. Reconcile
+runs this so pre-existing stranded all-done epics heal on the next reconcile
+pass - going forward the cascade prevents new ones, so this is a no-op once
+migrated.

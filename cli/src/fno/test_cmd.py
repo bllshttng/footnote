@@ -60,6 +60,10 @@ _AMBIENT_MODE = "clean"
 
 _STATE_MODES = ("clean", "populated", "both")
 _STATE_MODE = "clean"
+# Set by any lane whose filesystem canary refused. `--state both` discards the
+# populated lane's exit code on purpose, because that lane is red by design on
+# its own positive control, so a canary refusal there has no other way out.
+_STATE_CANARY_LEAKED = False
 STATE_LEAK_CANARY = "STATE_LEAK_CANARY"
 _STATE_FIXTURE_DIR = Path(__file__).resolve().parents[3] / "cli" / "tests" / "fixtures" / "populated-state"
 
@@ -156,11 +160,24 @@ def _state_verdict_diff(clean: Path, populated: Path) -> list[str]:
     )
 
 
+# The one positive control the state lanes read, matched on its own test name.
+# A substring match on "test_state_canary" also hits every testcase in
+# test_state_canary_wiring.py, and under parallel execution one of those can be
+# read in the control's place, so a healthy run is rejected on a passing wiring
+# test. startswith rather than equality so a future parametrisation still
+# matches; the wiring names do not begin with this string.
+_STATE_CONTROL_TEST = "test_state_canary_detects_populated_state"
+
+
+def _is_state_control(nodeid: str) -> bool:
+    return nodeid.rsplit("::", 1)[-1].startswith(_STATE_CONTROL_TEST)
+
+
 def _state_canary_status(path: Path) -> str | None:
     """Return the recorded state-canary verdict, or None when it did not run."""
     verdicts = _state_verdicts(path)
     for nodeid, verdict in verdicts.items():
-        if "test_state_canary" in nodeid:
+        if _is_state_control(nodeid):
             return verdict
     return None
 
@@ -170,6 +187,7 @@ def _state_both_exit(
     diff: Sequence[str],
     canary_clean: str | None,
     canary_populated: str | None,
+    canary_leaked: bool = False,
 ) -> int:
     """The --state both verdict, decided by the junit comparison alone.
 
@@ -177,14 +195,21 @@ def _state_both_exit(
     positive control), so its raw exit code can never decide the verdict: an
     exit code fed from it reports failure on the tool's own definition of
     success. The comparison is the verdict; the raw populated rc is not read.
+
+    canary_leaked is the one thing the discarded rc still has to carry. The
+    FILESYSTEM canary is a different instrument from the junit control above,
+    and a lane that wrote to the operator state root is never green, so it is
+    passed in beside the comparison rather than being thrown away with the rc.
     """
+    if canary_leaked:
+        return 1
     if canary_clean != "passed" or canary_populated != "failed":
         return 1
     if clean_rc:
         return clean_rc
     if not diff:
         return 1
-    if any("test_state_canary" not in nodeid for nodeid in diff):
+    if any(not _is_state_control(nodeid) for nodeid in diff):
         return 1
     return 0
 
@@ -936,6 +961,45 @@ def _smoke_env(root: Path) -> dict:
         env["STATE_PROFILE_DIR"] = str(_sandbox() / "home" / ".fno")
         env["CLAUDE_CODE_SESSION_ID"] = "state-canary-session"
     return env
+
+
+def _state_canary_snapshot() -> str:
+    """Snapshot path for this process, so two runs on one box never share one.
+
+    plant and verify run in the SAME process, so the pid keys both halves. CI
+    gives each shard its own runner and would not collide anyway; a developer
+    running two checkouts at once would.
+    """
+    return str(Path(tempfile.gettempdir()) / f"fno-state-canary.{os.getpid()}.snapshot")
+
+
+def _run_state_canary(root: Path, verb: str) -> int:
+    """Run scripts/ci/check-state-canary.sh on the PARENT HOME.
+
+    Deliberately NOT under _smoke_env: the sandbox is what the suite is allowed
+    to write, and the parent HOME is the surface the canary exists to protect.
+    Handing it the sandbox would measure the wrong root and pass forever.
+
+    A missing script is fatal on verify and non-fatal on plant. A verify that
+    cannot run must never read as a green; that is the absence-reads-as-success
+    failure this runner refuses everywhere else.
+
+    Not to be confused with _state_canary_status, which reads the state-lane
+    junit and answers a different question.
+    """
+    script = root / "scripts" / "ci" / "check-state-canary.sh"
+    if not script.is_file():
+        if verb == "verify":
+            sys.stderr.write(
+                f"smoke: {script} is missing - cannot verify the operator state "
+                "root was untouched, refusing to call this green\n"
+            )
+            return 1
+        return 0
+    env = dict(os.environ)
+    env["FNO_STATE_CANARY_SNAPSHOT"] = _state_canary_snapshot()
+    proc = subprocess.run(["bash", str(script), verb], cwd=str(root), env=env)
+    return proc.returncode
 
 
 def _read_failure_record(path: str, known: set[str]) -> set[str]:
@@ -1731,6 +1795,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     there is not evidence the test is hermetic, and a failure may be your
     machine. `fno doctor test smoke --only '<glob>'` runs the same step hermetically.
     """
+    global _STATE_CANARY_LEAKED
     root = _repo_root(Path.cwd()) or Path.cwd()
     if any(a in ("-h", "--help") for a in args):
         print(_run_smoke.__doc__)
@@ -1786,6 +1851,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             if a.startswith("--state="):
                 continue
             state_rest.append(a)
+        _STATE_CANARY_LEAKED = False
         print("state: clean lane")
         clean_rc = _run_smoke([*state_rest, "--state=clean"], stream=stream)
         print("state: populated lane")
@@ -1811,7 +1877,16 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
                 "state verdict diff: no changed testcase; verify the populated "
                 "lane ran its positive control before trusting this result\n"
             )
-        return _state_both_exit(clean_rc, diff, canary_clean, canary_populated)
+        if _STATE_CANARY_LEAKED:
+            sys.stderr.write(
+                "state: a lane's filesystem canary refused, so a step wrote to "
+                "the operator state root. The populated lane's exit code is "
+                "discarded by design, so that refusal has no other way out and "
+                "is carried here instead. The run is NOT green.\n"
+            )
+        return _state_both_exit(
+            clean_rc, diff, canary_clean, canary_populated, _STATE_CANARY_LEAKED
+        )
 
     global _AMBIENT_MODE, _STATE_MODE
     _AMBIENT_MODE = opts["ambient"]
@@ -1959,10 +2034,19 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         _preserve_claim_door(root, env)
         _scrub_target_bins(root)
 
+    # The canary brackets the whole run: plant before the first step, verify
+    # after the last. Both halves sit around the single _execute_steps call
+    # site, so this is one pair rather than a per-step hook.
+    _run_state_canary(root, "plant")
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
         pytest_shard=shard_spec if shard_total > 1 else "",
     )
+    canary_rc = _run_state_canary(root, "verify")
+    if canary_rc != 0:
+        # Recorded beside the exit code, not only in it: `--state both` throws
+        # the populated lane's rc away on purpose.
+        _STATE_CANARY_LEAKED = True
     # Journey/rust/bash steps leak keepers via CLI subprocesses no conftest reaches.
     from fno.graph.store import sweep_orphaned_keepers
 
@@ -1981,7 +2065,12 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         print(f"  {s:6} {d:4.0f}s  {n}", flush=True)
 
     _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
-    return 1 if failed else 0
+    if canary_rc != 0 and not failed:
+        sys.stderr.write(
+            "smoke: every step passed but the state canary refused - a step "
+            "wrote to the operator state root. The run is NOT green.\n"
+        )
+    return 1 if (failed or canary_rc != 0) else 0
 
 
 # --census-deferred: stop _DISCOVERY_DEFERRED from silently holding green

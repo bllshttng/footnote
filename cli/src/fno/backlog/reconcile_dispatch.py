@@ -232,6 +232,7 @@ def _dispatch_reconcile(
             ),
             provider=dep.get("provider"),
             node=dep,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="reconcile_dispatch",
             events_path=ev_path,
         )

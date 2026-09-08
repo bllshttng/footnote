@@ -13,16 +13,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import fno.adapters.providers.benchmarks as bm
-from fno.route_resolve import _BAND_FLOOR, _GRID_CANDIDATES, _STATIC_FALLTHROUGH
+from fno.route_resolve import _BAND_FLOOR, _STATIC_FALLTHROUGH
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _all_tier_tables() -> dict:
-    merged: dict = {k: list(v) for k, v in bm.STATIC_TIERS.items()}
-    for band, names in _GRID_CANDIDATES.items():
-        merged.setdefault(band, []).extend(names)
-    return merged
+    return {k: list(v) for k, v in bm.STATIC_TIERS.items()}
 
 
 def test_every_tier_id_is_reachable_by_name():

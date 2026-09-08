@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
 from fno import paths
 from fno.agents import events
+from fno.agents import rm_directory_bytes
 from fno.agents import rm_notice
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
@@ -3217,19 +3218,12 @@ class RmResult:
     reason: str = "operator-requested"
     request_id: Optional[str] = None
     worktree_touched: bool = False
-    reclaimed_bytes: int = 0
+    # `None`: removed, but the size walk hit its budget. See rm_agent.
+    reclaimed_bytes: Optional[int] = 0
 
 
-def _directory_bytes(path: str) -> Optional[int]:
-    total = 0
-    try:
-        for root, dirs, files in os.walk(path, followlinks=False):
-            dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(root, name))]
-            for name in files:
-                total += os.lstat(os.path.join(root, name)).st_size
-    except OSError:
-        return None
-    return total
+_DIRECTORY_BYTES_BUDGET_S = rm_directory_bytes.DIRECTORY_BYTES_BUDGET_S
+_directory_bytes = rm_directory_bytes.directory_bytes
 
 
 def _prune_row_worktree(entry: Any) -> Optional[str]:
@@ -4532,10 +4526,12 @@ def rm_agent(
                 not Path(existing.cwd).exists()
                 or (worktree_receipt or "").startswith("worktree removed:")
             )
+            # `None`, not `0`, when the tree was removed but the size walk
+            # hit its budget - `0` stays reserved for a real zero.
             reclaimed_bytes = (
                 audit_reclaimed_bytes
                 if audit_reclaimed_bytes is not None
-                else worktree_bytes if worktree_removed and worktree_bytes is not None else 0
+                else worktree_bytes if worktree_removed else 0
             )
             worktree_outcome = (
                 "not-touched"
@@ -4546,8 +4542,8 @@ def rm_agent(
             )
             if worktree_removed:
                 print(
-                    f"WARNING: worktree removed by guarded cleanup "
-                    f"(reclaimed_bytes={reclaimed_bytes})",
+                    "WARNING: worktree removed by guarded cleanup "
+                    f"(reclaimed_bytes={'unmeasured' if reclaimed_bytes is None else reclaimed_bytes})",
                     file=sys.stderr,
                     flush=True,
                 )

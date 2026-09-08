@@ -112,6 +112,7 @@ pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_posture;
+pub mod merge_reap;
 #[cfg(test)]
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
@@ -138,6 +139,7 @@ pub mod resume_args;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;
+pub mod route_slot;
 pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
@@ -852,6 +854,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
+    // Merge reaper (daemon-emitted, x-07dc): a pending request was HELD (the
+    // node reads open, the list is empty, or the graph would not read) and is
+    // retried next pass; a request aged past its expiry window and is
+    // tombstoned; a row's harness was stopped ahead of its registry removal.
+    "merge_cleanup_held",
+    "merge_cleanup_expired",
+    "merge_reaper_stopped",
     "agent_inconsistent",
     "agent_ask_done",
     "agent_create_no_session",
@@ -907,6 +916,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
+    // The merge reaper (x-07dc) emits the same kind the cleanup verb does when
+    // it takes a merged node's tree, so one removal, one event, wherever the
+    // caller lives.
+    "worktree_removed",
     // Terminal-stop sweep (daemon-emitted, x-fcbf): a fire-and-forget
     // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
     // its slot frees instead of parking at an idle prompt forever.

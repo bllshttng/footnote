@@ -1725,28 +1725,23 @@ def _refuse_hermetic_escape(path: Path) -> None:
 
     Scope, stated so the next reader does not overclaim it: this guards
     :func:`append_event` only. ``events/log.py`` and ``agents/events.py`` write
-    journals through their own file handles and do not pass here, so the doc
-    must not say every Python event write funnels through this function.
+    journals through their own file handles and do not pass here. The rule
+    itself lives in :func:`fno.hermetic.declared_root`, so this fence and the
+    accessor fence in ``fno.paths`` cannot disagree.
     """
-    if os.environ.get("FNO_TEST_HERMETIC") != "1":
-        return
-    roots = _hermetic_allowed_roots()
-    # ONLY the realpath is judged. Accepting the raw form too would let a
-    # symlink sitting inside the sandbox pass while resolving to a live journal
-    # outside it - which is the precise mechanism this guard exists to stop, a
-    # worktree's `.fno/events.jsonl` being a symlink to the canonical one.
-    # Measured: 200 bytes of a production-shaped row reached the outside file
-    # through exactly that shape. The roots carry both forms already, so the
-    # macOS `/var` vs `/private/var` split is still handled.
-    resolved = Path(os.path.realpath(path))
-    if any(resolved == root or root in resolved.parents for root in roots):
-        return
-    raise HermeticEscapeError(
-        f"append_event refused a journal write outside the test sandbox: {path}. "
-        "A hermetic run must not touch a live events.jsonl. Pass an explicit "
-        "events_path= under tmp_path, or resolve the journal with "
-        "fno.paths.project_events_json() so FNO_EVENTS_PATH applies."
-    )
+    from fno.hermetic import UndeclaredStateRootError, declared_root
+
+    try:
+        declared_root(path)
+    except (HermeticEscapeError, UndeclaredStateRootError) as exc:
+        # Both refusals get the journal's remedy: the undeclared one is a
+        # SIBLING class, so catching only the escape sends the wrong advice.
+        raise type(exc)(
+            f"append_event refused a journal write with no declared root: "
+            f"{path}. Pass an explicit events_path= under tmp_path, or resolve "
+            "the journal with fno.paths.project_events_json() so "
+            f"FNO_EVENTS_PATH applies. ({exc})"
+        ) from exc
 
 
 def append_event(

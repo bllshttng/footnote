@@ -142,6 +142,17 @@ def _env_for_api_key(
     return resolved
 
 
+def _refuse_identity_mismatch(
+    record: ProviderRecord, root: Path, by_id: dict[str, ProviderRecord]
+) -> None:
+    """The same refusal ``resolve_account_overlay`` makes, from the same binding."""
+    from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
+
+    got = resolve_account_binding(record, root=root, by_id=by_id)
+    if got.status == MISMATCH:
+        raise ProviderUnavailableError(got.receipt)
+
+
 def dispatch_env(
     provider_id: str,
     repo_root: Path | None = None,
@@ -149,8 +160,10 @@ def dispatch_env(
 ) -> dict[str, str]:
     """Return the subprocess env dict for invoking provider_id's CLI.
 
-    Pure function. Does not mutate any global state. Reads settings.yaml
-    via load_providers(), looks up the record, and computes the env.
+    Reads settings.yaml via load_providers(), looks up the record, and computes
+    the env. For a claude record with a bound principal it also asks the binding
+    who the credential root serves, which costs one profile call and a cache
+    write. No account record is mutated.
 
     Raises:
         ProviderNotFoundError: if provider_id not in config.records
@@ -175,6 +188,7 @@ def dispatch_env(
     # would fall through to the `managed -> {}` arm below and dispatch on the
     # ambient default account (silent mis-bill).
     if record.config_dir is not None:
+        _refuse_identity_mismatch(record, root, by_id)
         return {"CLAUDE_CONFIG_DIR": str(record.config_dir)}
 
     if record.auth == "oauth_dir":
@@ -189,6 +203,8 @@ def dispatch_env(
         # A managed account materializes into the shared default slot
         # (~/.claude for claude, ~/.codex for codex), so dispatch adds no
         # CLAUDE_CONFIG_DIR/HOME override - the CLI reads the slot directly.
+        # So the slot itself has to be asked who it serves.
+        _refuse_identity_mismatch(record, root, by_id)
         return {}
 
     # api_key path

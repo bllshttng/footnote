@@ -82,9 +82,13 @@ __pycache__/
 # since git cannot re-include a path under an ignored directory. A `foo/` rule
 # matches directories only, so the slash form left every linked worktree dirty 
 # and preflight refusing (same defect as the .claude/* link below). 
-# .agents/.codex/.codex-plugin keep their glob form on purpose: each
-# holds tracked files, so link_dir hits its non-empty-real-dir refusal and they
-# are never symlinks - and .codex-plugin must stay shippable besides.
+# .agents/.codex/.codex-plugin keep their glob form on purpose: at the REPO
+# ROOT each holds tracked files, so link_dir hits its non-empty-real-dir
+# refusal and stays a real dir - and .codex-plugin must stay shippable
+# besides. In subprojects (cli/) the same paths hold nothing tracked and DO
+# become symlinks, which no gitignore pattern can express without eating the
+# re-includes above; the reapable guard discounts those `??` lines by reading
+# each symlink's target instead.
 .gemini
 
 # Private/local scripts and docs (environment-specific, not for distribution)

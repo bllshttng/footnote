@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Tuple, Union
 
 from fno.harness_identity import (
+    live_thread_row_for_cwd,
     parse_canonical_identity,
     resolve_attester_identity,
     resolve_owned_identity,
@@ -24,9 +26,17 @@ def resolve_self_identity(
 ):
     """Resolve the harness identity this process can prove it owns.
 
-    The prover is the process-tree walk, and it is the ONLY prover. The nearest
-    harness ancestor is what a process actually runs under, so it separates a
-    marker this session minted from one it merely inherited.
+    The prover is the process-tree walk, and it is the only prover for an
+    AMBIENT marker. The nearest harness ancestor is what a process actually
+    runs under, so it separates a marker this session minted from one it
+    merely inherited.
+
+    The spawn record is a separate, narrower source that fills a session id
+    ancestry structurally cannot supply: a codex thread worker owns no process
+    (N thread workers share the ONE app-server daemon pid), and the
+    daemon-written registry row, keyed by this process's own cwd, is the only
+    per-worker identity the lane has. See :func:`_fill_spawn_record`, which
+    runs after the walk and never overwrites a proven session id.
 
     A self-set marker does NOT belong here, and the attempt is worth recording
     because it looks correct. ``CLAUDECODE`` is written by the claude binary at
@@ -91,7 +101,7 @@ def resolve_self_identity(
         # whoami and --from-self for it. The fail-closed collide lives in
         # the stamped branches below, where an attester can still witness
         # self.
-        return resolve_owned_identity(env, prove=fallback_prove)
+        return _fill_spawn_record(resolve_owned_identity(env, prove=fallback_prove))
 
     try:
         attested_session_id, witness = resolve_attester_identity(env)
@@ -130,10 +140,36 @@ def resolve_self_identity(
             session_identity_key(canonical.session_id),
         )
 
-    return resolve_owned_identity(
-        env,
-        prove=prove,
-        collide=None if canonical_proven else collide_with(own_pair),
+    return _fill_spawn_record(
+        resolve_owned_identity(
+            env,
+            prove=prove,
+            collide=None if canonical_proven else collide_with(own_pair),
+        )
+    )
+
+
+def _fill_spawn_record(owned):
+    """Fill a session id the walk could not supply from the cwd-keyed spawn
+    record (x-e882).
+
+    Guards, in order: a resolved session id short-circuits before the read, a
+    fail-closed disposition is never overwritten, and a process carrying ANY
+    other family's marker never adopts - cwd is shared by bystanders.
+    """
+    if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
+        return owned
+    row = live_thread_row_for_cwd(os.getcwd())
+    if row is None:
+        return owned
+    harness, session_id = row
+    if owned.harness and owned.harness != harness:
+        return owned
+    marker_families = {h for _m, h, _v in owned.markers_present}
+    if marker_families - {harness}:
+        return owned
+    return replace(
+        owned, harness=harness, session_id=session_id, disposition="spawn_record"
     )
 
 
@@ -151,7 +187,8 @@ _MANIFEST_IDENTITY_FIELDS = (
 #: Dispositions of :class:`fno.harness_identity.OwnedHarnessIdentity` whose
 #: session id is PROVEN by this process's own ancestry. Every other
 #: disposition with an id present is an inherited marker, and an inherited
-#: marker that matches the worktree manifest is a shared anchor, not a self.
+#: marker matching the worktree manifest is a shared anchor, not a self
+#: (``spawn_record`` stays absent: see :func:`_fill_spawn_record`).
 _PROVEN_DISPOSITIONS = frozenset({"canonical", "proven"})
 
 

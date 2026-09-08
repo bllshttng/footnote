@@ -13,7 +13,17 @@ import pytest
 import fno.active_backlog as ab
 
 
-def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, crowns=(), epics=None, paths=None):
+def _patch(
+    monkeypatch,
+    *,
+    enabled=True,
+    interval="5m",
+    failure_limit=3,
+    max_concurrent=1,
+    crowns=(),
+    epics=None,
+    paths=None,
+):
     """Wire a fake settings + live-crown set + workspace map.
 
     ``crowns`` is the list of (scope, level) tuples _live_crowns returns.
@@ -21,7 +31,12 @@ def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, crowns=
     """
     from fno.config import ActiveBacklogConfig
 
-    cfg = ActiveBacklogConfig(enabled=enabled, interval=interval, failure_limit=failure_limit)
+    cfg = ActiveBacklogConfig(
+        enabled=enabled,
+        interval=interval,
+        failure_limit=failure_limit,
+        max_concurrent=max_concurrent,
+    )
 
     class _Settings:
         active_backlog = cfg
@@ -217,4 +232,25 @@ def test_as_dicts_shape(monkeypatch):
         "rung": 2,
         "kingless": False,
         "members": ["x-epic"],
+        "max_concurrent": 1,
     }
+
+
+def test_max_concurrent_rides_on_every_target(monkeypatch):
+    """The cap is global, so every target carries the same value.
+
+    The daemon holds ONE gate for the whole drain; the target list is just its
+    config channel. A cap that reached no target is a cap nothing enforces,
+    which is how a declared 1 ran five concurrent converges.
+    """
+    _patch(
+        monkeypatch,
+        max_concurrent=3,
+        crowns=[("x-a", 2), ("x-b", 2)],
+        epics={"x-a": "footnote", "x-b": "other"},
+        paths={"footnote": "/repo/footnote", "other": "/repo/other"},
+    )
+    # Two crowned territories plus one kingless loose territory per project.
+    targets = ab.resolve_drain_targets()
+    assert len(targets) == 4
+    assert {t.max_concurrent for t in targets} == {3}

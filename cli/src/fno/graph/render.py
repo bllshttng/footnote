@@ -296,6 +296,10 @@ def render_graph_md(
             lines.append(_kanban_card(entry, id_to_entry, orphans))
             lines.append("")
 
+    # Before the Obsidian footer: the kanban:settings block must stay last.
+    from fno.branch_provenance_cache import provenance_lines
+    lines.extend(provenance_lines())
+
     if obsidian:
         lines.append("***")
         lines.append("")

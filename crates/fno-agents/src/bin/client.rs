@@ -16,6 +16,7 @@ use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
+use fno_agents::spawn_gate::machine_status_line;
 use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
@@ -41,6 +42,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "help",
     "host",
     "kill-check",
+    "route-slot",
     "list",
     "logs",
     "loop",
@@ -286,6 +288,13 @@ async fn run(args: Vec<String>) -> i32 {
     // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct
+    // dispatch; no daemon RPC. Python's spawn seam, advance and the readouts
+    // send one JSON payload and read {status, candidate, chain} back.
+    if verb == "route-slot" {
+        return fno_agents::route_slot::run_route_slot(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
@@ -1681,9 +1690,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
-        // opencode headless: the client-side one-shot `opencode run --auto`
-        // (x-567d wires the documented lane; the bare `opencode` TUI stays the
-        // `pane` form). Stateless plain-text, like agy.
+        // opencode headless: the client-side one-shot
+        // `opencode run --dangerously-skip-permissions` (x-567d wires the lane;
+        // the bare `opencode` TUI stays the `pane` form). Stateless plain-text,
+        // like agy. The flag is NOT `--auto`: that spelling is stale vendor
+        // docs, it does not exist in `run --help`, and a comment naming it has
+        // twice been read as proof this arm was never built.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model, effort,
         )),
@@ -2014,6 +2026,11 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "{}".into())
         );
+    }
+    // Best-effort: a machine whose footprint cannot be read prints no line
+    // rather than a stale or fabricated one.
+    if let Some(line) = machine_status_line() {
+        println!("machine: {line}");
     }
 }
 
@@ -3017,10 +3034,13 @@ fn format_success(
                 notes.push(format!("event record not written: {reason}"));
             }
             if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
-                let bytes = result
-                    .get("reclaimed_bytes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                // `null` means the size walk hit its budget on a large or
+                // slow-storage tree - print `unmeasured`, never a `0` that
+                // reads identically to "measured, nothing to reclaim".
+                let bytes = match result.get("reclaimed_bytes").and_then(Value::as_u64) {
+                    Some(n) => n.to_string(),
+                    None => "unmeasured".to_string(),
+                };
                 notes.push(format!(
                     "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
                 ));

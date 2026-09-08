@@ -133,20 +133,40 @@ pane_group_max = 4
 [agents.profiles.blueprint]
 model = "opus"
 
-[[agents.profiles.target.lanes]]
-provider = "codex"
-effort = "high"
-substrate = "pane"
-permission_mode = "yolo"
-pane_group = "codex"
+# lanes is RANK: the walk is in declared order, first pass wins.
+[agents.profiles.target]
+lanes = ["flash-zai", "luna-codex"]
+on_exhausted = "queue"
 
+# An inline lane table is the other spelling: it folds as its own row, so
+# both shapes reach the same resolver and the inline form is sugar.
 [[agents.profiles.target.lanes]]
 provider = "claude"
 route = "zai/glm-5.3[1m]"
 substrate = "bg"
+
+[[routing.models]]
+name = "flash-zai"
+harness = "claude"
+model = "glm-5.3-flash[1m]"
+route = "zai/glm-5.3-flash[1m]"
+account = "zai-main"
+effort = "high"
+
+[[routing.models]]
+name = "luna-codex"
+harness = "codex"
+model = "gpt-5.6-luna"
+effort = "xhigh"
 ```
 
-When a profile has `lanes`, the live-worker count chooses the round-robin start. Selection then skips forward past a routed vendor already at `agents.provider_limits`. If every lane is capped, or the provider count is incomplete, the spawn refuses rather than billing an unintended lane. Two escapes narrow that refusal, and neither weakens the skip. A command line can name its own lane with `--harness`, `-P` or `--route`. That spawn is not spending a capped vendor's budget, so it continues with no lane applied. `FNO_SPAWN_GATE=0`, the admission bypass, never blocks a spawn either. Substrate and `permission_mode` ride the lane, not the profile. The Claude/GLM lane can use `bg`, and the Codex lane needs a pane.
+When a profile has `lanes`, the list is the rank. The live-worker count plays no part in where the walk starts. A lane is either the name of a `[[routing.models]]` row or an inline table with the same fields. Both spellings fold into one row inventory, so there is one selection path. The inline shape is sugar, never a second leg. The spawn walks the lanes in declared order and takes the first lane that passes. A lane skips for three reasons. The pinned substrate or permission mode cannot ride its harness. Its routed vendor sits at `agents.provider_limits`. Live capacity reads `exhausted` for the account the row names. Every skip names the lane and the reason in the spawn receipt. A verb with lanes never consults the difficulty grid. A verb without lanes falls through to the grid over the whole inventory, exactly as before lanes existed.
+
+Capacity resolves per lane, not per harness. Quota locks out at the ACCOUNT. A row that names a `config.accounts.records` id reads that account's own state. A lane pinned to a locked-out account skips. A sibling lane on a healthy account answers. The old harness-wide MAX read that same fleet as healthy. A row that names no account reads the harness-wide aggregate. That aggregate is the correct answer for an unnamed row. An account the capacity snapshot does not name reads `unknown`, which permits.
+
+When every lane skipped, `on_exhausted` declares the terminal. `refuse` (the default) stops the spawn rather than billing an unintended lane. `degrade` lets the profile scalars and `agents.defaults` answer. The lanes play no part, and the receipt names the degrade. `queue` exits 78 with a typed capacity refusal that a dispatcher reads as capacity, not config. The refusal carries `reason: slot_exhausted` and one entry per lane. An out-of-enum value refuses by name. It never silently coerces to a terminal nobody named. Two escapes narrow any refusal, and neither weakens the skip. A command line can name its own lane with `--harness`, `-P` or `--route`. `FNO_SPAWN_GATE=0`, the admission bypass, never blocks a spawn. Both degrade instead of refusing, whatever `on_exhausted` says. A lane string naming no declared row refuses at the spawn seam with the declared row names.
+
+A lane is opaque about behavior and transparent about economics. fno ranks on what it declares: harness, optional band, cost, context, account. Everything else is passthrough to the harness's own bundle. That covers permission mode, sandbox, system prompt, skills, MCP and subagent roles. codex forwards them with `--profile`, claude with `--settings`. fno cannot win the flag-enumeration race against harnesses that grow launch flags every release, so it forwards and does not remodel. Substrate and `permission_mode` ride an inline lane as declared passthrough, and `pane_group` places the pane. Three personas the shape survives. A research-only installation fills one slot and leaves the rest empty. Empty means the harness default, never route nowhere. A single-frontier installation points every slot at one lane. A mixed installation orders cheap lanes first and lets the walk find the one that is up. `fno config route inventory` prints each verb's slot with live lane capacity. An armed router and an absent one are no longer the same silence.
 
 `pane_group` is injected as `fno agents spawn --tab <group>` on pane lanes. Placement happens AFTER the spawn, never before it. The pane reports its own squad, and the tab list is read scoped to that squad. The pane's own tab then joins the first `<group>`, `<group>-2`, ... tab below `pane_group_max`. If none has room, its tab takes the next sibling name instead. A group cannot combine with `--split`/`--at`. The pane then sits in a tab it does not own. The move takes that tab's other panes with it. The read-then-act is deliberately not globally serialized, so concurrent spawns can briefly overfill a tab. Placement never changes the worker route.
 

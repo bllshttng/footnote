@@ -303,6 +303,18 @@ class _WatchdogBudgetSpent(Exception):
 #: legs behind it.
 _WAKE_APPLY_FLOOR_S = 200
 
+
+def _wd_apply_and_emit(wd, verdict, *, cwd: str, agent: str, label: str) -> str:
+    try:
+        outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd, agent=agent)
+    except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+        outcome, detail = "refused", f"{label} crashed: {exc!r}"
+    wd.emit_event(
+        "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+        {"row_id": verdict.row_id, "verdict": verdict.verdict, "detail": detail},
+    )
+    return outcome
+
 #: A stranded sweep is one batched git fetch plus a rev-list and a
 #: last-commit-age call per worktree - cheap, but not free at 60+
 #: worktrees. Skipping under this floor costs nothing: the next tick
@@ -693,21 +705,26 @@ def tick() -> None:
                                         "%s left for the next tick", verdict.row_id,
                                     )
                                     continue
-                                try:
-                                    outcome, detail = _wd.apply_verdict(
-                                        verdict, lanes="wake", cwd=row.cwd
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                                    outcome, detail = "refused", f"wake crashed: {exc!r}"
+                                _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, agent=row.agent, label="wake")
                                 acted += 1
-                                _wd.emit_event(
-                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                                    {
-                                        "row_id": verdict.row_id,
-                                        "verdict": verdict.verdict,
-                                        "detail": detail,
-                                    },
-                                )
+                        # SILENCE lane (x-c624): registry-scoped rows fleet_rows misses.
+                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                            log.warning("pr-watch: watchdog silence budget spent")
+                        else:
+                            try:
+                                silence_vs, silence_rows_out = _wd.silence_verdicts(roots, now_s=now)
+                            except Exception as exc:  # noqa: BLE001 - a broken lane never aborts the tick
+                                log.warning("pr-watch: silence sweep failed: %s", exc)
+                                silence_vs, silence_rows_out = [], []
+                            for silence_v, silence_row in zip(silence_vs, silence_rows_out):
+                                if silence_v.verdict != _wd.SILENCE:
+                                    continue
+                                if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                                    log.warning("pr-watch: watchdog silence budget spent")
+                                    break
+                                _wd_apply_and_emit(_wd, silence_v, cwd=silence_row.cwd,
+                                                    agent=silence_row.agent, label="silence drive")
+                                acted += 1
                         recovery_scans = []
                         recovery_roots_done = 0
                         for recovery_root in roots:
@@ -984,56 +1001,60 @@ def tick() -> None:
                 log.warning("pr-watch: heal phase failed: %s", exc)
 
         set_tick_phase("stranded")
-        if _wd_lane_armed(settings):
-            try:
+        # The sweep feeds the board's provenance cache; the lane only arms acting.
+        lane_armed = _wd_lane_armed(settings)
+        try:
+            left = deadline - (time.monotonic() - started)
+            if left < _STRANDED_FLOOR_S:
+                raise _WatchdogBudgetSpent(
+                    f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
+                    "a stranded sweep costs"
+                )
+            from fno.branch_provenance_cache import write_cache
+            from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
+
+            wake = lane_armed and _wd_wake_armed(settings)
+            changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
+            for root in _catchup_roots():
+                # Re-check per root, not just once before the loop: a
+                # code-review finding caught that the floor above only
+                # bounded the FIRST root - a multi-repo tick with several
+                # catch-up roots could blow well past the shared tick
+                # deadline after the first root's own check passed.
                 left = deadline - (time.monotonic() - started)
                 if left < _STRANDED_FLOOR_S:
-                    raise _WatchdogBudgetSpent(
-                        f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
-                        "a stranded sweep costs"
+                    log.info(
+                        "pr-watch: stranded leg stopped after %d root(s), "
+                        "%.1fs left, under the %.0fs a sweep costs - "
+                        "remaining roots retry next tick",
+                        roots_done, left, _STRANDED_FLOOR_S,
                     )
-                from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
-
-                # "report" mode still classifies (so counts stay honest) but
-                # never pushes or files - the same wake vs report split the
-                # fleet watchdog leg above draws at apply_verdict.
-                wake = _wd_wake_armed(settings)
-                stranded_n = unknown_n = acted_n = failed_n = roots_done = 0
-                for root in _catchup_roots():
-                    # Re-check per root, not just once before the loop: a
-                    # code-review finding caught that the floor above only
-                    # bounded the FIRST root - a multi-repo tick with several
-                    # catch-up roots could blow well past the shared tick
-                    # deadline after the first root's own check passed.
-                    left = deadline - (time.monotonic() - started)
-                    if left < _STRANDED_FLOOR_S:
-                        log.info(
-                            "pr-watch: stranded leg stopped after %d root(s), "
-                            "%.1fs left, under the %.0fs a sweep costs - "
-                            "remaining roots retry next tick",
-                            roots_done, left, _STRANDED_FLOOR_S,
-                        )
-                        break
-                    try:
-                        stranded_rows = sweep(repo=root)
-                        outcomes = apply_sweep(stranded_rows, wake=wake)
-                    except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
-                        log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)
-                        continue
-                    stranded_n += sum(1 for r in stranded_rows if r.klass == STRANDED)
-                    unknown_n += sum(1 for r in stranded_rows if r.klass == UNKNOWN)
-                    acted_n += len(outcomes)
-                    failed_n += sum(1 for o in outcomes if o["stopped_at"])
-                    roots_done += 1
-                typer.echo(
-                    f"stranded sweep ({'wake' if wake else 'report'}): "
-                    f"stranded={stranded_n} unknown={unknown_n} "
-                    f"acted={acted_n} failed={failed_n}"
-                )
-            except _WatchdogBudgetSpent as exc:
-                log.info("pr-watch: stranded leg skipped: %s", exc)
-            except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
-                log.warning("pr-watch: stranded sweep failed: %s", exc)
+                    break
+                try:
+                    stranded_rows = sweep(repo=root)
+                    changed |= write_cache(root, stranded_rows)
+                    outcomes = apply_sweep(stranded_rows, wake=wake)
+                except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                    log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)
+                    continue
+                stranded_n += sum(1 for r in stranded_rows if r.klass == STRANDED)
+                unknown_n += sum(1 for r in stranded_rows if r.klass == UNKNOWN)
+                acted_n += len(outcomes)
+                failed_n += sum(1 for o in outcomes if o["stopped_at"])
+                roots_done += 1
+            typer.echo(
+                f"stranded sweep ({'wake' if wake else 'report'}): "
+                f"stranded={stranded_n} unknown={unknown_n} "
+                f"acted={acted_n} failed={failed_n}"
+            )
+            if changed:
+                from fno.graph.render import render_graph_md
+                from fno.graph.store import read_graph_strict
+                render_graph_md(read_graph_strict())
+        except _WatchdogBudgetSpent as exc:
+            log.info("pr-watch: stranded leg skipped: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
+            log.warning("pr-watch: stranded sweep failed: %s", exc)
 
         # Canonical-sync catch-up. The dispatch above is event-time-only:
         # it acts on merges it DETECTS, so a merge that landed while the daemon was

@@ -480,6 +480,86 @@ class TestRunGate:
         assert "footprint attributes 1.86/12.00 cores" in evidence
         assert "15.5% capacity" in evidence
 
+    def test_footprint_cause_reader_names_the_claude_spare_pool(self, monkeypatch):
+        """Measured 2026-09-07: the pool held 66.5% of a 12-CPU machine while
+        the refusal named only the fleet. It must be named in the same line."""
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_live_root_pids",
+            lambda **_kwargs: (set(), None),
+        )
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_read_ps",
+            lambda **_kwargs: (
+                """\
+                PID PPID ELAPSED %CPU RSS COMMAND
+                100 1 01:00:00 86.0 1024 fno-agents-worker --run
+                101 100 01:00:00 100.0 1024 cargo test -p fno
+                300 1 00:05:00 200.0 118784 claude bg-spare --bg-spare /tmp/x.claim.sock
+                301 1 00:05:00 190.0 118784 claude bg-pty-host --bg-pty-host /tmp/x.pty.sock 200 50
+                """,
+                None,
+            ),
+        )
+        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
+        monkeypatch.setattr(
+            spawn_gate.os,
+            "sched_getaffinity",
+            lambda _pid: set(range(12)),
+            raising=False,
+        )
+
+        evidence = spawn_gate._footprint_cause_evidence()
+
+        assert evidence is not None
+        assert "claude spare pool holds 3.90 cores across 2 idle pre-warm" in evidence
+        assert "does not own or bound" in evidence
+
+    def test_footprint_cause_reader_names_no_pool_when_none_is_running(
+        self, monkeypatch
+    ):
+        """Negative control for the assertion above: with no pool rows in the
+        snapshot the evidence line carries no pool claim at all."""
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_live_root_pids",
+            lambda **_kwargs: (set(), None),
+        )
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_read_ps",
+            lambda **_kwargs: (
+                """\
+                PID PPID ELAPSED %CPU RSS COMMAND
+                100 1 01:00:00 86.0 1024 fno-agents-worker --run
+                """,
+                None,
+            ),
+        )
+        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
+        monkeypatch.setattr(
+            spawn_gate.os,
+            "sched_getaffinity",
+            lambda _pid: set(range(12)),
+            raising=False,
+        )
+
+        evidence = spawn_gate._footprint_cause_evidence()
+
+        assert evidence is not None
+        assert "spare pool" not in evidence
+
     def test_footprint_cause_reader_fails_open_when_ps_is_unavailable(
         self, monkeypatch
     ):

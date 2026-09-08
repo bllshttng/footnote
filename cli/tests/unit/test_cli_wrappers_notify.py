@@ -79,7 +79,7 @@ def test_notify_impl_darwin_dispatches_osascript(monkeypatch, tmp_path):
     # FNO_TEST_HERMETIC=1 to keep every other test off the operator's screen.
     # The unsuppressed run also emits the operator_notice journal row (x-5f06),
     # so the journal must be pinned inside the sandbox.
-    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
     code, err = _impl.send_notification("T", "M")
     assert code == 0
@@ -91,7 +91,7 @@ def _headless(monkeypatch):
     """A host with neither notifier: Linux, no notify-send, dispatch suppressed."""
     monkeypatch.setattr(_impl.platform, "system", lambda: "Linux")
     monkeypatch.setattr(_impl.shutil, "which", lambda _name: None)
-    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
 
 
 def _sink_settings(monkeypatch, events):

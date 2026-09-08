@@ -218,6 +218,33 @@ class SpawnError(RuntimeError):
     """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable."""
 
 
+class SpawnQueueRefused(SpawnError):
+    """Exit 78: every configured lane exhausted; carries per-lane reasons
+    and, when a reset is known, ``retry_at``."""
+
+    def __init__(self, message: str, retry_at: Optional[float] = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def _slot_queue_retry_at(stdout: str) -> Optional[float]:
+    """The ``retry_at`` from the seam's typed queue-refusal JSON, if any."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:  # noqa: BLE001 - not JSON, keep scanning
+            continue
+        if isinstance(data, dict) and data.get("reason") == "slot_exhausted":
+            try:
+                return float(data.get("retry_at", ""))  # absent reads as unset
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Seams (subprocess to the public CLI; patched in unit tests)
 # ---------------------------------------------------------------------------
@@ -237,44 +264,7 @@ def selection_guards(
 ) -> Optional[str]:
     """Return a skip-reason for a would-be-selected node, or None to select it.
 
-    The single narrowing choke point shared by ``next`` selection (_pick_ready)
-    and the converge readiness filter (_direct_dependents), so the two paths
-    can never disagree about what is dispatchable. Guards, in order:
-
-      contained: the node carries ``contained_in`` - its work ships inside
-        another node's PR, so it is not a delivery unit and dispatching it
-        would open a second PR for one plan. Returns ``contained:<owner-id>``,
-        which names where the work actually went (``dead-ancestor`` would only
-        say the subtree is dead). First, because containment is a fact about
-        THIS node while every guard below reads its ancestors or its plan.
-        Belt-and-braces: the write-site refusal (x-d9a4) already stops new
-        double-bindings, so this is a read of a state that should not exist.
-        It is also only HALF the coverage - selection_guards is autonomous-only
-        (see the design-stage note below), so `fno do target init` carries the
-        named-dispatch half. A guard on one of two reachable paths is
-        decorative.
-
-      dead-ancestor: any transitive ``parent`` in {superseded, deferred} - the
-        subtree is abandoned, so building a leaf under a killed epic is wasted
-        work. Returns ``dead-ancestor:<ancestor-id>``. A missing parent id ends
-        the walk with no verdict (select normally). Depth-bounded + cycle-safe.
-
-      stale-quarantine: a ready node with no movement signal older than
-        ``staleness_days`` -> ``stale-quarantine``. The guard only EXCLUDES
-        here; the reversible defer is owned by ``maintain --apply`` (guards
-        never mutate the graph as a selection side effect - epic LD1/LD2).
-
-      design-stage: the linked plan is still a design doc (frontmatter
-        ``status: design``), so the node is planned but not blueprinted ->
-        ``design-stage``. Only AUTONOMOUS selection routes through this
-        function; an explicitly-named node dispatches from any rung, naming
-        being the consent (epic LD8). This is what retires the
-        keep-plans-unlinked workaround: linking a design doc now lands a
-        visible-but-unarmed node instead of arming dispatch.
-
-    Hold reads fail closed before the compatibility guard: an unreadable plan
-    cannot prove a hold is absent. Every remaining guard stays fail-open (epic
-    Errors): a read failure returns None and emits one loud stderr line.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from datetime import datetime, timezone
 
@@ -646,45 +636,7 @@ def select_lane_fill(
 ) -> list[dict]:
     """Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
-    The parallel-mode (epic x-42d5, group 2) lane-fill selector. With
-    ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
-    group-1 primitive ``acquire_lane_slot``), so the concurrency cap is enforced
-    by claim atomicity, never a counted snapshot (Locked Decision #7). Each
-    returned node already holds a slot keyed ``parallel-lane:<id>``; the caller
-    spawns one worker per node and the worker's ``target init`` reconciles that
-    same slot (Locked Decision #8) rather than acquiring a fresh one.
-
-    Collision-cleanliness is recomputed AFTER each claim from a FRESH ready-list,
-    never a pre-claim snapshot: between two picks a peer may claim a node or a
-    lane may finish, and re-querying reflects that. This is the x-7441 "stops at
-    a claimed head" hazard - selection must skip claimed heads across every
-    domain. A node a live peer lane already holds is skipped so a
-    not-yet-node-claimed lane is never double-dispatched. (Two dispatchers
-    racing the SAME node are prevented upstream by the singleton
-    ``walker:<root>`` claim, so this stays a single-dispatcher selector, not a
-    distributed lock.)
-
-    Domain is NOT a selection rule: the file-collision gate decides,
-    so two same-domain nodes with disjoint surfaces co-schedule. What remains
-    of domain is the annotation on an unevaluated candidate - see
-    :func:`_classify_lane_candidate`.
-
-    ``max_lanes == 1`` selects a single ready node: this is the retargeted
-    active_backlog daemon's sequential
-    fire-and-forget dispatch (x-0ad6). ``max_lanes < 1`` returns ``[]`` with no
-    side effects.
-
-    ``claim=False`` previews the selection (which nodes WOULD dispatch) without
-    holding any slot - the read-only mode, mirroring ``fno backlog next`` sans
-    ``--claim``.
-
-    ``claim=True`` assumes the caller runs under the singleton ``walker:<root>``
-    claim (the dispatch context does): that serialization is what prevents two
-    concurrent callers from both selecting the SAME node and each grabbing a
-    distinct slot for it (which would inflate the cap - the group-1 primitive is
-    idempotent only for a single caller's retries). It is NOT a standalone
-    distributed lock; do not run two ``--claim`` selectors concurrently outside
-    the walker.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
@@ -901,37 +853,8 @@ def _classify_lane_candidate(
     claims_root: Optional[Path] = None,
 ) -> Optional[str]:
     """Classify one ready node for lane-fill. ``None`` = selectable, else a typed
-    exclusion reason. Read-only (acquires no slot): the SINGLE per-candidate
-    truth shared by :func:`select_lane_fill` (live) and :func:`schedule_shadow`
-    (the read-only report), so the two can never disagree about why a node is
-    held back. Duplicating this sequence into a second copy is the drift the
-    codebase's path-uniqueness rule exists to prevent.
 
-    Guard order: peer-lane, then collision, then domain. Domain was a proxy for
-    "these will not collide"; the collision gate is the real measurement, so it
-    runs first and domain NEVER excludes an evaluated candidate - two
-    same-domain nodes with disjoint file surfaces co-schedule.
-
-    Reason tokens (all stable, machine-readable):
-
-      ``peer-lane``              a live peer lane already holds this exact node.
-      ``high-collision:<id>``    a high-severity file overlap with in-flight work.
-      ``unevaluated:no-surface`` the plan states no comparable file surface, so
-        collision safety is UNKNOWN. This is a distinct class, not an exclusion:
-        live dispatch fails open on it (dispatches anyway); the shadow report is
-        conservative and serializes it with this diagnostic (plan Change 1).
-        When the node's domain is already held (by a live lane or an earlier
-        pick) the token carries ``+same-domain:<domain>`` - the domain tiebreak
-        survives only as that annotation, so the report can still explain a
-        serialized unknown. That subclass is the one behavior change inside the
-        class: a held domain excluded such a candidate before the reorder and
-        now it dispatches, loudly (select_lane_fill warns on the annotation),
-        with the mandatory-surface intake refusal as the standing control.
-      ``unevaluated:collision-error`` the collision gate raised, so safety is
-        unknown for the same reason and gets the same fail-open treatment. It is
-        a stated verdict rather than a swallowed error precisely so it cannot
-        reach the frontier looking like a clean comparison. Carries the same
-        ``+same-domain:<domain>`` annotation when the domain is held.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.claims.lanes import find_lane_slot
 
@@ -1319,6 +1242,7 @@ def _spawn_worker(
     dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
+    dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
@@ -1326,37 +1250,7 @@ def _spawn_worker(
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
-    Routes the substrate + the per-harness-normalized command through the shared
-    resolver (``fno.agents.harness_map.resolve_dispatch``) instead of hardcoding
-    ``--substrate bg`` + a ``/target`` f-string (x-0676). ``harness`` (the selected
-    provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
-    ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
-    worktree, never the pane default that would STALL a fire-and-forget dispatch,
-    x-2c27), ``headless`` for codex/others. A node's ``dispatch_verb``/
-    ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
-    brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
-
-    Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
-    the default builtin bakes ``no-merge``; ``config.auto_merge.grant`` routes the
-    ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
-    ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
-    ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
-    resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
-
-    ``dispatch_account`` is a quota cutover's destination provider RECORD id, and
-    it rides argv. The credentials never do: the spawn front door resolves the
-    record and applies its overlay where the harness is exec'd. That matters
-    because a non-claude record's overlay is a HOME override and footnote reads
-    HOME to find its own state root, so an overlay merged into THIS wrapper's env
-    would file the worker's registry row and claim under the account's home
-    (x-c33e). ``extra_env`` is refused outright for any such key.
-
-    Returns the spawn receipt's LAUNCH IDENTITY: the claude short_id, or for a
-    codex thread the FULL harness_session_id (codex has no short id; a head-8
-    slice is refused by shape - ruling d-513d9d22). Raises SpawnAlreadyRunning
-    on a name-collision (a peer beat us in the boot window),
-    DispatchResolveError on an unresolvable harness/substrate/verb (caught
-    non-fatally by the caller), and SpawnError otherwise.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     is_reconcile = bool(reconcile_manifest)
     agent_name = _worker_agent_name(
@@ -1426,6 +1320,32 @@ def _spawn_worker(
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
+    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
+    # to produce a byte-identical dispatch. The `verb` param collapses both to
+    # None; only the node dict carries the difference, so the receipt names it
+    # - and reads the DICT alone, never the verb param, so a caller whose verb
+    # diverges from the dict surfaces as verb=builtin beside verb_source=
+    # declared (the mismatch this field exists to expose) instead of a receipt
+    # that launders the divergence. A dict without the key at all can only
+    # come from a projection that dropped it - the exact silent loss this
+    # names out loud. Canonicalized the same way the resolver's allowlist rung
+    # does, so receipt and command agree on the spelling.
+    if isinstance(node, dict) and "dispatch_verb" in node:
+        verb_source = (
+            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+        )
+    else:
+        verb_source = "field-absent"
+        print(
+            f"advance: WARNING: dispatching {node_id} without knowing whether it "
+            f"declared a verb: the node dict {caller} passed carries no "
+            "dispatch_verb key. The selection projection feeding this dispatcher "
+            "is lossy (x-0961); fix the projection, not the node.",
+            file=sys.stderr,
+        )
+    receipt_verb = node_verb or "builtin"
+    if receipt_verb.startswith("/fno:"):
+        receipt_verb = "/" + receipt_verb[len("/fno:"):]
     resolve_kwargs: dict = {
         "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
@@ -1501,6 +1421,13 @@ def _spawn_worker(
     # and the events into the account's home where nothing looks (x-c33e).
     if dispatch_account:
         cmd += ["--dispatch-account", dispatch_account]
+    # x-0961: the worker-to-node join. Without --node the registry row carries
+    # node: null, so no instrument can answer which worker is on which node;
+    # every manual spawn passes it, which is why manual dispatches joined and
+    # advance dispatches did not.
+    cmd += ["--node", node_id]
+    if node_slug:
+        cmd += ["--slug", node_slug]
     cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
@@ -1528,6 +1455,17 @@ def _spawn_worker(
     # merge so the resolver's own value (either way) is the only one that lands.
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
+    # x-0961: the caller's dispatch:<id> reservation and the --node spawn
+    # door's own family-2 guard collide - the door acquires the SAME key,
+    # sees a foreign `advance:<pid>` holder it must never clear, and refuses
+    # with reservation-held. Hand the reservation over: release ours just
+    # before shelling the door, and the door's O_EXCL acquisition (its
+    # reservation plus the node:<id> handover) immediately re-closes the
+    # sub-second window. A racing dispatcher in that window is refused by the
+    # door's own atomic node-handover, so the release cannot double-dispatch.
+    if dispatch_reservation is not None:
+        _res_key, _res_holder, _res_root = dispatch_reservation
+        _safe_release(_res_key, _res_holder, _res_root)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -1535,6 +1473,23 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        if proc.returncode == 78:
+            # Typed capacity refusal: persist a defer; hand retry_at to the skip.
+            raise SpawnQueueRefused(
+                f"slot queue refused: {(stderr or proc.stdout or '').strip()[:200]}",
+                retry_at=_slot_queue_retry_at(proc.stdout or ""),
+            )
+        # The --node door's family-2 guard dedups (a peer door won the node
+        # handover, or our released reservation was re-taken mid-launch) by
+        # refusing with already-running. That is the benign skip the caller's
+        # own reservation used to produce, not a spawn failure - including the
+        # race where we handed the reservation over and lost the re-acquire.
+        if (
+            proc.returncode == 2
+            and "node dispatch refused" in stderr
+            and "verdict=already-running" in stderr
+        ):
+            raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
         raise SpawnError(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
@@ -1584,6 +1539,8 @@ def _spawn_worker(
             "account": dispatch_account or "",
             "substrate": substrate,
             "command": target_cmd,
+            "verb": receipt_verb,
+            "verb_source": verb_source,
             "cwd": node_cwd or "",
             "caller": caller,
             "grid": grid_why or "",
@@ -1596,7 +1553,13 @@ def _spawn_worker(
         # row and the receipt cannot disagree (the row has no harness-
         # independent form; prov is what it records).
         receipt.update(
-            {"short_id": launch_identity, "substrate": substrate, "harness": prov}
+            {
+                "short_id": launch_identity,
+                "substrate": substrate,
+                "harness": prov,
+                "verb": receipt_verb,
+                "verb_source": verb_source,
+            }
         )
     return launch_identity
 
@@ -1685,43 +1648,15 @@ def _base_project_id(canonical_root: Path) -> str:
 def _grid_lane_for(
     node: Optional[dict], *, model: Optional[str], provider: Optional[str]
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """``(harness, model, decline_reason)`` the capacity grid picks for an UNPINNED spawn.
+    """``(harness, model, decline_reason)`` the slot resolver picks for an UNPINNED spawn.
 
-    On a pick the reason is ``None``; on a decline the harness and model are
-    ``None`` and the reason names WHY.
+    On a decline the reason is the chain's own terminal, verbatim: rewording
+    it forks the receipt vocabulary. Receipts only, never refusing (Locked
+    10). Deliberately ONE function: tests monkeypatch this name, and a caller
+    that reached past it would bypass every patch. Placement and spawn both
+    compose verb ``target`` through here so the two agree on one lane.
 
-    ``resolve_grid`` already returns ``(candidate, chain)`` whose last element
-    is its terminal reason, and this function used to throw that away as
-    ``_chain``. A bare ``(None, None)`` collapsed three different outcomes into
-    one value - the caller pinned a model, capacity is unknown, or the
-    inventory is empty - so a spawn site could not tell a deliberate pin from a
-    config gap and fell through to the ambient default in silence.
-
-    That is not hypothetical. With ``config.routing.models`` empty no band can
-    ever match: ``resolve_grid`` appends ``grid=no-inventory-declared`` and
-    returns no candidate, so EVERY banded plan buys the ambient fleet forever
-    rather than momentarily. Observed on this node's own joiners, which both
-    spawned on the most expensive lane while the receipt said only "grid
-    declined, harness null, model null".
-
-    The reason is for RECEIPTS, never for refusing. Routing degrades and never
-    blocks a spawn (Locked 10), and an empty inventory is a config gap, not a
-    capacity failure. Naming it is what makes it fixable.
-
-    Deliberately ONE function rather than a two-tuple wrapper around a
-    three-tuple worker. Tests monkeypatch this name, and an internal caller
-    that reached past the wrapper would silently bypass every such patch - the
-    first cut of this change did exactly that and two tests caught it.
-
-    The receiving end of the difficulty deferral: dispatch callers resolve
-    difficulty to nothing precisely so it picks the lane HERE, where live
-    capacity is readable - the spawned argv's explicit --harness can never
-    trigger the spawn-CLI grid. Only a fully unpinned spawn defers (an explicit
-    model or provider stays operator authority); unknown capacity falls back to
-    the caller's defaults (Locked 10: routing degrades, never blocks a spawn).
-    Dispatch sites that make HARNESS-KEYED decisions before spawning (lane
-    worktree placement) must call this first and thread the result through
-    both decisions, so placement and spawn always agree.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None
@@ -1738,9 +1673,9 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, chain = route_resolve.resolve_grid(
-            node.get("difficulty"),
-            node.get("priority"),
+        candidate, chain = route_resolve.resolve_slot(
+            "target",
+            node,
             capacity,
             role=role,
             inventory=inventory,
@@ -2026,86 +1961,101 @@ def dispatch_lanes(
         # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
+        #
+        # Reserve-to-outcome span (x-41f7), mirroring _converge_one: every exit
+        # that is not a dispatch returns the boot-window reservation, so a raise
+        # between acquire and the dispatched receipt cannot strand the bridge.
+        dispatched = False
         try:
-            eff_harness = harness if harness is not None else node.get("provider")
-            resolved_model = _route_resolve.node_model(
-                node, explicit=model, provider=eff_harness, resolve_difficulty=False
-            )
-            # The grid must decide BEFORE the worktree is placed: placement is
-            # harness-keyed (claude-native vs external base), so it has to agree
-            # with the harness the spawn will actually use. Threading the result
-            # into both decisions keeps placement and spawn one decision. A
-            # DECLINE pins too: an unpinned spawn re-consults the grid at the
-            # spawn seam, and a capacity change in between could land the worker
-            # on a harness the worktree was not keyed for.
-            lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
-                node, model=resolved_model, provider=eff_harness
-            )
-            lane_placement_harness = _lane_harness(
-                lane_grid_harness or eff_harness, str(root)
-            )
-            worktree = _ensure_lane_worktree(
-                node_id,
-                canonical_root=root,
-                harness=lane_placement_harness,
-            )
-            # A never-policy lane runs in the canonical checkout in place; seeding
-            # a per-lane config.local.toml there would write into canonical .fno.
-            if worktree.resolve() != root.resolve():
-                _seed_lane_local_settings(
-                    worktree, node_id, _base_project_id(root)
+            try:
+                eff_harness = harness if harness is not None else node.get("provider")
+                resolved_model = _route_resolve.node_model(
+                    node, explicit=model, provider=eff_harness, resolve_difficulty=False
                 )
-            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
-            short_id = _spawn_worker(
-                node_id,
-                str(worktree),
-                slug,
-                model=lane_grid_model or resolved_model,
-                provider=lane_grid_harness or eff_harness,
-                vendor=vendor,
-                # The placement value unconditionally: a grid pick is always a
-                # fixed point of _lane_harness today, and if that ever stops
-                # holding, the raw pick would reopen the split this pins shut.
-                harness=lane_placement_harness,
-                verb=node.get("dispatch_verb"),
-                brief=_brief,
-                node=node,
-                caller="dispatch_lanes",
-                events_path=ev_path,
-                # The door resolved the grid, so the seam's own consult never
-                # runs and the reason field would be blank on the busiest door.
-                grid_reason=lane_grid_why,
-            )
-        except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
-            # Release BOTH the boot-window reservation and the dispatch-time lane
-            # slot so the node returns to the pool (a later tick re-dispatches it).
-            _safe_release(dispatch_key, dispatch_holder, dispatch_root)
-            _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
-            _skip(str(exc)[:200])
-            continue
+                # The grid must decide BEFORE the worktree is placed: placement is
+                # harness-keyed (claude-native vs external base), so it has to agree
+                # with the harness the spawn will actually use. Threading the result
+                # into both decisions keeps placement and spawn one decision. A
+                # DECLINE pins too: an unpinned spawn re-consults the grid at the
+                # spawn seam, and a capacity change in between could land the worker
+                # on a harness the worktree was not keyed for.
+                lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
+                    node, model=resolved_model, provider=eff_harness
+                )
+                lane_placement_harness = _lane_harness(
+                    lane_grid_harness or eff_harness, str(root)
+                )
+                worktree = _ensure_lane_worktree(
+                    node_id,
+                    canonical_root=root,
+                    harness=lane_placement_harness,
+                )
+                # A never-policy lane runs in the canonical checkout in place; seeding
+                # a per-lane config.local.toml there would write into canonical .fno.
+                if worktree.resolve() != root.resolve():
+                    _seed_lane_local_settings(
+                        worktree, node_id, _base_project_id(root)
+                    )
+                _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+                lane_receipt: dict = {}
+                short_id = _spawn_worker(
+                    node_id,
+                    str(worktree),
+                    slug,
+                    model=lane_grid_model or resolved_model,
+                    provider=lane_grid_harness or eff_harness,
+                    vendor=vendor,
+                    # The placement value unconditionally: a grid pick is always a
+                    # fixed point of _lane_harness today, and if that ever stops
+                    # holding, the raw pick would reopen the split this pins shut.
+                    harness=lane_placement_harness,
+                    verb=node.get("dispatch_verb"),
+                    brief=_brief,
+                    node=node,
+                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
+                    caller="dispatch_lanes",
+                    events_path=ev_path,
+                    receipt=lane_receipt,
+                    # The door resolved the grid, so the seam's own consult never
+                    # runs and the reason field would be blank on the busiest door.
+                    grid_reason=lane_grid_why,
+                )
+            except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
+                _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
+                _skip(str(exc)[:200])
+                continue
 
-        # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
-        # (or is acquiring) node:<id> and reconciles its lane slot at target init.
-        _emit(
-            EVENT_DISPATCHED,
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "lane": True,
-                "worktree": str(worktree),
-                "brief": _brief_tag,
-            },
-            ev_path,
-        )
-        receipts.append(
-            {
-                "node_id": node_id,
-                "status": "dispatched",
-                "short_id": short_id,
-                "worktree": str(worktree),
-            }
-        )
+            # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now
+            # owns (or is acquiring) node:<id> and reconciles its lane slot at
+            # target init. (_skip released the slot on every other exit; the
+            # finally below released the reservation.)
+            _emit(
+                EVENT_DISPATCHED,
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "lane": True,
+                    "worktree": str(worktree),
+                    "verb": lane_receipt.get("verb", "builtin"),
+                    "verb_source": lane_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                },
+                ev_path,
+            )
+            receipts.append(
+                {
+                    "node_id": node_id,
+                    "status": "dispatched",
+                    "short_id": short_id,
+                    "worktree": str(worktree),
+                }
+            )
+            dispatched = True
+        finally:
+            if not dispatched:
+                _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+
     if report is not None:
         report["dispatched"] = sum(
             receipt.get("status") == "dispatched" for receipt in receipts
@@ -2606,41 +2556,7 @@ def _join_node(
 ) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
-    Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
-    manifest snapshot), computes the bound plan's ready-graph width, and
-    spawns ``/fno:execute waves <plan>`` workers there via ``fno agents spawn
-    --substrate thread`` - one per distinct wave band when the plan carries
-    bands (highest band first, the lead; each lane resolved per band by
-    ``_grid_lane_for``), else ``min(workers, width - 1)`` shapeless workers
-    (joiner 2). Either way the width rule caps the count: the node holder is
-    one of the width workers. ``workers`` is the requested joiner count;
-    ``None`` (the CLI default) derives the ask from the sizing table - the
-    node's priority against the plan's highest wave band - instead of
-    defaulting to one joiner, which is the default that kept bare joins
-    from ever being worth running. The brief rides TWO channels: the file
-    ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
-    which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
-    that inherit the spawner's env, e.g. panes); a banded brief also carries
-    the per-worker band table, the band's durable channel beside the
-    best-effort ``FNO_WORKER_BAND`` env export. The spawned process exports
-    FNO_WORKER_NAME from ``--name``, so each joiner's task-claim holder is
-    its own roster name (the joiner 1 contract; where the env export cannot
-    reach, resolve_task_holder reads the roster binding). ``model`` rides as
-    an explicit ``--model``: a typed model with no vendor implication
-    overrides a config-injected default whose lane would refuse.
-
-    Returns the receipt ``{"node", "worktree", "width", "priority", "band",
-    "workers", "workers_source", "spawned", "lead", "lanes"}`` - the three
-    sizing inputs ride beside the requested count and where it came from
-    (``derived`` | ``explicit``), so the receipt answers "why this many".
-    ``lanes`` maps each spawned name to its ``band``/``harness``/
-    ``model``/``sandbox`` (``enforced`` | ``overlapping`` | ``unevaluated`` |
-    ``off``, from ``config.join.sandbox`` and the plan's band partition; plus
-    ``"grid": "declined"`` when the grid declined that band
-    and the joiner rides the caller's default lane). Raises JoinRefuse (exit
-    2/3/4/5) on a precondition failure and SpawnError when the lead spawn
-    itself fails; a non-lead spawn failure warns to stderr and shrinks
-    ``spawned`` instead of aborting the join.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.claims.core import claim_status
     from fno.graph.collision import resolve_plan_path
@@ -3392,6 +3308,7 @@ def advance(
         else:
             eff_provider = provider if provider is not None else node.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+        next_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             node_cwd,
@@ -3405,12 +3322,34 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
             events_path=ev_path,
+            receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
+    except SpawnQueueRefused as exc:
+        # Every lane exhausted: persist the defer (backlog owner), skip on the horizon.
+        _safe_release(dispatch_key, holder, dispatch_root)
+        reset = int(exc.retry_at) if exc.retry_at else "unknown"
+        proc = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id,
+             "--reason", f"slot-queue: every configured lane exhausted; retry_at={reset}"],
+            cwd=node_cwd or None,
+            capture_output=True,
+            text=True,
+        )
+        return skip(
+            "slot-queue-deferred",
+            node_id=node_id,
+            retry_at=exc.retry_at,
+            detail=(
+                f"deferred={'yes' if proc.returncode == 0 else 'no'}"
+                f" retry_at={exc.retry_at or '-'}"
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(node_id, str(exc))
@@ -3441,6 +3380,8 @@ def advance(
             "node_id": node_id,
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            "verb": next_receipt.get("verb", "builtin"),
+            "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
@@ -3449,7 +3390,10 @@ def advance(
     )
     if verbose:
         print(
-            f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
+            f"advance: dispatched {node_id} -> target worker {short_id} "
+            f"(verb={next_receipt.get('verb', 'builtin')} "
+            f"source={next_receipt.get('verb_source', 'field-absent')} "
+            f"brief={_brief_tag})",
             file=sys.stderr,
         )
     _tick(1, None, f"node={node_id} worker={short_id}")
@@ -3654,6 +3598,8 @@ def _converge_one(
     Emits exactly one of advance_dispatched / advance_skipped / advance_failed
     (LD#12) and returns the matching AdvanceResult. Never raises: a spawn failure
     releases the reservation (node stays re-dispatchable) and resolves to failed.
+    Every exit that is not a dispatch releases the reservation (x-41f7), so only
+    a dispatched worker keeps the boot-window bridge.
     """
     node_id = node_meta["id"]
     slug = node_meta.get("slug") or node_meta.get("title")
@@ -3712,60 +3658,75 @@ def _converge_one(
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))
 
+    # Reserve-to-outcome span (x-41f7): every exit that is not a dispatch
+    # returns the boot-window reservation, so a raise between acquire and the
+    # dispatched receipt can no longer strand the bridge (dispatch:x-e882 was
+    # held forever by exactly that shape).
+    dispatched = False
     try:
-        eff_provider = provider if provider is not None else node_meta.get("provider")
-        _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
-        spawn_receipt: dict = {}
-        short_id = _spawn_worker(
-            node_id,
-            root,
-            slug,
-            model=_route_resolve.node_model(
-                node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
-            ),
-            provider=eff_provider,
-            verb=node_meta.get("dispatch_verb"),
-            brief=_brief,
-            node=node_meta,
-            caller="_converge_one",
-            events_path=ev_path,
-            receipt=spawn_receipt,
-        )
-    except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return failed(str(exc))
+        try:
+            eff_provider = provider if provider is not None else node_meta.get("provider")
+            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
+            spawn_receipt: dict = {}
+            short_id = _spawn_worker(
+                node_id,
+                root,
+                slug,
+                model=_route_resolve.node_model(
+                    node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
+                ),
+                provider=eff_provider,
+                verb=node_meta.get("dispatch_verb"),
+                brief=_brief,
+                node=node_meta,
+                dispatch_reservation=(dispatch_key, holder, dispatch_root),
+                caller="_converge_one",
+                events_path=ev_path,
+                receipt=spawn_receipt,
+            )
+        except SpawnAlreadyRunning:
+            return skip("already-claimed")
+        except Exception as exc:  # noqa: BLE001
+            return failed(str(exc))
 
-    _emit(
-        EVENT_DISPATCHED,
-        _tag(
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "cross_project": cross_project,
-                "brief": _brief_tag,
-            }
-        ),
-        ev_path,
-    )
-    if verbose:
-        _scope = f"mission {mission} " if mission else ""
-        _kind = "cross-project" if cross_project else "same-project"
-        print(
-            f"advance: dispatched {_scope}{_kind} {node_id} -> "
-            f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
-            file=sys.stderr,
+        _emit(
+            EVENT_DISPATCHED,
+            _tag(
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "cross_project": cross_project,
+                    "verb": spawn_receipt.get("verb", "builtin"),
+                    "verb_source": spawn_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                }
+            ),
+            ev_path,
         )
-    return AdvanceResult(
-        "dispatched",
-        EVENT_DISPATCHED,
-        node_id=node_id,
-        short_id=short_id,
-        substrate=spawn_receipt.get("substrate"),
-    )
+        if verbose:
+            _scope = f"mission {mission} " if mission else ""
+            _kind = "cross-project" if cross_project else "same-project"
+            print(
+                f"advance: dispatched {_scope}{_kind} {node_id} -> "
+                f"target worker {short_id} (--cwd {root}) "
+                f"(verb={spawn_receipt.get('verb', 'builtin')} "
+                f"source={spawn_receipt.get('verb_source', 'field-absent')} "
+                f"brief={_brief_tag})",
+                file=sys.stderr,
+            )
+
+        dispatched = True
+        return AdvanceResult(
+            "dispatched",
+            EVENT_DISPATCHED,
+            node_id=node_id,
+            short_id=short_id,
+            substrate=spawn_receipt.get("substrate"),
+        )
+    finally:
+        if not dispatched:
+            _safe_release(dispatch_key, holder, dispatch_root)
 
 
 def _dispatch_one_dependent(

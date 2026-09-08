@@ -36,7 +36,6 @@ honors the existing dedup apparatus (markers + claims) unchanged.
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import subprocess
@@ -47,7 +46,11 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
-from fno.agents.events import _emit_daemon_envelope
+from fno.agents.events import (
+    emit_merge_cleanup_requested,
+    merge_cleanup_request_id,
+    rows_for_cleanup,
+)
 from fno.config import load_settings_for_repo
 from fno.paths import agents_home_dir
 from fno.pr._proc import Result, ToolMissing, run as _run
@@ -57,14 +60,6 @@ from fno.pr._proc import Result, ToolMissing, run as _run
 # concurrently. 15m bounds a run that finishes in 1-3 min; the TTL is the
 # crash backstop.
 _CLAIM_TTL = "15m"
-# Reap order: minted only by this ritual against a gh-confirmed MERGED state,
-# consumed by the daemon's periodic worktree sweep (which runs its pass with
-# --apply while any order stands). 24h is the claim TTL ceiling AND the sweep
-# interval ceiling. Minting clears the cadence stamp, and the six-hour fallback
-# leaves at least three complete payment windows inside the order's lifetime.
-# "7d"-style day units are rejected TTL syntax (verified: only m/h/s parse,
-# and the ms range caps at one day).
-_REAP_ORDER_TTL = "24h"
 # x-0d66: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
 # partial-dispatch state instead of wedging the ritual. Killing mid-dispatch is
@@ -336,6 +331,8 @@ class Ritual:
         self.ctx.receipts.append(rec)
         typer.echo(rec.line())
         if step == "archive":
+            from fno.agents.events import _emit_daemon_envelope
+
             _emit_daemon_envelope(
                 "post_merge_archive",
                 {
@@ -535,8 +532,8 @@ class Ritual:
         self._leg("sync-canonical", ["do", "pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
                   timeout=900.0)
 
-    def _merged_state(self) -> tuple[Optional[str], Optional[str]]:
-        """(state, headRefName) from ONE gh call, or (None, None) if unreadable.
+    def _merged_state(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """(state, headRefName, mergedAt) from ONE gh call, or Nones if unreadable.
 
         Memoized: two legs ask, and one PR view per ritual is enough. The state
         can only travel toward MERGED during a run, so a cached OPEN refuses
@@ -552,24 +549,30 @@ class Ritual:
         `_resolve_pr`, which returns a caller-supplied number unchecked. On that
         path the merge is an ARGUMENT, so the guard belongs here at the leg,
         where a removal actually happens, not at resolve.
+
+        mergedAt travels to the cleanup mint: both mint sites key one request
+        id, the journal keeps the LAST event per id, and the reaper's grace
+        window anchors on merged_at - so a later mint that stamped now would
+        push the reap a full grace window past the real merge.
         """
         if self._merge_state is None:
             self._merge_state = self._merged_state_read()
         return self._merge_state
 
-    def _merged_state_read(self) -> tuple[Optional[str], Optional[str]]:
+    def _merged_state_read(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
         try:
             meta = self._gh(["pr", "view", str(self.ctx.pr),
-                             "--json", "state,headRefName"])
+                             "--json", "state,headRefName,mergedAt"])
         except (ToolMissing, subprocess.SubprocessError):
-            return (None, None)
+            return (None, None, None)
         if not meta.ok:
-            return (None, None)
+            return (None, None, None)
         try:
             obj = json.loads(meta.stdout or "{}")
         except json.JSONDecodeError:
-            return (None, None)
-        return (obj.get("state") or None, obj.get("headRefName") or None)
+            return (None, None, None)
+        return (obj.get("state") or None, obj.get("headRefName") or None,
+                obj.get("mergedAt") or None)
 
     def _refuse_unless_merged(self, step: str) -> bool:
         """True when gh confirms MERGED. Emits the refusal itself otherwise.
@@ -577,109 +580,44 @@ class Ritual:
         Fails CLOSED: an unreadable state refuses too. "I could not check"
         must never spend the same as "I checked and it is merged".
         """
-        state, _ = self._merged_state()
+        state, _, _ = self._merged_state()
         if state == "MERGED":
             return True
         detail = f"not-merged (state={state})" if state else "merge-state unreadable"
         self._emit(step, _SKIPPED, detail)
         return False
 
-    def _register_reap_order(self, why: str) -> str:
-        """Mint the durable reap order a deferred archive owes (a TTL claim).
-
-        The daemon's periodic worktree sweep consumes standing orders: while
-        any live order exists it runs its pass with ``--apply``. Removal stays
-        merge-triggered - only this ritual, against a gh-confirmed MERGED
-        state, mints orders - and the sweep's own guards (reapable, live
-        claim, rooted processes) still decide tree by tree, so a tree that is
-        still in use stays put and the order simply expires.
-        """
-        key = f"reap:pr-{self.ctx.pr}"
-        try:
-            r = self.runner(
-                [*fno_py_cmd(), "agents", "claim", "acquire", key,
-                 "--holder", f"postmerge:reap:pr-{self.ctx.pr}",
-                 "--ttl", _REAP_ORDER_TTL,
-                 "--reason", "post-merge reap order",
-                 "--metadata", json.dumps({"pr": self.ctx.pr,
-                                           "project": self.ctx.project})],
-                timeout=15.0,
-            )
-        except (ToolMissing, subprocess.SubprocessError) as exc:
-            return f"reap-order-unwritten ({exc})"
-        if r.returncode in (0, 1):
-            # Minting makes the next idle tick the order's first payment
-            # window; the six-hour cadence remains the fallback if this
-            # best-effort reset cannot be written.
-            try:
-                (agents_home_dir() / "worktree-sweep.stamp").unlink(missing_ok=True)
-            except OSError:
-                pass
-        if r.returncode == 0:
-            return f"reap-order {key} standing ({why})"
-        if r.returncode == 1:
-            # Already held: a prior ritual for this PR already ordered it.
-            return f"reap-order {key} already standing ({why})"
-        return f"reap-order-unwritten (exit={r.returncode}, {why})"
-
     def _register_cleanup_request(
         self, branch: str, worktree: Optional[str], why: str
     ) -> str:
-        """Persist one merge-triggered cleanup request before deferring.
-
-        The request is keyed by the exact merge, branch, worktree, and closed
-        node set. The append-only journal is the durable source; the standing
-        claim remains during the compatibility window so older daemons keep
-        their existing guarded sweep behavior.
+        """Persist one merge-triggered cleanup request before deferring: the
+        shared helper `fno do pr merge` also mints, one fold key for both.
         """
-        request_id = self._cleanup_request_id(branch, worktree)
-        node_ids = sorted(str(node) for node in self.ctx.node_ids)
-        _emit_daemon_envelope(
-            "merge_cleanup_requested",
-            {
-                "request_id": request_id,
-                "repo": str(self.canon),
-                "project": self.ctx.project,
-                "pr": self.ctx.pr,
-                "branch": branch,
-                "worktree": worktree,
-                "node_ids": node_ids,
-                "candidate_row_names": self._rows_for_cleanup(worktree) if worktree else [],
-            },
+        if not self.ctx.node_ids:
+            # Dominant path: the ship gate already closed the node, so
+            # reconcile's .closed[] was empty. Recover it HERE, before the
+            # envelope and its request id key on it - leg_reap_rows runs the
+            # same recovery several legs later, too late for this mint.
+            self.ctx.node_ids = self._recover_node_for_pr()
+        request_id = emit_merge_cleanup_requested(
+            repo=str(self.canon) if self.canon else "",
+            project=self.ctx.project,
+            pr=self.ctx.pr,
+            branch=branch,
+            worktree=worktree,
+            node_ids=[str(node) for node in self.ctx.node_ids],
+            session_id=None,
+            harness=None,
+            merged_at=self._merged_state()[2],
+            candidate_row_names=(
+                rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
+                if worktree
+                else []
+            ),
         )
-        legacy = self._register_reap_order(why)
-        return f"cleanup-requested request_id={request_id}; {legacy}"
-
-    def _cleanup_request_id(self, branch: str, worktree: Optional[str]) -> str:
-        node_ids = sorted(str(node) for node in self.ctx.node_ids)
-        identity = "|".join(
-            [str(self.ctx.project), str(self.ctx.pr), branch, worktree or "", *node_ids]
-        )
-        return "merge-cleanup-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
-
-    def _rows_for_cleanup(self, worktree: str) -> list[str]:
-        try:
-            r = self._sh(["agents", "list", "--json"])
-        except (ToolMissing, subprocess.SubprocessError):
-            return []
-        if not r.ok:
-            return []
-        try:
-            payload = json.loads(r.stdout or "{}")
-        except json.JSONDecodeError:
-            return []
-        rows = payload if isinstance(payload, list) else payload.get("agents") or []
-        node_ids = {str(node) for node in self.ctx.node_ids}
-        out = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("name") or "")
-            if row.get("cwd") == worktree or any(
-                name.startswith(f"target-{node}-") for node in node_ids
-            ):
-                out.append(name)
-        return out
+        # Minting makes the next idle tick the request's first payment window.
+        (agents_home_dir() / "worktree-sweep.stamp").unlink(missing_ok=True)
+        return f"cleanup-requested request_id={request_id}; {why}"
 
     def _remove_rows_after_archive(
         self, worktree: str, request_id: str, reclaimed_bytes: int
@@ -687,7 +625,7 @@ class Ritual:
         if Path(worktree).exists():
             return False
         removed = True
-        for name in self._rows_for_cleanup(worktree):
+        for name in rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh):
             result = self._sh(
                 [
                     "agents",
@@ -709,7 +647,7 @@ class Ritual:
 
     def leg_archive(self) -> None:
         """Step 4: best-effort worktree archive; defer when run from inside it."""
-        state, branch = self._merged_state()
+        state, branch, _merged_at = self._merged_state()
         if state is None:
             self._emit("archive", _SKIPPED, "gh-unavailable")
             return
@@ -776,9 +714,13 @@ class Ritual:
             )
             return
         if r.ok:
-            request_id = self._cleanup_request_id(branch, wt)
+            request_id = merge_cleanup_request_id(
+                self.ctx.project, self.ctx.pr, branch, wt, self.ctx.node_ids
+            )
             rows_removed = self._remove_rows_after_archive(wt, request_id, worktree_bytes)
             if rows_removed:
+                from fno.agents.events import _emit_daemon_envelope
+
                 _emit_daemon_envelope(
                     "merge_cleanup_completed",
                     {

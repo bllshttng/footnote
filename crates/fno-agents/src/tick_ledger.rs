@@ -65,6 +65,10 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         arm: "stop_hook",
         default_interval_s: 0,
     },
+    ArmSpec {
+        arm: "reap",
+        default_interval_s: 60,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token

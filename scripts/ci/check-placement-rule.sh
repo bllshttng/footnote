@@ -82,6 +82,11 @@
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
+#      binding.py is the shared effective-account read those callers now go
+#      through, and test_account_binding.py is its test: it builds a canonical
+#      ~/.claude and an alt dir under tmp_path to prove that two roots sharing
+#      a transcript folder keep distinct credential identity. Fixture paths
+#      under tmp_path; footnote stores nothing under either.
 #      managed.py resolves the same canonical path for the same reason, in
 #      reconcile-slot: an identity read must not follow an ambient
 #      CLAUDE_CONFIG_DIR, or the repair proves the pinned account and stamps
@@ -172,6 +177,7 @@ cli/src/fno/adapters/_shared.py
 cli/src/fno/adapters/providers/dispatch.py
 cli/src/fno/adapters/providers/managed.py
 cli/src/fno/adapters/providers/staging.py
+cli/src/fno/adapters/providers/test_account_binding.py
 cli/src/fno/adapters/providers/test_cli.py
 cli/src/fno/adapters/providers/test_dispatch.py
 cli/src/fno/adapters/providers/test_failover.py

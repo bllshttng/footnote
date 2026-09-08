@@ -15,6 +15,10 @@
 #        session_context_nudge; below the general trigger does not
 #   AC18 latch holds across CWD: the per-session latch lives in the global state
 #        dir, so a cwd move between fires does not re-nudge within a band
+#   AC26 flush refusal: a foreign live writer rooted in the checkout (named by
+#        pid + registry row) refuses the commit advice; the same dirty checkout
+#        without one still gets it; an unreadable measurement refuses; the
+#        refusal latches separately so it never eats the nudge
 #   compact gate: the compact advice matches a MEASURED injection path, all THREE
 #        answers (injectable / not-injectable / could-not-measure), plus source
 #        sweeps for the dead crown verb and the raw transport name, each with a
@@ -361,6 +365,87 @@ run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "AC23: clean tree no flush block" "$OUT" '"decision":"block"'
+cd "$SBX"
+
+# === AC26: flush refusal - a foreign live writer rooted in the checkout =======
+# (x-299b) The flush nudge counts dirty files and never asks who wrote them:
+# twice in one night two kings were urged to commit 351 mid-flight lines that
+# belonged to a live codex worker rooted in the same canonical checkout. Now
+# the fire is gated on foreign_rooted_writers. Every arm asserts a string the
+# outcome ALONE produces: the refusal NAMES the pid, because absence of a
+# commit suggestion is also what a hook that never ran produces. The control
+# arm is the same dirty checkout with no rooted foreign writer, where the
+# suggestion must still appear - a guard that refuses everything reads as
+# fixed and is not.
+FLUSH_REPO="$SBX/flush-repo"
+rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null   # latch + static-HEAD state, not ctx bands
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "f$i" > "$FLUSH_REPO/foreign-dirty$i.txt"; done
+cd "$FLUSH_REPO"
+sleep 300 &                                            # foreign writer: cwd = FLUSH_REPO
+FPID=$!
+# status "busy" is deliberate: a dispatched worker mid-turn projects an active
+# status, not always "live", and the guard must see it anyway (review round 1).
+jq -n --argjson pid "$FPID" '{schema_version: 13, agents: [{
+  name:"t-foreign-probe", harness:"codex", cwd:"/tmp", log_path:"/tmp/fp",
+  status:"busy", short_id:"fp", harness_session_id:"foreign-probe-sid",
+  pid:$pid, crown_level:null, crown_scope:null, crown_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+write_transcript "$SBX/low.jsonl" 300000
+run_hook "$(payload "$SBX/low.jsonl")"                 # stop 1: static=1
+assert_absent "AC26: stop 1 no block yet" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                 # stop 2: static=2
+assert_absent "AC26: stop 2 no block yet" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                 # stop 3: static=3 -> fires
+assert_contains "AC26: refusal NAMES the foreign pid" "$OUT" "$FPID"
+assert_contains "AC26: refusal names the owning row" "$OUT" 't-foreign-probe'
+assert_contains "AC26: refusal is a refusal" "$OUT" 'REFUSED'
+assert_absent "AC26: refusal never advises a commit" "$OUT" 'commit it now'
+events_has context_flush_refused && ok "AC26: context_flush_refused event emitted" || bad "AC26: no context_flush_refused event"
+
+# Latch separation: the refusal touched the FOREIGN latch and left the flush
+# latch unconsumed, so the real nudge can still fire once the writer leaves.
+flush_latches=$(find "$LATCHES" -name '.context-nudge-flush-latch-*' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "AC26: refusal leaves the flush latch unconsumed" "$flush_latches" "0"
+foreign_latches=$(find "$LATCHES" -name '.context-nudge-flush-foreign-*' 2>/dev/null | wc -l | tr -d ' ')
+[ "$foreign_latches" -gt 0 ] && ok "AC26: foreign latch written" || bad "AC26: no foreign latch written"
+
+# Control arm: same dirty checkout, foreign writer gone and its registry row
+# with it -> the commit suggestion must STILL appear.
+kill "$FPID" 2>/dev/null
+wait "$FPID" 2>/dev/null || true
+write_registry no no                                   # live rows, none pid-bearing
+rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "AC26: control arm still advises the commit" "$OUT" 'commit it now'
+
+# Self arm: a live pid-bearing row whose session id IS the hook's own (the pid
+# is this test shell, rooted in FLUSH_REPO by the cd above) -> self-excluded,
+# proved by the nudge appearing, not by a refusal failing to appear.
+jq -n --argjson pid "$$" '{schema_version: 13, agents: [{
+  name:"t-self-probe", harness:"claude", cwd:"/tmp", log_path:"/tmp/sp",
+  status:"live", short_id:"sp", harness_session_id:"'"$KING_SID"'",
+  pid:$pid, crown_level:null, crown_scope:null, crown_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
+rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "AC26: own-session row does not refuse" "$OUT" 'commit it now'
+assert_absent "AC26: own-session row does not refuse (marker)" "$OUT" 'REFUSED'
+
+# Unreadable arm: lsof answers nothing -> the measurement could not be made ->
+# fail closed with a refusal that says WHY, never read as nobody-is-here.
+UNREADDIR="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$UNREADDIR/lsof"
+chmod +x "$UNREADDIR/lsof"
+_OLD_PATH="$PATH"; PATH="$UNREADDIR:$PATH"
+rm -f "$LATCHES"/.context-nudge-flush-* 2>/dev/null
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+PATH="$_OLD_PATH"; rm -rf "$UNREADDIR"
+assert_contains "AC26: unreadable measurement refuses" "$OUT" 'REFUSED'
+assert_contains "AC26: refusal names the unreadable measurement" "$OUT" 'could not be measured'
 cd "$SBX"
 
 # === AC24: delta-by-shape - plan_path sets the wording ========================

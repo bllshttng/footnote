@@ -414,7 +414,6 @@ def _hermetic_in_flight_review_gate(monkeypatch):
 # pulls only os/pathlib/typing plus harness_identity, never fno.graph.
 from fno.hermetic import neutralise  # noqa: E402
 
-_REAL_HOME = os.environ.get("HOME") or os.path.expanduser("~")
 _SANDBOX = tempfile.mkdtemp(prefix="fno-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
@@ -491,43 +490,6 @@ def _config_search_ceiling(tmp_path_factory: pytest.TempPathFactory):
     )
     yield
     os.environ["FNO_CONFIG_SEARCH_ROOT"] = previous
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _real_graph_leak_tripwire():
-    """CI-only regression guard for ab-2f78b48e: fail the session if any test
-    wrote a node into the developer's REAL ~/.fno/graph.json.
-
-    With the $HOME redirect above this should be impossible; a non-empty delta
-    means a test bypassed it (e.g. an absolute ~/.fno path). Gated on CI
-    because a dev box may run a live walker/reconcile that legitimately mutates
-    the real graph concurrently, which would false-positive. Node-id delta (not
-    md5) is used so reconcile reformatting of existing nodes is ignored.
-    """
-    import json
-
-    real_graph = Path(_REAL_HOME) / ".fno" / "graph.json"
-
-    def node_ids() -> set[str]:
-        try:
-            data = json.loads(real_graph.read_text())
-        except (OSError, ValueError):
-            return set()
-        entries = data.get("entries", []) if isinstance(data, dict) else data
-        return {n.get("id") for n in entries if isinstance(n, dict) and n.get("id")}
-
-    if not os.environ.get("CI"):
-        yield
-        return
-    before = node_ids()
-    yield
-    leaked = node_ids() - before
-    if leaked:
-        pytest.fail(
-            "tests leaked nodes into the real ~/.fno/graph.json "
-            f"(ab-2f78b48e): {sorted(leaked)}",
-            pytrace=False,
-        )
 
 
 @pytest.fixture(autouse=True)

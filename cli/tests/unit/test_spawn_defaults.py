@@ -7,15 +7,25 @@ no-surface provider while an explicit --effort stays fail-closed downstream.
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
+
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
 
 from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
-                 route="", account="", pane_group="", lanes=None):
+                 route="", account="", pane_group="", lanes=None, on_exhausted="",
+                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow"):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -28,6 +38,10 @@ class _Defaults:
             _Defaults(**lane) if isinstance(lane, dict) else lane
             for lane in (lanes or [])
         ]
+        self.on_exhausted = on_exhausted
+        self.by_difficulty = by_difficulty or {}
+        self.on_low = on_low
+        self.on_unknown = on_unknown
 
 
 class _Settings:
@@ -617,19 +631,18 @@ def test_ac3_hp_namespace_stripped_key():
         assert out[out.index("--model") + 1] == "fable", seed
 
 
-def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
+@requires_rust
+def test_profile_lanes_walk_in_declared_order(monkeypatch):
+    """The lanes list IS the rank: lane 0 is tried first on every spawn, and
+    the live row count plays no part in where the walk starts."""
     import fno.agents.spawn_defaults as spawn_defaults
 
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     lanes = [
         _lane("codex", effort="high", substrate="pane", permission_mode="yolo"),
         _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
     ]
-    for live_count, expected_harness, expected_rung in (
-        (0, "codex", "lanes[0]"),
-        (1, "claude", "lanes[1]"),
-        (2, "codex", "lanes[0]"),
-        (3, "claude", "lanes[1]"),
-    ):
+    for live_count in (0, 1, 2, 3):
         monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda n=live_count: [object()] * n)
         err = io.StringIO()
         out = _inject(
@@ -637,15 +650,17 @@ def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
             err=err,
             profiles={"target": {"lanes": lanes}},
         )
-        assert out[out.index("--harness") + 1] == expected_harness
-        assert expected_rung in err.getvalue()
+        assert out[out.index("--harness") + 1] == "codex"
+        assert "agents.profiles.target.lanes[0]" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lanes_skip_capped_vendor(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
 
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
     err = io.StringIO()
     out = _inject(
@@ -653,15 +668,16 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            _lane("codex", permission_mode="yolo"),
             _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+            _lane("codex", permission_mode="yolo"),
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
-    assert "zai lane skipped at 2 of 2" in err.getvalue()
-    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+    assert "provider zai at 2 of 2" in err.getvalue()
+    assert "agents.profiles.target.lanes[1]" in err.getvalue()
 
 
+@requires_rust
 def test_profile_only_lane_at_cap_refuses(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
@@ -686,6 +702,7 @@ def test_profile_only_lane_at_cap_refuses(monkeypatch):
     assert "zai" in err.getvalue() and "2 of 2" in err.getvalue()
 
 
+@requires_rust
 def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
@@ -714,6 +731,7 @@ def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     assert "registry incomplete" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lane_unknown_harness_refuses(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -729,6 +747,7 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
     assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lane_injects_pane_group(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -1581,6 +1600,7 @@ class TestLinkIdentityIncludesTheAccountAxis:
         ]})["L"]
         assert sd.link_id(a) != sd.link_id(b)
 
+    @requires_rust
     def test_an_unpinned_link_keeps_the_bare_identity(self) -> None:
         from fno.agents import spawn_defaults as sd
 
@@ -1741,6 +1761,7 @@ def test_typed_cross_vendor_model_still_warns_and_proceeds():
     assert "refusing to spawn" not in msg
 
 
+@requires_rust
 def test_injected_model_matching_the_lane_is_silent():
     # The negative on the refusal path: an injected model whose vendor MATCHES
     # the lane is the ordinary case and must neither warn nor refuse. Without
@@ -1783,6 +1804,7 @@ def test_injected_cross_vendor_model_with_explicit_route_proceeds():
     assert out[0] == "spawn"
 
 
+@requires_rust
 def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
     assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
 
@@ -1846,6 +1868,7 @@ def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
     ]
 
 
+@requires_rust
 def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch):
     """A cap names a VENDOR's concurrency. A caller who typed --harness codex is
     not spending the capped zai lane's budget, so refusing that spawn stops work
@@ -1881,6 +1904,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
     err = io.StringIO()
 
@@ -1895,7 +1919,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
-    assert "zai lane skipped at 2 of 2" in err.getvalue()
+    assert "provider zai at 2 of 2" in err.getvalue()
 
     # Only lane capped: no refusal under the bypass.
     err2 = io.StringIO()
@@ -1910,33 +1934,234 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
     assert "FNO_SPAWN_GATE=0" in err2.getvalue()
 
 
+class _Routing:
+    def __init__(self, models):
+        self.models = models
+
+
+def _slot_settings(rows, profiles):
+    """Settings whose DECLARED routing inventory is exactly ``rows``.
+
+    String lanes resolve against ``settings.routing.models`` - the declared
+    rows - never the built-in fallback, so the fake must carry the rows the
+    lanes name.
+    """
+    s = _Settings(profiles=profiles)
+    s.routing = _Routing(rows)
+    return s
+
+
+_SLOT_ROWS = [
+    {"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash",
+     "band": "low", "account": "zai-main"},
+    {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5",
+     "band": "medium"},
+]
+
+
+@requires_rust
+def test_string_lane_names_an_inventory_row(monkeypatch):
+    """A lane may be the NAME of a [[routing.models]] row: the row's harness,
+    model and access path ride as one coordinate."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(_SLOT_ROWS, {"target": {"lanes": ["flash-x"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+    assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
+
+
+@requires_rust
+def test_lane_on_exhausted_account_is_skipped_for_the_next_lane(monkeypatch):
+    """AC3-HP: the lane whose account is dead skips; the sibling lane on the
+    healthy account answers."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS, {"target": {"lanes": ["flash-x", "sonnet-x"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "capacity=exhausted" in err.getvalue()
+
+
+def test_on_exhausted_queue_exits_78_with_typed_refusal(monkeypatch, capsys):
+    """AC3-EDGE: every lane exhausted + on_exhausted=queue exits 78 with the
+    typed capacity refusal - the shape a dispatcher reads as capacity, not
+    config."""
+    # The hermetic suite sets FNO_SPAWN_GATE=0, and that escape degrades
+    # instead of refusing; opt back in or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    both_dead = [
+        dict(_SLOT_ROWS[0]),
+        dict(_SLOT_ROWS[1], account="claude-main"),
+    ]
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "exhausted",
+                "accounts": {"zai-main": "exhausted", "claude-main": "exhausted"},
+            }
+        },
+    )
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                both_dead,
+                {"target": {"lanes": ["flash-x", "sonnet-x"], "on_exhausted": "queue"}},
+            ),
+            stderr=io.StringIO(),
+            env={},
+        )
+    assert exc.value.code == 78
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "slot_exhausted"
+    assert receipt["verb"] == "target"
+    assert [lane["name"] for lane in receipt["lanes"]] == ["flash-x", "sonnet-x"]
+    assert all("exhausted" in lane["reason"] for lane in receipt["lanes"])
+
+
+def test_on_exhausted_degrade_names_the_degrade_in_the_receipt(monkeypatch):
+    """on_exhausted=degrade: the profile scalars answer as before, and the
+    receipt says the slot terminal was the reason."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {
+                "target": {
+                    "lanes": ["flash-x"],
+                    "on_exhausted": "degrade",
+                    "model": "fallback-m",
+                }
+            },
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "fallback-m"
+    assert "applied slot=exhausted degrade" in err.getvalue()
+
+
+@requires_rust
+def test_unknown_lane_name_refuses_by_name(monkeypatch):
+    """AC3-ERR: a lane naming no declared row refuses with exit 2, naming the
+    lane path, the missing row, and the declared row names."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS, {"target": {"lanes": ["ghost-x"]}}
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "agents.profiles.target.lanes[0]" in msg
+    assert "'ghost-x'" in msg
+    assert "flash-x" in msg and "sonnet-x" in msg
+    assert "fno config route inventory" in msg
+
+
+@requires_rust
+def test_inline_lane_still_selects(monkeypatch):
+    """The inline-table lane spelling keeps working after the port: sugar over
+    the same resolver, never a second leg."""
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {"lanes": [_lane("codex", effort="high")]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+
+
+@requires_rust
+def test_verb_with_no_lanes_falls_to_the_grid(monkeypatch):
+    """A profile without lanes changes nothing: the capacity grid over the
+    whole inventory answers, exactly as before the slot resolver existed."""
+    _declare_inventory(monkeypatch, _two_harness_rows())
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
+    )
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid2", "hi"],
+        err=err,
+        profiles={"target": {"substrate": "bg"}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    # the chain's terminal is the grid's own pick line; the seam receipts it
+    assert "applied grid=grid candidate codex/sol-x capacity=ok" in err.getvalue()
+
+
+@requires_rust
 def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
     """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
     test builds objects, which take the getattr branch, so the Mapping-only
     unknown-field and non-string refusals were never executed."""
-    import fno.agents.spawn_defaults as spawn_defaults
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
 
-    err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        spawn_defaults._validated_lanes(
-            [_lane("claude", nonsense="x")], "agents.profiles.target.lanes", err
-        )
-    assert exc.value.code == 2
-    assert "unknown field 'nonsense'" in err.getvalue()
+    def _raw_lane_settings(lanes):
+        prof = type("P", (), {"lanes": lanes})()
+        return type(
+            "S",
+            (),
+            {"agents": type(
+                "A", (), {"defaults": _Defaults(), "profiles": {"target": prof},
+                          "max_lanes": {}}
+            )},
+        )()
 
-    err2 = io.StringIO()
-    with pytest.raises(SystemExit) as exc2:
-        spawn_defaults._validated_lanes(
-            [{"provider": 7}], "agents.profiles.target.lanes", err2
-        )
-    assert exc2.value.code == 2
-    assert "must be a string" in err2.getvalue()
-
-    err3 = io.StringIO()
-    with pytest.raises(SystemExit) as exc3:
-        spawn_defaults._validated_lanes([{}], "agents.profiles.target.lanes", err3)
-    assert exc3.value.code == 2
-    assert "is empty" in err3.getvalue()
+    for lanes, fragment in (
+        ([{"provider": "claude", "nonsense": "x"}], "unknown field 'nonsense'"),
+        ([{"provider": 7}], "must be a string"),
+        ([{}], "is empty"),
+    ):
+        err = io.StringIO()
+        with pytest.raises(SystemExit) as exc:
+            inject_spawn_defaults(
+                ["spawn", "--name", "w", "/fno:target x-1"],
+                settings=_raw_lane_settings(lanes),
+                stderr=err,
+                env={},
+            )
+        assert exc.value.code == 2, fragment
+        assert fragment in err.getvalue()
+        assert "no worker launched" in err.getvalue()
 
 
 def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
@@ -2027,6 +2252,7 @@ def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
     assert "-x" in err.getvalue()
 
 
+@requires_rust
 def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
     """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
     not spending a capped lane's budget. Both this function's docstring and the
@@ -2050,6 +2276,7 @@ def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
     assert out  # the spawn continues rather than exiting 2
 
 
+@requires_rust
 def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
     """A lane is a COMPLETE routing coordinate. Per-field fallback let a codex
     lane inherit the profile's zai route, producing `--harness codex --route
@@ -2065,3 +2292,393 @@ def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
     )
     assert out[out.index("--harness") + 1] == "codex"
     assert "--route" not in out
+_LOW_NODE = {"id": "x-1", "difficulty": "low", "priority": "p2"}
+
+
+def test_missing_difficulty_takes_the_high_overlay(monkeypatch):
+    """AC6-DIFFICULTY: no node, no difficulty: the high overlay answers and
+    the receipt says the difficulty rounded up."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x"],
+                        "by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "difficulty missing; rounds up to high" in err.getvalue()
+
+
+@requires_rust
+def test_low_difficulty_overlay_replaces_lanes(monkeypatch):
+    """AC6-DIFFICULTY: a low node rides the low overlay's lanes."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["sonnet-x"],
+                        "by_difficulty": {"low": {"lanes": ["flash-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+
+
+def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
+    """AC6-DIFFICULTY: an out-of-vocabulary difficulty is missing, not low."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda toks, env=None: {"id": "x-1", "difficulty": "urgent"},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x"],
+                        "by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "difficulty 'urgent' is not low|medium|high" in err.getvalue()
+
+
+@requires_rust
+def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
+    """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
+    lanes; the policy is live on them."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "low"}}},
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x", "sonnet-x"],
+                        "by_difficulty": {"low": {"on_low": "skip"}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "capacity=low (on_low=skip)" in err.getvalue()
+
+
+_LOW_FLASH_HEALTHY_CODEX = [
+    *_SLOT_ROWS[:1],
+    {"name": "codex-y", "harness": "codex", "model": "gpt-5.6-luna"},
+]
+
+
+@requires_rust
+def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
+    """AC6-LOW: the default policy demotes a low lane behind a healthy one."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
+            "codex": {"state": "ok"},
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _LOW_FLASH_HEALTHY_CODEX,
+            {"target": {"lanes": ["flash-x", "codex-y"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "slot demote agents.profiles.target.lanes[0] flash-x capacity=low" in err.getvalue()
+
+
+@requires_rust
+def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
+    """AC6-LOW: no healthy lane anywhere: the first low lane still serves."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
+            "codex": {"state": "low"},
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _LOW_FLASH_HEALTHY_CODEX,
+            {"target": {"lanes": ["flash-x", "codex-y"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert "slot demote agents.profiles.target.lanes[0] flash-x capacity=low" in err.getvalue()
+    assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
+
+
+@requires_rust
+def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
+    """AC6-UNKNOWN: with skip, an unproven observation never serves."""
+    monkeypatch.setenv("FNO_SPAWN_GATE", "1")
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS,
+                {"target": {"lanes": ["flash-x", "sonnet-x"], "on_unknown": "skip"}},
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "capacity=unknown (on_unknown=skip)" in err.getvalue()
+
+
+@requires_rust
+def test_overlay_with_explicit_empty_lanes_refuses_as_malformed(monkeypatch):
+    """AC6-DIFFICULTY: an explicitly empty overlay lane list is malformed, not
+    an invitation to open the global inventory."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS,
+                {"target": {"lanes": ["flash-x"],
+                            "by_difficulty": {"high": {"lanes": []}}}},
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "by_difficulty.high.lanes must be a non-empty list" in err.getvalue()
+
+
+def test_overlay_only_profile_still_resolves(monkeypatch):
+    """AC6-DIFFICULTY: a profile with no base lanes but a by_difficulty map is
+    a configured slot, not a grid fallthrough."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+_IDENTITY_ROWS = [
+    {"name": "canon-opus", "harness": "claude", "model": "opus",
+     "account": "makers"},
+    {"name": "alt-sonnet", "harness": "claude", "model": "sonnet",
+     "account": "readyrule"},
+]
+
+
+@requires_rust
+def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
+    """AC6-PIN: the slot proves makers is active; a readyrule pin is a
+    mismatch and never serves, whatever on_unknown allows."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "ok",
+                "accounts": {"makers": "ok", "readyrule": "ok"},
+                "evidence": {"makers": "proven", "readyrule": "mismatch"},
+            },
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _IDENTITY_ROWS,
+            {"target": {"lanes": ["alt-sonnet", "canon-opus"],
+                        "on_unknown": "allow"}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "opus"
+    assert "account_identity_mismatch" in err.getvalue()
+
+
+@requires_rust
+def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
+    """AC6-IDENTITY: an unproven slot claim is excluded under skip and named
+    under the default allow."""
+    capacity = {
+        "claude": {"state": "unknown", "accounts": {"makers": "ok"},
+                   "evidence": {}},
+    }
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _IDENTITY_ROWS[:1], {"target": {"lanes": ["canon-opus"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: capacity)
+    assert out[out.index("--harness") + 1] == "claude"
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "1")
+    err2 = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _IDENTITY_ROWS[:1],
+                {"target": {"lanes": ["canon-opus"], "on_unknown": "skip"}},
+            ),
+            stderr=err2,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "account_identity_unknown (on_unknown=skip)" in err2.getvalue()
+
+
+@requires_rust
+def test_vendor_route_lane_never_claims_the_slot(monkeypatch):
+    """AC6-IDENTITY: an API lane with its own account and route skips the
+    identity gate; the slot occupant is not its business."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "ok",
+                "accounts": {"zai-main": "ok"},
+                "evidence": {},
+            },
+        },
+    )
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(rows, {"target": {"lanes": ["flash-zai"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert "account_identity" not in err.getvalue()
+
+
+def test_proven_account_owns_the_harness_aggregate(monkeypatch):
+    """AC6-IDENTITY: an unpinned row reads the proven account's state, never
+    a MAX that a sibling record could fake."""
+    from fno.route_resolve import runtime_capacity as rc
+
+    monkeypatch.setattr(
+        "fno.route_resolve.harness_accounts", lambda harness, **kw: ["makers", "readyrule"]
+    )
+
+    class _V:
+        def __init__(self, state):
+            self.state = type("S", (), {"value": state})()
+            self.resets_at = None
+            self.source = "window"
+
+    monkeypatch.setattr(
+        "fno.adapters.providers.runtime_state.headrooms",
+        lambda ids: {"makers": _V("exhausted"), "readyrule": _V("ok")},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve._identity_evidence",
+        lambda harness, accounts: {"makers": "proven", "readyrule": "mismatch"},
+    )
+    cap = rc(providers=("claude",))
+    assert cap["claude"]["state"] == "exhausted"
+    assert cap["claude"]["window"] == "identity:makers"
+@requires_rust
+def test_lane_coordinate_forwards_route_and_account(monkeypatch):
+    """AC6-COORDINATE: a named row's vendor route and account constraint ride
+    the launch argv; the coordinate is not discarded after the capacity check."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"},
+                                 "evidence": {}}},
+    )
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(rows, {"target": {"lanes": ["flash-zai"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.3"
+    assert out[out.index("--account") + 1] == "zai-main"
+
+
+def test_record_route_contradiction_refuses(monkeypatch):
+    """AC6-COORDINATE: the account record resolves its own vendor; a lane
+    route that contradicts it would check one coordinate and bill another."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    s = _slot_settings(rows, {"target": {"lanes": ["flash-zai"]}})
+    s.accounts = SimpleNamespace(records=[{"id": "zai-main", "route": "openai/x"}])
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=s,
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "contradicting the lane route 'zai/glm-5.3'" in err.getvalue()
+
+
+@requires_rust
+def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
+    """AC6-COORDINATE: a typed --model outranks the slot, receipt names the
+    override, and no lane harness is borrowed for the foreign model."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--model", "gpt-5.6-luna", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS, {"target": {"lanes": ["flash-x", "sonnet-x"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "gpt-5.6-luna"
+    assert "slot=model-pin-override" in err.getvalue()
+    applied = err.getvalue()
+    assert "applied slot=" not in applied or "model-pin-override" in applied

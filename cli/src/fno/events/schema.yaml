@@ -1805,7 +1805,7 @@ event_types:
 
   - name: worktree_removed
     description: "A worktree directory was removed by an fno path. Emitted once per removal so a recurrence is attributable: a live worker losing its tree (2026-08-25, 2026-08-29) left no row because no removal path emitted anything, and an absence of rows measured only the instrument. Pair with the guard refusals: this row records what the guard read at decision time, so a removal that skipped the claim check is visible after the fact."
-    sources: [bash]
+    sources: [bash, daemon]
     data:
       required: [path, caller, claim, reason]
       properties:
@@ -2264,6 +2264,54 @@ event_types:
         pr:
           type: integer
         reason:
+          type: string
+
+  - name: merge_cleanup_held
+    retention: durable
+    description: "A pending merge cleanup request was HELD by its doneness re-read (an open node, an empty node list, or an unreadable graph) and stays pending for the next reaper pass. Emitted at most once per hour per request, so a normal in-grace hold cannot outshout the events that matter."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_cleanup_expired
+    retention: durable
+    description: "A pending merge cleanup request aged past the expiry window past its merge moment and is tombstoned, so a broken reconcile cannot pin a request (and the rows it names) forever."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_reaper_stopped
+    retention: durable
+    description: "The merge reaper stopped a row's harness (claude stop, or the worker-socket stop) BEFORE removing the registry row. The order is load-bearing: a row dropped first orphans the session in its sideline. Pane rows emit no row here - their pane death is the stop."
+    sources: [daemon]
+    data:
+      required: [short_id, name, request_id]
+      properties:
+        short_id:
+          type: string
+        name:
+          type: string
+        request_id:
+          type: string
+        harness:
           type: string
 
   - name: agent_inconsistent
@@ -3803,6 +3851,13 @@ event_types:
         command:
           type: string
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized the way the allowlist rung does, so /fno:blueprint records /blueprint), or the literal 'builtin' when the node declared nothing. `builtin` beside a node that DID declare is only visible as a command mismatch, which is why this field exists (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "declared = the node dict carried a non-empty dispatch_verb. none-declared = the key was present and empty/null, a legitimate default. field-absent = the key was NOT in the dict at all, which can only mean the selection projection feeding this dispatcher dropped it; the spawn also warns on stderr, so a future lossy projection self-reports (x-0961)."
         cwd:
           type: string
           description: "The --cwd the worker was launched into; empty means --fresh."
@@ -3833,6 +3888,13 @@ event_types:
         agent_name:
           type: string
           description: "Spawned agent name (target-<full-node-id>-<slug>)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized), or 'builtin'. See dispatch_spawned.verb (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "Whether the dispatched verb was declared, defaulted from an explicit empty, or unknowable because the feed dropped the key. See dispatch_spawned.verb_source (x-0961)."
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
@@ -4580,7 +4642,7 @@ event_types:
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."
 
   - name: watchdog_applied
-    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
+    description: "The fleet watchdog executed a verdict's action: a wake or silence-lane drive whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
     sources: [daemon]
     data:
       required: [row_id, verdict, detail]
@@ -4590,7 +4652,7 @@ event_types:
           description: "The row's recorded session id."
         verdict:
           type: string
-          description: "wake | reroute | reap | retire."
+          description: "wake | reroute | reap | retire | silence."
         detail:
           type: string
           description: "What was done, including the mechanism's receipt."
