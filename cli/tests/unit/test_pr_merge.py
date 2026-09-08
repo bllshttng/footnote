@@ -592,20 +592,25 @@ def test_a_landed_merge_with_a_cleanup_failure_reports_partial(
 ):
     """Primary specimen (PR #742). The server-side merge landed and a step
     around it did not - a local branch delete a worktree holds, a base-branch
-    checkout, a remote delete. The owner reports that as a merge carrying a
-    note; this verb must render it as partial with the note visible, never as
+    checkout, a remote delete. The owner reports that in ``cleanup_failure``;
+    this verb must render it as partial with the reason visible, never as
     failed, or an autonomous caller retries a merge that already happened.
     """
     (tmp_path / ".fno").mkdir()
-    note = (
-        "merged server-side, but the gh merge exited non-zero afterwards: "
+    cleanup_failure = (
+        "gh merge exited non-zero after the server-side merge: "
         "cannot delete branch 'feature/x-beb7' used by worktree"
     )
 
     def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
         if kwargs.get("decide_only"):
             return {"outcome": "authorized", "detail": "abc123"}
-        return {"outcome": "merged", "detail": "abc123", "note": note}
+        return {
+            "outcome": "merged",
+            "detail": "abc123",
+            "note": "merged server-side",
+            "cleanup_failure": cleanup_failure,
+        }
 
     monkeypatch.setattr(_merge, "_authorized_merge", _authorized)
     monkeypatch.setattr(_merge, "run", FakeRun(toplevel=str(tmp_path)))
@@ -615,6 +620,34 @@ def test_a_landed_merge_with_a_cleanup_failure_reports_partial(
     assert obj["cleanup"].startswith("failed")
     assert "cleanup failed" in obj["reason"]
     assert "cannot delete branch" in obj["reason"]
+
+
+def test_a_worktree_fallback_merge_is_merged_not_partial(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The regression the two fields exist to prevent. ``note`` says HOW the
+    merge landed, and the REST recovery for a worktree-held branch WORKED.
+    Rendered as a cleanup failure it made every worktree-first merge - which
+    is every run in this repo - report partial at exit 3.
+    """
+    (tmp_path / ".fno").mkdir()
+
+    def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
+        if kwargs.get("decide_only"):
+            return {"outcome": "authorized", "detail": "abc123"}
+        return {
+            "outcome": "merged",
+            "detail": "abc123",
+            "note": "merged server-side (worktree fallback)",
+        }
+
+    monkeypatch.setattr(_merge, "_authorized_merge", _authorized)
+    monkeypatch.setattr(_merge, "run", FakeRun(toplevel=str(tmp_path)))
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["reason"] == "merged server-side (worktree fallback)"
+    assert not obj.get("cleanup")
 
 
 # ---- post-merge followups ----

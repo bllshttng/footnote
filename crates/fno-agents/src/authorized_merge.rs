@@ -51,11 +51,17 @@ impl Effect {
 pub enum Outcome {
     Merged {
         head: String,
-        /// Set when the merge landed but something around it did not: a local
-        /// post-merge step that failed after the server-side merge, or the
-        /// REST recovery for a worktree-held branch. The caller renders it as
-        /// a partial outcome rather than losing it behind a bare success.
+        /// How the merge landed, when it was not the plain path. The REST
+        /// recovery for a worktree-held branch sets it. The caller renders it
+        /// as the success reason, never as trouble.
         note: Option<String>,
+        /// Set only when the merge landed and something around it did NOT: a
+        /// local post-merge step that failed after the server-side merge. The
+        /// caller renders it as a partial outcome. Keeping it apart from
+        /// `note` is load-bearing: a recovery that worked is not a failure,
+        /// and reporting it as one made every worktree-first merge read
+        /// partial.
+        cleanup_failure: Option<String>,
     },
     Armed {
         head: String,
@@ -124,10 +130,17 @@ impl Outcome {
     pub fn to_json(&self) -> Value {
         let mut out = json!({ "outcome": self.word(), "detail": self.detail() });
         match self {
-            Outcome::Merged { head, note } => {
+            Outcome::Merged {
+                head,
+                note,
+                cleanup_failure,
+            } => {
                 out["head"] = json!(head);
                 if let Some(note) = note {
                     out["note"] = json!(note);
+                }
+                if let Some(cleanup_failure) = cleanup_failure {
+                    out["cleanup_failure"] = json!(cleanup_failure);
                 }
             }
             Outcome::Armed { head } | Outcome::Authorized { head } => out["head"] = json!(head),
@@ -307,17 +320,20 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     }
 
     if request.require_checks {
+        // Only a POSITIVE red fails. Every other non-green answer holds, so a
+        // read that could not run - `fno do pr status` says `error` when the
+        // fetch is rate-limited or the network is down - retries instead of
+        // stamping the node's merge status failed.
         match probes.checks_verdict(cwd, facts.number).as_str() {
             "green" => {}
-            verdict @ ("pending" | "unknown") => {
-                return Err(Outcome::Held {
-                    reason: format!(
-                        "checks are {verdict}; require_checks_pass forbids merging without green"
-                    ),
+            "red" => {
+                return Err(Outcome::Failed {
+                    reason: "checks are red; require_checks_pass forbids merging without green"
+                        .to_string(),
                 })
             }
             verdict => {
-                return Err(Outcome::Failed {
+                return Err(Outcome::Held {
                     reason: format!(
                         "checks are {verdict}; require_checks_pass forbids merging without green"
                     ),
@@ -422,6 +438,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
             Effect::Merge => Outcome::Merged {
                 head: authorized.head.clone(),
                 note: None,
+                cleanup_failure: None,
             },
         };
     }
@@ -432,8 +449,9 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
     match probes.pr_facts(cwd, Some(number)) {
         Ok(after) if after.state == "MERGED" => Outcome::Merged {
             head: authorized.head.clone(),
-            note: Some(format!(
-                "merged server-side, but the gh {} exited non-zero afterwards: {}",
+            note: Some("merged server-side".to_string()),
+            cleanup_failure: Some(format!(
+                "gh {} exited non-zero after the server-side merge: {}",
                 request.effect.word(),
                 first_line(&output)
             )),
@@ -460,9 +478,11 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
                     format!("sha={}", authorized.head),
                 ];
                 if let Ok((true, _)) = probes.run_gh(cwd, &api) {
+                    // The recovery WORKED, so it carries no cleanup failure.
                     return Outcome::Merged {
                         head: authorized.head.clone(),
                         note: Some("merged server-side (worktree fallback)".to_string()),
+                        cleanup_failure: None,
                     };
                 }
             }
@@ -493,12 +513,21 @@ fn first_line(output: &str) -> String {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("no error output");
-    line[..line.len().min(200)].to_string()
+    // Truncate by CHARACTER. A byte slice panics when the cut lands inside a
+    // multi-byte character, and gh output carries them (a PR title, a branch
+    // name, a localized git message).
+    line.chars().take(200).collect()
 }
 
 fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
     let lower = output.to_lowercase();
-    let reason = if lower.contains("not mergeable") {
+    let reason = if lower.contains("fno/review-coverage") {
+        // This verb published that status itself moments ago. GitHub has not
+        // observed it yet, so the refusal clears on a retry.
+        "fno/review-coverage is still required after its success status was published; \
+         GitHub may not have observed the update yet - retry the merge"
+            .to_string()
+    } else if lower.contains("not mergeable") {
         "not mergeable (conflicts or base changed)".to_string()
     } else if lower.contains("protected") {
         "branch protected".to_string()
@@ -867,6 +896,9 @@ mod tests {
         floor: Option<String>,
         gh_ok: bool,
         gh_output: String,
+        /// Answer for the REST recovery call alone, so a test can fail the
+        /// `gh pr merge` and let the retry succeed.
+        gh_recovery_ok: Option<bool>,
         gh_calls: RefCell<Vec<Vec<String>>>,
     }
 
@@ -924,6 +956,11 @@ mod tests {
         }
         fn run_gh(&self, _cwd: &Path, args: &[String]) -> Result<(bool, String), String> {
             self.gh_calls.borrow_mut().push(args.to_vec());
+            if args.first().map(String::as_str) == Some("api") {
+                if let Some(ok) = self.gh_recovery_ok {
+                    return Ok((ok, String::new()));
+                }
+            }
             Ok((self.gh_ok, self.gh_output.clone()))
         }
     }
@@ -1096,6 +1133,7 @@ mod tests {
             Outcome::Merged {
                 head: "abc123".to_string(),
                 note: None,
+                cleanup_failure: None,
             }
         );
         let calls = fake.gh_calls.borrow();
@@ -1187,13 +1225,78 @@ mod tests {
         };
         let outcome = effect(&fake, &request(Effect::Merge), &authorized);
         assert_eq!(outcome.word(), "merged");
-        // The cleanup failure survives as a note; a bare success would lose it.
-        let Outcome::Merged { note, .. } = outcome else {
+        // The cleanup failure rides its OWN field. A bare success would lose
+        // it, and folding it into `note` would report the merge as partial.
+        let Outcome::Merged {
+            note,
+            cleanup_failure,
+            ..
+        } = outcome
+        else {
             unreachable!()
         };
-        assert!(note
-            .expect("a note")
+        assert_eq!(note.as_deref(), Some("merged server-side"));
+        assert!(cleanup_failure
+            .expect("a cleanup failure")
             .contains("failed to delete local branch"));
+    }
+
+    #[test]
+    fn a_worktree_recovery_that_worked_carries_no_cleanup_failure() {
+        // The regression this pins: the recovery is how the merge landed, not
+        // trouble around it. Rendered as a cleanup failure, every worktree-held
+        // merge - which is every worktree-first run - reported partial.
+        let fake = Fake {
+            gh_ok: false,
+            gh_output: "fatal: 'x' is already used by worktree at '/w'".to_string(),
+            gh_recovery_ok: Some(true),
+            ..clean()
+        };
+        let authorized = Authorized {
+            facts: open_facts(),
+            head: "abc123".to_string(),
+            strategy: "merge".to_string(),
+        };
+        let outcome = effect(&fake, &request(Effect::Merge), &authorized);
+        assert_eq!(
+            outcome,
+            Outcome::Merged {
+                head: "abc123".to_string(),
+                note: Some("merged server-side (worktree fallback)".to_string()),
+                cleanup_failure: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_checks_read_that_could_not_run_holds_instead_of_failing() {
+        // `fno do pr status` answers `error` when the fetch is rate-limited or
+        // the network is down. Failing on it stamps the node merge status
+        // failed for a read that never described the checks at all.
+        for verdict in ["error", "pending", "unknown"] {
+            let fake = Fake {
+                checks: Some(verdict.to_string()),
+                ..clean()
+            };
+            let mut req = request(Effect::Merge);
+            req.require_checks = true;
+            assert_eq!(run(&fake, &req).word(), "held", "verdict {verdict}");
+        }
+        let red = Fake {
+            checks: Some("red".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        assert_eq!(run(&red, &req).word(), "failed");
+    }
+
+    #[test]
+    fn a_multibyte_error_line_is_truncated_without_panicking() {
+        // A byte slice at 200 panics when the cut lands inside a character.
+        let line = "e".repeat(198) + &"é".repeat(20);
+        let cut = first_line(&line);
+        assert_eq!(cut.chars().count(), 200);
     }
 
     #[test]

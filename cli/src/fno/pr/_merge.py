@@ -2198,15 +2198,18 @@ def _do_merge(
 
     # The effect re-runs the whole decision, so the window the receipt opened is
     # closed again by the same guards, and the merge stays pinned to the head
-    # those guards read.
+    # those guards read. The second pass is the price of that window, not an
+    # oversight: it doubles the owner's probe spawns, and a merge is rare
+    # enough to pay it. Do not "optimize" it into one pass.
     receipt = _authorized_merge(pr_number, repo, **ask)
     if receipt.get("outcome") == "merged":
-        # A note means the merge LANDED and something around it did not - a
-        # local post-merge step, or the worktree-held REST recovery. It rides
-        # into the partial outcome so a landed merge is never reported failed
-        # and the cleanup trouble is never lost behind a bare success.
+        # Two different fields, and collapsing them is a bug: `note` says HOW
+        # the merge landed (the worktree-held REST recovery is a success),
+        # while `cleanup_failure` says a post-merge step failed AFTER the
+        # server-side merge. Only the second makes the outcome partial.
         note = str(receipt.get("note") or "")
-        if note:
+        cleanup_failure = str(receipt.get("cleanup_failure") or "")
+        if note or cleanup_failure:
             _git(["fetch", "origin"], repo)
         return _finish_confirmed_merge(
             pr_number,
@@ -2214,6 +2217,6 @@ def _do_merge(
             repo,
             auto_merge,
             note or "merged immediately",
-            prior_cleanup_failure=(f"failed: {note}" if note else ""),
+            prior_cleanup_failure=(f"failed: {cleanup_failure}" if cleanup_failure else ""),
         )
     return _emit_authorized_outcome(pr_number, receipt, strategy)

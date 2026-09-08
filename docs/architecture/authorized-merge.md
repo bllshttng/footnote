@@ -29,7 +29,7 @@ The receipt keeps them apart. `Armed` is a queue entry, a promise GitHub keeps l
 
 | Outcome | Means | Caller does |
 |---|---|---|
-| `Merged` | the merge landed; a `note` names any cleanup that failed around it | post-merge follow-ups |
+| `Merged` | the merge landed. `note` says how. `cleanup_failure` names a post-merge step that failed | post-merge follow-ups |
 | `Armed` | the queue owns it now | nothing; the queue merges on green |
 | `Authorized` | a `decide_only` pass cleared; nothing ran | its own pre-effect step, then ask again |
 | `Held` | retryable: a hold, a pending check, an already-armed PR | retry later |
@@ -58,6 +58,8 @@ The pin is never optional. It is the last guard between the decision and a racin
 No `--delete-branch`, on either path. Its LOCAL delete fails from inside the worktree that holds the branch. That made the best-disciplined merge the one most reliably reported failed. Remote cleanup is a separate step.
 
 A non-zero gh exit is never taken at face value. The PR's own state is re-read. When a post-merge step fails after the server-side merge landed, gh also exits non-zero. A branch another worktree holds recovers through the REST endpoint, which carries the same `sha` pin.
+
+The recovery and the cleanup failure ride separate fields. A recovery that worked is how the merge landed, not trouble around it. Folded together, every worktree-held merge reported partial.
 
 ## Who calls it
 

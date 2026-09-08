@@ -452,7 +452,8 @@ def _failing_required(rollup: Sequence[dict]) -> List[str]:
     _latest_per_name drops superseded runs; _classify reads pass/fail/pending
     with the shared semantics (a REQUESTED or empty-conclusion check is
     pending, not failing). No isRequired filter - `gh pr view` never emits
-    that key (see _merge._checks_verdict), so with require_checks_pass every
+    that key (see the checks arm of authorized_merge.rs), so with
+    require_checks_pass every
     check counts."""
     from fno.pr._status import _classify, _latest_per_name
 
@@ -545,26 +546,35 @@ def _bounded_remediation(
         sys.stdout.write(f"merge_state_unreadable: PR #{pr_number} {detail}\n")
         return 2
 
-    lowered = detail.lower()
-    if any(
-        tok in lowered
-        for tok in ("freshness", "stale state", "state file", "state-file mtime", "git-protection")
-    ):
-        _emit_audit(
-            repo_root,
-            state_file,
-            pr_number,
-            "merge_blocked_by_freshness_cap",
-            {"stderr_token": "freshness_cap"},
-        )
-        sys.stdout.write(
-            f"merge_blocked_by_freshness_cap: git-protection.py blocked the merge "
-            f"(state-file mtime > 1h). Bypass it from a shell with "
-            f"gh pr merge {pr_number} --{strategy}.\n"
-        )
-        return 1
-
     if outcome == "failed":
+        # The freshness read only ever described a gh command that RAN and was
+        # blocked, so it lives inside this arm. Outside it, a hold whose reason
+        # happens to name a state file was reported as a git-protection block,
+        # with a bypass instruction that addressed nothing.
+        lowered = detail.lower()
+        if any(
+            tok in lowered
+            for tok in (
+                "freshness",
+                "stale state",
+                "state file",
+                "state-file mtime",
+                "git-protection",
+            )
+        ):
+            _emit_audit(
+                repo_root,
+                state_file,
+                pr_number,
+                "merge_blocked_by_freshness_cap",
+                {"stderr_token": "freshness_cap"},
+            )
+            sys.stdout.write(
+                f"merge_blocked_by_freshness_cap: git-protection.py blocked the merge "
+                f"(state-file mtime > 1h). Bypass it from a shell with "
+                f"gh pr merge {pr_number} --{strategy}.\n"
+            )
+            return 1
         _emit_audit(repo_root, state_file, pr_number, "merge_attempt_failed", {"detail": detail})
         sys.stdout.write(f"merge_attempt_failed: {detail}\n")
         return 1
