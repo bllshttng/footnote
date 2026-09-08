@@ -358,7 +358,15 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 **Specimen.** `cli/src/fno/agents/spawn_defaults.py` derives the dispatch role from the node's `plan_path`. No node means no plan_path, so a planned node bills at the planning tier. On 2026-09-08 a spawn carrying the id only in its payload printed the note "planless target". It launched a Rust port on opus, against a standing rule that bars opus for implementation. The same spawn with the id passed as `--node` resolved the target lane and a flash model. The node had a 27.8K plan on disk throughout.
 
-*Graduates to:* the router parsing the node id out of the payload it already reads. A target verb whose node the router cannot see should refuse rather than reroute.
+*Graduates to:* the router parsing the node id out of the payload it already reads. A target verb whose node the router cannot see must refuse rather than reroute.
+
+## The orphan warning cannot see the workers most likely to be orphaned
+
+**Answer.** The stop hook lists live workers by their `spawned_by_session` link. A row with no link is not listed. So the warning names the workers that have a king, and stays silent about the ones that do not.
+
+**Specimen.** On 2026-09-08 the hook named two workers and both were correct. The same registry read showed 27 live rows, and 12 carried a null link. All 12 were codex target rows, and they matched the 12 pidless rows the footprint had already reported as an attribution gap. The hook's own text warns about this, which is the only reason anyone checked.
+
+*Graduates to:* the warning reporting the unlinked live count beside the linked list, so a silent zero and an unreadable one are told apart.
 
 ## Related
 
