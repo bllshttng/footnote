@@ -1157,14 +1157,21 @@ def summarize_promise_held(
     itself on the next sweep.
     """
     verb = "Holding" if dry_run else "Held"
+    headlines = {
+        "promise_unmet": "merged PR, unmet plan promise",
+        "promise_unknown": "ship count unconfirmed, retryable read failure",
+    }
+    # Grouped by the outcomes PRESENT, not by a hard-coded pair. A closed
+    # enumeration is the same shape the `satisfied` property exists to kill:
+    # a fourth outcome would be dropped from the roll, and a sweep holding
+    # only those nodes would print a blank line while holding them open.
+    order = list(headlines) + sorted({o for _, _, o in held} - set(headlines))
     lines: list[str] = []
-    for outcome, headline in (
-        ("promise_unmet", "merged PR, unmet plan promise"),
-        ("promise_unknown", "ship count unconfirmed, retryable read failure"),
-    ):
+    for outcome in order:
         rows = [(nid, reason) for nid, reason, out in held if out == outcome]
         if not rows:
             continue
+        headline = headlines.get(outcome, outcome)
         lines.append(f"{verb} {len(rows)} node(s) open ({headline}):")
         lines.extend(f"  {nid}: {reason}" for nid, reason in rows)
     return "\n".join(lines)

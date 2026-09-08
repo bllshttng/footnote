@@ -734,6 +734,18 @@ def test_held_open_roll_splits_refusal_from_outage():
     assert "Holding" in summarize_promise_held([("ab-1", "x", "promise_unmet")], dry_run=True)
 
 
+def test_held_open_roll_never_drops_an_unenumerated_outcome():
+    """A closed enumeration is the shape `satisfied` exists to kill: a fourth
+    refusal outcome must still reach the operator. Held open and printed as a
+    blank line is the silent-gate defect, not a display nit."""
+    from fno.graph._reconcile import summarize_promise_held
+
+    text = summarize_promise_held([("ab-9", "Refused: something new", "promise_future")])
+    assert "Held 1 node(s) open (promise_future):" in text
+    assert "  ab-9: Refused: something new" in text
+    assert text.strip()
+
+
 def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):
     """The inverse of the refusal: a plan declaring nothing closes clean on
     every close path - a regression on any single path that re-introduces an
