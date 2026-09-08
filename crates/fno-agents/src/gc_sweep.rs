@@ -584,12 +584,17 @@ pub(crate) fn claude_death_reason(
     if let Some(state) = row
         .state
         .as_deref()
-        .filter(|state| matches!(*state, "done" | "stopped" | "failed"))
+        .filter(|state| crate::claude_roster::is_terminal_roster_state(state))
     {
         return Some(format!("row {row_id} present, state {state}"));
     }
     if let Some(pid) = row.pid {
-        if crate::daemon::process_start_time(pid).is_none() {
+        // A failed lookup also answers None, and None is being read as death:
+        // demand two consecutive Nones so one transient probe failure cannot
+        // forge death evidence for a live worker.
+        if crate::daemon::process_start_time(pid).is_none()
+            && crate::daemon::process_start_time(pid).is_none()
+        {
             return Some(format!("row {row_id} pid {pid} is gone"));
         }
     }

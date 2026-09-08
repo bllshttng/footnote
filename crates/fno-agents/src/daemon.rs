@@ -6984,7 +6984,7 @@ async fn handle_rm_with(
         .as_ref()
         .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
         .and_then(|row| row.state.as_deref())
-        .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
+        .is_some_and(|state| crate::claude_roster::is_terminal_roster_state(state));
     let provably_gone = row_state_terminal
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));

@@ -63,6 +63,13 @@ impl ClaudeAgentRow {
     }
 }
 
+/// The one terminal-state set, shared by every death-evidence reader (rm's
+/// live gate, the reaper's stop confirmation). `blocked` is deliberately
+/// absent: a blocked row may be rotated and resumed, so it holds.
+pub fn is_terminal_roster_state(state: &str) -> bool {
+    matches!(state, "done" | "stopped" | "failed")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeAgentsSnapshot {
     Known {
