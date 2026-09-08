@@ -2068,8 +2068,9 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// candidate list (AC1-UI). `--dry-run` writes nothing. `--tabs-only` runs the
 /// tab fold alone and leaves every squad row and member record untouched;
 /// `--dead-only` reaps dead members alone and removes no squad row; together
-/// they run exactly those two halves, so the sweep modal's "both" can never
-/// remove a squad row the modal never offered to remove.
+/// (x-688b, with `--include-used-shells`) they run every half EXCEPT the
+/// squad-row pass, so the sweep modal's "both" can never remove a squad row
+/// the modal never offered to remove.
 ///
 /// `--include-used-shells` (x-cf97) is the one tab-fold widening, and it is
 /// OPT-IN: a tab of spent bare shells (every pane `cmd: None`, no `fno_id`,

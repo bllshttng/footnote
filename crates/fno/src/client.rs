@@ -2644,10 +2644,10 @@ fn build_sweep_modal(tabs: usize, used: usize, dead: usize) -> AuxPopup {
     }
     rows.push(choice(
         "both".into(),
-        "tabs and dead agents",
-        tabs > 0 || dead > 0,
+        "tabs, spent shells, and dead agents",
+        tabs > 0 || dead > 0 || used > 0,
     ));
-    if tabs > 0 || dead > 0 {
+    if tabs > 0 || dead > 0 || used > 0 {
         actions.push(AuxAction::SweepBoth);
     }
     if actions.is_empty() {
@@ -2672,6 +2672,31 @@ fn begin_sweep_apply(view: &mut View, scope: SweepScope) {
     }
 }
 
+/// The prune flags one sweep scope maps to, pure so the expansion each
+/// choice promises is unit-testable without spawning the verb. `both` means
+/// all three populations (x-688b): tabs, spent shells, and dead agents -
+/// with tabs 0 and used shells 21, a both that skipped the shells half
+/// closed nothing while the operator watched.
+fn sweep_apply_args(scope: SweepScope, args: &mut Vec<String>) {
+    match scope {
+        SweepScope::Tabs => args.push("--tabs-only".to_string()),
+        // (x-cf97) The opt-in half: tabs-only PLUS the flag that
+        // widens the tab fold to spent shells. Never the default.
+        SweepScope::UsedShells => {
+            args.push("--tabs-only".to_string());
+            args.push("--include-used-shells".to_string());
+        }
+        SweepScope::Dead => args.push("--dead-only".to_string()),
+        // Both halves, and nothing else: bare prune would also remove
+        // stale squad rows, which the modal never offered to remove.
+        SweepScope::Both => {
+            args.push("--tabs-only".to_string());
+            args.push("--dead-only".to_string());
+            args.push("--include-used-shells".to_string());
+        }
+    }
+}
+
 /// Run one `mux workspace prune` verb off the UI thread: a `--dry-run --json`
 /// probe for the choice modal's counts, or a scoped apply whose JSON receipt
 /// becomes the notice. Bounded so a wedged server cannot hold the UI loop's
@@ -2691,22 +2716,7 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
             10
         }
         SweepAction::Apply(scope) => {
-            match scope {
-                SweepScope::Tabs => args.push("--tabs-only".to_string()),
-                // (x-cf97) The opt-in half: tabs-only PLUS the flag that
-                // widens the tab fold to spent shells. Never the default.
-                SweepScope::UsedShells => {
-                    args.push("--tabs-only".to_string());
-                    args.push("--include-used-shells".to_string());
-                }
-                SweepScope::Dead => args.push("--dead-only".to_string()),
-                // Both halves, and nothing else: bare prune would also remove
-                // stale squad rows, which the modal never offered to remove.
-                SweepScope::Both => {
-                    args.push("--tabs-only".to_string());
-                    args.push("--dead-only".to_string());
-                }
-            }
+            sweep_apply_args(scope, &mut args);
             // Each folded tab is one control roundtrip; a big workspace
             // sweep legitimately outlasts a modal probe.
             60
