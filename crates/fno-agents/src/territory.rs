@@ -630,7 +630,9 @@ pub fn resolve_territories(
             cwd,
         });
     }
-    territories.sort_by(|a, b| a.key.cmp(&b.key));
+    // Python-order contract: crowned territories in scope order first, then
+    // the kingless loose territories in project order (the readout renders
+    // rows in exactly this order).
     Ok(territories)
 }
 

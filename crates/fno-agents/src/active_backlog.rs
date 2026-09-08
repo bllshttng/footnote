@@ -67,6 +67,7 @@ use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
 use crate::loopcheck::TerminationReason;
+use crate::territory;
 use crate::run_outcome::classify;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
@@ -1349,6 +1350,68 @@ impl ConvergeGate {
 /// yields an empty list, so the feature simply stays dormant.
 pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
     resolve_targets_report(fno_bin).0
+}
+
+/// The drain-target receipt, computed natively from the territory fact set
+/// (`territory::resolve_territories` + the `active_backlog` config block) -
+/// the same JSON shape the Python `fno config active-backlog --json` verb
+/// prints, so the supervisor and the passthroughs read one contract. An
+/// unreadable source is the Err naming it; never an empty list read as
+/// "nothing enabled".
+pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Value>, String> {
+    let facts = territory::active_backlog_facts(config_cwd);
+    if !facts.any_enabled() {
+        return Ok(Vec::new());
+    }
+    let interval = match facts.interval_seconds {
+        Some(s) => s as u64,
+        None => return Ok(Vec::new()),
+    };
+    let territories = territory::resolve_territories(config_cwd, registry_path)
+        .map_err(|e| e.0)?;
+    let mut targets = Vec::new();
+    for territory in territories {
+        // A rung-2 territory roots at the first member epic's own project
+        // (the converge core fans out across projects at dispatch time); a
+        // project territory roots at the project itself.
+        let root_project = if territory.rung == 2 {
+            territory.project.clone()
+        } else {
+            territory.project.clone()
+        };
+        if root_project.is_empty() || territory.cwd.is_empty() {
+            continue; // unrootable: skipped, never guessed
+        }
+        if !facts.is_enabled_for(Some(&root_project)) {
+            continue;
+        }
+        let mission = if territory.rung == 2 {
+            territory.members.first().cloned()
+        } else {
+            None
+        };
+        targets.push(json!({
+            "project": territory.project,
+            "cwd": territory.cwd,
+            "interval_seconds": interval,
+            "failure_limit": facts.failure_limit,
+            "mission": mission,
+            "scope": territory.key,
+            "rung": territory.rung,
+            "kingless": territory.kingless,
+            "members": territory.members,
+            "max_concurrent": facts.max_concurrent,
+        }));
+    }
+    // The drain iterates in canonical scope order (the Python resolver's
+    // `sorted(_territories(), key=scope)`).
+    targets.sort_by(|a, b| {
+        a["scope"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["scope"].as_str().unwrap_or(""))
+    });
+    Ok(targets)
 }
 
 /// [`resolve_targets`] plus the failure detail the supervisor reports in its
