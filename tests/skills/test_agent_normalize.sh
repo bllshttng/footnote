@@ -507,7 +507,7 @@ norm_gen() { DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "$1";
 OUT="$(norm_gen 'x-2aad bg')"
 if [[ "$(field "$OUT" node)" == "x-2aad" ]] \
    && [[ "$(field "$OUT" payload_mode)" == "build" ]] \
-   && [[ "$(field "$OUT" substrate)" == "bg" ]] \
+   && [[ "$(field "$OUT" substrate)" == "thread" ]] \
    && [[ "$(field "$OUT" message)" == "/target x-2aad --no-merge" ]]; then
   pass "configured-prefix id builds via /target"
 else
