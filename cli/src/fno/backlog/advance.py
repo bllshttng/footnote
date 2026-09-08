@@ -582,24 +582,13 @@ def _ready_nodes(
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "ready"]
-    if project:
-        cmd += ["--project", project]
-    if mission:
-        cmd += ["--mission", mission]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog ready exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        normal = []
-    else:
-        nodes = json.loads(out)
-        if not isinstance(nodes, list):
-            raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
-        normal = [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    # The native selection leg, one call: admission, cascade, ranking. The
+    # typed client raises on an unreachable keeper - never a locally
+    # recomputed fallback.
+    normal = store_ready(project=project, mission=mission, repo_root=repo_root())["rows"]
     observer = _dispatch_safe_observer(_undispatched_nodes(project, mission))
     from fno.backlog.undispatched import prepend_missed_rows
 
@@ -3940,25 +3929,12 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     semantics (descendants_of). Raises on a garbled response so the caller skips
     rather than guessing (Failure Modes: Errors).
     """
-    cmd = [
-        *_subprocess_util.fno_py_cmd(),
-        "backlog", "ready", "--parent", epic_id, "--all",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog ready --parent {epic_id} exited {proc.returncode}: "
-            f"{proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        return []
-    nodes = json.loads(out)
-    if not isinstance(nodes, list):
-        raise RuntimeError(
-            f"fno backlog ready --parent returned an unexpected shape: {out[:200]}"
-        )
-    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    # The same native leg the sequential drain rides, scoped to the epic:
+    # container-, claim-, open-PR-, batch- and guard-filtered, rank-sorted.
+    return store_ready(parent=epic_id, all=True, repo_root=repo_root())["rows"]
 
 
 def _binding_provider() -> Optional[str]:

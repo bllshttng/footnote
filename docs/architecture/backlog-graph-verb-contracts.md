@@ -615,6 +615,10 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
     distributed lock; do not run two ``--claim`` selectors concurrently outside
     the walker.
 
+## cmd_ready (the selection, served natively)
+
+Which backlog nodes may be dispatched right now, and in what order. The decision lives in `crates/fno-agents/src/backlog_ready.rs` (`backlog_ready::select`), served by the keeper's `ready` verb; `fno backlog ready` and `fno backlog next` are clients. The verb accepts the filter flags (`project`, `all`, `roadmap_id`, `parent`, `mission`, `include_ideas`, `include_deferred`, `repo_root`) and an optional `entries` array - rows ride IN, the one decision answers both backends (the external-tracker branch feeds `_joined_open_candidates` through it). The reply carries survivors plus per-node drops, first-filter attribution, with guard drops naming `dead-ancestor:<id>`, `design-stage`, `idea-stage`, `stale-quarantine`, `contained:<id>`, or the hold verdict's guard reason; `advance --explain` renders from them (AC4). A missing `--parent` node refuses (exit 1, `ReadyParentMissingError` client-side). An unreachable keeper refuses selection: `fno backlog ready` exits non-zero naming the keeper, never a locally recomputed fallback (AC6). The `next` observer merge (`_with_observer`) still re-verifies observer rows through the Python `selection_guards`: a divergence detector over the reply, not a second selection leg.
+
 ## selection_guards
 
 Return a skip-reason for a would-be-selected node, or None to select it.

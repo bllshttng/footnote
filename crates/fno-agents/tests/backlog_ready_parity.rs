@@ -1,13 +1,15 @@
-//! Differential parity for the dispatch admission decision (protocol steps
-//! 0-2, docs/architecture/dual-implementation-inventory.md). The Rust leg is
+//! Characterization for the dispatch admission decision (protocol steps 3-4,
+//! docs/architecture/dual-implementation-inventory.md). The Rust leg is
 //! `fno_agents::backlog_ready::select`, served over the keeper's `ready`
-//! verb; the Python leg it must equal is `cmd_ready`'s filter chain over
-//! `fno.backlog.explain`'s cascade. The goldens under
-//! `tests/golden/backlog_ready/` are captured from the PYTHON leg while both
-//! legs live; wave 5 of the port flips this file to characterization with
-//! the same oracle (the cascade is deleted there).
+//! verb. The goldens under `tests/golden/backlog_ready/` were captured from
+//! the PYTHON leg while both legs lived: the differential stage asserted
+//! Rust==Python byte-for-byte (modulo the volatile stamps and paths named in
+//! `normalize_volatile`) on survivor JSON, drop attribution, and survivor
+//! sets, then the Python cascade (`fno.backlog.explain
+//! .build_selection_filters` / `run_cascade`) and `cmd_ready`'s inline
+//! filters were deleted in the same change that flipped this file.
 
-//! parity-stage: differential
+//! parity-stage: characterization
 //! parity-oracle: fno.backlog.explain.build_selection_filters
 
 use serde_json::Value;
@@ -832,18 +834,21 @@ fn golden_dir() -> PathBuf {
 }
 
 #[test]
-fn differential_ready_selection_matches_the_python_leg() {
+fn characterization_ready_selection_matches_the_frozen_goldens() {
     let repo = canonical_repo_root();
     let capture = std::env::var("FNO_CAPTURE_GOLDEN").is_ok();
-    let failures: Vec<String> = Vec::new();
     for case in cases() {
         let (_m, ctx) = materialize(&case);
         let dir = _m.dir.path().to_path_buf();
-        let (py_exit, py_out, py_err) = run_python_ready(&repo, &dir, case.flags);
         let rs = rust_rows(&ctx, &case, &dir);
 
         if case.expect_err {
-            assert_eq!(py_exit, 1, "[{}] python must refuse", case.name);
+            if capture {
+                // The live verb refused at capture time; the refusal
+                // contract is the exit code, frozen with the goldens.
+                let (py_exit, _out, _err) = run_python_ready(&repo, &dir, case.flags);
+                assert_eq!(py_exit, 1, "[{}] python must refuse", case.name);
+            }
             assert!(
                 rs.get("error").is_some(),
                 "[{}] rust must refuse too",
@@ -852,14 +857,23 @@ fn differential_ready_selection_matches_the_python_leg() {
             continue;
         }
 
-        assert_eq!(py_exit, 0, "[{}] python leg failed: {py_err}", case.name);
-
-        // Rows: byte-equality on the projection list, modulo volatile stamps.
-        let py_rows: Value = serde_json::from_str(&py_out)
-            .unwrap_or_else(|e| panic!("[{}] python stdout is not JSON: {e}\n{py_out}", case.name));
-        let py_normalized = normalized_text(&py_rows);
+        // Rows: byte-equality on the projection list against the frozen
+        // golden, modulo volatile stamps. In capture mode the golden is the
+        // live Python leg's stdout, asserted equal before it freezes; in
+        // characterization mode the Python leg never runs.
         let rs_normalized = normalized_text(rs.get("rows").unwrap());
         if capture {
+            let (py_exit, py_out, py_err) = run_python_ready(&repo, &dir, case.flags);
+            assert_eq!(py_exit, 0, "[{}] python leg failed: {py_err}", case.name);
+            let py_rows: Value = serde_json::from_str(&py_out).unwrap_or_else(|e| {
+                panic!("[{}] python stdout is not JSON: {e}\n{py_out}", case.name)
+            });
+            let py_normalized = normalized_text(&py_rows);
+            assert_eq!(
+                rs_normalized, py_normalized,
+                "[{}] capture: rust diverged from the live python leg",
+                case.name
+            );
             std::fs::create_dir_all(golden_dir()).unwrap();
             std::fs::write(
                 golden_dir().join(format!("{}.out", case.name)),
@@ -877,9 +891,6 @@ fn differential_ready_selection_matches_the_python_leg() {
         }
 
         // Drops: the cascade's dropped-by map, first-filter attribution.
-        let (d_exit, d_out, d_err) = run_cascade_oracle(&repo, &dir, &case);
-        assert_eq!(d_exit, 0, "[{}] cascade oracle failed: {d_err}", case.name);
-        let oracle: Value = serde_json::from_str(&d_out).expect("oracle json");
         let rs_drops: BTreeMap<&str, &str> = rs
             .get("drops")
             .and_then(Value::as_array)
@@ -889,41 +900,65 @@ fn differential_ready_selection_matches_the_python_leg() {
                     .collect()
             })
             .unwrap_or_default();
-        let oracle_drops: BTreeMap<&str, &str> = oracle
-            .get("drops")
-            .and_then(Value::as_object)
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| Some((k.as_str(), v.as_str()?)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            rs_drops, oracle_drops,
-            "[{}] drop attribution diverges from the cascade",
-            case.name
-        );
-        // Survivor sets must also agree (the cascade is pre-sort; the rows
-        // golden already proves order).
-        let rs_survivors: BTreeSet<&str> = rs
-            .get("rows")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|r| r.get("id").and_then(Value::as_str))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let oracle_survivors: BTreeSet<&str> = oracle
-            .get("survivors")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        assert_eq!(
-            rs_survivors, oracle_survivors,
-            "[{}] survivor sets diverge",
-            case.name
-        );
+        let drops_path = golden_dir().join(format!("{}.drops.json", case.name));
+        if capture {
+            // The live cascade, one last time: attribution frozen at capture.
+            let (d_exit, d_out, d_err) = run_cascade_oracle(&repo, &dir, &case);
+            assert_eq!(d_exit, 0, "[{}] cascade oracle failed: {d_err}", case.name);
+            let oracle: Value = serde_json::from_str(&d_out).expect("oracle json");
+            let oracle_drops: BTreeMap<&str, &str> = oracle
+                .get("drops")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| Some((k.as_str(), v.as_str()?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                rs_drops, oracle_drops,
+                "[{}] drop attribution diverges from the live cascade",
+                case.name
+            );
+            let rs_survivors: BTreeSet<&str> = rs
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.get("id").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let oracle_survivors: BTreeSet<&str> = oracle
+                .get("survivors")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                rs_survivors, oracle_survivors,
+                "[{}] survivor sets diverge",
+                case.name
+            );
+            std::fs::write(
+                &drops_path,
+                serde_json::to_string_pretty(&serde_json::json!(oracle_drops)).unwrap(),
+            )
+            .unwrap();
+        } else {
+            let golden_drops: BTreeMap<String, String> = serde_json::from_str(
+                &std::fs::read_to_string(&drops_path)
+                    .unwrap_or_else(|e| panic!("[{}] missing golden .drops.json: {e}", case.name)),
+            )
+            .expect("golden drops parse");
+            let rs_typed: BTreeMap<String, String> = rs_drops
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(
+                rs_typed, golden_drops,
+                "[{}] drop attribution diverges from the frozen cascade",
+                case.name
+            );
+        }
     }
-    assert!(failures.is_empty());
 }
