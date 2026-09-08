@@ -320,10 +320,7 @@ def resolve_slot(
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"], "unarmed"
     chain = [str(line) for line in (out.get("chain") or [])]
-    candidate, verdict = out.get("candidate"), str(out.get("verdict") or "")
-    if not verdict:
-        verdict = slot_verdict(candidate, chain)
-    return candidate, chain, verdict
+    return out.get("candidate"), chain, str(out.get("verdict") or "unarmed")
 
 
 def _routing_enforced(settings: object) -> bool:
@@ -359,23 +356,6 @@ def routing_fingerprint(settings: object = None) -> str:
 def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
     """The verb's named field plus its chain, lines coerced verbatim."""
     return out.get(key), [str(line) for line in (out.get("chain") or [])]
-
-
-def slot_verdict(candidate: Any, chain: list[str]) -> str:
-    """The terminal classifier for a binary that predates the verdict field.
-
-    A policy refusal is held, capacity is held, and neither is "exhausted
-    dispatch"; anything else is the harness default standing by.
-    """
-    if candidate:
-        return "armed"
-    terminal = chain[-1] if chain else ""
-    if "slot=strict-refusal" in terminal or terminal.startswith("slot=config "):
-        return "policy-held"
-    if terminal.startswith("slot=exhausted"):
-        return "capacity-held"
-    return "unarmed"
-
 
 def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
     by_diff = getattr(profile, "by_difficulty", None)
