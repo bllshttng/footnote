@@ -10,7 +10,7 @@ def test_harness_qualified_review_spellings_all_stamp_review():
     the slash spellings all name a reviewer, prose never does."""
     assert infer_phase("$fno:review xhigh branch HEAD against main") == "review"
     assert infer_phase("/fno:review xhigh branch HEAD against main") == "review"
-    assert infer_phase("/code-review xhigh --comment") == "review"
+    assert infer_phase("/code-review <level> --comment") == "review"
     assert infer_phase("review this diff") == ""
     assert infer_phase("/fno:triage deep") == ""
     assert infer_phase("/fno:think deep") == "think"

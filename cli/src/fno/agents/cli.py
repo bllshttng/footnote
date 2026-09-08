@@ -978,7 +978,7 @@ def cmd_court(
 # verb: the x-4342 complaint shape is a review worker spawned with the node id
 # in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
 # reviewer row stamped on that sibling, so prose and other verbs arm nothing.
-from fno.agents.spawn_phase import REVIEW_VERB_PREFIXES as _REVIEW_VERB_PREFIXES
+from fno.agents.spawn_phase import REVIEW_VERB_PREFIXES as _REVIEW_VERB_PREFIXES  # noqa: E402
 
 
 def _resolve_spawn_merge_grant(message: str) -> dict:
@@ -2134,7 +2134,6 @@ def cmd_spawn(
         DispatchResolveError,
         apply_merge_posture_env,
         check_loop_participation,
-        is_target_family,
         message_carries_no_merge,
         normalize_legacy_no_merge,
     )
