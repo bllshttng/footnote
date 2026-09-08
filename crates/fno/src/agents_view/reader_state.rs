@@ -154,9 +154,15 @@ impl ReaderState {
                 .as_ref()
                 .is_some_and(|good| !good.is_empty()),
         };
-        let mut reg_rows = reg_derived
-            .or_else(|| self.last_good_reg.clone())
-            .unwrap_or_default();
+        let mut reg_rows = match &self.reg_raw {
+            // Last-good only rescues a PRESENT-but-garbage document (the torn
+            // write); a vanished file empties its source (AC2-EDGE) - falling
+            // back here would resurrect rows over a confirmed absence.
+            Some(_) => reg_derived
+                .or_else(|| self.last_good_reg.clone())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         // fno-truth junior badge (x-4a48): fill the no-badge/Idle gap for a
         // bg /target worker between turns from its claim + loop_check recency.
         if let Some(raw) = &self.reg_raw {
@@ -173,9 +179,12 @@ impl ReaderState {
                 .as_ref()
                 .is_some_and(|good| !good.is_empty()),
         };
-        let roster = roster_parsed
-            .or_else(|| self.last_good_roster.clone())
-            .unwrap_or_default();
+        let roster = match &self.roster_raw {
+            Some(_) => roster_parsed
+                .or_else(|| self.last_good_roster.clone())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         self.last_good_roster = Some(roster.clone());
 
         // (x-c914) Fold each isolated account's roster into the union, tagging
