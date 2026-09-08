@@ -368,6 +368,14 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 *Graduates to:* the warning reporting the unlinked live count beside the linked list, so a silent zero and an unreadable one are told apart.
 
+## My PR reads rounds 5 of 2
+
+**Answer.** A clean pass re-emitted per pushed head counts as a round. An attestation keys to the head, so every mechanical commit invites a fresh one. Attest only after a real findings round. A scoped fix and its verify is not a round.
+
+**Specimen.** On 2026-09-05 one PR reached 5 of 2 this way and its merge hold refused. On 2026-09-08 another reached the same count, burned across a revival fix, a collection fix, an import fix, and a merge of main. Coverage still read covered at the final head, so the extra rounds bought nothing. Two reviews complete a review, so rounds three through five were spent on commits that changed no finding.
+
+*Graduates to:* rounds keyed to a findings round rather than to a pushed head, so a mechanical commit cannot spend one.
+
 ## Related
 
 - [troubleshooting.md](troubleshooting.md) for run-level failures
