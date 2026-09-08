@@ -21,6 +21,20 @@
 # not know a `python-to-rust-conversion` ruling existed; a bare count would not
 # have told it. The subject is the searchable key.
 #
+# A subject alone is a table of contents, and a table of contents cannot warn
+# you. Measured 2026-09-07: a session whose preamble named `review-coverage`
+# and `review-rounds-sufficient` spent ninety minutes building a law-shaped
+# case against both, then read them and retracted it. It read the names as
+# topics it already knew. So a ruling that says IN ITS OWN TEXT not to reopen
+# it prints that ruling's first sentence. Everything else stays a name.
+#
+# The trigger is the clause, never the subject. Against the store on
+# 2026-09-07 that is two rows, both under `review-coverage`. The other law
+# that session broke, `review-rounds-sufficient`, carries no such clause and
+# still renders as a bare name, which is the intended narrowness: the block is
+# for rulings the operator wrote a stop sign into, not for every law an agent
+# has broken. Measured cost, whole preamble, 473 to 565 bytes.
+#
 # NEVER gate this on a crown. Law is fleet-wide and applies to every session,
 # crowned or not. `hooks/king-postcompact-reinject.sh` is the cautionary case:
 # it gates on `crown_level`, a field a DIFFERENT verb is responsible for
@@ -59,6 +73,7 @@ fi
 
 printf '%s' "$payload" | python3 -c '
 import json
+import re
 import sys
 
 RENDER_CAP = 8
@@ -128,11 +143,39 @@ damaged = payload.get("damaged") or 0
 if not total and not damaged:
     sys.exit(0)
 
+# A ruling that says not to reopen it is the one a confident agent walks past,
+# so it speaks for itself instead of being named. Matched on the decision TEXT:
+# the clause is the operator writing "settled", not a field anyone maintains.
+SETTLED = re.compile(r"do not reopen|is not reopened|do not re-derive|this is settled", re.I)
+SENTENCE_CAP = 120
+# The block is exempt from RENDER_CAP by design, so it carries its own ceiling.
+# Without one, a store that grows settled rulings grows the preamble every
+# session with nothing measuring it.
+SETTLED_SUBJECT_CAP = 3
+SETTLED_BLOCK_BYTES = 400
+
+settled = {}
+settled_order = []
 subjects = []
 for row in rows:
     if not isinstance(row, dict):
         continue
     subject = str(row.get("subject") or "").strip()
+    text = str(row.get("decision") or "").strip()
+    if text and SETTLED.search(text):
+        # The first sentence IS the ruling on every specimen ("Two reviews
+        # maximum."); the do-not-reopen clause itself is the longest sentence
+        # in the row and says nothing about what was decided.
+        first = re.split(r"(?<=[.!?])\s", text)[0].strip()
+        if len(first) > SENTENCE_CAP:
+            first = first[: SENTENCE_CAP - 1].rstrip() + "\u2026"
+        key = subject or "(unnamed)"
+        if key not in settled:
+            settled[key] = []
+            settled_order.append(key)
+        if first not in settled[key]:
+            settled[key].append(first)
+        continue
     if subject and subject not in subjects:
         subjects.append(subject)
 
@@ -170,6 +213,28 @@ print(
     "lists recent rulings across every subject. Do not re-derive a "
     "standing ruling."
 )
+# The settled block is separate and comes LAST, so it is the line the reader
+# leaves the preamble holding. It is never truncated by RENDER_CAP: the whole
+# defect is a settled ruling reaching the reader as a name it walks past.
+if settled_order:
+    lines = []
+    spent = 0
+    for key in settled_order[:SETTLED_SUBJECT_CAP]:
+        line = f"- {key}: " + " ".join(settled[key])
+        # The first line always renders, however long. A cap that can empty
+        # this block turns a settled ruling into silence, which is the exact
+        # failure the block exists to end.
+        if lines and spent + len(line) > SETTLED_BLOCK_BYTES:
+            break
+        lines.append(line)
+        spent += len(line)
+    dropped = len(settled_order) - len(lines)
+    print()
+    print("Settled, do not re-derive:")
+    for line in lines:
+        print(line)
+    if dropped > 0:
+        print(f"- and {dropped} more settled ruling(s): `fno backlog decisions --lane law`")
 if damaged:
     print()
     print(

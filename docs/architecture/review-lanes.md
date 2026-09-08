@@ -578,9 +578,15 @@ Neither layer covers the specimens alone. The probe cannot see the window betwee
 | Site | Registers | Why it is the one that matters |
 |---|---|---|
 | `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
+| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, so every pipeline review is held on any harness without a reviewer doing anything. It takes nothing on a refused or unconfirmed send: no review is running |
 | `skills/review/scripts/emit-attestation.sh` | releases it | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
+| `fno do review classify --attest` | releases it | the Python producer of the same row. It emitted the verdict and left the hold standing for the full TTL |
 | the TTL | ages it out | the reviewer died. See the receipt rule below |
 | a human or an unhooked harness | takes nothing | the named residual gap, covered only by the worktree probe |
+
+The requester site is the answer to PR 1575, merged 2026-09-07 while the only non-author review was still running. Eight findings, one HIGH, were discarded, and a review that finishes after a merge cannot post them. The hold existed and `fno do pr merge` was already fail-closed against it. Nothing took it. A hold nobody takes is identical to a hold that does not exist.
+
+A hold says a review is RUNNING. It counts no round and gates on no origin (laws `d-0fa92eb9`, `d-777e7d1f`).
 
 Registration NEVER blocks a review from starting. The probe still covers a review that runs unheld. A review that refuses to start because a lockfile write failed is strictly worse.
 
