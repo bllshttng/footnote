@@ -1,12 +1,8 @@
 """Blueprint session lifecycle verbs: stamp, close, reap.
 
-What a session did to this node, and what the next session inherits. The
-close releases the spawn-handover claim it was launched under and repoints
-dispatch_verb at the launch verb, so a finished blueprint stops holding
-its node and names the verb that runs next.
+The close releases the handover claim it was launched under and repoints
+dispatch_verb at the launch verb, so a finished blueprint names what runs next.
 """
-
-from __future__ import annotations
 
 import json
 import os
@@ -392,11 +388,8 @@ def cmd_session_close(
         "ended_at": ended_at,
         "added": added,
     }
-    # Name the next verb on the node BEFORE the claim release below: the release
-    # is what makes the node dispatchable again, and a dispatcher it wakes must
-    # never resolve the blueprint slot this close just ended. The codex $fno:
-    # spelling canonicalizes to /fno:, the only prefix the dispatch resolver
-    # reads back.
+    # Name the next verb BEFORE the release below: the release wakes
+    # dispatchers, and one must never resolve the blueprint slot just ended.
     launch_verb = launch.split()[0]
     stored_verb = launch_verb
     if launch_verb.startswith("$fno:"):
