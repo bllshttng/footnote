@@ -80,14 +80,14 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
   --crown <epic> --substrate pane --workspace <epic>
 ```
 
-`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `bg` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
+`--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `thread` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
 
 What `pane` buys here is the COURT, not the crown.
-The crown itself rides `--substrate bg` equally: a bg worker is a persistent conversation in claude's agent view, attachable and resumable, and only the `headless` one-shot is refused, since it exits before it can reign.
-What a bg king loses is placement.
-The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a bg session does not have.
-So a bg king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.
-Crown a bg king for a pass, which abdicates before layout matters; crown a pane king for a reign that runs a court.
+The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
+What a thread king loses is placement.
+The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a thread session does not have.
+So a thread king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.
+Crown a thread king for a pass, which abdicates before layout matters; crown a pane king for a reign that runs a court.
 
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
@@ -118,7 +118,7 @@ How you spell that depends on your provider, so take the requirement and not thi
 There is a rot-proof abstraction for this: set the node's work-difficulty band, `fno backlog update <id> --difficulty high`, and the dispatch grid resolves harness and model from live provider capacity rather than a hardcoded name.
 It is not a spawn-time flag; set it on the node before crowning, and the grid fires at spawn when no model or provider is pinned.
 The band is an intrinsic property of the work (expected time, edge cases, unknowns), not a quality-tier hint about models.
-- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `bg` is claude `--bg` or an opencode serve session, and hard-errors elsewhere. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
+- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `thread` is the persistent continuation lane; the capability rows and refusals are maintained in `docs/architecture/thread-lanes.md`. The deprecated `bg` alias maps to `thread`. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
 
 **Authority for the worker you crown.**
 `--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.
@@ -163,7 +163,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 **Priority.** High-priority work comes from the OPERATOR or from a KING SUPERIOR, not from whoever mails you most. Push back on either when you disagree, think clearly, and advocate for your team and your epic. The failure mode is structural, not a discipline gap: mail arrives as a discrete event with an id and a queue, so it gets recorded, while operator conversation is a stream with no boundary, so it does not - and the direction a king records FROM is the direction it gets pushed from. So the capture loop is part of the tick, not a memory exercise: run `fno inbox operator status`, disposition every queued operator turn before the tick ends, file an operator ask with `fno backlog idea --source-kind operator_request` or `fno backlog capture add`, record an operator ruling with `fno inbox law set`, then ack the turn naming what it produced: `fno inbox operator ack <turn-id> --outcome law:<id>|capture:<fu-id>|node:<id>|nothing`. A captured law lands as `chat_attested`, never as `operator`, and that is honest attribution rather than a downgrade: the ack records that the operator asked; it does not manufacture authority an agent never had.
 
 **Dispatch.**
-`fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
+`fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|thread|headless` starts a worker (`bg` is the deprecated alias for `thread`).
 The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
 `fno backlog join <node>` hands a held node's remaining waves to joiners in its worktree.
@@ -171,9 +171,9 @@ It refuses with a named exit code when it cannot, and [step 4](#4-kick-off) read
 
 **Placement is a pane-only concern, and it applies to both shapes.**
 `--workspace <name>` (short `-s`) sends a new pane into a named mux workspace, and `--split left|right|up|down` tiles it there.
-Both are refused outside `--substrate pane`: `bg` and `headless` have no mux geometry, so a `bg` example carrying `--workspace` is a command that exits nonzero rather than a stricter one.
+Both are refused outside `--substrate pane`: `thread` and `headless` have no mux geometry, so a `thread` example carrying `--workspace` is a command that exits nonzero rather than a stricter one.
 The consequence splits cleanly by substrate.
-A pass dispatching on `bg` or `headless` carries its mission in the graph and the spawn provenance, and names no placement flag at all.
+A pass dispatching on `thread` or `headless` carries its mission in the graph and the spawn provenance, and names no placement flag at all.
 Which placement flag depends on whether you are already in the target workspace, and the two cases split by shape.
 A **court** teammate anchors to your own pane with `--at current --split <dir>`, never `--workspace --split` - see [the court spawn contract](#spawn-each-teammate-into-your-mission-workspace) for why aiming at a workspace races on focus.
 The **ad-hoc pane a pass launches mid-kickoff** has no king pane to anchor to, so it takes explicit `--workspace <mission-workspace> --split <dir>` and accepts that race, which is harmless for a one-off it never has to sit beside.
