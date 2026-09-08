@@ -22,7 +22,7 @@ def infer_phase(message: str | None) -> str:
     a slash or dollar never reads as a review."""
     verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
     bare = verb.lstrip("/$")
-    if is_target_family(message):
+    if is_target_family(message or ""):
         return "do"
     if verb.startswith(REVIEW_VERB_PREFIXES) or bare.startswith("fno:review"):
         return "review"
