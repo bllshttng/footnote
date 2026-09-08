@@ -7916,56 +7916,6 @@ impl Core {
         live_attach_ids_snapshot()
     }
 
-    /// Fold the cached registry rows and the spawn journal into the same
-    /// evidence the standalone workspace-prune verb computes - one shared
-    /// fold (`fold_registry_rows`), so the daemon sweep and the CLI apply
-    /// can never drift on what a row or a reaped name proves. Unknown rows
-    /// contribute no verdict; only a positive `Alive` or `Dead` reading
-    /// enters a set. The journal read is injected so tests never touch the
-    /// operator's real events.jsonl.
-    fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
-        self.member_evidence_with_journal(&self.journal)
-    }
-
-    /// The path-injected core of [`Self::member_evidence`].
-    fn member_evidence_with_journal(
-        &self,
-        journal: &crate::spawn_journal::SpawnJournal,
-    ) -> crate::squad_store::MemberEvidence {
-        let mut evidence =
-            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
-        let held = crate::spawn_journal::held_worker_names(&journal.receipts);
-        evidence.fold_registry_rows(
-            &self.agents,
-            journal.spawned_names.clone(),
-            held,
-            self.agents_read_ok,
-        );
-        for name in journal.never_bound.keys() {
-            evidence.add_dead_name(name.clone());
-        }
-        evidence
-    }
-
-    fn dead_sweep_count(&self) -> usize {
-        let mut evidence = self.member_evidence();
-        for entry in self.panes.values() {
-            if let Some(worker) = &entry.refused_worker {
-                evidence.add_dead(worker.clone());
-            }
-        }
-        self.squad_members
-            .values()
-            .flatten()
-            .filter(|member| {
-                matches!(
-                    evidence.verdict(member),
-                    crate::squad_store::MemberLiveness::Dead
-                )
-            })
-            .count()
-    }
-
     fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
         self.squad_members.values().flatten().any(|member| {
             let Some(worker) = member.worker.as_deref() else {

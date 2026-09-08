@@ -3025,7 +3025,7 @@ mod tests {
         let exited = crate::agents_view::RegistryAgent {
             name: "w2".into(),
             harness: Some("claude".into()),
-            harness_session_id: Some("11111111-1111-1111-1111-111111111111".into()),
+            harness_session_id: Some("6d6d6d6d-1d1d-4d1d-8d1d-1d1d1d1d1d1d".into()),
             exited: true,
             liveness: crate::agents_view::Liveness::Dead,
             ..Default::default()
@@ -3033,7 +3033,7 @@ mod tests {
         let reused_dead = crate::agents_view::RegistryAgent {
             name: "w3".into(),
             harness: Some("claude".into()),
-            harness_session_id: Some("22222222-2222-2222-2222-222222222222".into()),
+            harness_session_id: Some("7e7e7e7e-2e2e-4e2e-9e2e-2e2e2e2e2e2e".into()),
             exited: true,
             liveness: crate::agents_view::Liveness::Dead,
             ..Default::default()

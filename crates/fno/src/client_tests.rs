@@ -6,6 +6,7 @@ use crate::vt::frame_text;
 // file is shrink-only under the file-budget gate.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
+mod sweep_both_tests;
 
 // The x-9fd0 portal-placement-picker family lives in its own module too.
 #[path = "client/tests/portal_pick_tests.rs"]
@@ -8705,47 +8706,6 @@ fn sweep_modal_is_centered_with_live_counts_and_inert_zeroes() {
         .rows
         .iter()
         .any(|row| matches!(row, PopupRow::Header(text) if text == "nothing to sweep")));
-}
-
-/// (x-688b) "Both" means both: with the measured workspace (tabs 0, dead 0,
-/// used shells 21) the both row is enabled, and the apply it queues carries
-/// all three flags - the old expansion excluded used shells, so an operator
-/// pressing both closed nothing while 21 sat there.
-#[test]
-fn sweep_both_row_enables_on_used_shells_alone_and_applies_all_three() {
-    let used_only = build_sweep_modal(0, 21, 0);
-    assert_eq!(
-        used_only.actions,
-        vec![AuxAction::SweepUsedShells, AuxAction::SweepBoth]
-    );
-    assert!(used_only.popup.rows.iter().any(|row| match row {
-        PopupRow::Entry { label, enabled, .. } => label == "both" && *enabled,
-        _ => false,
-    }));
-
-    let mut both_args = Vec::new();
-    sweep_apply_args(SweepScope::Both, &mut both_args);
-    assert_eq!(
-        both_args,
-        vec![
-            "--tabs-only".to_string(),
-            "--dead-only".to_string(),
-            "--include-used-shells".to_string(),
-        ],
-        "both must include the used-shells widening"
-    );
-    let mut used_args = Vec::new();
-    sweep_apply_args(SweepScope::UsedShells, &mut used_args);
-    assert_eq!(
-        used_args,
-        vec![
-            "--tabs-only".to_string(),
-            "--include-used-shells".to_string(),
-        ]
-    );
-    let mut dead_args = Vec::new();
-    sweep_apply_args(SweepScope::Dead, &mut dead_args);
-    assert_eq!(dead_args, vec!["--dead-only".to_string()]);
 }
 
 #[tokio::test]
