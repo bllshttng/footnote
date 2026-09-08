@@ -837,9 +837,19 @@ pub struct MemberEvidence {
     /// (x-688b) Names with a still-held spawn receipt: the worker is
     /// resumable, so registry absence must stay `Unknown`.
     held_names: std::collections::HashSet<String>,
-    /// (x-688b) The registry read itself succeeded (and the roster is
-    /// readable-or-absent). Only then may absence prove death; a failed read
-    /// keeps every member `Unknown`.
+    /// (x-0d08) Names the provenance cascade POSITIVELY resolved to a done,
+    /// PR-confirmed node. The caller asks the cascade once per Unknown
+    /// name-only member and inserts only the positive answers; a live name
+    /// never reaches here, so the verdict arm below retires nothing on an
+    /// absence.
+    retire_eligible_names: std::collections::HashSet<String>,
+    /// (x-0d08) The Unmeasured expiry: an Unmeasured registry row whose last
+    /// activity is older than this many seconds contributes its NAME to the
+    /// dead-row candidates, where the reuse guard (an alive same-name row, a
+    /// held spawn receipt) still protects it. Zero (the default) disables
+    /// the expiry and keeps the historical fail-safe.
+    unmeasured_expiry_s: u64,
+    now_secs: u64,
     complete_registry_names: bool,
     complete_attach_set: bool,
 }
@@ -858,6 +868,9 @@ impl MemberEvidence {
             registry_row_names: std::collections::HashSet::new(),
             spawned_names: std::collections::HashSet::new(),
             held_names: std::collections::HashSet::new(),
+            retire_eligible_names: std::collections::HashSet::new(),
+            unmeasured_expiry_s: 0,
+            now_secs: 0,
             complete_registry_names: false,
             complete_attach_set: false,
         }
@@ -876,6 +889,9 @@ impl MemberEvidence {
             registry_row_names: std::collections::HashSet::new(),
             spawned_names: std::collections::HashSet::new(),
             held_names: std::collections::HashSet::new(),
+            retire_eligible_names: std::collections::HashSet::new(),
+            unmeasured_expiry_s: 0,
+            now_secs: 0,
             complete_registry_names: false,
             complete_attach_set: true,
         }
@@ -898,6 +914,21 @@ impl MemberEvidence {
 
     pub fn mark_complete_attach_set(&mut self) {
         self.complete_attach_set = true;
+    }
+
+    /// (x-0d08) Arm the Unmeasured expiry: `now_secs` is the fold's clock,
+    /// `expiry_s` the inactivity bound past which an Unmeasured row's name
+    /// may join the dead-row candidates. Zero keeps the historical
+    /// fail-safe.
+    pub fn set_unmeasured_expiry(&mut self, now_secs: u64, expiry_s: u64) {
+        self.now_secs = now_secs;
+        self.unmeasured_expiry_s = expiry_s;
+    }
+
+    /// (x-0d08) A cascade answer: this name positively resolved to a done,
+    /// PR-confirmed node.
+    pub fn add_retire_eligible_name(&mut self, name: impl Into<String>) {
+        self.retire_eligible_names.insert(name.into());
     }
 
     pub fn add_live_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
@@ -960,7 +991,22 @@ impl MemberEvidence {
                 crate::agents_view::Liveness::Dead => {
                     dead_row_names.insert(row.name.clone());
                 }
-                crate::agents_view::Liveness::Unmeasured => continue,
+                crate::agents_view::Liveness::Unmeasured => {
+                    // (x-0d08) The expiry: a row the probe never measured
+                    // and whose last activity is older than the bound is
+                    // not live in any positive sense its evidence can
+                    // name. Its name joins the DEAD-ROW candidates, where
+                    // the reuse guard (an alive same-name row, a held spawn
+                    // receipt) still protects it. Zero disables.
+                    if self.unmeasured_expiry_s > 0 {
+                        if let Some(at) = row.updated_at {
+                            if self.now_secs.saturating_sub(at) > self.unmeasured_expiry_s {
+                                dead_row_names.insert(row.name.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
             }
             if let (Some(harness), Some(session_id)) = (row.harness.as_deref(), pair_session) {
                 match row.liveness {
@@ -1056,6 +1102,10 @@ impl MemberEvidence {
                 .worker
                 .as_deref()
                 .is_some_and(|w| self.dead_names.contains(w))
+            || member
+                .worker
+                .as_deref()
+                .is_some_and(|w| self.retire_eligible_names.contains(w))
         {
             MemberLiveness::Dead
         } else {
@@ -3071,6 +3121,137 @@ mod tests {
             evidence.verdict(&member),
             MemberLiveness::Unknown,
             "a resumable worker is not reaped by absence"
+        );
+    }
+
+    /// (x-0d08) A cascade POSITIVE answer retires the name-only member; a
+    /// name the cascade left unresolved, open, or held stays Unknown. The
+    /// reuse guard is upstream (the caller folds live identities first),
+    /// so this arm retires on positive evidence only.
+    #[test]
+    fn a_cascade_positive_answer_retires_a_name_only_member() {
+        use std::collections::HashSet;
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("target-x-aaaa-worker".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.add_retire_eligible_name("target-x-aaaa-worker");
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Dead,
+            "a done, PR-confirmed node is positive evidence"
+        );
+        let mut live_guard = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        live_guard.add_retire_eligible_name("target-x-aaaa-worker");
+        live_guard.add_live("target-x-aaaa-worker");
+        assert_eq!(
+            live_guard.verdict(&member),
+            MemberLiveness::Live,
+            "a live identity outranks the cascade answer"
+        );
+    }
+
+    /// (x-0d08) The Unmeasured expiry: a row the probe never measured whose
+    /// last activity is older than the bound contributes its name to the
+    /// dead-row candidates under the reuse guard; a fresh or never-active
+    /// row, or expiry disabled (0), stays fail-safe Unknown.
+    #[test]
+    fn the_unmeasured_expiry_folds_a_stale_row_under_the_reuse_guard() {
+        use std::collections::HashSet;
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("w9".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        let stale = crate::agents_view::RegistryAgent {
+            name: "w9".into(),
+            liveness: crate::agents_view::Liveness::Unmeasured,
+            updated_at: Some(1000),
+            ..Default::default()
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.set_unmeasured_expiry(10_000, 5_000);
+        evidence.fold_registry_rows(&[stale.clone()], HashSet::new(), HashSet::new(), true);
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Dead,
+            "unmeasured past the bound is dead evidence for the name"
+        );
+        let fresh = crate::agents_view::RegistryAgent {
+            name: "w9".into(),
+            liveness: crate::agents_view::Liveness::Unmeasured,
+            updated_at: Some(9_000),
+            ..Default::default()
+        };
+        let mut keep = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        keep.set_unmeasured_expiry(10_000, 5_000);
+        keep.fold_registry_rows(&[fresh], HashSet::new(), HashSet::new(), true);
+        assert_eq!(
+            keep.verdict(&member),
+            MemberLiveness::Unknown,
+            "a fresh unmeasured row stays fail-safe"
+        );
+        let mut disabled = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        disabled.fold_registry_rows(&[stale], HashSet::new(), HashSet::new(), true);
+        assert_eq!(
+            disabled.verdict(&member),
+            MemberLiveness::Unknown,
+            "expiry 0 (the default) keeps the historical fail-safe"
+        );
+    }
+
+    // The converse the cross-door property pins: a NAME-ONLY member sharing
+    // a live session's worker name stays Live. Its registry row reads
+    // Unmeasured and stale (the expiry folds the name), but the session's
+    // fresh transcript answers LIVE through the pair fold, and the live
+    // pair owes its name to the live set - the transcript store, not the
+    // row's write age, is the session's activity evidence.
+    #[test]
+    fn a_live_pair_outranks_the_expiry_folded_name() {
+        use std::collections::HashSet;
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("w9".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        let stale = crate::agents_view::RegistryAgent {
+            name: "w9".into(),
+            harness: Some("claude".into()),
+            liveness: crate::agents_view::Liveness::Unmeasured,
+            updated_at: Some(1000),
+            ..Default::default()
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.set_unmeasured_expiry(10_000, 5_000);
+        evidence.fold_registry_rows(&[stale], HashSet::new(), HashSet::new(), true);
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Dead,
+            "without the live answer the expiry folds the name"
+        );
+        evidence.add_live_pair("claude".to_string(), "uuu-1".to_string());
+        evidence.add_live("w9".to_string());
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Live,
+            "the live session's name outranks the expiry-folded name"
         );
     }
 
