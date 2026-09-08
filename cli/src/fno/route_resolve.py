@@ -284,13 +284,16 @@ def resolve_slot(
     explicit_model_value: Optional[str] = None,
     explicit_route_value: Optional[str] = None,
     explicit_vendor_value: Optional[str] = None,
+    meta: Optional[dict[str, Any]] = None,
 ) -> tuple[Optional[dict[str, Any]], list[str], str]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
     verbatim, and a missing or failing binary is a named refusal. ``work_verb``
     is the ORIGINAL dispatch command (a planless target plans: the command
     stays target while the slot is blueprint); it defaults to ``verb``. The
-    third element is the walk's own verdict word: armed, unarmed, or a hold."""
+    third element is the walk's own verdict word: armed, unarmed, or a hold.
+    Callers that need the structured refusal pass ``meta``; it is filled with
+    the verb's ``refusal_terminal`` object when the answer carries one."""
     import os
 
     settings, profile, lanes = _slot_entry(settings, verb)
@@ -320,6 +323,8 @@ def resolve_slot(
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"], "unarmed"
     chain = [str(line) for line in (out.get("chain") or [])]
+    if meta is not None and isinstance(out.get("refusal_terminal"), dict):
+        meta["refusal"] = out["refusal_terminal"]
     return out.get("candidate"), chain, str(out.get("verdict") or "unarmed")
 
 
@@ -331,13 +336,8 @@ def _routing_enforced(settings: object) -> bool:
 
 
 def routing_fingerprint(settings: object = None) -> str:
-    """A short fingerprint of the routing-relevant NONSECRET config inputs.
-
-    The receipt answer to "was the config that decided this the config that
-    launched": declared rows, policy fields and the slot table, with no
-    credential values. A changed fingerprint says the next launch re-selects;
-    it is never an ownership token.
-    """
+    """The receipt answer to "was this the config that launched": declared
+    rows, policy fields and the slot table, no credential values."""
     try:
         payload = {
             "rows": sorted(_declared_rows(settings).items()),

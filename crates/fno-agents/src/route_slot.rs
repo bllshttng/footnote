@@ -1790,7 +1790,30 @@ fn none(chain: Vec<Value>) -> Value {
             }
         })
         .unwrap_or("unarmed");
-    json!({"status": "none", "verdict": verdict, "candidate": Value::Null, "chain": chain})
+    let mut out =
+        json!({"status": "none", "verdict": verdict, "candidate": Value::Null, "chain": chain});
+    if let Some((class, text)) = refusal_terminal(&chain) {
+        out["refusal_terminal"] = json!({"class": class, "text": text});
+    }
+    out
+}
+
+/// The user-facing refusal a terminal composes, so consumers read a field
+/// instead of parsing chain strings. The chain lines stay verbatim; this is
+/// added structure beside them. A `config` fault is bare; a `strict` refusal
+/// carries the policy annotation the seam used to compose.
+fn refusal_terminal(chain: &[Value]) -> Option<(String, String)> {
+    let terminal = chain.last()?.as_str()?;
+    if let Some(rest) = terminal.strip_prefix("slot=config ") {
+        return Some(("config".to_string(), rest.to_string()));
+    }
+    if let Some(rest) = terminal.strip_prefix("slot=strict-refusal ") {
+        return Some((
+            "strict".to_string(),
+            format!("{rest} (strict routing: config routing.enforce_inventory)"),
+        ));
+    }
+    None
 }
 
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
@@ -1808,7 +1831,7 @@ fn exhausted_decision(chain: Vec<Value>) -> Value {
 /// Null, and `reason_kind` tells machine consumers this apart from a
 /// capacity queue or an unarmed legacy no-candidate.
 fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
-    json!({
+    let mut out = json!({
         "status": "none",
         "verdict": "policy-held",
         "candidate": Value::Null,
@@ -1816,7 +1839,13 @@ fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
         "refusal": kind,
         "reason": reason,
         "chain": chain,
-    })
+    });
+    // `refusal` stays the kind string; the structured terminal rides beside
+    // it under its own key.
+    if let Some((class, text)) = refusal_terminal(out["chain"].as_array().expect("chain array")) {
+        out["refusal_terminal"] = json!({"class": class, "text": text});
+    }
+    out
 }
 
 /// The native operator view a harness can show, if the harness has one on
@@ -1864,44 +1893,121 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
     if args.first().map(String::as_str) == Some("audit") {
         return run_route_slot_audit(&args[1..]);
     }
-    let payload: Value = if let Some(path) = args.first() {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (
-                        2,
-                        String::new(),
-                        format!("route-slot: bad payload file {path}: {e}\n"),
-                    )
-                }
-            },
-            Err(e) => {
-                return (
-                    2,
-                    String::new(),
-                    format!("route-slot: cannot read payload {path}: {e}\n"),
-                )
-            }
-        }
-    } else {
-        let mut buf = String::new();
-        match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
-            Ok(_) => match serde_json::from_str(&buf) {
-                Ok(v) => v,
-                Err(e) => return (2, String::new(), format!("route-slot: bad payload: {e}\n")),
-            },
-            Err(e) => {
-                return (
-                    2,
-                    String::new(),
-                    format!("route-slot: stdin read failed: {e}\n"),
-                )
-            }
-        }
+    let payload = match read_route_slot_payload(args) {
+        Ok(v) => v,
+        Err(fail) => return fail,
     };
+    // The Python transport sends the verb only as argv[1] with the payload on
+    // stdin, so the journal op rides inside the payload, not in argv.
+    if payload.get("op").and_then(Value::as_str) == Some("journal") {
+        return run_route_slot_journal(&payload);
+    }
     let out = resolve_slot_payload(&payload);
     (0, format!("{out}\n"), String::new())
+}
+
+/// Payload reader shared by every subcommand: one payload file argument, else
+/// stdin. The failure strings are part of the verb's contract.
+fn read_route_slot_payload(args: &[String]) -> Result<Value, (i32, String, String)> {
+    if let Some(path) = args.first() {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            (
+                2,
+                String::new(),
+                format!("route-slot: cannot read payload {path}: {e}\n"),
+            )
+        })?;
+        return serde_json::from_str(&text).map_err(|e| {
+            (
+                2,
+                String::new(),
+                format!("route-slot: bad payload file {path}: {e}\n"),
+            )
+        });
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map_err(|e| {
+        (
+            2,
+            String::new(),
+            format!("route-slot: stdin read failed: {e}\n"),
+        )
+    })?;
+    serde_json::from_str(&buf)
+        .map_err(|e| (2, String::new(), format!("route-slot: bad payload: {e}\n")))
+}
+
+/// `route-slot journal`: append one spawn_defaults_applied receipt to the
+/// agents event journal (x-90a9). The WRITE belongs to the verb; the row keeps
+/// the flat envelope (`kind` plus flattened fields) every reader of this event
+/// parses, so the emitter here is a plain appender, not the x-2901 framing.
+/// The caller passes the resolved journal path: the binary reads no config.
+pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
+    let path = match payload.get("path").and_then(Value::as_str) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            return (
+                2,
+                String::new(),
+                "route-slot journal: payload carries no path\n".to_string(),
+            )
+        }
+    };
+    let mut record = match payload.get("event").and_then(Value::as_object) {
+        Some(m) => m.clone(),
+        None => {
+            return (
+                2,
+                String::new(),
+                "route-slot journal: payload carries no event object\n".to_string(),
+            )
+        }
+    };
+    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
+    record.insert(
+        "kind".into(),
+        Value::String("spawn_defaults_applied".to_string()),
+    );
+    let mut line = match serde_json::to_string(&Value::Object(record)) {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                1,
+                String::new(),
+                format!("route-slot journal: serialize failed: {e}\n"),
+            )
+        }
+    };
+    line.push('\n');
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                1,
+                String::new(),
+                format!("route-slot journal: open failed: {e}\n"),
+            )
+        }
+    };
+    match std::io::Write::write_all(&mut file, line.as_bytes()) {
+        Ok(()) => (
+            0,
+            format!("journal: spawn_defaults_applied -> {}\n", path.display()),
+            String::new(),
+        ),
+        Err(e) => (
+            1,
+            String::new(),
+            format!("route-slot journal: write failed: {e}\n"),
+        ),
+    }
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy

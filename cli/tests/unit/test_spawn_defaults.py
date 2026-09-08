@@ -1619,7 +1619,7 @@ def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
 
 
 @requires_rust
-def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
+def test_model_vendor_mismatch_emits_measurement_event(monkeypatch, tmp_path):
     emitted = []
     monkeypatch.setattr(
         "fno.agents.events.emit",
@@ -1634,8 +1634,9 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     # `model_source` and `outcome` ride the event because the measurement is
     # useless without them: a warned typed pairing and a refused injected one
     # are different facts, and the old payload rendered them identically.
-    # The seam's own spawn_defaults_applied decision event (task 0.1) rides
-    # the same emit; it carries no mismatch fields, so filter on kinds.
+    # The seam's own spawn_defaults_applied receipt (task 0.1) no longer rides
+    # this emit: it is appended through the route-slot journal into the
+    # pinned journal, so it is asserted there.
     mismatch = [e for e in emitted if e[0] == "model_vendor_mismatch"]
     assert mismatch == [
         (
@@ -1649,8 +1650,14 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
             },
         )
     ]
-    kinds = [k for k, _ in emitted]
-    assert kinds.count("spawn_defaults_applied") == 1
+    journal = tmp_path / "events.jsonl"
+    rows = (
+        [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+        if journal.exists()
+        else []
+    )
+    receipts = [r for r in rows if r.get("kind") == "spawn_defaults_applied"]
+    assert len(receipts) == 1
 
 
 @requires_rust

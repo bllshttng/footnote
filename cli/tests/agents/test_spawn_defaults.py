@@ -312,7 +312,28 @@ def _stub_route_slot(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[di
 
     def _call(payload: dict) -> dict:
         seen.append(payload)
-        return decision
+        if "op" in payload:
+            return {"status": "ok"}
+        answer = dict(decision)
+        # The real verb composes the refusal terminal beside the verbatim
+        # chain; the stub mirrors that composition from the same terminal.
+        chain = answer.get("chain") or []
+        terminal = chain[-1] if chain else ""
+        if terminal.startswith("slot=config "):
+            answer.setdefault(
+                "refusal_terminal",
+                {"class": "config", "text": terminal[len("slot=config "):]},
+            )
+        elif terminal.startswith("slot=strict-refusal "):
+            answer.setdefault(
+                "refusal_terminal",
+                {
+                    "class": "strict",
+                    "text": terminal[len("slot=strict-refusal "):]
+                    + " (strict routing: config routing.enforce_inventory)",
+                },
+            )
+        return answer
 
     monkeypatch.setattr(rsc, "route_slot_call", _call)
     return seen
@@ -486,5 +507,8 @@ def test_strict_seam_forwards_the_verb_on_every_spawn(
         err=io.StringIO(),
         routing=_Routing(enforce_inventory=True),
     )
-    assert len(seen) == 2, seen
-    assert all(p["work_verb"] == "target" for p in seen)
+    # Two resolves plus the receipt journal each spawn now appends through
+    # the same transport; only the resolves carry the work verb.
+    resolves = [p for p in seen if "event" not in p]
+    assert len(resolves) == 2, seen
+    assert all(p["work_verb"] == "target" for p in resolves)

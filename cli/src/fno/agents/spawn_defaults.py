@@ -1101,12 +1101,10 @@ def inject_spawn_defaults(
     )
     slot_receipt: List[Tuple[str, str, str]] = []
     # (axis, value, rung, reason): a config-resolved axis this spawn did NOT
-    # get. Route is the axis that bills, so an omission there must name itself
-    # (the four-way silent drop); the others already print.
+    # get. Route is the axis that bills, so an omission there names itself.
     suppressed: List[Tuple[str, str, str, str]] = []
-    # Strict inventory policy: the resolver runs on EVERY spawn, even one
-    # whose model axis is occupied - an explicit pin is a constraint the
-    # slot qualifies, never a bypass.
+    # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies,
+    # never bypasses.
     enforced = bool(
         getattr(getattr(settings, "routing", None), "enforce_inventory", False)
     )
@@ -1143,6 +1141,7 @@ def inject_spawn_defaults(
                     protected_name = role.strip().lower()
             except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
                 protected_name = None
+            _slot_meta: dict = {}
             try:
                 from fno import route_resolve as _rr
 
@@ -1179,13 +1178,13 @@ def inject_spawn_defaults(
                         if explicit_vendor_present
                         else None
                     ),
+                    meta=_slot_meta,
                 )
             except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
                 if enforced:
                     print(
-                        "fno agents spawn: routing decision unavailable "
-                        f"({_exc}); strict routing refuses without a "
-                        "complete decision",
+                        f"fno agents spawn: routing decision unavailable "
+                        f"({_exc}); strict routing refuses without a complete decision",
                         file=err,
                     )
                     print("fno agents spawn: refusing; no worker launched", file=err)
@@ -1205,6 +1204,11 @@ def inject_spawn_defaults(
 
         if slot_chain:
             _terminal = slot_chain[-1]
+            # Config faults and strict refusals arrive pre-composed from the
+            # verb's refusal_terminal; only transport faults parse here.
+            _refusal = _slot_meta.get("refusal") or {}
+            if _refusal.get("text"):
+                _refuse(f"fno agents spawn: {_refusal['text']}")
             if _terminal.startswith("slot=config "):
                 _refuse(f"fno agents spawn: {_terminal[len('slot=config '):]}")
             if _terminal.startswith("slot=provider-count-unavailable "):
@@ -1223,11 +1227,6 @@ def inject_spawn_defaults(
                         if enforced
                         else ""
                     )
-                )
-            if _terminal.startswith("slot=strict-refusal"):
-                _refuse(
-                    f"fno agents spawn: {_terminal[len('slot=strict-refusal '):]} "
-                    "(strict routing: config routing.enforce_inventory)"
                 )
             if _terminal == "slot=manual_account_switch_required":
                 _refuse(
@@ -1931,6 +1930,19 @@ def _seam_axes_view(scope: dict) -> dict:
     return axes
 
 
+def _journal_path() -> str:
+    """The agents journal the receipt rides: the test/hermetic pin, else the
+    state dir's events.jsonl (the same file the old in-process writer hit)."""
+    import os
+
+    pin = os.environ.get("FNO_EVENTS_PATH")
+    if pin:
+        return pin
+    from fno import paths
+
+    return str(paths.state_dir() / "events.jsonl")
+
+
 def _emit_defaults_applied(
     out: Sequence[str],
     verb: Optional[str],
@@ -1942,27 +1954,29 @@ def _emit_defaults_applied(
 ) -> None:
     """Journal one spawn_defaults_applied decision receipt for this spawn.
 
-    Exactly one event per completed seam resolution: the applied axes with
-    their rungs, the suppressed ones with their reasons, and the routing
-    config fingerprint the decision rode on. The emit must not be able to
-    raise - an unwritable journal (or a raising ``paths.state_dir()`` under
-    the hermetic guard) can never turn an already-valid launch into a crash.
-    Diagnostic failure also never waives strict qualification; that decision
-    lives upstream of this call.
+    Exactly one event per completed seam resolution. The WRITE belongs to the
+    route-slot verb; the journal path is resolved here because the binary
+    reads no config. The call must not be able to raise - a missing binary or
+    an unwritable journal can never turn an already-valid launch into a
+    crash. Diagnostic failure also never waives strict qualification; that
+    decision lives upstream of this call.
     """
     try:
-        from fno.agents.events import emit
+        from fno.route_slot_client import route_slot_call
 
-        emit(
-            "spawn_defaults_applied",
-            name=_flag_value(out[1:], "--name"),
-            verb=verb,
-            seed=seed,
-            fingerprint=fingerprint,
-            resolved={axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
-            applied=[list(entry) for entry in applied],
-            suppressed=[list(entry) for entry in suppressed],
-        )
+        route_slot_call({
+            "op": "journal",
+            "path": _journal_path(),
+            "event": {
+                "name": _flag_value(out[1:], "--name"),
+                "verb": verb,
+                "seed": seed,
+                "fingerprint": fingerprint,
+                "resolved": {axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
+                "applied": [list(entry) for entry in applied],
+                "suppressed": [list(entry) for entry in suppressed],
+            },
+        })
     except Exception:  # noqa: BLE001 - a dead journal never bricks a spawn
         pass
 
