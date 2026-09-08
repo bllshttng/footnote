@@ -2933,14 +2933,27 @@ def cmd_intake(
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Annotate silently: write the note and notify nobody.",
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
 ) -> None:
-    """Append a timestamped progress note to a backlog node (append-only).
+    """Append a timestamped progress note to a backlog node, and DELIVER it.
 
     Distinct from ``update --details`` (which REPLACES the rationale) and the
     single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
     entries. The status-fanout backlog-progress adapter stamps one per
     ``task_done``/``run_summary`` (); it is also hand-runnable.
+
+    Delivery is the DEFAULT. A worker reads its node once, at dispatch, so a
+    note written after that reaches nobody unless the verb mails it: the node's
+    live claim holder, the holder of the node whose PR carries it, and the
+    crowned king of its epic each get a POINTER naming the node. ``--quiet`` is
+    the deliberate silent annotation. A forgotten flag then costs a redundant
+    mail, where a forgotten mail used to cost the finding.
     """
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
@@ -2968,6 +2981,35 @@ def cmd_note(
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
         typer.echo(f"noted {task_id}: {text}")
+    if not quiet:
+        _deliver_note(task_id, text, to_stderr=json_output)
+
+
+def _deliver_note(task_id: str, text: str, *, to_stderr: bool = False) -> None:
+    """Mail the note's readers and print what happened. Never raises.
+
+    Every outcome is printed, including "nobody to reach". Silence here would be
+    indistinguishable from delivery, which is the defect the verb now closes.
+    A receipt that is not a delivery - ``notify FAILED``, ``notify UNCONFIRMED``
+    - goes to stderr wherever the receipts land, so a lost delivery stays visible
+    in a log that keeps the two streams apart.
+    """
+    try:
+        from fno.graph.note_notify import notify_note
+
+        receipts = notify_note(task_id, text, graph_path=_graph_path())
+    except Exception as exc:  # noqa: BLE001 - the note is written; delivery is best-effort
+        typer.echo(f"notify FAILED {task_id}: {exc}", err=True)
+        return
+    if not receipts:
+        typer.echo(
+            f"notify: no holder, owner or king to reach for {task_id}",
+            err=to_stderr,
+        )
+        return
+    for receipt in receipts:
+        undelivered = receipt.startswith(("notify FAILED", "notify UNCONFIRMED"))
+        typer.echo(receipt, err=to_stderr or undelivered)
 
 
 def _warn_if_note_is_long(text: str) -> None:

@@ -22,6 +22,11 @@ from typing import Any, Callable, Iterable, Optional
 # notes in one 10-minute window share that window.
 _POINTER_WORDS = 20
 
+# One send's patience. A live inject waits on the recipient's flock (30s default
+# plus a grace retry), and a note must not pay that twice over.
+# ponytail: fixed bound, make it config if a slow lane needs more.
+_SEND_TIMEOUT_SECONDS = 30.0
+
 
 def _owner_id(entry: dict) -> Optional[str]:
     """The node whose PR carries this work, when it is not this node."""
@@ -77,8 +82,16 @@ def note_recipients(
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
 
+    def is_self(address: str) -> bool:
+        # A claim holder is role-prefixed (`target-session:<id>`) while the
+        # identity prover returns the bare session id, so an equality test alone
+        # mails the author its own note.
+        return bool(self_session) and (
+            address == self_session or address.endswith(f":{self_session}")
+        )
+
     def add(address: Optional[str], why: str) -> None:
-        if not address or address == self_session or address in seen:
+        if not address or address in seen or is_self(address):
             return
         seen.add(address)
         out.append((address, why))
@@ -146,11 +159,45 @@ def notify_note(
     body = pointer(entry.get("id") or node_id, text)
     receipts: list[str] = []
     for address, why in recipients:
-        try:
-            receipts.append(f"notified {address} ({why}): {send(address, body)}")
-        except Exception as exc:  # noqa: BLE001 - one bad address is not the rest
-            receipts.append(f"notify FAILED {address} ({why}): {exc}")
+        state, value = _bounded_send(send, address, body)
+        if state == "ok":
+            receipts.append(f"notified {address} ({why}): {value}")
+        elif state == "timeout":
+            receipts.append(
+                f"notify UNCONFIRMED {address} ({why}): no answer in "
+                f"{_SEND_TIMEOUT_SECONDS:.0f}s"
+            )
+        else:
+            receipts.append(f"notify FAILED {address} ({why}): {value}")
     return receipts
+
+
+def _bounded_send(
+    send: Callable[[str, str], str], address: str, body: str
+) -> tuple[str, Any]:
+    """One send, bounded by a wall clock. Returns ``(ok|err|timeout, value)``.
+
+    A live inject waits on the recipient's per-agent flock and can outlast any
+    patience a writer has: one measured run wedged past 150s. A note is a write
+    verb, so an unanswered recipient must cost seconds and a printed receipt,
+    never the turn. The thread is a daemon: the process exits without it, the OS
+    drops the flock, and the recipient sees no half-written envelope because the
+    mail store writes atomically.
+    """
+    import threading
+
+    out: list[tuple[str, Any]] = []
+
+    def run() -> None:
+        try:
+            out.append(("ok", send(address, body)))
+        except Exception as exc:  # noqa: BLE001 - one bad address is not the rest
+            out.append(("err", exc))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(_SEND_TIMEOUT_SECONDS)
+    return out[0] if out else ("timeout", None)
 
 
 def _default_claim_reader(key: str) -> dict[str, Any]:
@@ -179,5 +226,9 @@ def _self_session() -> Optional[str]:
 def _default_sender(address: str, body: str) -> str:
     from fno.agents.dispatch import dispatch_send
 
-    result = dispatch_send(address, body, None, cwd=Path.cwd(), from_name="fno")
+    # A short lock timeout on purpose: a contended recipient should get the
+    # durable envelope now rather than block the writer for 30 seconds.
+    result = dispatch_send(
+        address, body, None, cwd=Path.cwd(), from_name="fno", lock_timeout=5.0
+    )
     return f"{result.delivery} {result.msg_id}"

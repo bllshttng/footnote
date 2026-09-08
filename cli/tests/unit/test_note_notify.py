@@ -94,6 +94,18 @@ def test_the_author_is_never_mailed_its_own_note() -> None:
     assert got == []
 
 
+def test_a_role_prefixed_holder_is_still_recognised_as_self() -> None:
+    """`target-session:<id>` is the same session as the bare `<id>` prover."""
+    got = note_recipients(
+        {"id": "x-0d08"},
+        index={},
+        claim_reader=_claims(**{"node:x-0d08": _live("target-session:sess-me")}),
+        king_resolver=lambda scope: [],
+        self_session="sess-me",
+    )
+    assert got == []
+
+
 def test_a_raising_king_resolver_costs_the_king_not_the_holder() -> None:
     def boom(scope: str) -> list[str]:
         raise RuntimeError("registry unreadable")
@@ -180,3 +192,115 @@ def test_an_unknown_node_reports_rather_than_raising(tmp_path: Path) -> None:
         self_session="sess-me",
     )
     assert receipts == ["notify FAILED x-ffff (no such node): nothing to resolve"]
+
+
+# --- the verb itself: delivery is the default, and --quiet is the opt-out ---
+
+
+def _run(monkeypatch, argv: list[str], receipts: list[str] | None = None, boom: bool = False):
+    """Run `fno backlog note` with the graph write and the send both stubbed."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_notify
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        "fno.graph.store.append_progress_note", lambda *a, **k: (True, None)
+    )
+    calls: list[tuple] = []
+
+    def fake_notify(node_id, text, **kwargs):
+        calls.append((node_id, text))
+        if boom:
+            raise RuntimeError("resolver exploded")
+        return receipts or []
+
+    monkeypatch.setattr(note_notify, "notify_note", fake_notify)
+    result = CliRunner().invoke(graph_cli.cli, argv)
+    return result, calls
+
+
+def test_the_verb_delivers_by_default(monkeypatch) -> None:
+    result, calls = _run(
+        monkeypatch,
+        ["note", "x-0d08", "the finding"],
+        receipts=["notified sess-worker (holder of x-0d08): hosted msg-abc12345"],
+    )
+    assert result.exit_code == 0
+    assert calls == [("x-0d08", "the finding")]
+    assert "noted x-0d08: the finding" in result.stdout
+    assert "notified sess-worker" in result.stdout
+
+
+def test_quiet_writes_the_note_and_sends_nothing(monkeypatch) -> None:
+    result, calls = _run(monkeypatch, ["note", "x-0d08", "the finding", "--quiet"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "noted x-0d08: the finding" in result.stdout
+    assert "notif" not in result.stdout
+
+
+def test_nobody_to_reach_is_printed_rather_than_silent(monkeypatch) -> None:
+    result, _ = _run(monkeypatch, ["note", "x-0d08", "the finding"], receipts=[])
+    assert result.exit_code == 0
+    assert "notify: no holder, owner or king to reach for x-0d08" in result.stdout
+
+
+def test_a_failed_delivery_lands_on_stderr_and_keeps_the_note(monkeypatch) -> None:
+    result, _ = _run(
+        monkeypatch,
+        ["note", "x-0d08", "the finding"],
+        receipts=["notify FAILED sess-worker (holder of x-0d08): pair budget spent"],
+    )
+    assert result.exit_code == 0
+    assert "noted x-0d08: the finding" in result.stdout
+    assert "notify FAILED sess-worker" in result.stderr
+    assert "notify FAILED" not in result.stdout
+
+
+def test_a_raising_notifier_never_costs_the_note(monkeypatch) -> None:
+    result, _ = _run(monkeypatch, ["note", "x-0d08", "the finding"], boom=True)
+    assert result.exit_code == 0
+    assert "noted x-0d08: the finding" in result.stdout
+    assert "notify FAILED x-0d08: resolver exploded" in result.stderr
+
+
+def test_a_wedged_send_is_bounded_and_reported_unconfirmed(tmp_path, monkeypatch) -> None:
+    """A live inject can outlast any writer's patience; the note verb cannot."""
+    import threading
+
+    from fno.graph import note_notify
+
+    monkeypatch.setattr(note_notify, "_SEND_TIMEOUT_SECONDS", 0.2)
+    started = threading.Event()
+
+    def wedge(address: str, body: str) -> str:
+        started.set()
+        threading.Event().wait(30)  # never returns within the bound
+        return "hosted msg-never"
+
+    receipts = notify_note(
+        "x-0d08",
+        "the finding",
+        graph_path=_graph(tmp_path, [{"id": "x-0d08"}]),
+        sender=wedge,
+        claim_reader=_claims(**{"node:x-0d08": _live("sess-worker")}),
+        king_resolver=lambda scope: [],
+        self_session="sess-me",
+    )
+    assert started.is_set()
+    assert receipts == [
+        "notify UNCONFIRMED sess-worker (holder of x-0d08): no answer in 0s"
+    ]
+
+
+def test_an_unconfirmed_receipt_lands_on_stderr(monkeypatch) -> None:
+    result, _ = _run(
+        monkeypatch,
+        ["note", "x-0d08", "the finding"],
+        receipts=["notify UNCONFIRMED sess-worker (holder of x-0d08): no answer in 30s"],
+    )
+    assert result.exit_code == 0
+    assert "noted x-0d08: the finding" in result.stdout
+    assert "notify UNCONFIRMED sess-worker" in result.stderr

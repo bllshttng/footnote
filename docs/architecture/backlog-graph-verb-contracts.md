@@ -25,6 +25,26 @@ A child whose ``contained_in`` is the parent ships INSIDE the parent's PR, so th
 
 No "keep the all-done epic selectable" exception is needed: an epic closes automatically via ``_cascade_close_parents`` on the merge that finishes its last child (uniform across projects), so it is already ``done`` - never a lingering ``ready`` container that selection would have to surface for closure. That replaces the old "walker closes the epic via next" path, which conflicted with never building a container.
 
+## cmd_note
+
+Append a timestamped progress note to a node, and DELIVER it.
+
+A worker reads its node ONCE, at dispatch. So a note appended after that lands in a store no consumer re-reads: the write succeeds, the author believes the finding is delivered, and nothing reports the gap. That pairing is the worst one, because a silent success is indistinguishable from delivery from where the author stands. Measured on 2026-09-08: of seven notes written across four nodes, six were hand-relayed by a separate mail send and one was not, and the missing one's later retraction WAS relayed - so a live worker received the retraction of a finding it had never received.
+
+So the verb mails what it wrote. Three recipient classes, in the order a finding matters:
+
+- the live claim holder of ``node:<id>``. ``suspect`` counts as owned (TTL-unexpired, dead pid), because a suspect claim still belongs to its session.
+- the holder of the OWNER node: ``contained_in`` when set, else ``parent``. A note on a contained node is material to whoever is building the owner's PR.
+- every session crowned over the epic, resolved at send time by ``resolve_to_king``. The epic is the owner's ``parent`` for a contained node, else the node's own.
+
+The author is dropped from that list, matching a bare session id against a role-prefixed claim holder (``target-session:<id>``) so a worker never mails itself its own note.
+
+The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body spends the 80-word rolling pair budget on the first send, and several notes share one 10-minute window.
+
+``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
+
+Every outcome prints. A delivery prints ``notified <address> (<why>): <transport> <msg-id>``, no reachable reader prints ``notify: no holder, owner or king to reach for <id>``, and a failed send - a budget refusal included - prints ``notify FAILED`` on stderr. Each send is bounded at 30 seconds because a live inject waits on the recipient's per-agent flock and one measured run wedged past 150; an unanswered recipient prints ``notify UNCONFIRMED`` on stderr, which says the delivery is unknown rather than done. Nothing here can cost the note: the append already happened, so a resolution or send fault degrades to a printed receipt and the exit code stays 0.
+
 ## cmd_encounter
 
 Record ONE encounter with this node, from this session, with evidence.
