@@ -39,7 +39,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Literal, Mapping, Optional, cast
+from typing import Any, Literal, Mapping, Optional, cast
 
 import tomli_w
 import yaml
@@ -1995,97 +1995,13 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
-class HarnessOverlayBlock(BaseModel):
-    """One harness's answers under a spawn-defaults block.
-
-    The axis vocabulary rule applied to storage: a permission mode, effort or
-    substrate value is a flag spelling the HARNESS defines, not a fleet policy,
-    so the answer lives keyed by harness here instead of in one scalar that
-    every harness inherits. Precedence: explicit flag > lane >
-    ``profiles.<verb>.harness.<h>`` > ``profiles.<verb>`` >
-    ``defaults.harness.<h>`` > ``defaults``. Only fields whose vocabulary the
-    harness defines and fno forwards are legal here (``permission_mode``,
-    ``effort``, ``substrate``) plus ``args``: an opaque argv-vector appended
-    behind a ``--`` fence, referencing the harness's own bundle (``--profile``,
-    ``--settings``) through the passthrough fno already carries. Ranking
-    fields (``provider``, ``model``, ``route``, ``account``) are refused at
-    the spawn seam: they are lane fields, never per-harness answers.
-
-    ``extra="allow"`` is deliberate: a smuggled lane field must survive load
-    so the seam can name it in its refusal instead of the typo vanishing.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    permission_mode: str = ""
-    effort: str = ""
-    substrate: str = ""
-    args: List[str] = Field(default_factory=list)
-
-
-class SpawnDefaultsBlock(BaseModel):
-    """Default spawn routing (nested under 'config.agents.defaults').
-
-    The bottom-most operator rung of the spawn precedence chain: an explicit
-    CLI flag > these defaults > the built-in. Empty string = unset; an unset
-    field falls through to the built-in. These defaults reach every spawn that
-    has not pinned a field, including autonomous dispatch; an explicit flag
-    always wins. No value validation here: config stays a leaf module (x-7fdd,
-    no import from agents/harnesses at load time) - provider is checked
-    against the known set at the spawn seam, effort against the per-provider
-    surface.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    provider: str = ""
-    model: str = ""
-    effort: str = ""
-    # Config-sourced values degrade open with a warning on provider
-    # incompatibility at the spawn seam; an explicit flag stays fail-closed.
-    substrate: str = ""
-    permission_mode: str = ""
-    # route/account sit BESIDE the legacy provider field (ruling 4): provider
-    # keeps meaning harness and is allowlisted as a harness literal, so a
-    # stage that needed to say zai had no field. route carries vendor/model
-    # (forwarded as --route, fail-closed downstream); account forwards
-    # --account. The names carry no axis word, so the four-axis guard never
-    # reads them as bindings.
-    route: str = ""
-    account: str = ""
-    # Per-harness answers (x-8975): the scalar fields above are the base that
-    # works for most; an entry here re-answers one harness whose flag
-    # vocabulary differs. The spawn seam validates the harness NAME and
-    # refuses ranking fields here; config stays a leaf.
-    harness: dict[str, HarnessOverlayBlock] = Field(default_factory=dict)
-
-    @field_validator("harness", mode="before")
-    @classmethod
-    def _coerce_harness_overlays(cls, v: object) -> object:
-        """A non-mapping overlay table, or a non-mapping entry, degrades to
-        empty: one typo must never brick every command at load, mirroring
-        ``_coerce_profiles``."""
-        if not isinstance(v, dict):
-            return {}
-        return {k: val for k, val in v.items() if isinstance(val, dict)}
-
-
-class SpawnProfileBlock(SpawnDefaultsBlock):
-    """Per-verb overlay plus its strict ordered delivery-lane vocabulary.
-
-    lanes/by_difficulty stay raw: the slot resolver validates and refuses
-    by name, so a malformed list never breaks every config read.
-    """
-
-    pane_group: str = ""
-    lanes: Any = Field(default_factory=list)
-    # Terminal when every lane is skipped: refuse | degrade | queue (exit 78).
-    on_exhausted: str = "refuse"
-    # Overlays keyed low|medium|high; omitted fields inherit this block.
-    by_difficulty: Any = Field(default_factory=dict)
-    # on_low demotes a low lane behind healthy ones; on_unknown permits.
-    on_low: str = "prefer_healthy"
-    on_unknown: str = "allow"
+# The spawn-defaults schema blocks live in spawn_blocks (the config hub is
+# over the file budget and shrink-only); re-exported for every reader.
+from fno.config.spawn_blocks import (  # noqa: E402
+    HarnessOverlayBlock,
+    SpawnDefaultsBlock,
+    SpawnProfileBlock,
+)
 
 
 class RoutingModelBlock(BaseModel):

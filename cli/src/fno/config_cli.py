@@ -882,7 +882,7 @@ def _report_harness_overlays() -> None:
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
     from fno.agents.spawn_defaults import effective_field
-    from fno.agents.cli import CLAUDE_PERMISSION_MODES
+    from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
     from fno.config import load_settings
 
     try:

@@ -18,6 +18,7 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
+from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -88,14 +89,6 @@ def _remedy_for(key: str) -> str:
 #: contract, and `fno backlog advance` in particular relies on that reservation
 #: outliving its own exit because it takes no node claim to replace it.
 _SPAWN_CLI_HOLDER_PREFIX = "spawn-cli:"
-
-#: claude's own --permission-mode vocabulary, its --help being the authority.
-#: Spelled ONCE here: the --permission-mode help text interpolates it, and the
-#: doctor overlay readout checks claude's exact-passthrough values against it
-#: (x-8975) instead of keeping a second copy.
-CLAUDE_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
-)
 
 #: Buckets where force-release advice is HONEST: recovery ran, nobody was found
 #: on the node, and the claim is still there. Every other bucket is either a
