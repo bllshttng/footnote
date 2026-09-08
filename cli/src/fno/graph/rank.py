@@ -60,11 +60,23 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
 def agent_harness_writing_rank(env=None) -> str | None:
     """The harness name when an agent runs this, ``None`` in an operator shell.
 
-    A partial stamp reads as an agent, so a half-stamped spawn cannot buy its
-    worker the pin back.
+    Two provers, either of which is enough. ``resolve_self_identity`` walks the
+    process tree, so it catches a claude or codex session fno never spawned -
+    the fno stamp alone reads those as an operator shell. The stamp is still
+    read, because a codex thread worker owns no process of its own and its
+    ancestry cannot name it. A partial stamp reads as an agent too, so a
+    half-stamped spawn cannot buy its worker the pin back.
     """
     from fno.harness_identity import parse_canonical_identity
 
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        owned = resolve_self_identity(env)
+        if owned.harness:
+            return owned.harness
+    except Exception:  # noqa: BLE001 - the stamp below still answers
+        pass
     identity = parse_canonical_identity(env)
     if identity.disposition == "absent":
         return None
@@ -78,8 +90,9 @@ def _agent_rank_refusal(task_id: str, harness: str) -> str:
         "the last writer wins and importance is never computed.\nVote instead:\n"
         f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
         f"  fno backlog update {task_id} --priority p0|p1|p2|p3\n"
-        "An operator pins by hand: pass --operator, or run from a shell with no "
-        "harness stamp."
+        "The pin is the operator's, and the graph records no writer for it, so "
+        "nothing downstream could tell yours from theirs. Ask; do not reach for "
+        "the escape hatch in --help on your own behalf."
     )
 
 

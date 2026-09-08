@@ -332,7 +332,8 @@ DEFAULT_PRIORITY: str = "p2"
 P0_REFUSAL = (
     "p0 blocks everything else, usually a bug. "
     "Use --blocks-everything only when a broken service or fleet-wide resource "
-    "leak blocks all downstream work. Run this next: fno backlog rank <id> --top"
+    "leak blocks all downstream work. Run this next: "
+    "fno backlog encounter <id> --evidence \"what it cost you\""
 )
 
 

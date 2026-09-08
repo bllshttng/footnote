@@ -444,7 +444,14 @@ def make_selection_sort_key(
     scored_at = datetime.now(timezone.utc)
 
     def _score(node: dict) -> float:
-        return -importance_score(node, effective_priority(node), scored_at)
+        # Degrade, never raise: this key runs inside the board render inside
+        # locked_mutate_graph, where only OSError is caught upstream. A
+        # hand-edited `encounters: 3` would otherwise take the whole write down.
+        # Its neighbours (_rank_band, orphan_ids) degrade for the same reason.
+        try:
+            return -importance_score(node, effective_priority(node), scored_at)
+        except Exception:  # noqa: BLE001 - ordering signal; never break selection
+            return 0.0
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed
     # here (not passed by every caller) so no call site can forget it; fails

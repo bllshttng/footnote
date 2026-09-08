@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -92,6 +93,27 @@ def test_ac1_hp_partial_harness_stamp_still_refused(tmp_graph, monkeypatch):
 
     result = runner.invoke(app, ["backlog", "rank", "x-aaa1", "--top"])
 
+    assert result.exit_code != 0
+    assert _rank_of(tmp_graph, "x-aaa1") is None
+
+
+def test_ac1_hp_a_harness_fno_never_spawned_is_still_refused(tmp_graph, monkeypatch):
+    """The fno stamp is not the only prover: ancestry proves an ambient marker.
+
+    A claude or codex session started by hand carries its own markers and no
+    fno stamp, and it is an agent session all the same.
+    """
+    from fno.graph.rank import agent_harness_writing_rank
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None, **kw: SimpleNamespace(
+            harness="claude", session_id="sess-ambient", disposition="owned"
+        ),
+    )
+
+    assert agent_harness_writing_rank() == "claude"
+    result = runner.invoke(app, ["backlog", "rank", "x-aaa1", "--top"])
     assert result.exit_code != 0
     assert _rank_of(tmp_graph, "x-aaa1") is None
 

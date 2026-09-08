@@ -27,15 +27,18 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
 def _operator_shell_identity(monkeypatch):
     """Run every test as a bare operator shell, never as a spawned agent.
 
-    A test process inherits the harness stamp of whatever session ran pytest,
+    A test process inherits the harness markers of whatever session ran pytest,
     so an identity-gated refusal (``fno backlog rank`` is operator-only) passes
-    in CI and fires on a developer's own machine. A test that wants an agent
-    session sets the pair itself.
+    in CI and fires on a developer's own machine. The whole ambient set goes,
+    not just fno's own pair: ``resolve_self_identity`` proves an AMBIENT marker
+    through process ancestry, so a suite run from inside a harness reads as
+    that harness while any of its markers survives. A test that wants an agent
+    session sets the markers it needs itself.
     """
-    from fno.harness_identity import FNO_HARNESS_NAME, FNO_HARNESS_SESSION_ID
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
 
-    monkeypatch.delenv(FNO_HARNESS_NAME, raising=False)
-    monkeypatch.delenv(FNO_HARNESS_SESSION_ID, raising=False)
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
