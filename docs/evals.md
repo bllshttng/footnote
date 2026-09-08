@@ -7,7 +7,7 @@ A live-execution eval harness: give the pipeline a known task, run it, grade the
 **Capability vs regression tiers.** Every bank task declares `tier: capability | regression`.
 
 - `capability` - a hill to climb: a hard task the pipeline currently fails. Failures are informational, not alarms.
-- `regression` - must stay ~100%: a task that used to pass and must keep passing (e.g. the CLI starts, a known-flaky suite is green, the acceptance-evidence journey holds). Any regression-tier task below 100% fires the **regression alarm**.
+- `regression` - must stay ~100%: a task that used to pass and must keep passing (e.g. the CLI starts, a known-flaky suite is green). Any regression-tier task below 100% fires the **regression alarm**.
 
 A capability task that passes its last N consecutive full runs (default 3) becomes graduation-eligible. `fno doctor evals graduate <id>` retags its YAML to `regression`. Graduation is a reviewed edit: the verb rewrites the file, and a human ships the PR. It is never a silent runtime flip.
 
