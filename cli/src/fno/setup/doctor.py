@@ -347,17 +347,19 @@ def check_agent_profiles(settings: object) -> list[str]:
     return problems
 
 
-_KNOWN_ACCOUNTS_KEYS = frozenset(
-    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover"}
-)
-_KNOWN_QUOTA_KEYS = frozenset(
-    {"defer_dispatch", "defer_threshold_pct", "probe_ttl_seconds", "defer_horizon_minutes", "pick_on_launch"}
-)
-_KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
-_KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
-
-
 def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
+    """Blocks under accounts/providers that are not tables.
+
+    Unknown KEYS here are `check_unknown_keys`'s job: it derives the same
+    report from SettingsModel per file, so the four frozensets that used to
+    live here were a hand-copied schema with nothing forcing them to agree.
+    A non-table is different: load_providers coerces it to defaults rather
+    than refusing, so nothing else says so.
+
+    Record ENTRIES are deliberately not scanned. ProviderRecord is
+    extra="allow", so unknown record metadata round-trips by design;
+    structural record errors surface through load_providers().
+    """
     problems: list[str] = []
     raw_config = raw_data.get("config")
     config = raw_config if isinstance(raw_config, dict) else {}
@@ -366,49 +368,13 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
             block = scope.get(block_key)
             if not isinstance(block, dict):
                 continue
-            for k in block:
-                if k not in _KNOWN_ACCOUNTS_KEYS:
+            for sub in ("quota", "failover"):
+                value = block.get(sub)
+                if value is not None and not isinstance(value, dict):
                     problems.append(
-                        f"{source_label}: {prefix} has unknown key {k!r}; it will be ignored"
+                        f"{source_label}: {prefix}.{sub} is not a table "
+                        f"(got {type(value).__name__}); it will be coerced to defaults"
                     )
-            quota = block.get("quota")
-            if isinstance(quota, dict):
-                for k in quota:
-                    if k not in _KNOWN_QUOTA_KEYS:
-                        problems.append(
-                            f"{source_label}: {prefix}.quota has unknown key {k!r}; it will be ignored"
-                        )
-            elif quota is not None:
-                problems.append(
-                    f"{source_label}: {prefix}.quota is not a table "
-                    f"(got {type(quota).__name__}); it will be coerced to defaults"
-                )
-            failover = block.get("failover")
-            if isinstance(failover, dict):
-                for k in failover:
-                    if k not in _KNOWN_FAILOVER_KEYS:
-                        problems.append(
-                            f"{source_label}: {prefix}.failover has unknown key {k!r}; it will be ignored"
-                        )
-            elif failover is not None:
-                problems.append(
-                    f"{source_label}: {prefix}.failover is not a table "
-                    f"(got {type(failover).__name__}); it will be ignored"
-                )
-            combos = block.get("combos")
-            if isinstance(combos, dict):
-                for combo_name, combo_val in combos.items():
-                    if isinstance(combo_val, dict):
-                        for k in combo_val:
-                            if k not in _KNOWN_COMBO_KEYS:
-                                problems.append(
-                                    f"{source_label}: {prefix}.combos.{combo_name} has unknown key {k!r}; it will be ignored"
-                                )
-            # Record ENTRIES are deliberately not key-scanned:
-            # ProviderRecord is extra="allow", so unknown record metadata is
-            # retained and round-trips by design; flagging it made doctor
-            # exit 1 on legal config. Structural record errors surface
-            # through the load_providers() call in check_accounts.
     return problems
 
 

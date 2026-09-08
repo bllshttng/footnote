@@ -137,9 +137,13 @@ defer_dispatchh = true
     monkeypatch.setenv("PWD", str(tmp_path))
     monkeypatch.setenv("FNO_TEST_MODE", "1")
 
-    problems = check_accounts()
-    assert len(problems) > 0
-    assert any("accounts.quota has unknown key 'defer_dispatchh'" in p for p in problems)
+    # The unknown-key leg moved to the model-driven walker: check_accounts kept
+    # a hand-copied frozenset of accounts field names, and nothing forced it to
+    # match SettingsModel. The finding now names the file too.
+    from fno.config.readback import check_unknown_keys
+
+    problems = check_unknown_keys()
+    assert any("accounts.quota.defer_dispatchh" in p and str(cfg) in p for p in problems), problems
 
 
 def test_doctor_check_accounts_root_typo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -151,9 +155,10 @@ autto_switch = true
     monkeypatch.setenv("PWD", str(tmp_path))
     monkeypatch.setenv("FNO_TEST_MODE", "1")
 
-    problems = check_accounts()
-    assert len(problems) > 0
-    assert any("accounts has unknown key 'autto_switch'" in p for p in problems)
+    from fno.config.readback import check_unknown_keys
+
+    problems = check_unknown_keys()
+    assert any("accounts.autto_switch" in p and str(cfg) in p for p in problems), problems
 
 
 def test_load_providers_preserves_global_records_with_local_leaf_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
