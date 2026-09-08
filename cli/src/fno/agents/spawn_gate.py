@@ -1564,8 +1564,9 @@ def _check_king_share(
 def _territory_verdict(node: str) -> dict:
     """The per-territory cap verdict for `node`, asked from the Rust gate.
 
-    One counting leg: Python passes the node through the binary door and
-    recomputes nothing; a fault reads as territory_unknown, never headroom.
+    One counting leg (crates/fno-agents territory fact set): Python passes the
+    node through the binary door and recomputes nothing. A binary or payload
+    fault reads as territory_unknown, never as headroom.
     """
     from fno.rust_binary import call_binary_json
 
@@ -1584,8 +1585,12 @@ def _territory_verdict(node: str) -> dict:
 
 
 def _check_territory_cap(node: Optional[str]) -> None:
-    """Refuse (never queue) at the team cap, --force included: force speaks
-    for the MACHINE being busy, never for one territory overrunning its team.
+    """Refuse (never queue) when the node's territory is at its team cap.
+
+    The cap stays enforced under --force: force speaks for the MACHINE being
+    busy, never for one territory overrunning its team. Waiting cannot help -
+    the team is full where the caller is standing - so this refuses like the
+    provider cap.
     """
     if not node:
         return
