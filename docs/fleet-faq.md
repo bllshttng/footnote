@@ -438,6 +438,16 @@ The same session had verified six claims that arrived from other people that day
 
 *Graduates to:* a claim reader that reports a degraded roster as its own condition, so `unknown` never blocks work the way `held` does.
 
+## Does my reign still have a beat?
+
+**Answer.** Check it, do not assume it. List the scheduled jobs and the tasks. An empty pair means the check-in loop and every monitor are gone, and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
+
+**Specimen.** On 2026-09-08 a crowned session was asked whether it still held its beat. Scheduled jobs returned none. Tasks returned none. Six monitors and the loop had died at a compact hours earlier. Every check-in it had journaled that day was typed by hand in reply to an operator message. The same session had merged an entry about this exact failure earlier the same day and never ran the two commands on itself.
+
+**You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no king and no crown scope. With no state file present, the source field defaults to `test`. A king session has none, so every reign check-in journals as a test event. A fleet-wide question about which kings still have a beat has no reader at all.
+
+*Graduates to:* a check-in verb that stamps source, crown scope and session. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
+
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
