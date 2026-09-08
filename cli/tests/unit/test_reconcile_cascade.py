@@ -968,3 +968,140 @@ def test_release_receipt_is_silent_when_nothing_was_contained(world, dispatches)
     result = CliRunner().invoke(cli, ["remove", UNIT, "--force"])
     assert result.exit_code == 0, result.output
     assert "Released" not in result.output
+
+
+# -- carried-session stamp (x-3967) --
+#
+# A worker claims one node and ships several. The claim, the worktree, the
+# branch and finalize all name the claimed node, so every writer of
+# `sessions[]` fires on the owner and none fires on its passengers. Measured
+# 2026-09-08: 20 of the 28 PR-carrying nodes with an empty `sessions` share
+# their pr_number with a node that has one. Mechanism and denominator in
+# internal/fno/analysis/20260908-sessions-write-gap-x-3967.md.
+
+OWNER = "x-1bd0"
+PASSENGER = "x-b7ae"
+CO_PR = 1562
+
+
+def _do_row(session_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") -> dict:
+    return {
+        "phase": "do",
+        "harness": "claude",
+        "session_id": session_id,
+        "started_at": "2026-09-01T00:00:00Z",
+        "ended_at": "2026-09-01T01:00:00Z",
+    }
+
+
+def _co_ship(**passenger_overrides) -> list[dict]:
+    passenger = {"pr_number": CO_PR, "sessions": []}
+    passenger.update(passenger_overrides)
+    return [
+        _node(OWNER, pr_number=CO_PR, sessions=[_do_row()]),
+        _node(PASSENGER, **passenger),
+    ]
+
+
+def test_a_passenger_takes_the_owners_do_row():
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert entries[1]["sessions"] == [_do_row()]
+
+
+def test_a_node_that_already_records_a_session_is_untouched():
+    """The sweep fills a hole; it never edits a node that answered for itself."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    own = _do_row("11111111-2222-3333-4444-555555555555")
+    entries = _co_ship(sessions=[own])
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert entries[1]["sessions"] == [own]
+
+
+def test_a_node_with_no_pr_is_untouched():
+    """The shared PR is the whole evidence of carriage. No PR, no inference."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship(pr_number=None)
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert entries[1]["sessions"] == []
+
+
+def test_only_the_do_row_is_carried():
+    """blueprint and ship happened to the OWNER's node, not to the passenger.
+
+    The `do` row is the one whose work reached the passenger's files, so it is
+    the only row a shared PR is evidence for.
+    """
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    entries[0]["sessions"] = [
+        {"phase": "blueprint", "harness": "claude", "session_id": "b" * 36},
+        _do_row(),
+        {"phase": "ship", "harness": "claude", "session_id": "c" * 36},
+    ]
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert [r["phase"] for r in entries[1]["sessions"]] == ["do"]
+
+
+def test_the_sweep_is_idempotent():
+    """It runs at every SessionStart. A second pass must add nothing."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert len(entries[1]["sessions"]) == 1
+
+
+def test_a_peer_with_no_sessions_carries_nothing():
+    """Two empty nodes on one PR are two misses, not one repair."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    entries[0]["sessions"] = []
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert entries[1]["sessions"] == []
+
+
+def test_every_passenger_on_one_pr_is_stamped():
+    """PR #1257 carried x-735e and x-6290 for owner x-e555. Both are misses."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    entries.append(_node("x-6290", pr_number=CO_PR, sessions=[]))
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER, "x-6290"]
+    assert entries[2]["sessions"] == [_do_row()]
+
+
+def test_two_sessioned_owners_on_one_pr_both_reach_the_passenger():
+    """Two workers on one PR both wrote the passenger's files.
+
+    Dropping either would record a partial truth, and there is no evidence
+    that ranks one over the other.
+    """
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    second = _do_row("99999999-8888-7777-6666-555555555555")
+    entries = _co_ship()
+    entries.insert(1, _node("x-0fb9", pr_number=CO_PR, sessions=[second]))
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert entries[2]["sessions"] == [_do_row(), second]
+
+
+def test_a_malformed_row_never_takes_the_sweep_down():
+    """It runs inside reconcile's mutator, where a raise aborts the close."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = [
+        {"pr_number": CO_PR},                              # no id at all
+        {"id": None, "pr_number": CO_PR, "sessions": []},  # null id
+        _node(OWNER, pr_number=CO_PR, sessions=[_do_row(), "not-a-dict"]),
+        _node(PASSENGER, pr_number=CO_PR, sessions=[]),
+    ]
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert entries[3]["sessions"] == [_do_row()]

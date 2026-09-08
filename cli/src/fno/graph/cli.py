@@ -8283,6 +8283,61 @@ def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
     return closed
 
 
+def _sweep_stamp_carried_sessions(entries: list[dict]) -> list[str]:
+    """Give every node that shipped inside another node's PR the `do` rows of
+    the sessions that shipped it.
+
+    Nothing writes `sessions[]` on the close path. Every writer is keyed to a
+    session that OWNS the node - it was spawned with `--node`, it holds the
+    claim, or its manifest names the node - and reconcile owns no node. So one
+    worker that claims one node and ships several leaves its passengers with a
+    merged PR, a real code change inside it, and no session at all.
+
+    The evidence of carriage is the shared `pr_number`: a node with a PR, no
+    session of its own, and a peer on that same PR that has one. Only the `do`
+    rows travel. `blueprint` and `ship` happened to the owner's node, while the
+    do phase is the one whose work reached the passenger's files.
+
+    Mutates in place and never calls :func:`append_session_record`: this runs
+    inside reconcile's mutator, already under the store lock, and that writer
+    goes through the keeper. Full measurement, including the 8 own-branch
+    misses this cannot reach:
+    internal/fno/analysis/20260908-sessions-write-gap-x-3967.md
+    """
+    donors: dict[object, list[dict]] = {}
+    for e in entries:
+        if not isinstance(e, dict) or not e.get("pr_number"):
+            continue
+        rows = e.get("sessions")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and row.get("phase") == "do":
+                donors.setdefault(e["pr_number"], []).append(row)
+
+    stamped: list[str] = []
+    for e in entries:
+        # `.get`, not `e["id"]`: this runs inside the mutator, where a raise on
+        # one malformed row aborts the whole close the sweep rides on.
+        if not isinstance(e, dict) or not e.get("pr_number") or e.get("sessions"):
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str) or not nid:
+            continue
+        carried: list[dict] = []
+        seen: set[tuple] = set()
+        for row in donors.get(e["pr_number"], ()):
+            key = (row.get("phase"), row.get("harness"), row.get("session_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            carried.append(dict(row))  # copy: two nodes must not share one row
+        if carried:
+            e["sessions"] = carried
+            stamped.append(nid)
+    return stamped
+
+
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     """Return rows whose persisted status differs from a fresh derivation.
 
@@ -10344,6 +10399,7 @@ def cmd_reconcile(
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
+    carried_stamped: list[str] = []
     contained_errors: list[dict] = []
     supersession_unverified: list[dict] = []
     # Blocked_by edges the sweep settled (): pruned to done blockers,
@@ -10382,6 +10438,10 @@ def cmd_reconcile(
         # is invisible to the SessionStart hook, which runs `reconcile --json`
         # and discards stderr.
         contained_errors_acc: list = []
+        # Nodes given the do rows of the session that shipped them inside
+        # another node's PR (x-3967). Reporting only, like contained_closed_acc:
+        # a repair nobody names reads as "nothing happened".
+        carried_stamped_acc: list = []
         supersession_unverified_acc: list[dict] = []
         blocked_by_settlement_acc: list[dict] = []
 
@@ -10517,6 +10577,25 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # AFTER both close sweeps: a node closed in this same pass is a
+                # passenger too, and stamping before it closed would miss it.
+                try:
+                    carried_stamped_acc.extend(_sweep_stamp_carried_sessions(entries))
+                except Exception as _cs_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append(
+                        {
+                            "owner": None,
+                            "stage": "carried-session-stamp",
+                            "error": str(_cs_exc)[:200],
+                        }
+                    )
+                    typer.echo(
+                        "warning: the carried-session stamp failed: "
+                        f"{_cs_exc}; nodes that shipped inside another node's PR "
+                        "still record no session (`fno backlog reconcile` retries "
+                        "next run)",
+                        err=True,
+                    )
                 # Same self-heal shape, and guarded the same way: a raise here
                 # would abort a sweep whose real job is closing merged PRs.
                 try:
@@ -10729,6 +10808,7 @@ def cmd_reconcile(
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
+        carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
     elif dry_run and (closeable or strandable or strandable_contained or status_drift):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
@@ -10786,6 +10866,12 @@ def cmd_reconcile(
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        # Previewed on the throwaway copy for the same reason the closes are:
+        # a preview that omits a leg reads as "in sync" where a real run writes.
+        try:
+            carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
+        except Exception:  # noqa: BLE001 - a preview never raises
+            carried_stamped = []
 
     # W4 causal links: best-effort revert stamp, full sweep only. A merged
     # "Revert ..." PR referencing a PR carried by a graph node flips that
@@ -10997,6 +11083,9 @@ def cmd_reconcile(
             # (). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
+            # Nodes given the do rows of the session that shipped them inside
+            # another node's PR (x-3967).
+            "carried_stamped": carried_stamped,
             # Cascade/sweep and canonical-sync legs. In the payload because the
             # SessionStart hook reads --json and discards stderr: a leg whose
             # failure is unobservable is indistinguishable from one that never ran.
@@ -11043,6 +11132,7 @@ def cmd_reconcile(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not carried_stamped
         and not reverted_stamped
         and not promise_held
         and not promise_warnings
@@ -11067,6 +11157,11 @@ def cmd_reconcile(
             typer.echo(
                 f"Would close {len(contained_closed)} contained node(s) shipped "
                 f"inside {_whose}: " + ", ".join(contained_closed)
+            )
+        if carried_stamped:
+            typer.echo(
+                f"Would record the shipping session on {len(carried_stamped)} node(s) "
+                f"that shipped inside another node's PR: " + ", ".join(carried_stamped)
             )
         if healed_epics:
             typer.echo(
@@ -11095,6 +11190,11 @@ def cmd_reconcile(
             typer.echo(
                 f"{_lead} {len(contained_closed)} contained node(s) shipped "
                 f"inside {_whose} (cost stays on the delivery unit): " + ", ".join(contained_closed)
+            )
+        if carried_stamped:
+            typer.echo(
+                f"Recorded the shipping session on {len(carried_stamped)} node(s) "
+                f"that shipped inside another node's PR: " + ", ".join(carried_stamped)
             )
         if healed_epics:
             typer.echo(
