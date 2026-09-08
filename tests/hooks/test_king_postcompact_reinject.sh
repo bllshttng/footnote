@@ -33,17 +33,27 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 TMP="$(mktemp -d -t king-reinject-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Stub `fno` answering `agents registry-json` from a per-case fixture file, so
-# no real registry or daemon is involved. $KING_REG_FIXTURE selects the payload.
+# Stub `fno` answering `agents registry-json` from a per-case fixture file, and
+# `agents king faq list --scope X` from a second fixture keyed by scope, so no
+# real registry, daemon, or FAQ store is involved. $KING_REG_FIXTURE and
+# $KING_FAQ_FIXTURE select the payloads; the FAQ fixture is empty (no output)
+# unless a test overwrites it.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/fno" <<'STUB'
 #!/usr/bin/env bash
-[ "$1" = "agents" ] && [ "$2" = "registry-json" ] || exit 1
-cat "$KING_REG_FIXTURE"
+if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
+  cat "$KING_REG_FIXTURE"
+elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
+  cat "$KING_FAQ_FIXTURE" 2>/dev/null || true
+else
+  exit 1
+fi
 STUB
 chmod +x "$TMP/bin/fno"
 export PATH="$TMP/bin:$PATH"
 export KING_REG_FIXTURE="$TMP/registry.json"
+export KING_FAQ_FIXTURE="$TMP/faq.txt"
+: > "$KING_FAQ_FIXTURE"
 
 SID="sess-king"
 SID_OTHER="sess-someone-else"
@@ -109,6 +119,23 @@ OUT="$(printf '%s' "{\"source\":\"compact\",\"session_id\":\"$SID\"}" \
   | env PATH="/usr/bin:/bin" FNO_PLATFORM=claude bash "$KING" 2>/dev/null)"; RC=$?
 [[ $RC -eq 0 && -z "$OUT" ]] && pass "no fno on PATH: empty stdout, exit 0" \
   || fail "no-fno rc=$RC out=$OUT"
+
+# 7b. A crowned king with matching FAQ entries gets them after the static
+#     brief; an empty FAQ fixture (the default, case 1 above) adds nothing.
+registry_fixture "$CROWNED_ROW"
+printf 'Q: what do I do?\nA: reign on.\n---\n' > "$KING_FAQ_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+    | contains("This crown'"'"'s FAQ") and contains("reign on.")' >/dev/null 2>&1 \
+  && pass "crowned with matching FAQ entries: appended after the brief" \
+  || fail "crowned+FAQ rc=$RC payload=$OUT"
+: > "$KING_FAQ_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && ! echo "$OUT" | grep -q "This crown's FAQ" \
+  && pass "crowned with empty FAQ fixture: no FAQ heading added" \
+  || fail "crowned+empty-FAQ rc=$RC payload=$OUT"
 
 # 7. Byte budget: the brief is paid on every compaction of every king.
 BRIEF_BYTES="$(wc -c < "$BRIEF" 2>/dev/null | tr -d ' ')"

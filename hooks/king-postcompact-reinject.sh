@@ -81,6 +81,20 @@ Crown: level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami
 
 $(sed '/^<!--/d' "$BRIEF")"
 
+# This crown's own FAQ, appended after the static brief: bounded (the verb
+# caps entries) and degrade-safe (silence on a missing directory, an
+# unreadable one, or no entry for this scope - never a failed hook).
+if [[ -n "$CROWN_SCOPE" ]]; then
+    FAQ_ENTRIES="$(fno agents king faq list --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+    if [[ -n "$(printf '%s' "$FAQ_ENTRIES" | tr -d '[:space:]')" ]]; then
+        CONTEXT="$CONTEXT
+
+## This crown's FAQ
+
+$FAQ_ENTRIES"
+    fi
+fi
+
 # Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing

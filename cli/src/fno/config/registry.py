@@ -49,6 +49,7 @@ FIELD_META: dict[str, Meta] = {
     "paths.ledger_json": Meta("never", "Override path to ledger.json."),
     "paths.evals_history": Meta("never", "Override path to the evals-history.jsonl bank-run ledger."),
     "paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),
+    "paths.king_faqs_dir": Meta("never", "Override path to the king FAQ dir."),
     "paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
     "paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),
     "paths.worktrees_base": Meta("never", "Override base dir for worktrees."),
