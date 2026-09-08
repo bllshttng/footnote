@@ -21,7 +21,6 @@ def cmd_distress_answered(
     """Print ``{"<session>": {"answered": bool, "watchdog_verdict": str|null}}``.
     ``answered``: mail to that session landed after ``after`` (AC3-EDGE).
     ``watchdog_verdict`` is informational only, never a gate."""
-    from fno.agents import watchdog as wd
     from fno.bus.log import iter_messages
 
     try:
@@ -47,11 +46,22 @@ def cmd_distress_answered(
         if cutoff is not None and env.ts > cutoff:
             answered[env.to] = True
 
-    out: dict[str, Any] = {}
-    for session in after_by_session:
-        try:
-            verdict = wd.session_verdict(session)
-        except Exception:  # noqa: BLE001 - enrichment only, never fatal
-            verdict = None
-        out[session] = {"answered": answered[session], "watchdog_verdict": verdict}
+    verdict_by_session: dict[str, Any] = {}
+    try:
+        from fno.agents.watchdog import run_sweep
+
+        payload, _rows = run_sweep()
+        verdict_by_session = {
+            v.get("row_id"): v.get("verdict") for v in payload.get("verdicts", [])
+        }
+    except Exception:  # noqa: BLE001 - enrichment only, never fatal
+        pass
+
+    out: dict[str, Any] = {
+        session: {
+            "answered": answered[session],
+            "watchdog_verdict": verdict_by_session.get(session),
+        }
+        for session in after_by_session
+    }
     typer.echo(_json.dumps(out))
