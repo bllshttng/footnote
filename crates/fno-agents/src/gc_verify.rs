@@ -78,14 +78,6 @@ pub fn current_build() -> String {
     format!("fno-agents {}", env!("CARGO_PKG_VERSION"),)
 }
 
-fn receipt_timestamp(value: &Value, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    value
-        .get(key)?
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-}
-
 /// Audit the receipts store over the window. Read-only: nothing here writes.
 pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
     let mut report = VerifyReport::default();
@@ -121,10 +113,10 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
                 continue;
             }
         };
-        let Some(reaped) = receipt_timestamp(
-            &serde_json::to_value(&receipt).unwrap_or(Value::Null),
-            "reaped_at",
-        ) else {
+        let Some(reaped) = chrono::DateTime::parse_from_rfc3339(&receipt.reaped_at)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+        else {
             report.problems.push(VerifyProblem {
                 receipt: name,
                 reason: "reaped_at missing or unparseable".into(),

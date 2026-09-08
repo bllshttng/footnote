@@ -154,7 +154,7 @@ The sweep enumerates from `claude agents --json --all` and joins registry identi
 
 A fleet-watching agent was proposed and refused. The proposal's load-bearing argument was that "a verb answers when someone runs it". That fails here. This sweep already runs on a cadence: `config.recovery.watchdog` rides the pr_watch tick, so nobody has to remember to run it. Its findings already push: mail digest, events, reconciled operator questions. A second watcher restates the decision table and both its traps in a new component. That is the duplication the port law exists to refuse. The two lanes added for that proposal are the shape any future friction detector takes: `contended` and `polling_settled`, with their one reconciled question. Extend the table. Never propose a new watcher.
 
-## One retirement owner (x-70e1)
+## One retirement owner
 
 Row retirement is the daemon GC sweep, not the watchdog. The classifier is `gc.rs`: work-done through the reverse join, or the planning lane, plus quiet past grace. The lifecycle is `gc_sweep.rs`: stop, active-surface removal, registry drop, tree prune. The native effects are `gc_native.rs`: the same cascade `fno agents rm` walks, typed per effect.
 

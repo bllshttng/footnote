@@ -336,19 +336,38 @@ fn codex_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
     let root = crate::client_verbs::codex_home()
         .ok_or_else(|| "no codex home".to_string())?
         .join("sessions");
+    codex_store_sessions_from(&root)
+}
+
+/// The walker over a resolved codex sessions root. The rollout stem is
+/// `rollout-<iso stamp with dashes>-<8-4-4-4-12 uuid>`: the identity is the
+/// LAST FIVE dash-groups (or a 32-hex contiguous id), never the last group
+/// alone, which is only the uuid's 12-char tail.
+fn codex_store_sessions_from(
+    root: &std::path::Path,
+) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
     let files =
-        index_tree(&root, 0).map_err(|_| format!("codex store unreadable: {}", root.display()))?;
+        index_tree(root, 0).map_err(|_| format!("codex store unreadable: {}", root.display()))?;
     let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for (name, path) in files {
         let Some(stem) = name.strip_suffix(".jsonl") else {
             continue;
         };
-        let Some(sid) = stem.rsplit('-').next() else {
-            continue;
-        };
-        if !is_uuid_like(sid) && sid.len() != 32 {
+        let groups: Vec<&str> = stem.split('-').collect();
+        if groups.len() < 5 {
             continue;
         }
+        let dashed: String = groups[groups.len() - 5..].join("-");
+        let sid = if is_uuid_like(&dashed) {
+            dashed
+        } else {
+            // Some codex builds emit a 32-hex contiguous id.
+            let last = groups[groups.len() - 1];
+            if last.len() != 32 || !last.bytes().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            last.to_string()
+        };
         out.entry(sid.to_ascii_lowercase()).or_default().push(path);
     }
     Ok(out)
@@ -478,27 +497,14 @@ pub fn census_with(home: &AgentsHome, readers: SourceReaders) -> Inventory {
     ] {
         match walked {
             Ok(store) => {
-                let (harness, tag) = if source_tag == "store" {
-                    ("claude", "store")
+                let harness = if source_tag == "store" {
+                    "claude"
                 } else {
-                    ("codex", "codex-store")
+                    "codex"
                 };
-                let _ = tag;
                 for (sid, paths) in store {
                     let age = newest_age(&paths, now);
-                    fold(
-                        &mut by_key,
-                        harness,
-                        sid,
-                        None,
-                        if harness == "claude" {
-                            Source::Store
-                        } else {
-                            Source::Store
-                        },
-                        paths,
-                        age,
-                    );
+                    fold(&mut by_key, harness, sid, None, Source::Store, paths, age);
                 }
             }
             Err(reason) => inventory.incomplete.push((source_tag.into(), reason)),
@@ -626,6 +632,44 @@ mod tests {
         assert!(!is_uuid_like("short"));
         assert!(!is_uuid_like("ee99ff00_7777-8888-9999-aaaabbbbcccc"));
         assert!(!is_uuid_like("ee99ff00-7777-8888-9999-aaaabbbbcccc-extra"));
+    }
+
+    #[test]
+    fn the_codex_store_walker_indexes_real_dashed_uuid_rollouts() {
+        // The real filename shape (the walker once read only the last
+        // dash-group, a 12-char uuid tail, and indexed nothing).
+        let dir = std::env::temp_dir().join(format!(
+            "fno-codex-walk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_shape = "rollout-2026-09-07T23-53-18-01a07fca-e499-7ff2-80bd-61b6cee528ef.jsonl";
+        std::fs::write(dir.join(real_shape), b"{}\n").unwrap();
+        std::fs::write(
+            dir.join("rollout-2026-09-07T10-00-00-0123456789abcdef0123456789abcdef.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("rollout-not-a-session.jsonl"), b"{}\n").unwrap();
+
+        let indexed = codex_store_sessions_from(&dir).unwrap();
+
+        assert!(
+            indexed.contains_key("01a07fca-e499-7ff2-80bd-61b6cee528ef"),
+            "{indexed:?}"
+        );
+        assert!(
+            indexed.contains_key("0123456789abcdef0123456789abcdef"),
+            "{indexed:?}"
+        );
+        assert!(!indexed.iter().any(|(_, paths)| paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("not-a-session"))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -975,9 +975,6 @@ impl CodexThread {
 
     /// Clear `current_turn_id` ONLY when the named turn actually completed,
     /// preserving the drive_turn survivor invariant for the actor path too.
-
-    /// Clear `current_turn_id` ONLY when the named turn actually completed,
-    /// preserving the drive_turn survivor invariant for the actor path too.
     pub fn note_turn_completed(&mut self, turn_id: &str) {
         if self.current_turn_id.as_deref() == Some(turn_id) {
             self.current_turn_id = None;
