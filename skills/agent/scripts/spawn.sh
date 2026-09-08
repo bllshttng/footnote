@@ -68,7 +68,7 @@ fail() { printf 'result=failed reason="%s"\n' "$1"; exit 1; }
 
 thread_receipt_field() {
   local capabilities
-  capabilities="$(fno agents dispatch capabilities "$PROVIDER" --json 2>/dev/null)" || return 1
+  capabilities="$(FNO_AGENTS_RUNTIME=python fno agents dispatch capabilities "$PROVIDER" --json 2>/dev/null)" || return 1
   printf '%s' "$capabilities" | jq -r '
     if .keeper? != null then "short_id"
     elif ((.resume_strategy.forms.interactive_attach.tokens // []) | index("{short_id}")) != null then "short_id"

@@ -584,6 +584,9 @@ out="$(run_nofno 'docs/plan.md substrate thread' --handoff)"
 check_eq       'handoff thread substrate' "$(field "$out" substrate)" 'thread'
 check_eq       'handoff thread payload mode' "$(field "$out" payload_mode)" 'handoff'
 check_contains 'handoff thread path preserved' "$(msg_block "$out")" 'docs/plan.md'
+out="$(run_nofno 'docs/plan.md Substrate thread' --handoff)"
+check_eq       'handoff case-insensitive substrate' "$(field "$out" substrate)" 'thread'
+check_contains 'handoff case-insensitive path preserved' "$(msg_block "$out")" 'docs/plan.md'
 out="$(run_nofno 'thread' --handoff)"
 check_eq       'handoff one-word thread path' "$(field "$out" substrate)" ''
 check_contains 'handoff one-word thread preserved' "$(msg_block "$out")" 'thread'

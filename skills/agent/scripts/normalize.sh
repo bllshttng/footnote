@@ -404,7 +404,7 @@ if [[ "$HANDOFF_MODE" -eq 1 ]]; then
   set -f
   IFS=$' \t\n' read -r -d '' -a _handoff_toks <<< "$msg" || :
   set +f
-  if (( ${#_handoff_toks[@]} == 3 )) && [[ "${_handoff_toks[1]}" == "substrate" ]]; then
+  if (( ${#_handoff_toks[@]} == 3 )) && [[ "$(printf '%s' "${_handoff_toks[1]}" | tr '[:upper:]' '[:lower:]')" == "substrate" ]]; then
     set_substrate "$(printf '%s' "${_handoff_toks[2]}" | tr '[:upper:]' '[:lower:]')"
     msg="${_handoff_toks[0]}"
   fi

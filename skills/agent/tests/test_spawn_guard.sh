@@ -33,6 +33,9 @@ case "$1 $2" in
     [[ -n "${STUB_VERDICT:-}" ]] && printf '%s\n' "$STUB_VERDICT"
     exit "${STUB_VERDICT_RC:-0}" ;;
   "agents dispatch")
+    if [[ "${FNO_AGENTS_RUNTIME:-}" == "rust" && "${STUB_RUST_DISPATCH_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
     [[ "${STUB_CAPABILITIES_FAIL:-0}" == "1" ]] && exit 1
     case "${4:-}" in
       claude) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}' ;;
@@ -326,6 +329,10 @@ out="$(STUB_VERDICT="$DISP" STUB_CAPABILITIES_FAIL=1 \
   run --name thread-capabilities-fail --provider codex --yolo --message 'Implement x' --substrate thread)"
 ok 'capability read failure -> failed' "$(field "$out")" 'failed'
 no 'capability read failure did not spawn' "$(calllog)" 'agents spawn --harness'
+out="$(FNO_AGENTS_RUNTIME=rust STUB_VERDICT="$DISP" STUB_RUST_DISPATCH_FAIL=1 STUB_CODEX_THREAD=1 \
+  run --name thread-rust-runtime --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok 'rust runtime capability read -> launched' "$(field "$out")" 'launched'
+has 'rust runtime capability read spawned' "$(calllog)" 'agents spawn --harness'
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane
