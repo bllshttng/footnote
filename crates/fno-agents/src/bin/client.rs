@@ -2078,9 +2078,22 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     };
 
+    // The dry-run JSON read also carries the census (x-70e1 task 4): the
+    // complete per-session identity, observed surfaces and source coverage,
+    // so one read answers both "who would retire" and "what was seen".
+    let inventory = if dry_run && json_out {
+        Some(fno_agents::gc_inventory::census(&home))
+    } else {
+        None
+    };
     print!(
         "{}",
-        fno_agents::reap_render::render_reap(&summary, json_out, dry_run)
+        fno_agents::reap_render::render_reap_with_inventory(
+            &summary,
+            inventory.as_ref(),
+            json_out,
+            dry_run
+        )
     );
     0
 }
