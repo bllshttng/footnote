@@ -7,7 +7,6 @@ from typing import Any
 
 
 OBSERVER_COMMAND = "fno backlog undispatched --json"
-_PRIORITY_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
 
 class ObserverReadError(RuntimeError):
@@ -94,6 +93,9 @@ def classify_planned_unclaimed(
         if isinstance(entry.get("parent"), str)
     }
     rows: list[dict] = []
+    # The entry beside each row: the shared selection key sorts full entries,
+    # and the row is a projection that has already dropped rank and created_at.
+    scanned: list[dict] = []
     for entry in entries:
         node_id = entry.get("id")
         if not isinstance(node_id, str) or not node_id:
@@ -129,6 +131,7 @@ def classify_planned_unclaimed(
             and claim_state is None
         ):
             continue
+        scanned.append(entry)
         rows.append(
             {
                 "id": node_id,
@@ -144,12 +147,20 @@ def classify_planned_unclaimed(
             }
         )
 
-    rows.sort(
-        key=lambda row: (
-            _PRIORITY_ORDER.get(str(row.get("priority")), 99),
-            str(row["id"]),
-        )
+    # One ordering for both queues. This queue used to sort by (priority, id
+    # string), so the stop hook's `next:` line named a node the drain would
+    # never pick next: the drain reads the ready list, which is rank-aware.
+    # Reuse the shared key rather than re-implementing it (principle 9).
+    from fno.graph._intake import make_selection_sort_key
+
+    live_claimed = frozenset(
+        node_id for node_id, state in claimed.items() if state == "live"
     )
+    order = make_selection_sort_key(entries, live_claimed=live_claimed)
+    paired = sorted(
+        zip(scanned, rows), key=lambda pair: (order(pair[0]), str(pair[1]["id"]))
+    )
+    rows = [row for _, row in paired]
     return {
         "source": OBSERVER_COMMAND,
         "status": "ok",
