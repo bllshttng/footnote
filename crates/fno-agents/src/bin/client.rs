@@ -1690,9 +1690,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
-        // opencode headless: the client-side one-shot `opencode run --auto`
-        // (x-567d wires the documented lane; the bare `opencode` TUI stays the
-        // `pane` form). Stateless plain-text, like agy.
+        // opencode headless: the client-side one-shot
+        // `opencode run --dangerously-skip-permissions` (x-567d wires the lane;
+        // the bare `opencode` TUI stays the `pane` form). Stateless plain-text,
+        // like agy. The flag is NOT `--auto`: that spelling is stale vendor
+        // docs, it does not exist in `run --help`, and a comment naming it has
+        // twice been read as proof this arm was never built.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model, effort,
         )),
