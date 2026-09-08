@@ -341,8 +341,17 @@ make_fno_shim '{"recorded":false,"record_reason":"lock-timeout"}'
 MISSING_THROTTLE_ROOT="$TMP_DIR/missing-throttle-root"
 MISSING_THROTTLE_LOG="$TMP_DIR/missing-throttle-fno.log"
 MISSING_THROTTLE_BIN="$TMP_DIR/missing-throttle-bin"
-mkdir -p "$MISSING_THROTTLE_ROOT/hooks/helpers" "$MISSING_THROTTLE_ROOT/.fno" "$MISSING_THROTTLE_BIN"
+mkdir -p "$MISSING_THROTTLE_ROOT/hooks/helpers" "$MISSING_THROTTLE_ROOT/.fno" \
+  "$MISSING_THROTTLE_ROOT/scripts/lib" "$MISSING_THROTTLE_BIN"
 cp "$CARRIER" "$MISSING_THROTTLE_ROOT/hooks/worktree-peers-session-start.sh"
+# The carrier resolves its stranded dir through the paths stub under
+# FNO_TEST_HERMETIC=1, which the smoke runner sets and a bare `bash` run of
+# this file does not. Give the root its own stub and its own HOME so the cache
+# below is at the resolved path either way. Without both, this case passed
+# locally and failed on CI, because it was relying on the carrier falling back
+# to the checkout state root when the stub was missing, which is exactly the
+# fallback that got removed.
+cp "$REPO_ROOT/scripts/lib/paths.sh" "$MISSING_THROTTLE_ROOT/scripts/lib/paths.sh" 2>/dev/null || true
 cat > "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -359,6 +368,7 @@ EOF
 chmod +x "$MISSING_THROTTLE_BIN/fno"
 missing_throttle_out="$(
   FNO_STRANDED_LOG="$MISSING_THROTTLE_LOG" PATH="$MISSING_THROTTLE_BIN:$PATH" \
+  HOME="$MISSING_THROTTLE_ROOT" \
     bash "$MISSING_THROTTLE_ROOT/hooks/worktree-peers-session-start.sh" 2>/dev/null
 )"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
