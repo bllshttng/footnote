@@ -904,7 +904,7 @@ impl CascadeOutcome {
     }
 }
 
-fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
+pub(crate) fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
     if !e.short_id.is_empty() {
         return Some(e.short_id.clone());
     }
@@ -914,17 +914,22 @@ fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
         .map(|session_id| session_id.chars().take(8).collect())
 }
 
-/// True only when a KNOWN roster snapshot was consulted and the row is not
-/// in it. A `None`/unknown snapshot proves nothing, so it is never absent on
-/// that basis alone. The single predicate both the pre-cascade live-gate and
+/// True only when a KNOWN, warning-free roster snapshot was consulted and the
+/// row is not in it. A `None`/unknown snapshot proves nothing, so it is never
+/// absent on that basis alone; a list that carried warnings is PARTIAL, and a
+/// row hidden among the skipped rows would read as absent here. The single
+/// predicate both the pre-cascade live-gate and
 /// the cascade's own already-absent check apply, so "what counts as absent"
 /// cannot diverge between the two call sites.
 fn claude_row_provably_absent(
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
     row_id: Option<&str>,
 ) -> bool {
-    claude_agents
-        .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
+    claude_agents.is_some_and(|snap| {
+        snap.is_known()
+            && snap.warning_text().is_empty()
+            && row_id.is_some_and(|id| snap.find(id).is_none())
+    })
 }
 
 pub(crate) fn cascade_harness_session_result_with(
@@ -7014,20 +7019,54 @@ async fn handle_rm_with(
                  documented in `fno agents rm --help`, not here."
             )
         } else if roster_known {
-            format!(
-                "agent {name} is still live. Its harness row {row} is present in \
-                 `claude agents --json --all`. Stop it with `fno agents stop {name}`; rm \
-                 proceeds on its own once that row is gone. Do not tear the row down by \
-                 hand: that spends the resume handle for nothing, and `fno agents rm` \
-                 makes the same call itself."
-            )
+            let snapshot = claude_agents
+                .as_ref()
+                .expect("roster_known implies a snapshot");
+            let warnings = snapshot.warning_text();
+            let present = harness_row_id
+                .as_deref()
+                .is_some_and(|id| snapshot.find(id).is_some());
+            if present {
+                // A Known list can still be partial (warnings). The row IS in
+                // what parsed, but the operator should know the list was not
+                // clean.
+                let mut message = format!(
+                    "agent {name} is still live. Its harness row {row} is present in \
+                     `claude agents --json --all`. Stop it with `fno agents stop {name}`; rm \
+                     proceeds on its own once that row is gone. Do not tear the row down by \
+                     hand: that spends the resume handle for nothing, and `fno agents rm` \
+                     makes the same call itself."
+                );
+                if !warnings.is_empty() {
+                    message.push_str(&format!(
+                        " (the roster read carried warnings, so the list is partial: {warnings})"
+                    ));
+                }
+                message
+            } else {
+                format!(
+                    "agent {name} is still live, and its harness row {row} was not in the \
+                     parsed rows, but the roster read carried warnings, so the list is \
+                     partial and absence is not proof: {warnings}. Retry once the roster \
+                     reads clean: rm re-reads it and proceeds on its own when the row is \
+                     provably gone. Forcing it through spends the resume handle on \
+                     unverified evidence."
+                )
+            }
         } else {
+            // Name the read's own reason: "the roster read failed" without it
+            // sends callers to retry a timeout, which reproduces forever.
+            let reason = claude_agents
+                .as_ref()
+                .map(|snapshot| snapshot.warning_text())
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "no reason recorded".into());
             format!(
                 "agent {name} is still live, and its harness row {row}'s presence in \
                  `claude agents --json --all` could not be confirmed (the roster read \
-                 failed). Retry once the roster is readable: rm re-reads it and proceeds \
-                 on its own when the row is provably gone. Forcing it through spends the \
-                 resume handle on unverified evidence."
+                 failed: {reason}). Retry once that read succeeds: rm re-reads it and \
+                 proceeds on its own when the row is provably gone. Forcing it through \
+                 spends the resume handle on unverified evidence."
             )
         };
         return Response::err(req.id, ErrorCode::Busy, detail);
@@ -10045,6 +10084,81 @@ mod tests {
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    /// The Unknown-roster refusal must name the read's own reason. A bare
+    /// "the roster read failed" sent the 2026-09-08 operator to retry a
+    /// 15s timeout, which reproduces forever.
+    #[tokio::test]
+    async fn rm_unknown_roster_refusal_names_the_reads_own_reason() {
+        let home = short_home("rmunknown");
+        let mut row = claude_rm_row(
+            "done-worker",
+            "aaabbb13",
+            "aaabbb13-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "done-worker"}));
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::Unknown {
+                rows: Vec::new(),
+                warnings: vec!["claude agents --json --all timed out after 15s".into()],
+            },
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("the roster read failed:"));
+        assert!(message.contains("timed out after 15s"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A partial list cannot prove absence: a row hidden among the skipped
+    /// rows would read as gone. The refusal names the warnings instead.
+    #[tokio::test]
+    async fn rm_absence_is_not_proof_on_a_warning_carrying_list() {
+        let home = short_home("rmpartialabsence");
+        let mut row = claude_rm_row(
+            "done-worker",
+            "aaabbb14",
+            "aaabbb14-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "done-worker"}));
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::Known {
+                rows: Vec::new(),
+                warnings: vec!["one malformed row".into()],
+            },
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("absence is not proof"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     #[tokio::test]
     async fn rm_mux_failure_names_the_claude_side_already_removed() {
         let home = short_home("rmpartial");
@@ -10696,7 +10810,7 @@ mod tests {
             // states what forcing costs, and offers no override flag.
             let message = &response.error().unwrap().message;
             assert!(
-                message.contains("Retry once the roster is readable"),
+                message.contains("Retry once that read succeeds"),
                 "{}",
                 message
             );
