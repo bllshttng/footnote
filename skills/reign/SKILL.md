@@ -93,6 +93,8 @@ Then the levers, in this order, stopping at the first that applies per row: mail
 
 Rank is not yours. It is the operator's pin, and `fno backlog rank` refuses an agent session. A king who wants a row run next says so with `--priority p0`, which is bounded, receipted, and visible to the operator as a split vote on `fno backlog demand`.
 
+Then read [the fleet FAQ](../../docs/fleet-faq.md) for one thing only: an entry whose `Graduates to:` line landed since your last check-in. Move it to Retired in a PR, naming the PR that closed it. That list is the fleet's standing gap list, and the check-in beat is the only hook measured to fire, so nothing else retires an entry.
+
 Journal `reign_checkin`. If nothing changed since the last check-in, print `no change` and stop.
 
 ## Recording a ruling

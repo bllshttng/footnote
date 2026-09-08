@@ -10,9 +10,7 @@ Every entry is a workaround, and a workaround is a gap in the machinery. So this
 
 That makes each entry a candidate fix, not a permanent teaching. An entry earns its place until the gap closes, and then it leaves.
 
-**Adding an entry.** Write the question a reader will actually type, and the answer that survived contact. Give the specimen that proves it: a file and line, a command and its real output, or a measured number. Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry with no exit is a permanent workaround dressed as documentation.
-
-Run the `/simple-english` skill over your entry before you send it. That is ASD-STE100, the same standard `fno doctor lint style` enforces on this file.
+An entry with no exit is a permanent workaround dressed as documentation. The contract that keeps that from happening is in the next section, and it is the only one.
 
 This convention matches the pitfalls corpus in AGENTS.md, which removes an entry in the PR where its guard lands. Do the same here.
 
@@ -22,11 +20,13 @@ One entry already left this way. A king contributed a hook that fails with exit 
 
 Every entry names the change that retires it. That line is a contract, not a wish.
 
-**Adding one.** An entry needs an answer, a dated specimen that is real output or a file and a line, and a `Graduates to:` line. An entry that cannot name its own exit is a tip, not a gap. It does not belong here.
+**Adding one.** Write the question a reader will actually type, and the answer that survived contact. Give the specimen that proves it: a file and line, a command and its real output, or a measured number. Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry that cannot name its own exit is a tip, not a gap.
+
+Run the `/simple-english` skill over your entry before you send it. That is ASD-STE100, and `fno doctor lint style --surface markdown --files docs/fleet-faq.md` is the same standard mechanically. Pass the surface. The default is `mail`, whose 80-word cap refuses this whole file under a rule it cannot satisfy.
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line moves that entry to Retired at the bottom, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** A reigning king checks at its own check-in beat, which is the only hook measured to run. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
+**Checking.** A reigning king checks at its own check-in beat, which is the only hook measured to run. The check-in body in [../skills/reign/SKILL.md](../skills/reign/SKILL.md) names this file, so the read is encoded rather than asserted here. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
 The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
 
@@ -187,9 +187,6 @@ Holding is cheap and reversible. A worker killed to satisfy the wrong side of an
 
 **Where these came from.** Four reigns answered on one day, and their entries are mixed together below rather than kept in blocks. Some are not below at all. A contribution that matched an existing entry was folded into it. Several became shapes inside the absence section above. The reigns that sent those do not read as authors anywhere. A reaper crown sent three, on hidden sessions, a null field, and a compact that drops the beat. A project crown sent eight, on claim status, spawn share, the rebase reflex, and the merge gate. A state-isolation crown sent seven, on roster refusals, a dry run that overpromised, the operator-turn queue, and a check-run named for the wrong rule. An epic crown sent seven, on blocked nodes, codex cold starts, provider stamps, a stale sync report, and an arm that blamed the wrong thing.
 
-
-Contributed by the crowned sessions running other territories. Same contract: a real specimen, and a named exit.
-
 ## A node is blocked and I cannot unblock it
 
 **Answer.** You can edit the blocker list. `fno backlog update <id>` takes `--blocked-by` to replace it, `--add-blocker` to append, and `--remove-blocker` to drop one. Use those first.
@@ -342,7 +339,9 @@ So by default the gate rewards the author's own lane and discards the more indep
 
 Two kings acted on the false half within an hour. One warned the other that PR numbers fail the gate. The other stripped real PR numbers out of quoted specimens on that warning, then had to be told to keep them.
 
-*Graduates to:* a citation that names what the gate matches, or a gate that matches what the rule says. This entry corrects the sentence, and the gate is unchanged.
+A citation has siblings. Correcting one sentence leaves every copy of it standing, so grep the gate's own name before you call the drift fixed. This one had a second home in `docs/architecture/dual-implementation-inventory.md`, found by a review of the PR that corrected the first.
+
+*Graduates to:* a citation that names what the gate matches, or a gate that matches what the rule says. Both sentences are corrected, and the gate is unchanged.
 
 ## `claude agents --json` shows fewer sessions than the agent view
 
