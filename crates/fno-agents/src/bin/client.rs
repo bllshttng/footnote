@@ -54,6 +54,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "node-route",
     "notify-watch",
     "orphan-reap",
     "feed",
@@ -62,6 +63,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "probe-run",
     "promote",
     "reap",
+    "roster-reap",
     "reconcile",
     "recover",
     "reentry-plan",
@@ -542,6 +544,20 @@ async fn run(args: Vec<String>) -> i32 {
     // build_request.
     if verb == "reap" {
         return run_reap(&args[1..]);
+    }
+
+    // The roster-side sweep (x-aad0 gap one): claude rows no fno row names.
+    // Like `reap`, it operates directly on live surfaces so it needs no
+    // running daemon. Dry-run by default; `--apply` executes.
+    if verb == "roster-reap" {
+        return run_roster_reap(&args[1..]);
+    }
+
+    // The cascade verdict per NAME (x-0d08): the squad store's Unknown
+    // members carry no session id, so the fno side asks this verb for a
+    // positive verdict per name instead of re-implementing the cascade.
+    if verb == "node-route" {
+        return run_node_route(&args[1..]);
     }
 
     // Capture the verb name so format_success can use it at the print site
@@ -2233,6 +2249,166 @@ fn run_reap(rest: &[String]) -> i32 {
             dry_run
         )
     );
+    0
+}
+
+/// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
+/// by default; `--apply` executes. Takes only --json/--apply.
+fn run_roster_reap(rest: &[String]) -> i32 {
+    let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+    let dry_run = !rest.iter().any(|a| a == "--apply");
+    let extras: Vec<&str> = rest
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--json" && *a != "-J" && *a != "--apply")
+        .collect();
+    if !extras.is_empty() {
+        eprintln!(
+            "fno-agents: roster-reap takes no arguments other than --json/--apply (got: {})",
+            extras.join(" ")
+        );
+        return 2;
+    }
+    let home = AgentsHome::from_env();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
+    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, dry_run);
+    print!(
+        "{}",
+        fno_agents::roster_reap::render(&summary, json_out, dry_run)
+    );
+    0
+}
+
+/// `fno-agents node-route --names a,b --json`: the provenance cascade
+/// verdict per NAME (x-0d08). One graph read, one JSON answer per name:
+/// `retire-eligible` when the cascade resolves a done node and the PR
+/// confirm passes, `held` / `open` / `unresolved` otherwise. A name is
+/// never resolved from anything but the declared sources.
+fn run_node_route(rest: &[String]) -> i32 {
+    let mut names: Vec<String> = Vec::new();
+    let mut pairs: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--names" => {
+                let Some(value) = rest.get(i + 1) else {
+                    eprintln!("fno-agents: node-route --names needs a comma-separated list");
+                    return 2;
+                };
+                names.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_string),
+                );
+                i += 2;
+            }
+            "--pairs" => {
+                let Some(value) = rest.get(i + 1) else {
+                    eprintln!("fno-agents: node-route --pairs needs a comma-separated list");
+                    return 2;
+                };
+                pairs.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string),
+                );
+                i += 2;
+            }
+            "--json" | "-J" => i += 1,
+            other => {
+                eprintln!(
+                    "fno-agents: node-route takes only --names/--pairs/--json (got: {other})"
+                );
+                return 2;
+            }
+        }
+    }
+    if names.is_empty() && pairs.is_empty() {
+        eprintln!("fno-agents: node-route needs --names or --pairs");
+        return 2;
+    }
+    let home = AgentsHome::from_env();
+    let graph = fno_agents::gc_sweep::read_graph_entries(&home);
+    let mut answers = serde_json::Map::new();
+    for name in &names {
+        let mut entry =
+            fno_agents::state::RegistryEntry::new(None, fno_agents::state::Lineage::none());
+        entry.name = name.clone();
+        let answer = match &graph {
+            None => serde_json::json!({"state": "graph-unreadable"}),
+            Some(g) => {
+                let verdict = fno_agents::gc_sweep::provenance_verdict(&entry, "", g, None);
+                let node = verdict.route.node.clone();
+                let basis = format!(
+                    "via {}",
+                    verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                );
+                match (&verdict.work, &verdict.hold) {
+                    (_, Some(hold)) => serde_json::json!({
+                        "state": "held",
+                        "node": node,
+                        "reason": hold.as_str(),
+                    }),
+                    (fno_agents::graph_store::WorkState::AllDone { .. }, None) => {
+                        serde_json::json!({"state": "retire-eligible", "node": node, "basis": basis})
+                    }
+                    (fno_agents::graph_store::WorkState::Open { node: n, status }, None) => {
+                        serde_json::json!({"state": "open", "node": node, "reason": format!("{n} {status}")})
+                    }
+                    (fno_agents::graph_store::WorkState::NoProvenance, None) => {
+                        serde_json::json!({"state": "unresolved"})
+                    }
+                }
+            }
+        };
+        answers.insert(name.clone(), answer);
+    }
+    // The transcript-quiet pair leg: a session-keyed member whose registry
+    // row went stale still reads LIVE while its transcript is fresh - the
+    // same activity evidence the reap's quiet gate trusts. `harness:sid`
+    // answers `live` (fresh), `quiet` (stale), or `unresolved` (no store
+    // read); a name never consults a transcript it has no session for.
+    if !pairs.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
+        let now = fno_agents::daemon::now_epoch_secs();
+        let mut store = fno_agents::gc_inventory::HarnessStoreIndex::default();
+        for pair in &pairs {
+            let Some((harness, sid)) = pair.split_once(':') else {
+                answers.insert(
+                    pair.clone(),
+                    serde_json::json!({"state": "unresolved", "reason": "not harness:sid"}),
+                );
+                continue;
+            };
+            let mut entry = fno_agents::state::RegistryEntry::new(
+                Some(sid.to_string()),
+                fno_agents::state::Lineage::none(),
+            );
+            entry.harness = Some(harness.to_string());
+            let answer = match store.matches(&entry) {
+                Some(hits) if !hits.is_empty() => {
+                    match fno_agents::gc::transcript_age_s(Some(&hits), now) {
+                        Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
+                        Some(_) => serde_json::json!({"state": "quiet"}),
+                        None => serde_json::json!({"state": "unresolved"}),
+                    }
+                }
+                _ => serde_json::json!({"state": "unresolved"}),
+            };
+            answers.insert(pair.clone(), answer);
+        }
+    }
+    println!("{}", serde_json::Value::Object(answers));
     0
 }
 

@@ -495,9 +495,20 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # and `territory-rows` are reached through the config passthroughs, and
     # `territory-verdict` through the spawn gate's delegate - every caller
     # uses resolve_binary directly, never `fno agents <verb>` routing.
+    # `node-route` is shelled by the squad prune's cascade fold for a verdict
+    # per unknown member; `roster-reap` is the roster sweep's own door. Both
+    # are binary-first surfaces, never `fno` auto-routes.
     routable = arms | (
         specials
-        - {"board", "notify-watch", "active-backlog-receipt", "territory-rows", "territory-verdict"}
+        - {
+            "board",
+            "notify-watch",
+            "active-backlog-receipt",
+            "territory-rows",
+            "territory-verdict",
+            "node-route",
+            "roster-reap",
+        }
     )
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (

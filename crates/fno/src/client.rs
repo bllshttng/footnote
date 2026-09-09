@@ -1014,6 +1014,13 @@ struct View {
     /// toggle; the fold's rows newest first. `None` closed. The panel's
     /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
+    /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
+    /// it is open, so an index into `feed.items` would silently re-point at a
+    /// different event; the inspected event never changes under the reader.
+    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
+    /// safety as [`View::ans_esc`]).
+    feed_esc: Vec<u8>,
     feed_width: u16,
     feed_offset: usize,
     hover_feed_border: bool,
@@ -1460,7 +1467,9 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // The needs overlay's projection + render, moved out of this file (file
 // budget); the feed overlay answers its own question from its own module and
 // reuses join_fold_row's join keys for its deep link (x-4433).
+mod feed_detail;
 mod feed_view;
+mod keys_modal;
 mod needs_view;
 pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
 
@@ -1576,105 +1585,6 @@ struct PeekView {
 struct KeysModal {
     popup: Popup,
     row_events: Vec<Option<Event>>,
-}
-
-/// Build the modal's rows from [`key_bindings`] (the dispatcher's own table):
-/// title, then each section's header + its bindings (key leading, action right),
-/// its display-only meta rows, then a footer hint. `row_events` runs parallel to
-/// `popup.rows` so a selected row's chord is one lookup away.
-fn build_keys_modal() -> KeysModal {
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut events: Vec<Option<Event>> = Vec::new();
-    let mut add = |row: PopupRow, ev: Option<Event>| {
-        rows.push(row);
-        events.push(ev);
-    };
-    add(PopupRow::Header("keybinds  ·  esc close".into()), None);
-    let bindings = key_bindings();
-    for section in [
-        KeySection::Global,
-        KeySection::Navigation,
-        KeySection::WorkspacesTabs,
-        KeySection::Panes,
-        KeySection::SidelineRows,
-    ] {
-        add(PopupRow::Header(section.title().into()), None);
-        for kb in bindings.iter().filter(|kb| kb.section == section) {
-            add(
-                PopupRow::Entry {
-                    glyph: kb.disp.to_string(),
-                    label: kb.label.to_string(),
-                    // The stable id `[mux.keys]` names, beside the key it
-                    // rebinds. The config contract promises this modal lists
-                    // them.
-                    hint: kb.action.to_string(),
-                    enabled: true,
-                },
-                Some(kb.event.clone()),
-            );
-        }
-        // Display-only rows (1-9 select tab, prefix-prefix literal): selectable
-        // so the reference shows them, but not single-event chords, so Enter
-        // BELs. No action id - `chord()` handles them structurally.
-        for (disp, label, _) in meta_rows().iter().filter(|(_, _, s)| *s == section) {
-            add(
-                PopupRow::Entry {
-                    glyph: disp.clone(),
-                    label: label.clone(),
-                    hint: String::new(),
-                    enabled: true,
-                },
-                None,
-            );
-        }
-    }
-    add(PopupRow::Rule, None);
-    add(
-        PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
-        None,
-    );
-    // (x-7683) The right-click config note. The mux side works whenever the
-    // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
-    // that never send them are named so the operator configures the terminal,
-    // or reaches for the no-config paths, instead of reading a dead feature.
-    add(PopupRow::Rule, None);
-    add(
-        PopupRow::Header("right-click works only where the terminal forwards it".into()),
-        None,
-    );
-    add(
-        PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
-        None,
-    );
-    // (x-b465) Ghostty joins the named list: it binds right-click to its own
-    // context menu by default (`right-click-action`), measured against Warp on
-    // the same build, where the identical press opens the menu. The SETTING is
-    // named, not a value to set: which value restores forwarding is untested
-    // here, and a config line this text cannot vouch for is the kind of
-    // confident wrong answer that cost a whole diagnosis round already.
-    add(
-        PopupRow::Header("Ghostty binds it too · see right-click-action".into()),
-        None,
-    );
-    add(
-        PopupRow::Header(format!(
-            "in tmux set mouse off · else m, or hold Left {}ms",
-            MENU_LONG_PRESS.as_millis()
-        )),
-        None,
-    );
-    // (x-b5d1) The glyph legend rides the modal tail, after the notes: the
-    // x7683 pin holds the notes above the 64-row fold, and the legend is
-    // reference material the same scroll reaches. Generated from the same
-    // lattice table the rows and the header band render - one source, so
-    // the modal cannot drift from what the screen draws. Inert rows.
-    for row in glyph_legend::legend_rows() {
-        add(row, None);
-    }
-    KeysModal {
-        popup: Popup::new(rows, Anchor::Center),
-        row_events: events,
-    }
 }
 
 /// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
@@ -2703,6 +2613,8 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
+            feed_detail_of: None,
+            feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
             hover_feed_border: false,
@@ -3305,7 +3217,7 @@ impl View {
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
-        self.keys_modal = Some(build_keys_modal());
+        self.keys_modal = Some(keys_modal::build_keys_modal());
         self.keys_modal_esc.clear();
     }
 
@@ -6503,7 +6415,16 @@ impl View {
         // (x-f089) Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(lines) = &self.digest {
+        if let Some(item) = &self.feed_detail_of {
+            feed_detail::draw(
+                self,
+                item,
+                &mut cells,
+                (rows, cols),
+                overlay_origin,
+                overlay_dims,
+            );
+        } else if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
             // key-table overlay). Framed chrome so it reads as one product with
             // the settings and connections modals.
@@ -8939,6 +8860,10 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
+    /// Open the activity feed's provenance view for one row. Carries the item
+    /// BY VALUE: a later fold replaces the row list, so an index would open
+    /// the view onto a different event than the one clicked.
+    OpenFeedDetail(crate::feed_overlay::FeedItem),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -12521,7 +12446,14 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    // (x-f089) The feed panel is chrome and consumes no keys.
+    // (x-f089) The feed panel is chrome and consumes no keys UNTIL the
+    // operator focuses it with `E`, or opens a row's provenance. Both are
+    // explicit, and both release back to the pane on Esc, so the property
+    // this slot protects - typing reaches the focused pane - holds by
+    // default and is set aside only on request.
+    if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
+        return feed_view::feed_keys(view, &passthrough, sock_w).await;
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -12710,6 +12642,7 @@ async fn dispatch_event(
             }
         }
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
+        Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
@@ -12963,6 +12896,9 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
+        // Inspect first. The deep link is this view's own action, not the
+        // click that opened it.
+        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
     }
     Ok(())
 }

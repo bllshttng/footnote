@@ -922,6 +922,7 @@ fn dispatch_opencode_serve_inner(
             ("harness", "opencode".into()),
             ("session_id", session_id.clone().into()),
             ("serve_url", serve.base_url.clone().into()),
+            ("node", node.unwrap_or_default().into()),
         ],
     );
     AskOutcome::ok_reply(

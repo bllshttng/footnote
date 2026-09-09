@@ -17,6 +17,7 @@ question if the table has since moved.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -67,6 +68,54 @@ def load_receipts() -> list[tuple[Path, dict]]:
     return out
 
 
+#: The handle keys a receipt answers to. The same three
+#: ``crates/fno-agents/src/resume_receipt.rs`` matches for ``fno agents
+#: resume``: nobody remembers a uuid, and the receipt filename is keyed on
+#: one, so the name is not in the path either.
+RECEIPT_HANDLE_KEYS = ("harness_session_id", "short_id", "row_name")
+
+
+#: The live-row fields answering those same three handles. A receipt's
+#: ``row_name`` is a live row's ``name``; the other two keep their spelling.
+#: The two vocabularies must stay equal, or a name that finds a retired
+#: receipt finds no live row and the stale receipt is reported as the answer
+#: for a session that is running right now.
+LIVE_HANDLE_KEYS = ("harness_session_id", "short_id", "name")
+
+
+def _answers(
+    get: Callable[[str], object], keys: tuple[str, ...], needle: str
+) -> bool:
+    """True when ``get`` returns ``needle`` for any of ``keys``.
+
+    Compared case-insensitively. An empty field never matches an empty
+    argument: two blanks are not a hit.
+    """
+    if not needle:
+        return False
+    for key in keys:
+        value = get(key)
+        if isinstance(value, str) and value and value.casefold() == needle:
+            return True
+    return False
+
+
+def _receipt_answers(receipt: dict, needle: str) -> bool:
+    """True when this receipt answers to ``needle`` on any handle key."""
+    return _answers(receipt.get, RECEIPT_HANDLE_KEYS, needle)
+
+
+def _entry_answers(entry, needle: str) -> bool:
+    """True when this live registry row answers to ``needle``."""
+    return _answers(lambda k: getattr(entry, k, None), LIVE_HANDLE_KEYS, needle)
+
+
+def _reaped_at(entry: tuple[Path, dict]) -> str:
+    """Sort key for the hits: newest first, an absent stamp sorting last."""
+    value = entry[1].get("reaped_at")
+    return value if isinstance(value, str) else ""
+
+
 def _enrichment_node(receipt: dict) -> str | None:
     ledger = receipt.get("ledger")
     if not isinstance(ledger, dict):
@@ -114,10 +163,16 @@ def history_command(arg: str) -> None:
 
     live_rows = []
     live_err: str | None = None
+    needle = arg.casefold()
     try:
         entries = load_registry()
-        wanted = {arg} if arg_kind == "session" else joined_sids
-        live_rows = [e for e in entries if e.harness_session_id in wanted]
+        if arg_kind == "session":
+            # The same three handles a receipt answers to. Matching only the
+            # session id here left `live_sids` empty for a name query, so the
+            # receipt of a resumed session was reported as its present state.
+            live_rows = [e for e in entries if _entry_answers(e, needle)]
+        else:
+            live_rows = [e for e in entries if e.harness_session_id in joined_sids]
     except Exception as exc:  # noqa: BLE001 - a broken registry is one source's miss
         live_err = str(exc)
     live_sids = {e.harness_session_id for e in live_rows if e.harness_session_id}
@@ -127,7 +182,7 @@ def history_command(arg: str) -> None:
     for path, receipt in load_receipts():
         sid = receipt.get("harness_session_id")
         hit = (
-            (arg_kind == "session" and sid == arg)
+            (arg_kind == "session" and _receipt_answers(receipt, needle))
             or (arg_kind != "session" and sid in joined_sids)
             or (node is not None and _enrichment_node(receipt) == node)
             or (pr is not None and _enrichment_pr(receipt) == pr)
@@ -158,8 +213,17 @@ def history_command(arg: str) -> None:
         )
 
     if receipt_hits:
+        # A handle can be reused across retired sessions, so print every hit
+        # rather than picking one out of an unspecified directory order.
+        receipt_hits.sort(key=_reaped_at, reverse=True)
         typer.echo("receipt:")
-        for path, receipt in receipt_hits:
+        if len(receipt_hits) > 1:
+            typer.echo(
+                f"{len(receipt_hits)} receipts answer this handle, newest first"
+            )
+        for i, (path, receipt) in enumerate(receipt_hits):
+            if i:
+                typer.echo("---")
             typer.echo(f"from:     {path}")
             typer.echo(f"name:     {receipt.get('row_name') or '-'}")
             typer.echo(f"harness:  {receipt.get('harness') or '-'}")
@@ -171,7 +235,12 @@ def history_command(arg: str) -> None:
             # if the table moved since.
             typer.echo(f"resume:   {receipt.get('resume') or '-'}")
     else:
-        reasons = ["no reap receipt on disk under " + str(receipts_dir())]
+        reasons = [
+            "no reap receipt on disk under "
+            + str(receipts_dir())
+            + " matches "
+            + ", ".join(RECEIPT_HANDLE_KEYS)
+        ]
         if live_sids:
             reasons.append(
                 "a registry row still names it (row presence, not a liveness "

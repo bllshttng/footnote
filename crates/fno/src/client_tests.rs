@@ -1,6 +1,10 @@
 use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
+#[path = "client_tests/chrome_hit_helpers.rs"]
+mod chrome_hit_helpers;
+use crate::client::keys_modal::build_keys_modal;
 use crate::vt::frame_text;
+use chrome_hit_helpers::{chrome_hit_label, cmds};
 
 // (x-0719) The nav filter/overlay test run lives in its own module; this
 // file is shrink-only under the file-budget gate.
@@ -2735,28 +2739,6 @@ fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
     }
 }
 
-fn cmds(hit: Option<ChromeHit>) -> Vec<Command> {
-    match hit {
-        Some(ChromeHit::Cmds(c)) => c,
-        other => panic!("expected Cmds, got {}", chrome_hit_label(&other)),
-    }
-}
-
-fn chrome_hit_label(hit: &Option<ChromeHit>) -> &'static str {
-    match hit {
-        None => "None",
-        Some(ChromeHit::Cmds(_)) => "Cmds",
-        Some(ChromeHit::Notice(_)) => "Notice",
-        Some(ChromeHit::Confirm(_)) => "Confirm",
-        Some(ChromeHit::OpenCreate) => "OpenCreate",
-        Some(ChromeHit::CycleSection(_)) => "CycleSection",
-        Some(ChromeHit::SortColumn(_)) => "SortColumn",
-        Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
-        Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
-        Some(ChromeHit::CycleDensity) => "CycleDensity",
-    }
-}
-
 // A left click on the tab bar switches to the clicked tab, opens a new one on
 // the `+`, and does nothing on the inert squad-name label.
 #[test]
@@ -4737,7 +4719,7 @@ fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
     // The default selection is the first binding; row_events[selected] must
     // be exactly the Event a direct chord of that key would produce (Locked
     // 3 parity, at the modal boundary).
-    let m = super::build_keys_modal();
+    let m = build_keys_modal();
     let (ri, _) = m.popup.selected().expect("a selectable row");
     let ev = m.row_events[ri].clone().expect("first row is executable");
     // The first section is Global; its first binding is `w` -> OpenSelector.

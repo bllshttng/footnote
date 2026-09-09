@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from fno.agents.dispatch_errors import DispatchAskError
 from fno.agents.rust_spawn import _codex_thread_spawn, _opencode_serve_spawn
 from typing import (
     TYPE_CHECKING,
@@ -407,15 +408,6 @@ _PROVABLY_LIVE_WINDOW_SEC = 3600.0
 
 
 
-class DispatchAskError(RuntimeError):
-    """Raised by the dispatch helpers for any callable failure.
-
-    Carries the exit code the CLI layer should propagate to the shell.
-    """
-
-    def __init__(self, message: str, *, exit_code: int) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
 
 
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
@@ -4164,18 +4156,9 @@ def _teardown_harness_session(
     if harness == "codex":
         from fno.agents.harnesses import codex as codex_mod
 
-        try:
-            removed = codex_mod.remove_session_index_entry(sid)
-        except ValueError as exc:
-            return _fail(str(exc), exit_code=12)
-        except OSError as exc:
-            return _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
-        print(
-            f"torn down: codex session index entry {sid}"
-            if removed
-            else f"already gone: codex session index entry {sid}",
-            flush=True,
-        )
+        failure = codex_mod.teardown_session_index(sid)
+        if failure is not None:
+            return _fail(failure[0], exit_code=failure[1])
         return None
 
     # Fail loud rather than fall off the end: the caller's harness tuple and
@@ -4249,6 +4232,7 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
+            captured_index_lines: list = []
             from fno.worktree_reapable import is_linked_worktree
 
             detected_worktree = bool(existing.cwd and is_linked_worktree(existing.cwd))
@@ -4388,6 +4372,16 @@ def rm_agent(
                         )
 
             elif existing.harness in ("codex", "opencode", "cursor-agent"):
+                # Snapshot the index lines the teardown drops, so a declining
+                # write can put them back: the refusal leaves every store
+                # unchanged, harness store included.
+                captured_index_lines = []
+                if existing.harness == "codex" and existing.harness_session_id:
+                    from fno.agents.harnesses import codex as codex_mod
+
+                    captured_index_lines = codex_mod.capture_for_rm_rollback(
+                        existing.harness_session_id
+                    )
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,
@@ -4410,6 +4404,8 @@ def rm_agent(
                     decline_reason=decline_reason,
                 )
             except (OSError, RegistryVersionError) as exc:
+                if captured_index_lines:
+                    codex_mod.restore_session_index_entries(captured_index_lines)
                 events.emit(
                     "agent_removed",
                     name=name,
@@ -4426,6 +4422,8 @@ def rm_agent(
                     exit_code=12,
                 ) from exc
             if not registry_changed:
+                if captured_index_lines:
+                    codex_mod.restore_session_index_entries(captured_index_lines)
                 row_removed = decline_reason and decline_reason[0] == "row_removed"
                 events.emit(
                     "agent_removed",

@@ -12,9 +12,18 @@
 //! `no such agent` notice is what a dead session answers.
 //!
 //! Since x-f089 the feed is the right-edge PANEL the operator specified, not
-//! a centered modal: `e` toggles it, a click deep-links a row, the border
-//! drags, and typing reaches the focused pane because the panel consumes no
-//! keys at all.
+//! a centered modal: `e` toggles it, the border drags, and an UNFOCUSED panel
+//! consumes no keys at all, so typing reaches the focused pane.
+//!
+//! That key-free rule is the default, not the whole story. `E` focuses the
+//! panel explicitly: while focused it takes the arrows (row select and
+//! horizontal pan), Enter and Esc, and the header says so. Esc releases it.
+//! The property the rule protects - typing reaches the pane - holds whenever
+//! the operator has not asked for the opposite.
+//!
+//! A click no longer fires the deep link straight off. It opens the row's
+//! PROVENANCE (`feed_detail`), and the deep link is that view's footer
+//! action. Inspecting never attaches or resumes anything on its own.
 
 use super::*;
 use crate::feed_overlay::{FeedError, FeedItem};
@@ -23,8 +32,8 @@ use crate::feed_overlay::{FeedError, FeedItem};
 /// (a display index, NEWEST FIRST, the order the rows render in), and the
 /// same generation/single-flight discipline the needs fold runs. `want` arms
 /// the run-loop kick; `gen` invalidates a result that lands after a close or
-/// a re-open. `sel` follows the pointer, never the keyboard: the panel is
-/// chrome and consumes no keys.
+/// a re-open. `sel` follows the pointer while the panel is UNFOCUSED, and the
+/// arrows while it is focused - the panel consumes keys only then.
 pub(crate) struct FeedOverlay {
     pub(crate) items: Vec<FeedItem>,
     /// Hovered row in display order; the `▸` marker paints here.
@@ -35,6 +44,12 @@ pub(crate) struct FeedOverlay {
     pub(crate) inflight: bool,
     pub(crate) want: bool,
     pub(crate) gen: u64,
+    /// True while the panel holds the keyboard. Set by `E`, cleared by Esc
+    /// and by every close, so a reopen never starts holding it.
+    pub(crate) focused: bool,
+    /// Horizontal pan into the TITLE, in display columns. The timestamp, kind
+    /// and node stay anchored so a panned row is still identifiable.
+    pub(crate) hpan: usize,
 }
 
 /// A fresh open: the prior items ride over (instant content), but a refold is
@@ -48,6 +63,8 @@ pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay 
         inflight: false,
         want: true,
         gen,
+        focused: false,
+        hpan: 0,
     }
 }
 
@@ -62,7 +79,11 @@ pub(crate) fn feed_panel_lines(
     visible_rows: usize,
     offset: usize,
 ) -> Vec<String> {
-    let mut lines = vec![pad_to(" activity feed · click row opens · e close", w)];
+    // The header says which input state the panel is in, because the rule is
+    // not guessable: an unfocused panel takes no keys at all. It is also the
+    // ONLY place the focus key is advertised, so it degrades to a shorter
+    // spelling on a narrow panel rather than being clipped away.
+    let mut lines = vec![pad_to(header_line(o.focused, w), w)];
     let visible = visible_rows.saturating_sub(2);
     for d in offset..offset + visible {
         match o
@@ -72,7 +93,8 @@ pub(crate) fn feed_panel_lines(
             .and_then(|i| o.items.get(i))
         {
             Some(item) => {
-                // The hover marker lands on the row the pointer is on.
+                // The marker lands on the hovered row, or on the selected row
+                // while the panel holds the keyboard.
                 let marker = if d == o.sel { '▸' } else { ' ' };
                 let node = item.node.as_deref().unwrap_or("-");
                 lines.push(pad_to(
@@ -81,7 +103,7 @@ pub(crate) fn feed_panel_lines(
                         short_ts(&item.ts),
                         item.kind,
                         node,
-                        item.title
+                        pan_by(&item.title, o.hpan)
                     ),
                     w,
                 ));
@@ -128,37 +150,71 @@ pub(crate) fn feed_row_item(
     (d < item_len).then_some(d)
 }
 
+/// The panel header for one input state, at the widest spelling that fits.
+/// A clipped header is how the focus key stayed undiscoverable: the panel
+/// drags to any width, and at the 40-column default the full sentence does
+/// not fit.
+///
+/// The last spelling in each list leads with the KEY. The panel drags
+/// narrower than any prose fits, and the caller pads and clips from the end,
+/// so a label-first fallback loses the only place the key is advertised.
+pub(crate) fn header_line(focused: bool, w: usize) -> &'static str {
+    let candidates: [&str; 4] = if focused {
+        [
+            " FEED FOCUSED · up/down row · left/right pan · enter details · esc release",
+            " FEED FOCUSED · arrows move · enter details · esc release",
+            " FOCUSED · enter details · esc release",
+            " esc release",
+        ]
+    } else {
+        [
+            " activity feed · click row for details · E focus · e close",
+            " activity feed · click: details · E focus · e close",
+            " feed · click: details · E focus",
+            " E focus",
+        ]
+    };
+    candidates
+        .into_iter()
+        .find(|c| unicode_width::UnicodeWidthStr::width(*c) <= w)
+        .unwrap_or(candidates[candidates.len() - 1])
+}
+
+/// Drop `cols` DISPLAY columns off the front of `s`, so a pan never splits a
+/// wide glyph in half: a two-column glyph straddling the cut is dropped whole.
+/// Panning past the end yields the empty string rather than clamping, so the
+/// caller's own ceiling is what stops the pan.
+pub(crate) fn pan_by(s: &str, cols: usize) -> String {
+    if cols == 0 {
+        return s.to_string();
+    }
+    let mut skipped = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        if skipped >= cols {
+            out.push(ch);
+            continue;
+        }
+        skipped += unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(0)
+            .max(1);
+    }
+    out
+}
+
+/// The widest title in the panel, in display columns. The pan stops one
+/// column short of this, so the widest row always keeps something on screen.
+pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
+    items
+        .iter()
+        .map(|i| unicode_width::UnicodeWidthStr::width(i.title.as_str()))
+        .max()
+        .unwrap_or(0)
+}
+
 /// `HH:MM` out of an RFC3339 stamp; an unparseable ts shows raw.
 fn short_ts(ts: &str) -> String {
     ts.get(11..16).unwrap_or(ts).to_string()
-}
-
-/// The deep link. Joined first (the sideline's own resolution - node id
-/// matches a row's name or worktree basename, session id its harness id), so
-/// a live worker's row gets exactly the command a sideline click on that
-/// worker yields. Unjoined but carrying a session id: attach it on portal 0;
-/// a dead session answers through the server's existing refusal notice. No
-/// session id at all: not selectable.
-pub(crate) fn feed_hit(view: &View, item: &FeedItem) -> Option<ChromeHit> {
-    let keys: Vec<&str> = [item.node.as_deref(), item.session_id.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
-    if let Some(row) = view.layout.agents.iter().find(|a| {
-        keys.iter().any(|k| a.name == *k)
-            || a.cwd_base.as_deref().is_some_and(|c| keys.contains(&c))
-    }) {
-        return Some(agent_hit(row, view.layout.active_squad));
-    }
-    item.session_id.as_deref().map(|sid| {
-        ChromeHit::Cmds(vec![Command::AttachAgent {
-            id: sid.to_string(),
-            placement: PanePlacement {
-                portal: Some(0),
-                ..PanePlacement::default()
-            },
-        }])
-    })
 }
 
 /// The feed panel's width until the operator drags its border once; persisted
@@ -356,9 +412,13 @@ impl View {
         }
     }
 
-    /// The `chrome_hit` branch for the panel's columns: a click resolves
-    /// through the feed's deep link; the divider is the drag band and the
-    /// header/footer rows are chrome, never rows.
+    /// The `chrome_hit` branch for the panel's columns: a click opens that
+    /// row's PROVENANCE, and the deep link is that view's action. The divider
+    /// is the drag band and the header/footer rows are chrome, never rows.
+    ///
+    /// The click used to fire the deep link straight off. It moved because
+    /// "take me there" and "tell me what this was" are different questions,
+    /// and the row had only one gesture to answer both with.
     pub(super) fn chrome_hit_feed(&self, row: u16, col: u16) -> Option<ChromeHit> {
         let feed_w = self.feed_panel_w();
         if feed_w == 0 || col < self.term.1 - feed_w {
@@ -381,8 +441,62 @@ impl View {
         )
         .and_then(|d| {
             let item = f.items.get(f.items.len() - 1 - d)?;
-            feed_hit(self, item)
+            Some(ChromeHit::OpenFeedDetail(item.clone()))
         })
+    }
+
+    /// Keep the selected row inside the window after a keyboard move. The
+    /// offset is re-clamped against the CURRENT viewport first, exactly as
+    /// [`Self::scroll_feed`] does, so a shrunken terminal cannot leave the
+    /// window parked past the last row.
+    pub(super) fn follow_feed_selection(&mut self) {
+        let visible = (self.term.0 as usize).saturating_sub(2);
+        let Some(f) = &self.feed else {
+            return;
+        };
+        if visible == 0 {
+            return;
+        }
+        let max_off = f.items.len().saturating_sub(visible);
+        let sel = f.sel;
+        let mut off = self.feed_offset.min(max_off);
+        if sel < off {
+            off = sel;
+        } else if sel >= off + visible {
+            off = sel + 1 - visible;
+        }
+        self.feed_offset = off.min(max_off);
+    }
+
+    /// Open the provenance view for the selected row, copying the item OUT of
+    /// the list. A later fold replaces `items` wholesale, so holding an index
+    /// would re-point the open view at a different event mid-read.
+    pub(super) fn open_feed_detail(&mut self) {
+        let Some(f) = &self.feed else {
+            return;
+        };
+        // `sel` is a DISPLAY index, newest first; the list is oldest first.
+        let Some(item) = f
+            .items
+            .len()
+            .checked_sub(f.sel + 1)
+            .and_then(|i| f.items.get(i))
+        else {
+            return;
+        };
+        self.feed_detail_of = Some(item.clone());
+    }
+
+    /// What the provenance view's Enter does, resolved from the SAME evidence
+    /// the view rendered its footer from - one `Destination`, read twice. Resolving
+    /// it twice is how the footer came to promise a command the action did not
+    /// send: the footer joined on the exact session id while the action joined
+    /// on the row name, so a node_created row with a live worker on that node
+    /// read `esc close` and then focused a pane.
+    pub(super) fn feed_detail_hit(&self) -> Option<ChromeHit> {
+        let item = self.feed_detail_of.as_ref()?;
+        let dest = feed_detail::destination(&self.layout.agents, item);
+        feed_detail::detail_hit(self, &dest)
     }
 
     /// The hover marker follows the pointer inside the panel; anything else
@@ -417,7 +531,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     let Some(f) = view.feed.as_mut() else {
         return;
     };
-    if !(f.want && !f.inflight) {
+    if !f.want || f.inflight {
         return;
     }
     f.want = false;
@@ -471,7 +585,14 @@ pub(crate) async fn toggle(
     if view.feed.is_none() {
         view.feed = Some(open_overlay(view.feed.take(), gen));
     } else {
+        // Closing releases the keyboard with the panel, so a later reopen
+        // never starts already holding it.
         view.feed = None;
+        view.feed_detail_of = None;
+        // A half-read escape sequence must not survive the close: carried
+        // into the next focus it folds with the fresh bytes into a key
+        // nobody pressed.
+        view.feed_esc.clear();
     }
     let (r, c) = view.content_dims();
     write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
@@ -528,4 +649,112 @@ pub(crate) async fn esc_revert(
             .map_err(|e| format!("feed revert resize send failed: {e}"))?;
     }
     Ok(true)
+}
+
+/// The `E` focus. Opens the panel when it is closed, then takes the keyboard
+/// either way. This is the ONE place the key-free default is set aside, and
+/// only ever on the operator's explicit gesture.
+pub(crate) async fn focus(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    if view.feed.is_none() {
+        toggle(view, sock_w).await?;
+    }
+    if let Some(f) = view.feed.as_mut() {
+        f.focused = true;
+    }
+    view.feed_esc.clear();
+    Ok(())
+}
+
+/// Release the keyboard, leaving the panel open. The Esc half of `focus`.
+pub(crate) fn release(view: &mut View) -> bool {
+    match view.feed.as_mut() {
+        Some(f) if f.focused => {
+            f.focused = false;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The focused feed panel's keys, and the provenance view's.
+///
+/// Reached only when the operator asked for it: `E` focused the panel, or a
+/// click opened a row's provenance. Every other time the panel takes no keys
+/// at all and this function is never called, which is the whole point.
+///
+/// Precedence inside: the provenance view wins while it is open (it is the
+/// thing in front), then the focused panel. Esc unwinds one layer at a time -
+/// the view first, then the focus - so a reader never loses both at once.
+pub(crate) async fn feed_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.feed_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.feed_esc = esc;
+    for tok in toks {
+        if view.feed_detail_of.is_some() {
+            match tok {
+                ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
+                    view.feed_detail_of = None;
+                }
+                ModalKey::Enter => {
+                    // The deep link is the view's ACTION, never its opening
+                    // gesture: inspecting attaches and resumes nothing.
+                    if let Some(hit) = view.feed_detail_hit() {
+                        apply_hit(view, hit, sock_w).await?;
+                    }
+                    view.feed_detail_of = None;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if matches!(tok, ModalKey::Esc) {
+            release(view);
+            continue;
+        }
+        let Some(f) = view.feed.as_mut() else {
+            break; // closed mid-chunk: swallow the rest, never forward
+        };
+        let len = f.items.len();
+        match tok {
+            ModalKey::Esc => {}
+            ModalKey::Up => {
+                f.sel = f.sel.saturating_sub(1);
+                view.follow_feed_selection();
+            }
+            ModalKey::Down => {
+                f.sel = (f.sel + 1).min(len.saturating_sub(1));
+                view.follow_feed_selection();
+            }
+            // Panning moves the TITLE only; the stamp, kind and node stay
+            // anchored, so a panned row is still the row you selected.
+            ModalKey::Left => f.hpan = f.hpan.saturating_sub(1),
+            ModalKey::Right => {
+                // One column short of the widest title. AT that width every
+                // row is blank, so the pan would strand the operator in an
+                // empty panel with nothing on screen to pan back by.
+                let ceiling = feed_view::widest_title(&f.items).saturating_sub(1);
+                f.hpan = (f.hpan + 1).min(ceiling);
+            }
+            ModalKey::PageUp => {
+                let page = (view.term.0 as usize).saturating_sub(2).max(1);
+                f.sel = f.sel.saturating_sub(page);
+                view.follow_feed_selection();
+            }
+            ModalKey::PageDown => {
+                let page = (view.term.0 as usize).saturating_sub(2).max(1);
+                f.sel = (f.sel + page).min(len.saturating_sub(1));
+                view.follow_feed_selection();
+            }
+            ModalKey::Enter => view.open_feed_detail(),
+            ModalKey::Byte(_) => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
 }

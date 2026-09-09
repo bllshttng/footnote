@@ -67,6 +67,12 @@ pub struct GcRow {
     /// feature-shipped. `None` for every other row - their open-work gate is
     /// unchanged.
     pub planning: Option<Vec<String>>,
+    /// A hold computed beside the work verdict (x-5a62): the cascade's
+    /// conflict between witnesses, or the PR-state confirm contradicting a
+    /// done node. Decided in the sweep where the route and the graph read
+    /// live; relayed here so the keep is named by the policy, never silently
+    /// dropped. `None` when nothing holds.
+    pub confirm_hold: Option<KeepReason>,
 }
 
 /// The statuses that complete a PLANNING assignment: the plan was written
@@ -89,9 +95,21 @@ pub enum KeepReason {
     /// Origin is not `spawn` (adopted, or nothing recorded): only a row fno
     /// itself spawned retires, whatever the work state says.
     NotSpawn { origin: String },
-    /// The session is named in no node's `sessions[]`: no provenance, so no
-    /// work-done verdict is possible (d-5de7067a's refuse-without-provenance).
+    /// No declared source resolved a node for the session (x-5a62): the
+    /// reverse join, the registry field, the row name, and the transcript
+    /// all answered nothing (d-bbcd48b5 recovers provenance from any
+    /// declared source; nothing left to recover from is the one honest
+    /// keep).
     NoProvenance,
+    /// Two provenance sources resolved DIFFERENT nodes (x-5a62): witnesses
+    /// that disagree are not evidence, so the row is held rather than
+    /// retired on a guess.
+    NodeConflict { a: String, b: String },
+    /// The node reads done but its PR state contradicts (x-5a62): an open
+    /// additional PR, or a RECORDED merge_status that is not `merged`. An
+    /// absent merge_status does not hold - absence has three explanations
+    /// and none is `unmerged` - and rides the basis as unrecorded instead.
+    PrStateContradicts { node: String, detail: String },
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
@@ -115,7 +133,11 @@ impl KeepReason {
             KeepReason::Operator => "operator",
             KeepReason::Crowned => "crowned",
             KeepReason::NotSpawn { .. } => "not a spawn row",
-            KeepReason::NoProvenance => "no provenance: named in no node",
+            KeepReason::NoProvenance => {
+                "no provenance: no source resolved a node (sessions, registry, name, transcript)"
+            }
+            KeepReason::NodeConflict { .. } => "sources disagree",
+            KeepReason::PrStateContradicts { .. } => "pr state contradicts",
             KeepReason::OpenWork { .. } => "open work",
             KeepReason::Active { .. } => "active",
             KeepReason::TranscriptUnresolved => "transcript unresolved",
@@ -159,6 +181,13 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     if row.origin.as_deref() != Some("spawn") {
         let origin = row.origin.clone().unwrap_or_default();
         return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
+    }
+    // The cascade's holds relay through here so every keep is named by the
+    // policy: a conflict between witnesses, or PR evidence contradicting a
+    // done node. Gate order is unchanged - operator, crown and origin
+    // outrank it, exactly as they outrank the provenance arm below.
+    if let Some(hold) = &row.confirm_hold {
+        return (GcAction::Keep, Some(hold.clone()));
     }
     match &row.work {
         WorkState::NoProvenance => (GcAction::Keep, Some(KeepReason::NoProvenance)),
@@ -236,7 +265,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
 /// creation post-dates the real transcript's last turn must not read as
 /// fresher than it is. `None` when no match resolves: an unresolved
 /// transcript is never a quiet one.
-pub(crate) fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
+pub fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
     let newest = store_hits?.iter().max_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -770,6 +799,7 @@ mod tests {
             worktree_clean: Some(true),
             branch_merged: Some(true),
             planning: None,
+            confirm_hold: None,
         }
     }
 
@@ -956,6 +986,8 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1048,6 +1080,8 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1322,7 +1356,23 @@ mod tests {
         assert_eq!(KeepReason::Crowned.as_str(), "crowned");
         assert_eq!(
             KeepReason::NoProvenance.as_str(),
-            "no provenance: named in no node"
+            "no provenance: no source resolved a node (sessions, registry, name, transcript)"
+        );
+        assert_eq!(
+            KeepReason::NodeConflict {
+                a: "x-aaaa".into(),
+                b: "x-bbbb".into()
+            }
+            .as_str(),
+            "sources disagree"
+        );
+        assert_eq!(
+            KeepReason::PrStateContradicts {
+                node: "x-aaaa".into(),
+                detail: "additional_prs: 1".into()
+            }
+            .as_str(),
+            "pr state contradicts"
         );
         assert_eq!(
             KeepReason::OpenWork {

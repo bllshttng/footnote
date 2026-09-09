@@ -41,6 +41,7 @@ pub mod sideline_color;
 pub mod spawn_journal;
 pub mod sprites;
 pub mod squad;
+pub mod squad_cascade;
 pub mod squad_store;
 pub mod store_client;
 pub mod templates;
