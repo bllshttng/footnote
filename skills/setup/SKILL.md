@@ -41,7 +41,9 @@ GLOBAL_PATH="$HOME/.fno/config.toml"; LOCAL_PATH=".fno/config.toml"
 ```
 
 If the target file already exists, AskUserQuestion: "Found existing settings.
-Update in place, or start fresh?" Updating is non-destructive: `fno config set`
+Update in place, or start fresh?" - unless the user already requested an
+in-place update (or invoked `/setup local` on an existing file), in which case
+skip the question and update. Updating is non-destructive: `fno config set`
 preserves every key it does not touch (and any unknown/extra keys), so you only
 overwrite the answers the user changes.
 
@@ -52,13 +54,17 @@ fno config setup plan              # /setup and /setup local
 fno config setup plan --advanced   # /setup advanced
 ```
 
-Parse the JSON. For each field, ask the user using its `question` text. Use the `default` as the pre-filled answer and `default_source` as an inference hint:
+Parse the JSON. Before asking, read each field's current value from the target
+file (`fno config get <path>`): a field with a present, valid value uses it as
+the pre-filled answer, so only missing consequential choices are asked fresh.
+For each remaining field, ask using its `question` text. Use the `default` and
+`default_source` as an inference hint:
 
 - `repo-slug`  -> default from `basename $(git rev-parse --show-toplevel)`.
 - `readme`     -> infer a one-line vision from the README's first paragraph.
 - `auto-detect`-> detect from the repo (vault name, workspace topology).
 
-Today the `always` set is small. It covers Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. Ask only what `fno config setup plan` returns. Do not invent extra questions.
+Today the `always` set is small. It covers Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. The plan is the whole scalar question set; the only questions outside it are the two named exceptions below - the Step 2b review gate and the Step 3 workspace topology map.
 
 ## Step 2: Write each answer through `fno config set`
 
@@ -81,7 +87,9 @@ under a lock. Type handling:
 
 A rejected value (e.g. a reserved `id_prefix` like `tgt-`, or a length/charset
 violation) exits non-zero and leaves the file unchanged. Re-prompt and retry;
-NEVER hand-write the file to bypass validation.
+NEVER hand-write a scalar leaf to bypass validation. The one sanctioned
+exception is the Step 3 `config.work` structural map, validated by
+`fno config doctor` immediately after.
 
 Example writes:
 

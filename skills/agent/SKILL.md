@@ -418,7 +418,8 @@ skip path.
 
 #### 4. SPAWN (genuine execution + honest receipt)
 
-Only after a yes, run the spawn helper with the normalized fields. It re-checks
+Run the spawn helper with the normalized fields - reached straight from a
+`confirm_required=0` skip, or after a yes when `confirm_required=1`. It re-checks
 for a live duplicate, picks the verb from `provider`/`mode`/`payload_mode`, runs
 the real `fno agents` command (name POSITIONAL, `--provider`, NEVER `-p`/`--bare`),
 and parses the receipt deterministically:
@@ -791,11 +792,14 @@ STOP without stopping the worker.
 2. **claude stays on the subscription lane.** claude spawns via
    `fno agents spawn --harness claude` (-> client-side `claude --bg --name`).
    NEVER `-p` / `--bare`, and NEVER route claude through `host`.
-3. **The spawn confirm posture is `config.agents.confirm` (default `auto`), via
-   `confirm-decision.sh`.** Auto-skip is node-id-only and caveat-free; a caveat
-   always confirms under `auto`; `-y`/`--yes` and unattended callers skip; a
-   failed read degrades to `always`. Every skip path still echoes the exact
-   command. `send`/reads never confirm; `stop` always confirms (destructive).
+3. **Obey `confirm-decision.sh`; never re-derive its decision.** Run the helper
+   and follow its `confirm_required` field. spawn is a free lane: `auto`
+   (default) and `never` skip; only the cautious opt-in `config.agents.confirm:
+   always` confirms; `-y`/`--yes` is accepted and ignored; a failed read
+   degrades to `auto` (no confirm) with a staleness warning. A caveat
+   (codex/gemini exec, yolo, bypassPermissions, merge) surfaces as a `warn`,
+   not a confirm. Every path echoes the exact command. `send`/reads never
+   confirm; `stop` always confirms (destructive).
 4. **Sandboxed by default.** Append `--yolo` only when the user explicitly passed
    it; never infer it from the payload or provider.
 5. **Do not reinvent provider routing or the bus.** Provider resolution lives in

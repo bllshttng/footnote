@@ -62,9 +62,12 @@ fno agents resume <short-id>   # wakes it (claude) or resumes it (other harnesse
 fno agents attach <short-id>   # drive it yourself (claude)
 ```
 
-The address you send to is normally the same bare 8-hex short-id these take, so
-the id that failed to deliver is the id that gets you in. `resume` / `attach`
-need the session to be in the registry, and `send` can reach a live session that
+Address a peer by its full session id: the `from_session=` value on the
+`<fno_mail>` envelope, or the id `fno agents list` shows. The head-8 short form
+is a display handle, and under UUIDv7 it is a ~66-second clock bucket - two
+workers started in the same minute share one, so a send or reply addressed to
+the short form can refuse as ambiguous. `resume` / `attach` accept the id that
+names the session in the registry, and `send` can reach a live session that
 never registered - if a handle mails but will not resume, `fno agents list` /
 `top` will show whether it has a row.
 
@@ -201,14 +204,15 @@ Strip the leading `reply`; the rest is `<msg-id> <body>`.
 1. **NORMALIZE.** `bash "${SKILL_DIR}/scripts/normalize.sh" --verb reply --input "<msg-id + body>"`.
    It refuses an empty msg-id or empty body. On `status=error`, STOP and report the
    `error=` line. Capture `msg_id` and `body`.
-2. **RUN.** The id is always a flag; the body may be a flag or a bare argument, exactly as on `send`.
+2. **RUN.** The id is always a flag. The body goes in exactly once, as `--body`
+   (canonical), a bare positional, or `--body-file`:
 
    ```bash
    fno agents mail reply --to "<msg_id>" --body "<body>"
-   fno agents mail reply --to "<msg_id>" "<body>"        # same thing
    ```
 
-   Pass the body once. Giving both forms is a refusal, not a precedence rule.
+   The shipped parser accepts exactly one of the three body forms; two at once
+   is a refusal, not a precedence rule.
 
 3. **REPORT.** Relay the real outcome (`fno agents mail reply` correlates the thread via
    `in_reply_to`). On a nonzero exit, report FAILED with the captured stderr -
@@ -308,8 +312,9 @@ pattern). Architecture and per-kind handler detail:
    rotation all live in `fno agents mail`. This skill routes verbs, normalizes input, and
    reports honestly; it never duplicates that machinery.
 6. **Use the genuine CLI shapes.** `send <name> <body>` and `--to-project <X>` are
-   positional/flag; `reply` is `--to <id> --body <text>`; `unread`/`ack` name is
-   `-n`. Do not pass a body as a positional to `reply`.
+   positional/flag; `reply` takes `--to <id>` plus the body exactly once
+   (`--body`, a positional, or `--body-file` - two forms is a refusal);
+   `unread`/`ack` name is `-n`.
 
 ## Multi-CLI
 
