@@ -162,6 +162,10 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
             receipt: dir.to_string_lossy().to_string(),
             reason: "receipts store absent: no retirement has ever been applied".into(),
         });
+        // An absent store verifies nothing, so a named cohort is entirely
+        // missing: name it, or the JSON reads expected-without-missing and
+        // a consumer re-derives the gap the gate already knows.
+        audit_cohort(&mut report);
         return report;
     };
     let now = chrono::Utc::now();
@@ -439,6 +443,18 @@ mod tests {
             "{:?}",
             report.problems
         );
+    }
+
+    /// A named cohort against an ABSENT store verifies nothing, so every
+    /// expected session is missing: the JSON must say so instead of reading
+    /// expected-without-missing over a store-absent refusal.
+    #[test]
+    fn an_absent_store_names_the_whole_cohort_missing() {
+        let home = temp_home();
+        let expected = vec!["sess-a".to_string(), "sess-b".to_string()];
+        let report = verify(&home, 24 * 3600, &expected);
+        assert!(!report.passes());
+        assert_eq!(report.missing, expected);
     }
 
     #[test]
