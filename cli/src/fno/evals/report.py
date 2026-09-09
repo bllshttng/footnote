@@ -44,10 +44,9 @@ class TaskStat:
 def load_rows(
     history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
 ) -> list[dict[str, object]]:
-    """Return history rows in file order, one variant round only by default.
-
-    Rows with no ``variant`` key read as baseline. ``None`` folds every round.
-    ``since`` applies after the filter: the last N rows *of that variant*.
+    """Return history rows in order: one variant round by default (a missing
+    key reads as baseline), ``None`` for every round, ``since`` = last N rows
+    of that round, applied after the filter.
     """
     rows = [r for _, r in _history.iter_rows_tolerant(history_path)
             if variant is None or (r.get("variant") or "baseline") == variant]
@@ -151,7 +150,6 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
 
 def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:
     """Score *variant* against baseline, per task. Rows come from variant=None.
-
     A task the variant skipped lands in missing_in_variant. Each *_rev is the
     most common bank_rev in its set: the two shas for ``git diff``.
     """
@@ -182,7 +180,7 @@ def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, A
                       "delta": round(delta, 4), "verdict": verdict}
 
     def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
-        revs = [r["bank_rev"] for r in rs if isinstance(r.get("bank_rev"), str)]
+        revs = [v for r in rs if isinstance(v := r.get("bank_rev"), str)]
         return max(set(revs), key=revs.count) if revs else None
 
     return {

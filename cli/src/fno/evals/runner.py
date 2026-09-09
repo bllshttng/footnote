@@ -198,11 +198,13 @@ def run_task(
     """
     if not VARIANT_RE.match(variant):
         raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
-    if variant == "baseline" and variant_ref is not None:
-        raise ValueError("variant_ref is not allowed when variant is baseline")
-    if variant != "baseline" and variant_ref is None:
+    if variant == "baseline":
+        if variant_ref is not None:
+            raise ValueError("variant_ref is not allowed when variant is baseline")
+        variant_ref = task.repo_fixture
+    elif variant_ref is None:
         raise ValueError(f"variant_ref is required when variant is {variant!r}")
-    checkout_ref = task.repo_fixture if variant == "baseline" else variant_ref
+    checkout_ref = variant_ref
 
     # When no spawn is injected, bind the worker provider into the default spawn
     # so --provider actually routes the headless worker (not just logged).

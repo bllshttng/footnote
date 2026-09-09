@@ -218,7 +218,7 @@ def test_health_summary_stale_days_resolves_from_config(
     assert summary["stale"] is True
 
 
-# --- variant axis (x-bd75): a missing variant key reads as baseline ---
+# --- variant axis: a missing variant key reads as baseline ---
 
 def test_load_rows_missing_variant_reads_as_baseline(tmp_path: Path) -> None:
     hp = tmp_path / "h.jsonl"

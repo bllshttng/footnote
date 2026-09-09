@@ -67,7 +67,7 @@ def test_prompt_task_defaults_provider(tmp_path: Path, monkeypatch) -> None:
     assert "defaulting" in res.stdout
 
 
-# --- variant axis (x-bd75) ---
+# --- variant axis ---
 
 def test_bad_variant_name_exits_1_before_bank_load(tmp_path: Path) -> None:
     # The bank dir does not exist: reaching "no bank" would mean validation

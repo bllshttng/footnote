@@ -179,7 +179,6 @@ def test_evals_enabled_defaults_true_matching_prior_ungated_behavior(
 ) -> None:
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
-    from fno import config as config_mod
 
     assert evals_enabled() is True
 
@@ -212,7 +211,7 @@ def test_repeat_k_runs_k_times(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# variant axis (x-bd75)
+# variant axis: a scored round names baseline or v<N> and checks out its ref
 # --------------------------------------------------------------------------- #
 
 def _branch(root: Path, name: str, filename: str) -> None:
