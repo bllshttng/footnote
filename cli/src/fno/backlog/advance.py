@@ -4277,25 +4277,13 @@ def _ready_loose_nodes(project: str) -> list[dict]:
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    cmd = [
-        *_subprocess_util.fno_py_cmd(),
-        "backlog", "ready", "-p", project, "--all",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog ready -p {project} exited {proc.returncode}: "
-            f"{proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        return []
-    nodes = json.loads(out)
-    if not isinstance(nodes, list):
-        raise RuntimeError(f"fno backlog ready -p {project}: non-list payload")
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    rows = store_ready(project=project, all=True, repo_root=repo_root())["rows"]
     return [
         row
-        for row in nodes
+        for row in rows
         if isinstance(row, dict)
         and row.get("id")
         and not row.get("parent")
