@@ -224,8 +224,15 @@ def _graph_section(
     # where the node lane would have required jac >= 0.15 with no bonus to
     # earn. Accepted: recall over precision is the point of this fix, and a
     # domain-less probe cannot tell which candidates it would have matched.
+    # The wider floor also widens how many candidates clear it, so a k=5 cap
+    # (right for the node lane's tighter 0.15 floor) can let cross-domain
+    # noise fill every slot and evict the true low-score family the floor
+    # widening exists to recover - the empty-list warning then never fires,
+    # because the returned list is not empty, just wrong. Take a wider k on
+    # the seed lane so the reader has enough of the ranked list to judge.
     floor = _MIN_SCORE if resolved else _MIN_SCORE - _DOMAIN_BONUS
-    scored = similar_nodes(probe, combined, k=5, floor=floor)
+    k = 5 if resolved else 15
+    scored = similar_nodes(probe, combined, k=k, floor=floor)
     duplicates = []
     for node_id, score, reason in scored:
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
@@ -236,7 +243,7 @@ def _graph_section(
             | {"score": score, "reason": reason}
         )
     rollups = []
-    for node_id, score, reason in epic_candidates(probe, combined, k=3):
+    for node_id, score, reason in epic_candidates(probe, combined, k=3, floor=floor):
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
         if row is None:
             continue

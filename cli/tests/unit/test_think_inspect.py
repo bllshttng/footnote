@@ -357,6 +357,60 @@ def test_seed_lane_matches_node_lane_candidate_set(tmp_path: Path) -> None:
     assert seed_ids == node_ids == ["bbb", "ccc"]
 
 
+def test_seed_lane_widens_k_so_low_score_family_is_not_evicted_by_noise(tmp_path: Path) -> None:
+    # A wider floor also widens how many candidates clear it. If the seed lane
+    # kept the node lane's k=5 cap, five higher-scoring but unrelated
+    # candidates could fill every slot and evict the one low-score candidate
+    # the floor widening exists to recover - reported by external review
+    # (chatgpt-codex-connector, PR #1647).
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    seed_words = [
+        "zeta", "eta", "theta", "iota", "kappa", "lambda", "omicron", "rho",
+        "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega", "beta",
+    ]
+    seed_text = " ".join(seed_words)
+
+    # Shares one seed word only: raw jac = 1/16 = 0.0625. Clears the seed
+    # floor (0.05) but would lose every one of 5 slots to the noise below.
+    true_family = {
+        "id": "true1", "title": "zeta", "details": "", "status": "ready", "domain": "code",
+    }
+    # Each shares two seed words plus one unique word: raw jac = 2/17 = 0.1176,
+    # ranking above true_family despite matching nothing true_family doesn't.
+    noise_pairs = [
+        ("eta", "theta"), ("iota", "kappa"), ("lambda", "omicron"),
+        ("rho", "sigma"), ("tau", "upsilon"),
+    ]
+    noise_nodes = [
+        {
+            "id": f"noise{i}",
+            "title": f"{a} {b} noiseword{i}",
+            "details": "",
+            "status": "ready",
+            "domain": "code",
+        }
+        for i, (a, b) in enumerate(noise_pairs, start=1)
+    ]
+
+    receipt = build_receipt(
+        seed_text,
+        repo=repo,
+        graph_entries=[true_family, *noise_nodes],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    ids = [row["id"] for row in receipt["graph"]["duplicates"]]
+    assert "true1" in ids, f"low-score true family evicted by higher-scoring noise: {ids}"
+    assert len(ids) == 6
+
+
 def test_seed_lane_empty_marks_incomplete_and_names_backlog_find(tmp_path: Path) -> None:
     from fno.think_inspect import build_receipt
 

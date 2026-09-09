@@ -309,17 +309,21 @@ _RETIRED_EPIC_STATUSES = frozenset({"done", "superseded", "deferred"})
 
 
 def epic_candidates(
-    entry: Entry, entries: list[Entry], k: int = 3
+    entry: Entry, entries: list[Entry], k: int = 3, *, floor: float | None = None
 ) -> list[tuple[str, float, str]]:
     """Score ``entry`` against the live epics only, best-first, top-K.
 
     The rollup counterpart to ``build_map``: same ``_score``, narrowed to
     candidate parents so intake, ``maintain``, and ``/think`` cannot drift into
     a second similarity implementation. Ties break on id so a run is
-    reproducible. Pairs below ``_MIN_SCORE`` are absent (``_score`` drops them).
+    reproducible. Pairs below ``floor`` (default ``_MIN_SCORE``) are absent
+    (``_score`` drops them). ``floor`` is the same caller-narrowed escape hatch
+    ``similar_nodes`` takes, for a domain-less seed probe that can never earn
+    ``_DOMAIN_BONUS``.
     """
     ta = _tokens(entry)
     nid = entry.get("id")
+    minimum = _MIN_SCORE if floor is None else floor
     scored: list[tuple[str, float, str]] = []
     for e in entries:
         if not isinstance(e, dict) or e.get("type") != "epic":
@@ -329,7 +333,7 @@ def epic_candidates(
             continue
         if e.get("status") in _RETIRED_EPIC_STATUSES:
             continue
-        score, reason = _score(entry, e, ta, _tokens(e))
+        score, reason = _score(entry, e, ta, _tokens(e), minimum=minimum)
         if score > 0.0:
             scored.append((eid, score, reason))
     scored.sort(key=lambda r: (-r[1], r[0]))
