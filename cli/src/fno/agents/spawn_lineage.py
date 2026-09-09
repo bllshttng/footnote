@@ -271,18 +271,12 @@ def _stamp_launch_edge(node: "str | None") -> None:
 
         existing = next((r for r in read_graph() if r.get("id") == node), None)
         if existing is None:
-            print(
-                f"spawn: launch edge not recorded on {node} (node not in graph); "
-                f"the edge was not written. Skipped.",
-                file=sys.stderr,
-            )
+            print(f"spawn: launch edge not recorded on {node} (node not in graph); "
+                  f"the edge was not written. Skipped.", file=sys.stderr)
             return
         if existing.get("spawned_by_session"):
-            print(
-                f"spawn: launch edge on {node} already names "
-                f"{existing['spawned_by_session']}; kept.",
-                file=sys.stderr,
-            )
+            print(f"spawn: launch edge on {node} already names "
+                  f"{existing['spawned_by_session']}; kept.", file=sys.stderr)
             return
 
         def mutator(entries: "list[dict]") -> "list[dict]":
