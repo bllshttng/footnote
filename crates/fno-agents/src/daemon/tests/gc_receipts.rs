@@ -3585,3 +3585,72 @@ fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
         "the row survives the commit gate"
     );
 }
+
+/// x-5aef AC6-HP, the archived-session RECORD journey. The receipt is
+/// built through the real capability table and persisted to the store;
+/// the session's original cwd is then DELETED; resolution by exact
+/// session id still yields the resume tokens and a locator naming a
+/// transcript that exists and reads back. The verifier, given this
+/// session as its expected cohort, certifies the retirement - so a pass
+/// means the record journey, not merely a file on disk.
+///
+/// Ceiling, stated plainly: this proves the RECORD survives cwd deletion
+/// and resolves; it does NOT launch `claude --resume` and assert the
+/// native harness reopened the session. Nothing in CI can.
+#[test]
+fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
+    let (dir, home) = staged_graph_home();
+    let store = dir.path().join("native-store");
+    std::fs::create_dir_all(&store).unwrap();
+    let transcript = store.join("journey-0000-0000-0000-000000000000.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let cwd = dir.path().join("proj-gone");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut e = state::RegistryEntry::default();
+    e.name = "journeyw".into();
+    e.short_id = "journeyw".into();
+    e.origin = Some("spawn".into());
+    e.harness = Some("claude".into());
+    e.harness_session_id = Some("journey-0000-0000-0000-000000000000".into());
+    e.cwd = cwd.to_string_lossy().to_string();
+    e.created_at = "2026-09-01T00:00:00Z".into();
+    // The record: built through the REAL capability table (resume form
+    // rendered, locator staged), then localized to the fixture store the
+    // way the harness's own index resolves a live session.
+    let mut receipt = crate::receipt::build_reap_receipt(&e, None).unwrap();
+    receipt.native_locator = Some(json!({ "transcripts": [transcript.to_string_lossy()] }));
+    receipt.effects = vec![
+        crate::gc_native::stop_outcome_effect(true),
+        crate::daemon::CascadeOutcome::Removed.effect_record("active-surface"),
+        crate::gc_sweep::resume_evidence_effect(&receipt),
+    ];
+    receipt.writer_build = Some(crate::gc_verify::current_build());
+    crate::receipt::write_reap_receipt(&home, &receipt).unwrap();
+
+    // The journey: the original cwd is gone; resolution by session id.
+    std::fs::remove_dir_all(&cwd).unwrap();
+    assert!(crate::resume_receipt::maybe_hint_preserved_session(
+        &home,
+        "journey-0000-0000-0000-000000000000"
+    ));
+    // The data the resolution prints: resume tokens and a live transcript.
+    let resolved =
+        crate::receipt::read_reap_receipt(&crate::receipt::reap_receipt_path(&home, &receipt))
+            .unwrap();
+    assert!(
+        !resolved.resume_argv.is_empty(),
+        "resume tokens survive: {resolved:?}"
+    );
+    assert!(transcript.exists(), "the located transcript still exists");
+    let body = std::fs::read_to_string(&transcript).unwrap();
+    assert!(body.contains("\"type\""), "the transcript reads back");
+
+    // The gate, given this session as its cohort, certifies the record.
+    let report = crate::gc_verify::verify(
+        &home,
+        24 * 3600,
+        &["journey-0000-0000-0000-000000000000".to_string()],
+    );
+    assert!(report.passes(), "{:?}", report.problems);
+    assert!(report.missing.is_empty());
+}

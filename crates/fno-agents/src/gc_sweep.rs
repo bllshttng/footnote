@@ -1147,7 +1147,7 @@ pub(crate) fn stage_session_retirement(
 /// A `failed` outcome does not hold the row (the session is already
 /// stopped); it marks the receipt unverifiable so the gate refuses it
 /// rather than certifying a retirement nothing can recover (AC6-EDGE).
-fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
+pub(crate) fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
     let transcript_exists = receipt.native_locator.as_ref().is_some_and(|loc| {
         loc.get("transcripts")
             .and_then(Value::as_array)
