@@ -336,13 +336,8 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
 
 
 def _component_verdict(
-    source: Path,
-    subtree: str,
-    bindir: Path,
-    verdict_bin: Path,
-    *,
-    attempted: bool = False,
-    include_mux: Optional[bool] = None,
+    source: Path, subtree: str, bindir: Path, verdict_bin: Path, *,
+    attempted: bool = False, include_mux: Optional[bool] = None,
     python_tool: Optional[dict] = None,
 ) -> Optional[dict]:
     """One call to the native verdict; the binary probes and classifies.
