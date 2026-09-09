@@ -386,6 +386,16 @@ if [[ ! -f "$STATE_FILE" ]]; then
             # and hooks/agy-target-stop-hook.sh emits the same string), so the
             # detail is APPENDED and the matched prefix stays byte-identical.
             echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed (tried: ${RESOLVE_IDS[*]})" >&2
+            # A worker that died before `target init` wrote a manifest still
+            # carries a <help> tag nobody would otherwise read: loop-check is
+            # never invoked on this path, so scan for it directly. Side
+            # effect only, never a verdict; no transcript, nothing to read.
+            if [[ -n "$HOOK_TRANSCRIPT_PATH" && -n "$BIN" ]]; then
+                DISTRESS_SCAN_ARGS=(distress-scan --transcript "$HOOK_TRANSCRIPT_PATH" \
+                    --run "${RESOLVE_HARNESS_ID:-$HOOK_HARNESS_ID}" --cwd "$PWD")
+                [[ -n "$HOOK_HARNESS" ]] && DISTRESS_SCAN_ARGS+=(--harness "$HOOK_HARNESS")
+                "$BIN" "${DISTRESS_SCAN_ARGS[@]}" >&2 || true
+            fi
         fi
         exit 0
     fi
