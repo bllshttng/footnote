@@ -421,7 +421,8 @@ def test_open_binding_reads_only_the_branch_never_a_body():
 
 def test_open_binding_bound_through_the_graphs_reverse_key():
     # AC1-HP: the branch names no node; the node's own pr_number/pr_url does.
-    # Specimen: PR 1476 on fix/review-cap-invocation-gate, node x-b527.
+    # Modeled on a real open PR whose branch carried no id while its node
+    # carried the back-pointer the resolver never read.
     entries = [
         _node(id="x-b527", pr_number=1476, pr_url="https://github.com/o/r/pull/1476")
     ]

@@ -453,7 +453,8 @@ mod tests {
     #[test]
     fn binding_binds_through_the_graphs_reverse_key_when_the_branch_names_no_node() {
         // AC1/AC6: the graph's own back-pointer binds a node-less branch.
-        // Specimen: PR 1476 on fix/review-cap-invocation-gate, node x-b527.
+        // Modeled on a real open PR whose branch carried no id while its node
+        // carried the back-pointer the resolver never read.
         let entries = vec![json!({
             "id": "x-b527", "pr_number": 1476,
             "pr_url": "https://github.com/o/r/pull/1476",
