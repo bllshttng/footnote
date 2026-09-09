@@ -123,11 +123,13 @@ accounted for.
 For dev-only skill symlinks:
 
 ```bash
-./scripts/setup.sh --provider codex
+./scripts/setup.sh --provider codex --skills-source development
 ```
 
 This populates `.agents/skills/plugin--fno--*` without replacing the native plugin
-marketplace fixture.
+marketplace fixture. The explicit `--skills-source development` matters: with an
+installed plugin present, plain `--provider codex` resolves `auto` to installed
+mode and removes these symlinks instead of creating them.
 
 ## Custom Agents
 
