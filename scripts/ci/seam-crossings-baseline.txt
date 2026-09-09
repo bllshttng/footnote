@@ -21,6 +21,7 @@ crossing	crates/fno-agents/src/daemon.rs	6713	let mut child = std::process::Comm
 crossing	crates/fno-agents/src/daemon.rs	6772	let mut child = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	7931	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
+crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1880	let mut command = Command::new("fno");
