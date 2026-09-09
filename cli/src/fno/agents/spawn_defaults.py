@@ -1417,9 +1417,9 @@ def inject_spawn_defaults(
     if cfg_route or cfg_account or cfg_model:
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
-        _role_route = (
-            bool(role) and bool(_role_resolves(role, settings, env)) if cfg_model and not has_model else False
-        )
+        _role_route = False
+        if cfg_model and not has_model and role:
+            _role_route = bool(_role_resolves(role, settings, env))
         _target: Optional[str] = None
         _target_failed = False
         if cfg_model and not has_model and not explicit_route and not explicit_vendor_present and not _role_route:
@@ -1544,7 +1544,7 @@ def inject_spawn_defaults(
     if explicit_substrate is None:
         cfg_substrate, substrate_rung = _seamed("substrate")
     else:
-        cfg_substrate, substrate_rung = None, None
+        cfg_substrate, substrate_rung = "", None
     _has_permission = _has_permission_mode(out[1:])
     if not _has_permission:
         # Re-read through the harness rungs (x-8975): an empty re-read keeps
@@ -1559,7 +1559,7 @@ def inject_spawn_defaults(
     _pane_tokens_ok = False
     if cfg_permission and prov and _permission_mappable(prov, cfg_permission, "pane"):
         _pane_tokens_ok = True
-    _axes: dict = {}
+    _axes = {}
     if cfg_effort or cfg_substrate or cfg_permission:
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
@@ -1603,13 +1603,12 @@ def inject_spawn_defaults(
     _pg_answer: Optional[dict] = None
     _bundle_json = (_overlay_answer or {}).get("bundle")
     _positional_present = bool(_positional_indices(out[1:]))
-    _axes: dict = {}
+    _axes = {}
     if cfg_pane_group or isinstance(_bundle_json, dict):
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
         _pg_rung = f"{pane_group_rung}.pane_group"
         _pg_unavailable = ""
-        _pg_answer: Optional[dict] = None
         if cfg_pane_group and not _flag_present(out[1:], "--tab"):
             # Placement judgment lives in the verb; degrade open on missing it.
             try:
