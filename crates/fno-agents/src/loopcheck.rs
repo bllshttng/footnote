@@ -8052,7 +8052,7 @@ pub(crate) fn resolve_review_inputs(
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
+        .unwrap_or_else(default_global_events_path);
 
     // Scopes the review_coverage event written into the cross-project global
     // log. The git remote is the one identifier canonical and every one of its
