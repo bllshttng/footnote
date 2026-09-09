@@ -509,8 +509,9 @@ const PREFLIGHT_BASE_SCOPE: [&str; 7] = [
 ];
 
 // Legs preflight adds when the tree calls for them: allowed, never required.
-const PREFLIGHT_OPTIONAL_SCOPE: [&str; 3] = [
+const PREFLIGHT_OPTIONAL_SCOPE: [&str; 4] = [
     "file-budget:fno",
+    "reign-arms:fno",
     "squads-leak-guard:fno",
     "tracker-gates:fno",
 ];
@@ -1215,7 +1216,7 @@ mod tests {
 
     #[test]
     fn gate_accepts_every_leg_preflight_emits_and_refuses_an_unknown_one() {
-        // The full set this tree emits: seven base legs plus all three optional ones.
+        // The full set this tree emits: seven base legs plus all four optional ones.
         assert!(gate_eligible_receipt(&receipt_event_with_scope(vec![
             "smoke",
             "rustfmt:fno-agents",
@@ -1225,6 +1226,7 @@ mod tests {
             "cargo-test:fno-unit",
             "cargo-test:fno-e2e",
             "file-budget:fno",
+            "reign-arms:fno",
             "squads-leak-guard:fno",
             "tracker-gates:fno",
         ])));
