@@ -152,15 +152,12 @@ def resolve_presiding_king(session_id: "str | None") -> "dict | None":
         from fno.harness_identity import session_identity_key
 
         needle = session_identity_key(session_id)
-        own = next(
-            (
-                r
-                for r in load_registry()
-                if getattr(r, "harness_session_id", None)
-                and session_identity_key(r.harness_session_id) == needle
-            ),
-            None,
-        )
+
+        def _keyed(r: object) -> "str | None":
+            sid = getattr(r, "harness_session_id", None)
+            return session_identity_key(sid) if sid else None
+
+        own = next((r for r in load_registry() if _keyed(r) == needle), None)
         if own is None or own.crown_level is None or not own.crown_scope:
             return None
         crowns = gather_court().get("crowns")
