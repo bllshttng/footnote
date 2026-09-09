@@ -1150,30 +1150,19 @@ def inject_spawn_defaults(
                     settings=settings,
                     substrate=explicit_substrate,
                     permission_mode=explicit_permission_value,
-                    constrain_harness=(
-                        explicit_harness
-                        or (
-                            (getattr(profile, "provider", "") or "").strip()
-                            if profile is not None
-                            else ""
-                        )
-                    ).strip() or None,
+                    constrain_harness=(explicit_harness or (
+                        (getattr(profile, "provider", "") or "").strip() if profile is not None else ""
+                    )).strip() or None,
                     role=grid_role,
                     protected_role=protected_name,
                     model_occupied=model_occupied,
                     explicit_model=has_model,
                     explicit_lane=_explicit_lane,
                     work_verb=verb,
-                    explicit_model_value=(
-                        _flag_value(out[1:], "--model", "-m") if has_model else None
-                    ),
-                    explicit_route_value=(
-                        _flag_value(out[1:], "--route") if explicit_route else None
-                    ),
+                    explicit_model_value=_flag_value(out[1:], "--model", "-m") if has_model else None,
+                    explicit_route_value=_flag_value(out[1:], "--route") if explicit_route else None,
                     explicit_vendor_value=(
-                        (explicit_vendor or "").strip() or None
-                        if explicit_vendor_present
-                        else None
+                        (explicit_vendor or "").strip() or None if explicit_vendor_present else None
                     ),
                     meta=_slot_meta,
                 )
