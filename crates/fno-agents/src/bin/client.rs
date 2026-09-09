@@ -32,6 +32,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "claim",
     "codex-assign-project",
     "codex-loaded-threads",
+    "component-verdict",
     "court-orphans",
     "detect",
     "digest",
@@ -174,6 +175,15 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "codex-loaded-threads") {
         return fno_agents::codex_inject::run_loaded_thread_discovery().await;
+    }
+
+    // `component-verdict` is the HIDDEN decision verb for deployed-component
+    // convergence: reads one JSON request on stdin (expected rev +
+    // per-component probes) and prints the per-component verdict. Binary-direct
+    // transport for update/doctor, matched with `matches!` like `state` so it
+    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
+    if matches!(verb, "component-verdict") {
+        return fno_agents::component_update::run_component_verdict(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the

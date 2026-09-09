@@ -617,6 +617,52 @@ def _rust_report() -> dict[str, Optional[str]]:
     }
 
 
+def _component_convergence(
+    src: Optional[Path],
+    rust: dict[str, Optional[str]],
+    marker: Optional[str],
+    content_drift: Optional[int],
+) -> list[dict[str, Any]]:
+    """Probe every deployed component and classify natively. [] = the machine
+    could not answer, which is no evidence - never fresh. Never raises."""
+    if src is None:
+        return []
+    subtree = _rust_source_rev(src)
+    verdict_bin = rust.get("binary")
+    if not subtree or not verdict_bin or not Path(verdict_bin).is_file():
+        return []
+    from fno import update as _update
+
+    cargo_bin = _cargo_bin_path()
+    # Probe the directory the RESOLVED binary lives in: on a wheel install with
+    # no cargo bin, ~/.cargo/bin is the wrong tree and would read all-missing.
+    bindir = Path(cargo_bin).parent if cargo_bin else Path(verdict_bin).parent
+    report = _update._component_verdict(
+        src, subtree, bindir, Path(verdict_bin),
+        python_tool={
+            "rev": marker,
+            "expected": _source_rev(src),
+            "evidence": (
+                f"{content_drift} .py file(s) on disk differ from source" if content_drift else None
+            ),
+            "error": None if marker else "the installed-rev marker could not be read",
+        },
+    )
+    if report and isinstance(report.get("components"), list):
+        return report["components"]
+    # Could not answer: Unknown rows with the named gap, never fresh.
+    return [
+        {
+            "component": c,
+            "status": "unknown",
+            "line": "component "
+            + c
+            + ": unknown (the deployed fno-agents could not answer the convergence verdict)",
+        }
+        for c in ("python-tool", "fno", "fno-agents", "fno-agents-daemon", "fno-agents-worker")
+    ]
+
+
 def _plugin_registry_path() -> Path:
     """The claude plugin install registry (module-level so tests can stub it)."""
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
@@ -1762,6 +1808,7 @@ def _verdict(
     deployed_config_keys: Optional[frozenset[str]] = None,
     source_config_keys: Optional[frozenset[str]] = None,
     content_drift_count: Optional[int] = 0,
+    component_statuses: Optional[list[tuple[str, str]]] = None,
 ) -> dict[str, Any]:
     """Pure verdict function (no I/O) returning the complete JSON-serializable
     result, so the decision matrix is unit-testable and the output contract is
@@ -1834,12 +1881,19 @@ def _verdict(
     if content_indeterminate and status == "fresh":
         status = "unknown"
 
-    # Rust staleness: requires full evidence. Partial evidence is never stale.
+    # Rust staleness needs full evidence; a component probe proving a stale
+    # sibling beside a fresh client widens the gate (and so the fix path).
     rust_stale = (
         cargo_bin_present
         and rust_installed_rev is not None
         and rust_source_rev is not None
         and rust_installed_rev != rust_source_rev
+    ) or (
+        any(
+            status in ("stale", "missing", "failed")
+            for name, status in component_statuses or []
+            if name.startswith("fno-agents")
+        )
     )
 
     # Fold rust staleness into overall status.
@@ -1860,6 +1914,7 @@ def _verdict(
         "rust_binary": rust_binary,
         "rust_installed_rev": rust_installed_rev,
         "rust_source_rev": rust_source_rev,
+        "component_statuses": component_statuses or [],
     }
 
 
@@ -2135,15 +2190,24 @@ def _emit_human(
                 "Run `fno doctor update` (or `fno doctor --fix`)."
             )
         else:
-            # Rust-only stale. Branch structurally guarantees non-None (rust_stale
-            # requires both rust_installed_rev and rust_source_rev to be set).
+            # Rust-only stale. The client rev pair may be None here: the
+            # per-component verdict can prove a stale sibling beside a fresh
+            # client, whose own rev check has nothing to compare.
             ri = result["rust_installed_rev"]
             rs = result["rust_source_rev"]
-            out(
-                f"fno doctor: rust bins STALE "
-                f"(installed {ri[:12]} != source {rs[:12]}). "
-                "Run fno doctor update (or fno doctor --fix)."
-            )
+            if ri is not None and rs is not None:
+                out(
+                    f"fno doctor: rust bins STALE "
+                    f"(installed {ri[:12]} != source {rs[:12]}). "
+                    "Run fno doctor update (or fno doctor --fix)."
+                )
+            else:
+                out(
+                    "fno doctor: rust bins STALE "
+                    "(a deployed component does not match the source build). "
+                    "Run fno doctor update (or fno doctor --fix); the component "
+                    "lines below name which one."
+                )
     elif (
         result.get("content_indeterminate")
         and result.get("installed_rev") is not None
@@ -2217,6 +2281,19 @@ def _emit_human(
             f"fno doctor: rust fno-agents binary built at HEAD {binary_rev[:12]} "
             "(build provenance)."
         )
+
+    # Component convergence: a summary line proves the probes ran; anything
+    # else renders per component with evidence and repair (Unknown included).
+    components = result.get("components") or []
+    non_fresh = [c for c in components if c.get("status") not in ("fresh", "updated")]
+    if components and not non_fresh:
+        names = ", ".join(str(c.get("component")) for c in components)
+        out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
+    else:
+        from fno import update as _update
+
+        for line in _update._component_lines({"components": non_fresh}, prefix="fno doctor"):
+            out(line)
 
     daemon_drift = result.get("daemon_drift")
     if daemon_drift:
@@ -3966,6 +4043,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     source_config_keys = _source_config_keys(src)
     content_drift = _python_content_drift(src)
 
+    # Per-component convergence: feeds the rust gate and renders per component.
+    components = _component_convergence(src, rust, marker, content_drift)
+
     result = _verdict(
         source_resolved=src is not None,
         source_rev=source_rev,
@@ -3978,7 +4058,11 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         deployed_config_keys=deployed_config_keys,
         source_config_keys=source_config_keys,
         content_drift_count=content_drift,
+        component_statuses=[
+            (str(c.get("component")), str(c.get("status"))) for c in components
+        ],
     )
+    result["components"] = components
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
     result["daemon_drift"] = _daemon_drift_warning()

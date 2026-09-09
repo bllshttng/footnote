@@ -42,6 +42,7 @@ def _stub_signals(
     source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     content_drift: int | None = 0,
     source_checkout_sync: dict | None = None,
+    components: list[dict] | None = None,
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
     # Content-drift ground truth. Default 0 = "check ran, byte-identical" so a
@@ -78,6 +79,12 @@ def _stub_signals(
     monkeypatch.setattr(doctor, "_read_rust_marker", lambda: rust_marker)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: rust_source_rev)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: cargo_bin_present)
+    # Component convergence (deployed-shape probes + native verdict): default
+    # to "no evidence" so existing verdict tests keep their exact surface;
+    # component tests pass rows explicitly.
+    monkeypatch.setattr(
+        doctor, "_component_convergence", lambda src, rust, marker, drift: components or []
+    )
     # Agent health (x-1c7b): default to a quiet, healthy machine. Left unstubbed
     # these shell out to the real `launchctl` and read the real claims root, so
     # every verdict test would inherit the developer's own dead agents.
@@ -2803,3 +2810,127 @@ def test_doctor_stays_silent_when_evals_fresh(monkeypatch: pytest.MonkeyPatch) -
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     assert "evals" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Deployed-component convergence (verdict widening + rendering)
+# ---------------------------------------------------------------------------
+
+
+def test_verdict_widens_rust_stale_from_a_proven_stale_sibling() -> None:
+    """A fresh client beside a stale daemon is invisible to the client's own
+    rev check; the component verdict proves the sibling and gates rust_stale."""
+    result = doctor._verdict(
+        source_resolved=True,
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_installed_rev="aaa",
+        rust_source_rev="aaa",
+        cargo_bin_present=True,
+        component_statuses=[
+            ("fno-agents", "fresh"),
+            ("fno-agents-daemon", "stale"),
+            ("fno-agents-worker", "fresh"),
+            ("fno", "fresh"),
+            ("python-tool", "fresh"),
+        ],
+    )
+    assert result["rust_stale"] is True
+    assert result["status"] == "stale"
+
+
+def test_verdict_unknown_components_never_gate_rust_stale() -> None:
+    """Unknown is not proven stale: an unprobed component never widens the
+    gate (it renders with its named instrument instead)."""
+    result = doctor._verdict(
+        source_resolved=True,
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_installed_rev="aaa",
+        rust_source_rev="aaa",
+        cargo_bin_present=True,
+        component_statuses=[("fno-agents-worker", "unknown")],
+    )
+    assert result["rust_stale"] is False
+    assert result["status"] == "fresh"
+
+
+def test_ac3_hp_doctor_shows_unknown_with_the_named_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3-HP: one component cannot be probed -> doctor renders Unknown with
+    the named instrument and does not collapse it into fresh or missing."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        components=[
+            {"component": "fno-agents", "status": "fresh"},
+            {"component": "fno-agents-worker", "status": "unknown",
+             "detail": "hung on `version --json` (>20s)",
+             "line": "component fno-agents-worker: unknown (no revision reported,"
+                     " expected abc1234abcd); hung on `version --json` (>20s)"},
+            {"component": "python-tool", "status": "fresh"},
+        ],
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "component fno-agents-worker: unknown" in result.stdout
+    assert "hung on `version --json`" in result.stdout
+
+
+def test_doctor_component_summary_line_when_all_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every component fresh -> one positive summary line naming them all."""
+    rows = [
+        {"component": "python-tool", "status": "fresh"},
+        {"component": "fno", "status": "fresh"},
+        {"component": "fno-agents", "status": "fresh"},
+        {"component": "fno-agents-daemon", "status": "fresh"},
+        {"component": "fno-agents-worker", "status": "fresh"},
+    ]
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        components=rows,
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.stdout
+    assert "components: 5/5 fresh (python-tool, fno, fno-agents, fno-agents-daemon, fno-agents-worker)." in result.stdout
+
+
+def test_doctor_component_stale_renders_repair_and_gates_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proven-stale sibling renders its repair command and the doctor exits
+    nonzero (stale is actionable, not advisory)."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        components=[
+            {"component": "fno-agents-daemon", "status": "stale",
+             "observed_rev": "0" * 40, "expected_rev": "a" * 40,
+             "repair": "cargo install --path /src/crates/fno-agents --bins",
+             "line": "component fno-agents-daemon: stale (rev 000000000000,"
+                     " expected aaaaaaaaaaaa); repair: cargo install --path"
+                     " /src/crates/fno-agents --bins"},
+            {"component": "fno-agents", "status": "fresh"},
+        ],
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    assert "component fno-agents-daemon: stale" in result.stdout
+    assert "repair: cargo install --path /src/crates/fno-agents --bins" in result.stdout

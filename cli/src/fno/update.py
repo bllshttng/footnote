@@ -62,7 +62,7 @@ def _triad_names() -> tuple[str, ...]:
 _log = logging.getLogger(__name__)
 
 RefreshOutcome = Literal[
-    "refreshed", "refreshed-no-marker", "fresh", "failed", "dry-run",
+    "refreshed", "refreshed-no-marker", "fresh", "partial", "failed", "dry-run",
     "skipped-no-crate", "skipped-no-binary", "skipped-no-rev", "skipped-no-cargo",
 ]
 
@@ -282,31 +282,6 @@ def _read_rust_marker() -> Optional[str]:
         return None
 
 
-def _write_rust_marker(rev: str) -> bool:
-    """Atomically record ``rev`` to the rust-marker file. Best-effort; never raises.
-
-    Mirrors ``_write_installed_rev``: temp file + ``os.replace`` so a concurrent
-    reader never sees a torn or empty value. Cleans up the temp on replace failure.
-    Returns True when the marker landed, False on OSError, so callers can
-    distinguish refreshed-with-marker from refreshed-without (ab-703f2ed2).
-    """
-    target = _RUST_MARKER_FILE
-    tmp = None
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.parent / f".installed-rust-rev.{os.getpid()}.tmp"
-        tmp.write_text(f"{rev}\n", encoding="utf-8")
-        os.replace(tmp, target)
-        return True
-    except OSError:
-        if tmp is not None and tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        return False
-
-
 def _cargo_installed_bin() -> Optional[Path]:
     """Return the path to the cargo-installed fno-agents binary, or None if absent.
 
@@ -358,55 +333,58 @@ def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optiona
     return rev
 
 
-def _no_rev_reason(binary: Optional[Path], install_root: Path, *, timeout: float = 20.0) -> str:
-    """Why ``_installed_bin_crates_rev`` returned None, as a message fragment.
 
-    It collapses five causes into one None, and only one of them is fixed by
-    committing - telling a user with a crashing binary to stash their tree is
-    the same misdiagnosis this reporting exists to end. Re-probes rather than
-    guessing; the probe only runs on the already-failing path.
-    """
-    if binary is None or not binary.is_file():
-        return f"is missing from the install root ({install_root})"
+
+def _component_verdict(
+    source: Path, subtree: str, bindir: Path, verdict_bin: Path, *,
+    attempted: bool = False, include_mux: Optional[bool] = None,
+    python_tool: Optional[dict] = None,
+) -> Optional[dict]:
+    """One call to the native verdict; None when it cannot answer - never fresh."""
+    cmd = [
+        str(verdict_bin), "component-verdict",
+        "--bindir", str(bindir), "--expected", subtree,
+        "--agents-dir", str(source.parent / "crates" / "fno-agents"),
+    ]
+    if include_mux or (include_mux is None and (source.parent / "crates" / "fno").is_dir()):
+        cmd.append("--include-mux")
+    if attempted:
+        cmd.append("--attempted")
+    if python_tool:
+        cmd += ["--python-rev", python_tool.get("rev") or "-"]
+        for flag, key in (
+            ("--python-expected", "expected"),
+            ("--python-evidence", "evidence"),
+            ("--python-error", "error"),
+        ):
+            if python_tool.get(key):
+                cmd += [flag, python_tool[key]]
     try:
-        result = subprocess.run(
-            [str(binary), "version", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return f"hung on `version --json` (>{timeout:g}s)"
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=90.0)
     except (OSError, subprocess.SubprocessError) as exc:
-        return f"could not be executed ({exc})"
+        _log.warning("component-verdict transport failed: %s", exc)
+        return None
     if result.returncode != 0:
-        return f"exited {result.returncode} on `version --json`"
+        _log.warning("component-verdict exited %s: %s", result.returncode, (result.stderr or "").strip()[:200])
+        return None
     try:
-        data = json.loads(result.stdout)
+        report = json.loads(result.stdout)
     except (ValueError, TypeError):
-        return "emitted unparseable `version --json` output"
-    if not isinstance(data, dict):
-        return "emitted unexpected `version --json` output"
-    if data.get("dirty") is True:
-        return (
-            "was built from a dirty crates/ tree - commit or stash your"
-            " crates/ changes and re-run"
-        )
-    return "carries no rev stamp (built outside a git checkout?)"
+        return None
+    return report if isinstance(report, dict) and isinstance(report.get("components"), list) else None
 
 
-def _triad_same_build(bindir: Path, subtree: str) -> bool:
-    """True iff all three triad bins in ``bindir`` self-report ``crates_rev ==
-    subtree`` (and are not dirty). Now that daemon + worker carry a ``version``
-    verb too, the fresh fast path can verify the whole triad is the SAME build,
-    not merely present: a stale-but-present sibling reports a different (or
-    unparseable -> None) rev and forces a rebuild. ``_installed_bin_crates_rev``
-    already fails toward rebuild for every error mode, so no extra guarding here.
-    """
-    return all(
-        _installed_bin_crates_rev(bindir / n) == subtree for n in _triad_names()
-    )
+def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update") -> list[str]:
+    """Non-fresh rows with their native one-liner; None = cannot answer."""
+    if report is None:
+        return [
+            f"{prefix}: component verdict unavailable (the deployed fno-agents"
+            " could not answer); treating as NOT converged"]
+    return [
+        f"{prefix}: {c['line']}"
+        for c in report.get("components", [])
+        if c.get("status") not in ("fresh", "updated") and c.get("line")
+    ]
 
 
 def _cargo_installed_mux() -> Optional[Path]:
@@ -773,10 +751,33 @@ def update_readiness(
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
+    # Name both Python deployments: the front door's script and this interpreter (AC2-HP).
+    front_script: Optional[str] = None
+    _mux = _cargo_installed_mux() or shutil.which("fno")
+    if _mux:
+        try:
+            _r = subprocess.run(
+                [str(_mux), "version", "--json"],
+                capture_output=True, text=True, check=False, timeout=20.0,
+            )
+            _d = json.loads(_r.stdout or "") if _r.returncode == 0 else None
+            _s = _d.get("python_script") if isinstance(_d, dict) else None
+            front_script = _s if isinstance(_s, str) and _s else None
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            front_script = None
+    running = sys.executable or None
+    # Same deployment = the script and the interpreter share one bin dir; the
+    # console script and the interpreter are different files by design.
+    same = (
+        Path(front_script).resolve().parent == Path(running).resolve().parent
+        if front_script and running
+        else None
+    )
     return {
         "update_ready": update_ready,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
+        "python_tool": {"script": front_script, "running": running, "same": same},
         "wire": {"running": running_wires, "source": source_wire, "bump": wire_bump},
         "shells": shells if shells_known else None,
         "shells_ended": shells_ended if shells_known else None,
@@ -788,7 +789,7 @@ def update_readiness(
     }
 
 
-def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
+def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> bool:
     """Best-effort: install the crates/fno mux binary (`fno` on PATH - the front
     door) alongside the fno-agents bins, into the same --root.
 
@@ -796,16 +797,16 @@ def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) 
     shares that crates/ subtree staleness gate. A failure warns and continues:
     the mux is heavier to build (tokio + alacritty + pty), and an absent/stale
     mux is a front-door problem `fno doctor` surfaces, never a reason to fail the
-    Python update. No marker of its own - `fno doctor`'s front-door check keys on
-    the binary's presence, not a rev marker.
+    Python update. Returns whether the install effect succeeded; the convergence
+    verdict never trusts this alone - it re-probes the deployed binary.
     """
     crate_dir = source.parent / "crates" / "fno"
     if not crate_dir.is_dir():
-        return
+        return False
     cmd = ["cargo", "install", "--path", str(crate_dir), "--bins", "--root", str(install_root)]
     if dry_run:
         typer.echo(f"Would run: {shlex.join(cmd)}")
-        return
+        return False
     typer.echo(f"fno doctor update: refreshing mux front door: {shlex.join(cmd)}")
     try:
         result = subprocess.run(cmd, check=False)
@@ -815,15 +816,16 @@ def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) 
             " `fno` may be absent/stale; continuing",
             err=True,
         )
-        return
+        return False
     if result.returncode != 0:
         typer.echo(
             f"fno doctor update: WARNING: mux front door install failed (exit {result.returncode});"
             " `fno` may be absent/stale; continuing",
             err=True,
         )
-        return
+        return False
     typer.echo("fno doctor update: mux front door refreshed (crates/fno -> `fno`)")
+    return True
 
 
 def _triad_install_dirs() -> list[Path]:
@@ -982,56 +984,42 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         return "skipped-no-rev"
     # When force=True but subtree is None, we continue but remember we cannot write a marker.
 
-    # Freshness is proven by the BINARY ITSELF, not a marker file. The
-    # installed binary bakes in its crates_rev via build.rs; interrogate it and
-    # skip cargo only when that rev matches source AND the build is not dirty.
-    # A marker could advance past a stale/out-of-band binary and lie "fresh".
+    # Freshness is proven by the binaries themselves via one native probe:
+    # an absent, stale or unanswerable component falls through to cargo.
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
-    # The fresh fast path also requires the daemon + worker siblings to be the
-    # SAME build as the fresh client, not merely present. All three bins now
-    # carry a `version --json` verb, so _triad_same_build interrogates each one's
-    # crates_rev: a MISSING or STALE sibling (different/unparseable rev -> None)
-    # falls through to cargo, which rebuilds the whole triad coherently. This
-    # closes the residual gap where a manually-replaced older sibling beside a
-    # fresh client passed a presence-only check and skipped the rebuild.
     if (
         not force
         and installed_bin is not None
         and subtree is not None
-        and installed_rev is not None
-        and installed_rev == subtree
-        and _triad_same_build(installed_bin.parent, subtree)
+        and (pre := _component_verdict(
+            source, subtree, installed_bin.parent, installed_bin, include_mux=False
+        )) is not None
+        and pre.get("converged")
     ):
         typer.echo(
-            f"fno doctor update: rust bins fresh (rev {installed_rev[:12]} from binary);"
+            f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]} from binary);"
             " skipping cargo install"
         )
-        # The agents bins are current, but the mux front door (crates/fno ->
-        # `fno`) can still be ABSENT or STALE at a fresh triad. Absent: the
-        # fno->fno-py rename lands fno-py while a fresh-binary `fno doctor update` never
-        # installed the mux. Stale: the mux install is best-effort (a failed
-        # build warns and continues), so a prior failure can leave an OLD `fno`
-        # beside a fresh triad. Now that crates/fno bakes its own crates_rev,
-        # interrogate the installed mux and reinstall when it is missing OR its
-        # rev != source - closing the present-but-stale front-door gap a
-        # presence-only heal would miss. No-op when there is no crates/fno
-        # source. installed_bin is non-None here.
+        # The mux front door can be absent or stale at a fresh triad; reinstall then.
         mux = _cargo_installed_mux()
         if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
+        # The post-repair verdict decides "fresh", never the gate above.
+        # A dry run executed no effect, so it may not claim one attempted.
+        report = _component_verdict(
+            source, subtree, installed_bin.parent, installed_bin,
+            attempted=not dry_run,
+        )
+        converged = bool(report and report.get("converged"))
+        if not converged:
+            for line in _component_lines(report):
+                typer.echo(line)
         # Sync even on the fresh path: an interrupted prior run may have left the
         # other install locations behind (AC2-FR). The gate's fresh verdict must
         # NOT short-circuit convergence.
         _sync_triad(installed_bin.parent, dry_run=dry_run)
         _report_daemon_drift()
-        return "fresh"
-
-    if shutil.which("cargo") is None:
-        typer.echo(
-            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
-            err=True,
-        )
-        return "skipped-no-cargo"
+        return "fresh" if converged else "partial"
 
     # Derive the install root from the detected binary so the refresh lands in the
     # exact same location that was tested. Binary lives at <root>/bin/<name>, so
@@ -1042,6 +1030,27 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         install_root = installed_bin.parent.parent
     else:
         install_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+
+    def _render_component_evidence() -> None:
+        """Name what did not converge; the Python update still proceeds."""
+        if subtree is None:
+            return
+        report = _component_verdict(
+            source,
+            subtree,
+            install_root / "bin",
+            _cargo_installed_bin() or install_root / "bin" / _triad_names()[0],
+        )
+        for line in _component_lines(report):
+            typer.echo(line, err=True)
+
+    if shutil.which("cargo") is None:
+        typer.echo(
+            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
+            err=True,
+        )
+        _render_component_evidence()
+        return "skipped-no-cargo"
 
     cmd = ["cargo", "install", "--path", str(crate_dir), "--bins", "--root", str(install_root)]
 
@@ -1061,6 +1070,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
+        _render_component_evidence()
         return "failed"
     if result.returncode != 0:
         typer.echo(
@@ -1068,33 +1078,34 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
+        _render_component_evidence()
         return "failed"
 
-    # Post-deploy verify: interrogate the binary we just deployed. cargo can exit
-    # 0 yet leave a stale artifact (a reused build cache, or an install root that
-    # is not what the runtime actually resolves) - the marker gate hid exactly
-    # this class. HALT loud on mismatch with both revs printed. Skipped
-    # only when subtree is undeterminable (force with no git rev to check against).
-    if subtree is not None:
-        deployed = _cargo_installed_bin()
-        verify_rev = None if deployed is None else _installed_bin_crates_rev(deployed)
-        if verify_rev != subtree:
-            # Distinct failures reach here; a shared message misdiagnoses one as
-            # another and sends the reader hunting the install root.
-            if verify_rev is None:
-                detail = _no_rev_reason(deployed, install_root)
-            else:
-                detail = (
-                    f"reports crates/ rev {verify_rev[:12]}, but source is"
-                    f" {subtree[:12]} - the rebuild did not land where the runtime"
-                    f" resolves it (install root {install_root})"
-                )
-            typer.echo(
-                f"fno doctor update: ERROR: post-deploy verify FAILED - the deployed fno-agents {detail}."
-                " NOT continuing.",
-                err=True,
-            )
-            raise typer.Exit(1)
+    # Post-deploy verify: cargo can exit 0 yet deploy stale bytes, so the
+    # triad is re-probed natively; the client must prove current first.
+    verdict_bin = install_root / "bin" / _triad_names()[0]
+    if not verdict_bin.is_file():
+        verdict_bin = _cargo_installed_bin() or verdict_bin
+    post_report = (
+        _component_verdict(
+            source, subtree, install_root / "bin", verdict_bin, attempted=True
+        )
+        if subtree is not None and verdict_bin.is_file()
+        else None
+    )
+    rows = {c.get("component"): c for c in (post_report or {}).get("components", [])}
+    client = rows.get("fno-agents")
+    if subtree is not None and (
+        post_report is None or client is None or client.get("status") not in ("fresh", "updated")
+    ):
+        for line in _component_lines(post_report):
+            typer.echo(line, err=True)
+        typer.echo(
+            "fno doctor update: ERROR: post-deploy verify FAILED - the deployed fno-agents"
+            " did not prove current (details above). NOT continuing.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     # The mux front door (crates/fno -> `fno` on PATH) rides the SAME crates/
     # subtree staleness gate as the agents bins, so refresh it here too. Without
@@ -1108,27 +1119,32 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     _sync_triad(install_root / "bin", dry_run=False)
     _report_daemon_drift()
 
+    # Final proof: re-probe as finally deployed; an attempted build alone is
+    # never freshness (an unproven component downgrades to partial).
+    post_report = (
+        _component_verdict(
+            source, subtree, install_root / "bin", verdict_bin, attempted=True
+        )
+        if subtree is not None and verdict_bin.is_file()
+        else None
+    )
+    post_converged = bool(post_report and post_report.get("converged"))
+    if not post_converged:
+        for line in _component_lines(post_report):
+            typer.echo(line, err=True)
+
     outcome: RefreshOutcome
     if subtree is None:
-        # force=True with an undeterminable rev: bins rebuilt but no marker
-        # breadcrumb written (no verdict reads it, so this is cosmetic).
+        # force=True with an undeterminable rev: bins rebuilt but no rev to record.
         typer.echo("fno doctor update: rust bins refreshed (marker not written: rev undeterminable)")
         outcome = "refreshed-no-marker"
-    elif _write_rust_marker(subtree):
+    else:
         typer.echo(f"fno doctor update: rust bins refreshed (rev {subtree[:12]})")
         outcome = "refreshed"
-    else:
-        # Marker write failed, but the deploy already passed post-deploy verify
-        # above - the bins ARE repaired, and no verdict reads the legacy marker.
-        # So this is a SUCCESSFUL refresh, not `refreshed-no-marker` (which
-        # `fno doctor --fix` treats as a failed repair and exits 1). Warn about the
-        # cosmetic breadcrumb, return success.
-        typer.echo(
-            "fno doctor update: note: rust bins refreshed; the legacy marker write failed"
-            f" (harmless, no verdict reads it; check {_RUST_MARKER_FILE.parent} permissions)",
-            err=True,
-        )
-        outcome = "refreshed"
+
+    # Unproven components make the outcome partial, never full freshness.
+    if outcome == "refreshed" and not post_converged:
+        outcome = "partial"
 
     # Best-effort mux advisory: a long-running mux server keeps speaking the OLD
     # proto after this refresh. Pane-hosting servers are spared by default;

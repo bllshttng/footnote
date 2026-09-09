@@ -482,7 +482,17 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     for attempt in 1..=INSTALL_ATTEMPTS {
         let mut command = bootstrap_command(uv);
         command
-            .args(["tool", "install", "--force", "--compile-bytecode", source])
+            // --refresh busts uv's wheel cache: without it a cache hit
+            // reinstalls the same stale bytes and the re-provision loop can
+            // never converge (the 2026-08-15 skew incident).
+            .args([
+                "tool",
+                "install",
+                "--force",
+                "--refresh",
+                "--compile-bytecode",
+                source,
+            ])
             .env("NO_COLOR", "1")
             .env("UV_NO_COLOR", "1");
         let out = match bootstrap_output(&mut command) {
@@ -992,6 +1002,13 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
             // different axis from the script name.
             .join("fno-py"),
     )
+}
+
+/// The Python script this front door would exec, resolved by THIS door's own
+/// resolver - not a guessed uv environment. `fno version --json` reports it so
+/// update/doctor verify the deployment the user actually executes.
+pub fn resolved_python_script() -> Option<PathBuf> {
+    resolve_via_uv_tool_dir()
 }
 
 // ---------------------------------------------------------------------------

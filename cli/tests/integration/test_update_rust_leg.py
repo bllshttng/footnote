@@ -84,6 +84,10 @@ def _cargo_stub(
     )
     inner = (
         "#!/bin/sh\n"
+        'if [ "$1" = "component-verdict" ]; then\n'
+        '  shift\n'
+        '  exec "$FNO_AGENTS_BIN" component-verdict "$@"\n'
+        "fi\n"
         'if [ "$1" = "version" ] && [ "$2" = "--json" ]; then\n'
         f"  echo '{version_json}'\n"
         "fi\n"
@@ -163,9 +167,6 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     _cargo_stub(fakebin / "cargo", cargo_log, cargo_home, crates_rev, head_rev)
     _uv_stub(fakebin / "uv", uv_log, tmp_path)
 
-    rust_marker = home / ".fno" / "installed-rust-rev"
-    rust_marker.write_text("0" * 40 + "\n", encoding="utf-8")  # stale
-
     git_bin = Path(shutil.which("git") or "/usr/bin/git").parent
     env = {
         "PATH": f"{fakebin}:{git_bin}:/usr/bin:/bin",
@@ -197,10 +198,6 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     assert "refreshing rust bins" in result.stdout, result.stdout
     assert f"rust bins refreshed (rev {crates_rev[:12]})" in result.stdout, result.stdout
 
-    # Marker converged to the crates subtree rev, NOT HEAD: the trailing
-    # python-only commit must not be recorded as the rust rev.
-    assert rust_marker.read_text(encoding="utf-8").strip() == crates_rev
-
     # Stub cargo got the pinned-root install command, exactly once.
     cargo_lines = cargo_log.read_text(encoding="utf-8").strip().splitlines()
     assert len(cargo_lines) == 1, cargo_lines
@@ -211,9 +208,11 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
 
     # Installer handoff happened after the rust leg, and the chained
     # installed-rev write (post-execvp, gated on installer exit 0) recorded
-    # the source HEAD.
+    # the source HEAD. --refresh must ride along: without it a uv wheel-cache
+    # hit reinstalls the same stale bytes and the update never converges.
     uv_text = uv_log.read_text(encoding="utf-8")
     assert "tool install --reinstall" in uv_text
+    assert "--refresh" in uv_text
     assert str(cli_src.resolve()) in uv_text
     installed_rev = home / ".fno" / "installed-rev"
     assert installed_rev.read_text(encoding="utf-8").strip() == head_rev
@@ -224,7 +223,75 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
         f"exit {result2.returncode}\nstdout:\n{result2.stdout}\nstderr:\n{result2.stderr}"
     )
     # The gate now reads the binary's self-reported rev, so the message quotes it
-    # "from binary".
+    # "from binary". The verdict is native: with the fixture's crates/ holding no
+    # mux crate, only the triad is classified, the deployed binary answers the
+    # component-verdict transport itself, and all three prove Fresh.
     assert f"rust bins fresh (rev {crates_rev[:12]} from binary)" in result2.stdout, result2.stdout
     cargo_lines_after = cargo_log.read_text(encoding="utf-8").strip().splitlines()
     assert cargo_lines_after == cargo_lines, "fresh short-circuit must not re-invoke cargo"
+
+
+def test_component_verdict_binary_journey(tmp_path: Path) -> None:
+    """Journey: the real binary probes a bindir of deployed-shape executables
+    ITSELF (no Python probe in the loop) and proves convergence only when
+    every component's probe matches. Stale bytes keep the fleet unconverged
+    and name the executable repair; an unanswerable binary is Unknown with
+    the named instrument."""
+    binary = os.environ.get("FNO_AGENTS_BIN")
+    if not binary:
+        pytest.skip(
+            "FNO_AGENTS_BIN unset: this journey drives the real fno-agents binary"
+        )
+
+    import json as jsonlib
+    import subprocess as subproc
+
+    def ask(*args: str) -> dict:
+        proc = subproc.run(
+            [binary, "component-verdict", *args], capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return jsonlib.loads(proc.stdout)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fresh_json = '{"crates_rev": "%s", "dirty": false}' % ("a" * 40)
+    stale_json = '{"crates_rev": "%s", "dirty": false}' % ("0" * 40)
+
+    def deploy(name: str, payload: str) -> None:
+        p = bindir / name
+        p.write_text(f"#!/bin/sh\necho '{payload}'\n", encoding="utf-8")
+        p.chmod(0o755)
+
+    deploy("fno-agents", fresh_json)
+    deploy("fno-agents-daemon", fresh_json)
+    deploy("fno-agents-worker", fresh_json)
+    deploy("fno", fresh_json)
+
+    common = [
+        "--bindir", str(bindir),
+        "--expected", "a" * 40,
+        "--include-mux",
+        "--agents-dir", "/src/crates/fno-agents",
+    ]
+    fresh = ask(*common, "--python-rev", "a" * 40, "--python-expected", "a" * 40)
+    assert fresh["converged"] is True
+    names = {c["component"] for c in fresh["components"]}
+    assert names == {"fno-agents", "fno-agents-daemon", "fno-agents-worker", "fno", "python-tool"}
+
+    # A stale worker keeps the fleet unconverged and names the repair.
+    deploy("fno-agents-worker", stale_json)
+    stale = ask(*common)
+    assert stale["converged"] is False
+    worker = [c for c in stale["components"] if c["component"] == "fno-agents-worker"][0]
+    assert worker["status"] == "stale"
+    assert "cargo install --path /src/crates/fno-agents" in (worker["repair"] or "")
+
+    # An executable the probe cannot answer is Unknown with the named
+    # instrument, never collapsed into fresh or missing (AC3-HP).
+    deploy("fno-agents-worker", "not-json-at-all")
+    junk = ask(*common)
+    assert junk["converged"] is False
+    worker = [c for c in junk["components"] if c["component"] == "fno-agents-worker"][0]
+    assert worker["status"] == "unknown"
+    assert "unparseable" in (worker["detail"] or "")
