@@ -353,9 +353,8 @@ pub fn run_distress_scan(args: &[String]) -> i32 {
         return 0;
     };
     let project_events = events_path.unwrap_or_else(|| crate::paths::events_path(&cwd));
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events =
-        global_events_path.unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
+        global_events_path.unwrap_or_else(crate::loopcheck::default_global_events_path);
     let wrote = scan_and_emit(
         &project_events,
         &global_events,

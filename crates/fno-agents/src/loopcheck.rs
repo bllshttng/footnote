@@ -3495,6 +3495,16 @@ pub(crate) fn loopcheck_fno_bin() -> String {
     std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
 }
 
+/// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
+/// verb reaches for when no `--global-events` override is given. Hand-built
+/// (no Rust resolver for events.jsonl exists yet, x-1571 debt this file
+/// already carries) rather than a new duplicate of the same literal in
+/// every caller.
+pub(crate) fn default_global_events_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(&home).join(".fno/events.jsonl")
+}
+
 /// Best-effort `fno inbox notify TITLE BODY`. Spawned detached and never waited on;
 /// any failure (missing binary, non-zero exit) is non-fatal - the terminal
 /// completes on the durable event row alone (AC2-FR). Suppressed under

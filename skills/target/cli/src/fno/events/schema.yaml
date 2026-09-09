@@ -6111,7 +6111,7 @@ protocol_family:
   envelope:
     # Every top-level key a family event may carry. additionalProperties:false
     # rejects anything outside this whitelist.
-    allowed: [ts, v, type, source, from, model, host, project, node, task, run, parent, outcome, data]
+    allowed: [ts, v, type, source, from, model, host, project, node, task, run, parent, outcome, harness, data]
     # Always required, on top of the base [ts, type, source, data].
     required: [v, run]
   # `outcome` (return-contract enum) is present ONLY on these types, and required
