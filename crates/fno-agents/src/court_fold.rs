@@ -88,7 +88,17 @@ fn sessions_of(entry: &Value) -> Vec<String> {
     );
     if let Some(list) = entry.get("cost_sessions").and_then(|v| v.as_array()) {
         for raw in list {
-            push(raw.as_str().map(str::to_string));
+            // Ledger-derived cost sessions arrive as objects carrying
+            // session_id; older graphs hold bare strings.
+            let sid = match raw {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => raw
+                    .get("session_id")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
+                _ => None,
+            };
+            push(sid);
         }
     }
     push(
@@ -547,7 +557,10 @@ mod tests {
     #[test]
     fn fold_one_counts_whole_scope_lists_active_states_the_omitted_count() {
         let workers = BTreeMap::new();
-        let fold = fold_one("e-1", Some(2), &entries(), &no_projects(), &workers);
+        let mut e = entries();
+        // Ledger-derived cost sessions arrive as objects, not bare strings.
+        e[2]["cost_sessions"] = json!([{"session_id": "s6", "cost_usd": 0.4}]);
+        let fold = fold_one("e-1", Some(2), &e, &no_projects(), &workers);
         assert_eq!(fold["status"], "ok");
         assert_eq!(fold["total"], 4);
         // x-2 (done) and x-3 (idea) are the two inactive rows.
@@ -556,7 +569,7 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0]["id"], "e-1");
         assert_eq!(nodes[1]["sessions"][0], "s1");
-        assert_eq!(nodes[1]["sessions"].as_array().unwrap().len(), 5);
+        assert_eq!(nodes[1]["sessions"].as_array().unwrap().len(), 6);
         assert_eq!(nodes[1]["pr_number"], 3);
         assert_eq!(nodes[1]["slug"], "x-1-slug");
         let counts = fold["counts"].as_object().unwrap();

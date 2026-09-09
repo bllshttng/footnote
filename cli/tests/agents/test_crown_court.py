@@ -1020,7 +1020,7 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     assert adopted in spawn_gate.census().crowned_sessions
 
 
-# --- the scope fold (x-52d2): the native fold, relayed onto the crown rows
+# --- the scope fold: the native fold, relayed onto the crown rows
 
 
 def _stub_court_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool = False) -> None:

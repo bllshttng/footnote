@@ -949,7 +949,7 @@ def cmd_crown(
     print(json.dumps(receipt))
 
 
-# The court command moved to fno.agents.court (x-52d2, file budget); the
+# The court command moved to fno.agents.court (file budget); the
 # composition stays on the agents app here.
 from fno.agents.court import register_court_command  # noqa: E402
 
