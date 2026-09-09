@@ -1233,7 +1233,7 @@ fn the_receipt_is_on_disk_before_the_effects_fire() {
         &|_| true,
         &probing_surface,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
     let _ = home_for_seam; // the state root, named for the failure reader
@@ -1286,7 +1286,7 @@ fn a_row_without_a_buildable_receipt_refuses_before_any_effect() {
             CascadeOutcome::Removed
         },
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty(), "{:?}", summary.retired);
     assert_eq!(
@@ -1354,7 +1354,7 @@ fn a_row_without_a_located_transcript_records_failed_resume_evidence() {
         &|_| true,
         &confirming,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
     let receipts: Vec<std::path::PathBuf> = std::fs::read_dir(home.root().join("reap-receipts"))
@@ -1441,7 +1441,7 @@ fn a_planner_retires_only_on_its_own_closed_assignment() {
         &|_| true,
         &|_| CascadeOutcome::Removed,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
     assert_eq!(summary.retired[0].0, "bp-x-4hp-b", "{:?}", summary.retired);
@@ -3564,7 +3564,7 @@ fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
         &|_| true,
         &|_| CascadeOutcome::Removed,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty(), "{:?}", summary.retired);
     assert!(
