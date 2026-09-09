@@ -1,25 +1,22 @@
 # Model Fallback (Interactive Mode)
 
-**Load when:** the API returns a rate-limit or overload error during execution and you need to decide whether to wait, switch model, or pause.
+When the harness reports a rate-limit or overload error during execution, load this reference. It tells the user their options.
 
-If the API returns a rate limit or overload error during execution:
+There is no `config.model_fallback` block. This reference has no reachable code path to drive. When `target-state.md` carries `status: IN_PROGRESS`, `hooks/target-stopfailure.sh` writes a `model_fallback_needed` flag. The current write-once manifest never sets that field. Account and lane rotation already own real capacity and outage handling. `fno config accounts`, the spawn-overlay grid, and `agents.profiles.*.on_exhausted` cover that. This reference covers only the one case those do not. The interactive session's own model just hit a rate limit or overload, mid-turn, in the current harness.
 
-1. Read `model_fallback.chain` from config.toml (default: `[claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5]`)
-2. Read `model_fallback.cooldown_seconds` (default: 60)
-
-Present to user via AskUserQuestion:
+On that error, present the options via AskUserQuestion. Name only what the error itself reported. Do not fabricate a cooldown or a next-model name from a chain that does not exist:
 
 ```
-Claude {current_model} hit a {error_type}. Options:
-  1. Wait {cooldown}s and retry with {current_model}
-  2. Switch to {next_model} and continue
+{current_model} hit a {error_type}. Options:
+  1. Wait and retry with {current_model}
+  2. Switch model yourself (the harness's own model picker), then continue
   3. Pause - I'll resume when you say go
 
 Pick [1/2/3]:
 ```
 
-Update `target-state.md` `model_fallback` section with the choice. If user picks 2, update `model_fallback.fallback_index` and `model_fallback.current_model`.
+Record the user's choice as a line in the session's progress notes. It is not a `target-state.md` field, since the manifest is write-once and holds no `model_fallback` schema. Never switch the model yourself. This session cannot log in, rename an account root, enable remote control, or select a model the current account cannot reach. Any switch is the user's own action in their harness. This skill only names the options and continues once they answer.
 
-**Note:** In interactive mode, the model switch is advisory - Claude Code itself manages model selection. The tracking helps the user understand what happened and informs the stop hook's status messages.
+A phase transition never changes the model on its own. The user sets the model interactively. The resolved lane sets it unattended, via `fno agents spawn`'s grid. It stays whichever one set it, until that same actor changes it again.
 
-In autonomous (unattended) mode, there is no AskUserQuestion path - the loop chooses based on `model_fallback.policy` in config.toml (`wait_then_switch` is the default).
+In autonomous (unattended) mode there is no AskUserQuestion path. A worker spawned via `fno agents spawn` already resolved its lane through the grid at spawn time. A mid-run outage there is `run_outage_handoff`'s job (`fno.agents.outage_handoff`, invoked by `fno.recovery` on a positively proved outage), not this reference's.

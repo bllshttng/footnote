@@ -551,21 +551,16 @@ When the plan is stamped `source: claude-plan-mode`, the front door owns the dis
 
 Relay the receipt line it prints (`epic <id>: dispatched N, skipped M` / `dispatched <node>` / `skipped reason=...`; `--json` for the full dispatched id list) to the user. A refused or held advance is non-fatal: the plan stays intact and the node stays `ready` for a manual `/target bg <node>`. Never spawn the worker yourself and never add a blueprint-specific scheduler or spawn fallback.
 
-## When to redirect to /think
+## A missing supplied path fails loudly
 
-If the argument to `/blueprint` does NOT look like a file path, redirect immediately:
+A string is classified as a path (not a feature description) when it:
+- Contains `/`
+- Ends in `.md`
+- Starts with `~`, `./`, `../`, or `/`
 
-```
-No design doc found. Run `/think "<feature>"` first, then `/blueprint <resulting-doc-path>`.
-Or invoke `/target` for the full chain.
-```
+A path-shaped argument that does not exist on disk exits 1 with "file not found" naming the path - never a silent fall-through to raw-description mode. A typo in a supplied path is a loud refusal, not a guess.
 
-A string is treated as a feature description (not a path) when it:
-- Does not contain `/`
-- Does not end in `.md`
-- Does not start with `~`, `./`, `../`, or `/`
-
-A path that looks like a path but does not exist on disk also triggers this redirect (exit 1) rather than falling through to raw-description mode. This is deliberate: a typo in a path gets a loud "file not found" rather than silently treating the argument as a description.
+A NON-path-shaped argument is a raw feature description, not a missing-doc case: it runs [Single-doc creation](#single-doc-creation-idea-input), which self-grounds through step 2b's discovery gate (`fno do think inspect` + [references/discovery-gate.md](references/discovery-gate.md)). This never redirects to `/think` as a prerequisite - `/think` is a deliberate escalation step 2b takes only when the receipt shows the plan needs deeper investigation than 3-5 questions can ground.
 
 ## Gotchas
 
