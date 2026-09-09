@@ -1146,3 +1146,153 @@ def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
     # The frozen shape is gone for positive reasons above; this names it: the
     # setup-time snapshot of the whole graph no longer exists to go stale.
     assert "var ALL = counts(NODES);" not in local
+
+
+# --- the court section (x-52d2): crowns joined to their scope, local board only
+
+
+def _stub_court(monkeypatch, crowns) -> None:
+    import fno.agents.court as court_mod
+
+    monkeypatch.setattr(
+        court_mod,
+        "gather_court",
+        lambda rows=None, *, entries=None: {"crowns": crowns},
+    )
+
+
+def test_local_dashboard_carries_the_court_section_with_scope_nodes(
+    tmp_path: Path, monkeypatch
+):
+    """AC6-LOCAL: every live crown renders with its active nodes, their
+    workers, PRs and session ids - folded from the entries the render
+    already held, never a second graph read."""
+    _stub_court(
+        monkeypatch,
+        [
+            {
+                "holder": "king-a792",
+                "level": 2,
+                "scope": "e-1",
+                "status": "busy",
+                "agree": True,
+                "reason": None,
+                "crown_source": "both",
+                "manifest_session": "king-session",
+            },
+            {
+                "holder": "king-119e",
+                "level": 2,
+                "scope": "e-2",
+                "status": "live",
+                "agree": False,
+                "reason": "'e-2' status is 'done' (terminal)",
+                "crown_source": "row",
+                "manifest_session": "s-119e",
+            },
+        ],
+    )
+    entries = [
+        _entry("e-1", type="epic", status="in_progress"),
+        _entry(
+            "x-child01",
+            parent="e-1",
+            status="in_progress",
+            pr_number=1178,
+            session_id="s-child",
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    assert 'class="court"' in text
+    assert "king-a792" in text
+    assert "x-child01" in text
+    assert "s-child" in text
+    assert "#1178" in text
+    # The disagreeing crown folds to unresolved (e-2 is not in the graph) and
+    # says so instead of rendering an empty table.
+    assert "court-disagree" in text
+    assert "scope fold: unresolved" in text
+
+
+def test_a_disagreeing_crown_with_a_fodable_scope_shows_marker_and_reason(
+    tmp_path: Path, monkeypatch
+):
+    """AC6-DISAGREE: the disagreement marker and the reason text render inline
+    on the crown's own row."""
+    _stub_court(
+        monkeypatch,
+        [
+            {
+                "holder": "king-119e",
+                "level": 2,
+                "scope": "e-1",
+                "status": "live",
+                "agree": False,
+                "reason": "'e-1' status is 'done' (terminal)",
+                "crown_source": "row",
+                "manifest_session": "s-119e",
+            }
+        ],
+    )
+    entries = [_entry("e-1", type="epic", status="done")]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    assert "court-disagree" in text
+    assert "agree no" in text
+    assert "status is" in text and "terminal" in text
+
+
+def test_public_dashboard_never_carries_the_court_section(
+    tmp_path: Path, monkeypatch
+):
+    """AC6-PUBLIC: a published snapshot holds no court section, no holder name
+    and no session id - the local gate refuses the read entirely."""
+    import fno.agents.court as court_mod
+
+    from fno.graph.render_html import _dashboard_html
+
+    def _never(*a, **k):
+        raise AssertionError("court read reached a public render")
+
+    monkeypatch.setattr(court_mod, "gather_court", _never)
+    entries = [
+        _entry(
+            "x-child01",
+            project="alpha",
+            status="in_progress",
+            session_id="s-child",
+        )
+    ]
+
+    document = _dashboard_html(entries, title="fno Backlog", local=False)
+
+    assert 'class="court"' not in document
+    assert "king-a792" not in document
+    assert "s-child" not in document
+
+
+def test_a_raising_court_read_still_writes_the_board(tmp_path: Path, monkeypatch):
+    """AC6-RAISE: the section runs inside the post-mutation renderer, so any
+    fault in it degrades to no section - the document and the mutation
+    complete either way."""
+    import fno.agents.court as court_mod
+
+    def _raise(*a, **k):
+        raise RuntimeError("court exploded")
+
+    monkeypatch.setattr(court_mod, "gather_court", _raise)
+    entries = [_entry("x-1", project="alpha")]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    assert 'class="court"' not in text
+    assert 'id="board"' in text

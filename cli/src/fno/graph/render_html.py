@@ -579,6 +579,22 @@ body[data-local="false"] .detail { padding-left:15px }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px;
   display:flex; flex-wrap:wrap; gap:5px 16px }
 footer span { font-family:"IBM Plex Mono",ui-monospace,monospace }
+section.court { margin-top:18px; display:flex; flex-direction:column; gap:6px }
+section.court h2 { margin:0; font-size:13px; color:var(--ink-2); text-transform:uppercase; letter-spacing:.04em }
+details.crown { border:1px solid var(--line); border-radius:8px; background:var(--surface) }
+details.crown summary { cursor:pointer; padding:8px 11px; font-size:12.5px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; color:var(--ink-2) }
+details.crown summary::marker { color:var(--muted) }
+details.crown.court-disagree { border-color:var(--blocked) }
+details.crown.court-disagree summary { color:var(--blocked) }
+.crown-body { padding:0 11px 10px }
+.crown-counts { font-size:11.5px; color:var(--muted); margin-bottom:6px }
+.crown-note { font-size:11.5px; color:var(--blocked) }
+table.crown-nodes { width:100%; border-collapse:collapse; font-size:11.5px }
+table.crown-nodes th { text-align:left; color:var(--muted); font-weight:500; padding:3px 8px 3px 0;
+  border-bottom:1px solid var(--line) }
+table.crown-nodes td { padding:3px 8px 3px 0; border-bottom:1px solid var(--surface-2); vertical-align:top;
+  font-family:"IBM Plex Mono",ui-monospace,monospace; word-break:break-all }
 @media (max-width:720px) {
   .rmain { grid-template-columns:66px 1fr; row-gap:5px }
   .meta, .dot { grid-column:2; white-space:normal }
@@ -1241,6 +1257,77 @@ def _dashboard_static_html(
     return "".join(parts)
 
 
+def _court_section(entries: list[dict]) -> str:
+    """The crown readout: every live crown joined to its scope nodes.
+
+    Local board only - a published snapshot must never carry holder names or
+    session ids, and the ``local`` gate at the splice site is the only thing
+    between this section and a public document. The graph read is the one the
+    renderer already did (``entries``); the registry read and the Rust orphan
+    sweep are the court read's own (measured 0.0 s + 0.07 s).
+    """
+    from fno.agents.court import fold_scope_nodes, gather_court
+
+    court = gather_court(entries=entries)
+    crowns = court.get("crowns") or []
+    if not crowns:
+        return ""
+    fold_scope_nodes(crowns, entries)
+    parts = ['<section class="court"><h2>Court</h2>']
+    for c in crowns:
+        agree = c.get("agree")
+        marker = "?" if agree is None else ("yes" if agree else "no")
+        disagree = " court-disagree" if agree is False else ""
+        label = " · ".join(
+            str(x)
+            for x in (c.get("scope"), f"L{c.get('level')}", c.get("holder"))
+            if x is not None
+        )
+        parts.append(f'<details class="crown{disagree}"><summary>')
+        parts.append(html.escape(f"{label} · agree {marker}"))
+        if disagree and c.get("reason"):
+            parts.append(html.escape(f" - {c['reason']}"))
+        parts.append("</summary>")
+        sn = c.get("scope_nodes")
+        if sn is None:
+            parts.append("</details>")
+            continue
+        if sn.get("status") == "unresolved":
+            parts.append(
+                '<div class="crown-body"><span class="crown-note">'
+                f'{html.escape("scope fold: unresolved - " + sn.get("reason", ""))}'
+                "</span></div>"
+            )
+            parts.append("</details>")
+            continue
+        counts = ", ".join(f"{k} {v}" for k, v in sn.get("counts", {}).items())
+        parts.append('<div class="crown-body">')
+        parts.append(
+            '<div class="crown-counts">'
+            f"{html.escape(str(sn.get('total', 0)))} nodes: "
+            f"{html.escape(counts)} ({html.escape(str(sn.get('omitted', 0)))} not listed)"
+            "</div>"
+        )
+        parts.append(
+            '<table class="crown-nodes"><thead><tr><th>node</th><th>status</th>'
+            "<th>worker</th><th>pr</th><th>sessions</th></tr></thead><tbody>"
+        )
+        for r in sn.get("nodes") or []:
+            pr = f"#{r['pr_number']}" if r.get("pr_number") else ""
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(str(r.get('id') or ''))}</td>"
+                f"<td>{html.escape(str(r.get('status') or ''))}</td>"
+                f"<td>{html.escape(str(r.get('worker') or '-'))}</td>"
+                f"<td>{html.escape(pr)}</td>"
+                f"<td>{html.escape(', '.join(str(s) for s in r.get('sessions') or []))}</td>"
+                "</tr>"
+            )
+        parts.append("</tbody></table></div></details>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
 def _dashboard_html(
     entries: list[dict],
     *,
@@ -1298,6 +1385,13 @@ def _dashboard_html(
     static_board = _dashboard_static_html(
         rows, local=local, initial_done=projection == "roadmap"
     )
+    # Local only, and never raising: render_configured_targets runs after
+    # locked_mutate_graph writes graph.json, so a court section that throws
+    # would wedge every graph mutation. It degrades to nothing instead.
+    try:
+        court_html = _court_section(entries) if local else ""
+    except Exception:  # noqa: BLE001 - the board outranks the section
+        court_html = ""
     vote_suffix = (
         ' --operator --evidence "REPLACE: what it cost"' if local else ""
     )
@@ -1340,7 +1434,8 @@ def _dashboard_html(
         f'<b id="totalCount">{len(rows)}</b> nodes. {opens_note}'
         '<b>Plan, unfinished</b> is the real queue: every node with a plan that has '
         f'not shipped. Set <b>from</b> to a date to narrow the window. {detail_note}</p></header>'
-        '<div class="stats" id="stats"></div><div class="controls">'
+        + court_html
+        + '<div class="stats" id="stats"></div><div class="controls">'
         '<input type="search" id="q" placeholder="Search title, id, or description\u2026" aria-label="Search nodes">'
         '<div class="chips" id="statusChips" role="group" aria-label="Filter by status"></div>'
         '<div class="chips" id="projectChips" role="group" aria-label="Filter by project"></div>'
