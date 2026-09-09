@@ -30,6 +30,41 @@ from fno.worktree_cli import app as _worktree_app  # noqa: E402
 cli.add_typer(_worktree_app, name="worktree")
 
 
+@cli.command(name="reap")
+def reap_state_files_cmd(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Delete eligible state files. The default is a dry run.",
+    ),
+) -> None:
+    """Age-reap expendable state files without retiring agent rows."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno agents workspace reap: the fno-agents binary was not found; "
+            "reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+
+    mode = "--apply" if apply else "--dry-run"
+    try:
+        result = subprocess.run(
+            [str(binary), "reap", "--state-files-only", mode, "--json"],
+            check=False,
+        )
+    except OSError as exc:
+        typer.echo(f"fno agents workspace reap: failed to run {binary}: {exc}", err=True)
+        raise typer.Exit(code=127) from exc
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
 # `register-worker` moved from the retired runtime root: its other leaf, and its
 # only surviving one once the duplicated worktree command folded in above.
 @cli.command(name="register-worker", hidden=True)

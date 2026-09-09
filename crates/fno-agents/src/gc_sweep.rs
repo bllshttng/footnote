@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
@@ -139,6 +140,140 @@ pub struct GcSummary {
     pub stale_locks_deleted: Vec<String>,
     /// `(lock path, reason)` for every old lock the safe reaper retained.
     pub stale_locks_kept: Vec<(String, String)>,
+}
+
+/// One state file selected for deletion by the shared age policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateReapEntry {
+    pub path: String,
+    pub bytes: u64,
+    pub age_s: u64,
+}
+
+/// One state file retained because its safety proof was incomplete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateReapKept {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Structured outcome for one independently retained state-file family.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StateReapFamilySummary {
+    pub scanned: usize,
+    pub deleted: usize,
+    pub would_delete: usize,
+    pub bytes: u64,
+    pub oldest_age_s: Option<u64>,
+    pub kept: Vec<StateReapKept>,
+    pub deleted_entries: Vec<StateReapEntry>,
+    pub would_delete_entries: Vec<StateReapEntry>,
+}
+
+/// Totals are derived only from the four named families.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StateReapTotals {
+    pub scanned: usize,
+    pub deleted: usize,
+    pub would_delete: usize,
+    pub bytes: u64,
+    pub oldest_age_s: Option<u64>,
+    pub kept: usize,
+}
+
+/// State-file-only sweep outcome. This type cannot represent row retirement,
+/// so operator and scheduled callers share the file policy without gaining a
+/// path to mutate the live agent registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateFilesReapSummary {
+    pub expired_claims: StateReapFamilySummary,
+    pub plan_locks: StateReapFamilySummary,
+    pub agent_locks: StateReapFamilySummary,
+    pub pr_status_cache: StateReapFamilySummary,
+    pub totals: StateReapTotals,
+    pub applied: bool,
+    pub dry_run: bool,
+    pub skip_reason: Option<String>,
+}
+
+fn legacy_filename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn copy_state_reap_into_gc(state_reap: &StateFilesReapSummary, summary: &mut GcSummary) {
+    summary.expired_claims_deleted.extend(
+        state_reap
+            .expired_claims
+            .deleted_entries
+            .iter()
+            .map(|entry| legacy_filename(&entry.path)),
+    );
+    summary.pr_status_deleted.extend(
+        state_reap
+            .pr_status_cache
+            .deleted_entries
+            .iter()
+            .filter(|entry| entry.path.ends_with(".json"))
+            .map(|entry| legacy_filename(&entry.path)),
+    );
+    summary.expired_claims_kept.extend(
+        state_reap
+            .expired_claims
+            .kept
+            .iter()
+            .filter(|entry| entry.reason != "within retention window")
+            .map(|entry| (legacy_filename(&entry.path), entry.reason.clone())),
+    );
+    summary.pr_status_kept.extend(
+        state_reap
+            .pr_status_cache
+            .kept
+            .iter()
+            .filter(|entry| {
+                entry.path.ends_with(".json") && entry.reason != "within retention window"
+            })
+            .map(|entry| (legacy_filename(&entry.path), entry.reason.clone())),
+    );
+    for family in [
+        &state_reap.plan_locks,
+        &state_reap.agent_locks,
+        &state_reap.pr_status_cache,
+    ] {
+        summary.stale_locks_deleted.extend(
+            family
+                .deleted_entries
+                .iter()
+                .filter(|entry| entry.path.ends_with(".lock"))
+                .map(|entry| entry.path.clone()),
+        );
+        summary.stale_locks_kept.extend(
+            family
+                .kept
+                .iter()
+                .filter(|entry| {
+                    entry.path.ends_with(".lock") && entry.reason != "within retention window"
+                })
+                .map(|entry| (entry.path.clone(), entry.reason.clone())),
+        );
+    }
+}
+
+impl Default for StateFilesReapSummary {
+    fn default() -> Self {
+        Self {
+            expired_claims: StateReapFamilySummary::default(),
+            plan_locks: StateReapFamilySummary::default(),
+            agent_locks: StateReapFamilySummary::default(),
+            pr_status_cache: StateReapFamilySummary::default(),
+            totals: StateReapTotals::default(),
+            applied: false,
+            dry_run: true,
+            skip_reason: None,
+        }
+    }
 }
 
 /// The graph read that feeds a sweep: the entries (working graph plus
@@ -792,8 +927,12 @@ pub(crate) fn run(
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
-    expire_stale_state(home, dry_run, &mut summary);
-    expire_stale_locks(home, dry_run, &mut summary);
+    let state_reap = reap_state_files(
+        home,
+        crate::agents_config::StateReapConfig::default(),
+        !dry_run,
+    );
+    copy_state_reap_into_gc(&state_reap, &mut summary);
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -1637,78 +1776,6 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
     }
 }
 
-const EXPIRED_CLAIM_RETAIN_DAYS: u64 = 30;
-const PR_STATUS_RETAIN_DAYS: u64 = 14;
-const STALE_LOCK_RETAIN_DAYS: u64 = 7;
-
-/// Delete direct children whose mtime is past a family's retention window.
-/// Unknown age and refused deletion both fail closed: the entry stays and is
-/// named for the operator instead of turning an I/O failure into permission.
-fn expire_mtime_entries(
-    dir: &std::path::Path,
-    retain_days: u64,
-    extension: Option<&str>,
-    deleted: &mut Vec<String>,
-    kept: &mut Vec<(String, String)>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let now = std::time::SystemTime::now();
-    let window_secs = retain_days.saturating_mul(86_400);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
-        {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let modified = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(modified) => modified,
-            Err(err) => {
-                kept.push((name, format!("metadata failed: {err}")));
-                continue;
-            }
-        };
-        let age_secs = now.duration_since(modified).unwrap_or_default().as_secs();
-        if age_secs <= window_secs {
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => deleted.push(name),
-            Err(err) => kept.push((name, format!("delete failed: {err}"))),
-        }
-    }
-}
-
-/// Reap non-lock shared state on the retirement sweep's cadence. The agents
-/// home is `~/.fno/agents`; both retained families live under its parent.
-fn expire_stale_state(home: &AgentsHome, dry_run: bool, summary: &mut GcSummary) {
-    if dry_run {
-        return;
-    }
-    let Some(shared_root) = home.root().parent() else {
-        return;
-    };
-    expire_mtime_entries(
-        &shared_root.join("claims").join(".expired"),
-        EXPIRED_CLAIM_RETAIN_DAYS,
-        None,
-        &mut summary.expired_claims_deleted,
-        &mut summary.expired_claims_kept,
-    );
-    expire_mtime_entries(
-        &shared_root.join("cache").join("pr-status"),
-        PR_STATUS_RETAIN_DAYS,
-        Some("json"),
-        &mut summary.pr_status_deleted,
-        &mut summary.pr_status_kept,
-    );
-}
-
 fn lock_name(shared_root: &std::path::Path, path: &std::path::Path) -> String {
     path.strip_prefix(shared_root)
         .unwrap_or(path)
@@ -1730,41 +1797,165 @@ fn opened_path_matches(_file: &std::fs::File, _path: &std::path::Path) -> std::i
     Ok(true)
 }
 
-fn expire_stale_lock_dir(
+fn state_path(shared_root: &std::path::Path, path: &std::path::Path) -> String {
+    lock_name(shared_root, path)
+}
+
+fn keep_state_file(summary: &mut StateReapFamilySummary, path: String, reason: impl Into<String>) {
+    summary.kept.push(StateReapKept {
+        path,
+        reason: reason.into(),
+    });
+}
+
+fn observe_age(summary: &mut StateReapFamilySummary, age_s: u64) {
+    summary.oldest_age_s = Some(summary.oldest_age_s.unwrap_or(0).max(age_s));
+}
+
+fn record_state_file_action(
+    path: &std::path::Path,
+    display_path: String,
+    bytes: u64,
+    age_s: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+) {
+    let entry = StateReapEntry {
+        path: display_path.clone(),
+        bytes,
+        age_s,
+    };
+    if !apply {
+        summary.would_delete += 1;
+        summary.bytes = summary.bytes.saturating_add(bytes);
+        summary.would_delete_entries.push(entry);
+        return;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            summary.deleted += 1;
+            summary.bytes = summary.bytes.saturating_add(bytes);
+            summary.deleted_entries.push(entry);
+        }
+        Err(err) => keep_state_file(summary, display_path, format!("delete failed: {err}")),
+    }
+}
+
+fn read_state_dir(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    summary: &mut StateReapFamilySummary,
+) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            keep_state_file(
+                summary,
+                state_path(shared_root, dir),
+                format!("read directory failed: {err}"),
+            );
+            None
+        }
+    }
+}
+
+fn reap_mtime_family(
     shared_root: &std::path::Path,
     dir: &std::path::Path,
     retain_days: u64,
-    dry_run: bool,
-    summary: &mut GcSummary,
-    before_revalidate: &dyn Fn(&std::path::Path),
+    extension: Option<&str>,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
 ) {
-    if dry_run {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
         return;
     };
     let now = std::time::SystemTime::now();
     let window_secs = retain_days.saturating_mul(86_400);
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                keep_state_file(
+                    summary,
+                    state_path(shared_root, dir),
+                    format!("read entry failed: {err}"),
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
+        {
+            continue;
+        }
+        summary.scanned += 1;
+        let display_path = state_path(shared_root, &path);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                keep_state_file(summary, display_path, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(err) => {
+                keep_state_file(summary, display_path, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, display_path, "within retention window");
+            continue;
+        }
+        record_state_file_action(&path, display_path, metadata.len(), age_s, apply, summary);
+    }
+}
+
+fn reap_lock_family(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    retain_days: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+    before_revalidate: &dyn Fn(&std::path::Path),
+) {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                keep_state_file(
+                    summary,
+                    state_path(shared_root, dir),
+                    format!("read entry failed: {err}"),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("lock") {
             continue;
         }
-        let name = lock_name(shared_root, &path);
+        summary.scanned += 1;
+        let name = state_path(shared_root, &path);
         let direct = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata.file_type().is_file(),
             Err(err) => {
-                summary
-                    .stale_locks_kept
-                    .push((name, format!("metadata failed: {err}")));
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
                 continue;
             }
         };
         if !direct {
-            summary
-                .stale_locks_kept
-                .push((name, "not a direct file".to_string()));
+            keep_state_file(summary, name, "not a direct file");
             continue;
         }
         let file = match std::fs::OpenOptions::new()
@@ -1774,37 +1965,32 @@ fn expire_stale_lock_dir(
         {
             Ok(file) => file,
             Err(err) => {
-                summary
-                    .stale_locks_kept
-                    .push((name, format!("open failed: {err}")));
+                keep_state_file(summary, name, format!("open failed: {err}"));
                 continue;
             }
         };
         let metadata = match file.metadata() {
             Ok(metadata) => metadata,
             Err(err) => {
-                summary
-                    .stale_locks_kept
-                    .push((name, format!("metadata failed: {err}")));
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
                 continue;
             }
         };
         let modified = match metadata.modified() {
             Ok(modified) => modified,
             Err(err) => {
-                summary
-                    .stale_locks_kept
-                    .push((name, format!("metadata failed: {err}")));
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
                 continue;
             }
         };
-        if now.duration_since(modified).unwrap_or_default().as_secs() <= window_secs {
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, name, "within retention window");
             continue;
         }
         if metadata.len() != 0 {
-            summary
-                .stale_locks_kept
-                .push((name, "nonzero lock file".to_string()));
+            keep_state_file(summary, name, "nonzero lock file");
             continue;
         }
         if let Err(err) = file.try_lock() {
@@ -1812,46 +1998,106 @@ fn expire_stale_lock_dir(
                 std::fs::TryLockError::WouldBlock => "held".to_string(),
                 std::fs::TryLockError::Error(err) => format!("flock failed: {err}"),
             };
-            summary.stale_locks_kept.push((name, reason));
+            keep_state_file(summary, name, reason);
             continue;
         }
         before_revalidate(&path);
         match opened_path_matches(&file, &path) {
-            Ok(true) => match std::fs::remove_file(&path) {
-                Ok(()) => summary.stale_locks_deleted.push(name),
-                Err(err) => summary
-                    .stale_locks_kept
-                    .push((name, format!("delete failed: {err}"))),
-            },
-            Ok(false) => summary
-                .stale_locks_kept
-                .push((name, "path replaced".to_string())),
-            Err(err) => summary
-                .stale_locks_kept
-                .push((name, format!("path revalidation failed: {err}"))),
+            Ok(true) => {
+                record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
+            }
+            Ok(false) => keep_state_file(summary, name, "path replaced"),
+            Err(err) => keep_state_file(summary, name, format!("path revalidation failed: {err}")),
         }
         let _ = file.unlock();
     }
 }
 
-fn expire_stale_locks(home: &AgentsHome, dry_run: bool, summary: &mut GcSummary) {
-    let Some(shared_root) = home.root().parent() else {
-        return;
-    };
-    for dir in [
-        shared_root.join("locks"),
-        shared_root.join("agents").join("locks"),
-        shared_root.join("cache").join("pr-status"),
-    ] {
-        expire_stale_lock_dir(
-            shared_root,
-            &dir,
-            STALE_LOCK_RETAIN_DAYS,
-            dry_run,
-            summary,
-            &|_| {},
-        );
+fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
+    let families = [
+        &summary.expired_claims,
+        &summary.plan_locks,
+        &summary.agent_locks,
+        &summary.pr_status_cache,
+    ];
+    StateReapTotals {
+        scanned: families.iter().map(|family| family.scanned).sum(),
+        deleted: families.iter().map(|family| family.deleted).sum(),
+        would_delete: families.iter().map(|family| family.would_delete).sum(),
+        bytes: families.iter().map(|family| family.bytes).sum(),
+        oldest_age_s: families
+            .iter()
+            .filter_map(|family| family.oldest_age_s)
+            .max(),
+        kept: families.iter().map(|family| family.kept.len()).sum(),
     }
+}
+
+/// Reap only expendable state files, never agent rows. `apply = false` runs
+/// the identical age, flock, and inode checks and enumerates every candidate
+/// in `would_delete_entries` without unlinking it.
+pub fn reap_state_files(
+    home: &AgentsHome,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let mut summary = StateFilesReapSummary {
+        applied: apply && config.enabled,
+        dry_run: !apply,
+        ..Default::default()
+    };
+    if !config.enabled {
+        summary.skip_reason = Some("disabled".to_string());
+        return summary;
+    }
+    let Some(shared_root) = home.root().parent() else {
+        summary.applied = false;
+        summary.skip_reason = Some("state root unavailable".to_string());
+        return summary;
+    };
+    reap_mtime_family(
+        shared_root,
+        &shared_root.join("claims/.expired"),
+        config.expired_claims_retain_days,
+        None,
+        apply,
+        &mut summary.expired_claims,
+    );
+    reap_lock_family(
+        shared_root,
+        &shared_root.join("locks"),
+        config.locks_retain_days,
+        apply,
+        &mut summary.plan_locks,
+        &|_| {},
+    );
+    reap_lock_family(
+        shared_root,
+        &shared_root.join("agents/locks"),
+        config.locks_retain_days,
+        apply,
+        &mut summary.agent_locks,
+        &|_| {},
+    );
+    let pr_status_dir = shared_root.join("cache/pr-status");
+    reap_mtime_family(
+        shared_root,
+        &pr_status_dir,
+        config.pr_status_cache_retain_days,
+        Some("json"),
+        apply,
+        &mut summary.pr_status_cache,
+    );
+    reap_lock_family(
+        shared_root,
+        &pr_status_dir,
+        config.locks_retain_days,
+        apply,
+        &mut summary.pr_status_cache,
+        &|_| {},
+    );
+    summary.totals = state_reap_totals(&summary);
+    summary
 }
 
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1971,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_stale_state_removes_only_old_pr_status_json_and_keeps_lock_sidecars() {
+    fn state_reap_removes_old_pr_status_json_and_lock_sidecars() {
         let (base, home) = stale_state_home("pr-status");
         let statuses = base.join("cache/pr-status");
         std::fs::create_dir_all(&statuses).unwrap();
@@ -1985,14 +2231,17 @@ mod tests {
         age_file(&fresh, 2);
         age_file(&lock, 20);
 
-        let mut summary = GcSummary::default();
-        expire_stale_state(&home, false, &mut summary);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
 
         assert!(!old.exists());
         assert!(fresh.exists());
-        assert!(lock.exists(), "live flock sidecars are outside this reaper");
-        assert_eq!(summary.pr_status_deleted, vec!["old.json"]);
-        assert!(summary.pr_status_kept.is_empty());
+        assert!(!lock.exists());
+        assert_eq!(summary.pr_status_cache.deleted, 2);
+        assert_eq!(summary.pr_status_cache.kept.len(), 1);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2007,13 +2256,21 @@ mod tests {
         let broken = expired.join("broken-claim");
         symlink(expired.join("missing-target"), &broken).unwrap();
 
-        let mut summary = GcSummary::default();
-        expire_stale_state(&home, false, &mut summary);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
 
         assert!(broken.symlink_metadata().is_ok());
-        assert_eq!(summary.expired_claims_kept.len(), 1);
-        assert_eq!(summary.expired_claims_kept[0].0, "broken-claim");
-        assert!(summary.expired_claims_kept[0].1.contains("metadata failed"));
+        assert_eq!(summary.expired_claims.kept.len(), 1);
+        assert_eq!(
+            summary.expired_claims.kept[0].path,
+            "claims/.expired/broken-claim"
+        );
+        assert!(summary.expired_claims.kept[0]
+            .reason
+            .contains("metadata failed"));
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2026,11 +2283,15 @@ mod tests {
         std::fs::write(&groom, b"{}").unwrap();
         age_file(&groom, 2);
 
-        let mut summary = GcSummary::default();
-        expire_stale_state(&home, false, &mut summary);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
 
         assert!(groom.exists());
-        assert!(summary.expired_claims_deleted.is_empty());
+        assert_eq!(summary.expired_claims.deleted, 0);
+        assert_eq!(summary.expired_claims.kept.len(), 1);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2048,12 +2309,16 @@ mod tests {
         age_file(&claim, 40);
         age_file(&status, 20);
 
-        let summary = run_empty_registry_sweep(&home, true);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            false,
+        );
 
         assert!(claim.exists());
         assert!(status.exists());
-        assert!(summary.expired_claims_deleted.is_empty());
-        assert!(summary.pr_status_deleted.is_empty());
+        assert_eq!(summary.expired_claims.would_delete, 1);
+        assert_eq!(summary.pr_status_cache.would_delete, 1);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2082,24 +2347,31 @@ mod tests {
             .unwrap();
         held_file.try_lock().unwrap();
 
-        let mut summary = GcSummary::default();
-        expire_stale_locks(&home, false, &mut summary);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
 
         assert!(!old.exists());
         assert!(held.exists());
         assert!(nonzero.exists());
         assert!(summary
-            .stale_locks_deleted
+            .plan_locks
+            .deleted_entries
             .iter()
-            .any(|p| p == "locks/plan-old.lock"));
+            .any(|entry| entry.path == "locks/plan-old.lock"));
         assert!(summary
-            .stale_locks_kept
+            .agent_locks
+            .kept
             .iter()
-            .any(|(p, why)| { p == "agents/locks/held.lock" && why.contains("held") }));
+            .any(|entry| entry.path == "agents/locks/held.lock" && entry.reason.contains("held")));
         assert!(summary
-            .stale_locks_kept
+            .pr_status_cache
+            .kept
             .iter()
-            .any(|(p, why)| { p == "cache/pr-status/nonzero.lock" && why.contains("nonzero") }));
+            .any(|entry| entry.path == "cache/pr-status/nonzero.lock"
+                && entry.reason.contains("nonzero")));
         held_file.unlock().unwrap();
         std::fs::remove_dir_all(&base).ok();
     }
@@ -2113,8 +2385,8 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         age_file(&path, 8);
 
-        let mut summary = GcSummary::default();
-        expire_stale_lock_dir(&base, &lock_dir, 7, false, &mut summary, &|candidate| {
+        let mut summary = StateReapFamilySummary::default();
+        reap_lock_family(&base, &lock_dir, 7, true, &mut summary, &|candidate| {
             if candidate == path {
                 std::fs::remove_file(candidate).unwrap();
                 std::fs::write(candidate, b"").unwrap();
@@ -2123,9 +2395,10 @@ mod tests {
 
         assert!(path.exists());
         assert!(summary
-            .stale_locks_kept
+            .kept
             .iter()
-            .any(|(p, why)| { p == "locks/plan-race.lock" && why.contains("path replaced") }));
+            .any(|entry| entry.path == "locks/plan-race.lock"
+                && entry.reason.contains("path replaced")));
         std::fs::remove_dir_all(&base).ok();
         drop(home);
     }
@@ -2138,11 +2411,107 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         age_file(&path, 8);
 
-        let mut summary = GcSummary::default();
-        expire_stale_locks(&home, true, &mut summary);
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            false,
+        );
 
         assert!(path.exists());
-        assert!(summary.stale_locks_deleted.is_empty());
+        assert_eq!(summary.plan_locks.deleted, 0);
+        assert_eq!(summary.plan_locks.would_delete, 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_dry_run_enumerates_all_families_without_deleting() {
+        let (base, home) = stale_state_home("state-files-dry-run");
+        let claim = base.join("claims/.expired/old-claim");
+        let plan_lock = base.join("locks/plan-old.lock");
+        let quota_lock = base.join("locks/github-graphql-quota.lock");
+        let agent_lock = base.join("agents/locks/worker-old.lock");
+        let pr_status = base.join("cache/pr-status/42.json");
+        for path in [&claim, &plan_lock, &quota_lock, &agent_lock, &pr_status] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+            age_file(path, 40);
+        }
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig {
+                enabled: true,
+                locks_retain_days: 7,
+                expired_claims_retain_days: 30,
+                pr_status_cache_retain_days: 14,
+            },
+            false,
+        );
+
+        assert!(claim.exists());
+        assert!(plan_lock.exists());
+        assert!(quota_lock.exists());
+        assert!(agent_lock.exists());
+        assert!(pr_status.exists());
+        assert_eq!(summary.expired_claims.would_delete, 1);
+        assert_eq!(summary.plan_locks.would_delete, 2);
+        assert_eq!(summary.agent_locks.would_delete, 1);
+        assert_eq!(summary.pr_status_cache.would_delete, 1);
+        assert_eq!(summary.totals.would_delete, 5);
+        assert_eq!(
+            summary.totals.would_delete,
+            summary.expired_claims.would_delete
+                + summary.plan_locks.would_delete
+                + summary.agent_locks.would_delete
+                + summary.pr_status_cache.would_delete
+        );
+        assert!(!summary.applied);
+        assert!(summary.dry_run);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_apply_uses_config_and_never_retires_registry_rows() {
+        let (base, home) = stale_state_home("state-files-apply");
+        let claim = base.join("claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        age_file(&claim, 40);
+        let registry =
+            br#"{"entries":[{"name":"live-worker","created_at":"2026-09-09T00:00:00Z"}]}"#;
+        std::fs::write(home.registry_json(), registry).unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!claim.exists());
+        assert_eq!(summary.expired_claims.deleted, 1);
+        assert_eq!(summary.totals.deleted, 1);
+        assert_eq!(std::fs::read(home.registry_json()).unwrap(), registry);
+        assert!(summary.applied);
+        assert!(!summary.dry_run);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_disabled_is_an_exact_named_skip() {
+        let (base, home) = stale_state_home("state-files-disabled");
+        let claim = base.join("claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        age_file(&claim, 40);
+        let mut config = crate::agents_config::StateReapConfig::default();
+        config.enabled = false;
+
+        let summary = reap_state_files(&home, config, true);
+
+        assert!(claim.exists());
+        assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
+        assert_eq!(summary.totals.deleted, 0);
+        assert_eq!(summary.totals.would_delete, 0);
         std::fs::remove_dir_all(&base).ok();
     }
 

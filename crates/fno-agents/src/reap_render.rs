@@ -5,8 +5,74 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::GcSummary;
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
 use serde_json::{json, Value};
+
+/// Render the file-only reap receipt independently from row retirement.
+pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) -> String {
+    if json_out {
+        return format!(
+            "{}\n",
+            json!({
+                "families": {
+                    "expired_claims": summary.expired_claims,
+                    "plan_locks": summary.plan_locks,
+                    "agent_locks": summary.agent_locks,
+                    "pr_status_cache": summary.pr_status_cache,
+                },
+                "totals": summary.totals,
+                "applied": summary.applied,
+                "dry_run": summary.dry_run,
+                "skip_reason": summary.skip_reason,
+            })
+        );
+    }
+
+    fn family_line(name: &str, family: &StateReapFamilySummary) -> String {
+        let kept = family
+            .kept
+            .iter()
+            .map(|entry| format!("{} ({})", entry.path, entry.reason))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let oldest = family
+            .oldest_age_s
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        format!(
+            "{name}: scanned {}; deleted {}; would_delete {}; bytes {}; oldest_age_s {oldest}; kept [{}]\n",
+            family.scanned, family.deleted, family.would_delete, family.bytes, kept
+        )
+    }
+
+    let mut out = String::new();
+    for (name, family) in [
+        ("expired_claims", &summary.expired_claims),
+        ("plan_locks", &summary.plan_locks),
+        ("agent_locks", &summary.agent_locks),
+        ("pr_status_cache", &summary.pr_status_cache),
+    ] {
+        out.push_str(&family_line(name, family));
+    }
+    let oldest = summary
+        .totals
+        .oldest_age_s
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    out.push_str(&format!(
+        "total: scanned {}; deleted {}; would_delete {}; bytes {}; oldest_age_s {oldest}; kept {}; skip_reason {}\n",
+        summary.totals.scanned,
+        summary.totals.deleted,
+        summary.totals.would_delete,
+        summary.totals.bytes,
+        summary.totals.kept,
+        summary.skip_reason.as_deref().unwrap_or("none")
+    ));
+    if summary.dry_run {
+        out.push_str("(dry-run: no changes made)\n");
+    }
+    out
+}
 
 /// Render a sweep outcome. Pure, so the one property that matters here is
 /// testable without a registry: every bucket appears at every pass, zero
@@ -693,5 +759,47 @@ mod tests {
             receipt.notice.as_deref(),
             Some("server liveness incomplete")
         );
+    }
+
+    #[test]
+    fn state_file_reap_json_keeps_all_four_zero_count_families() {
+        let summary = crate::gc_sweep::StateFilesReapSummary::default();
+        let out = render_state_files_reap(&summary, true);
+        let value: Value = serde_json::from_str(out.trim()).expect("valid json");
+
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert_eq!(value["families"][family]["scanned"], json!(0));
+            assert_eq!(value["families"][family]["deleted"], json!(0));
+            assert_eq!(value["families"][family]["would_delete"], json!(0));
+            assert_eq!(value["families"][family]["bytes"], json!(0));
+            assert!(value["families"][family].get("oldest_age_s").is_some());
+            assert_eq!(value["families"][family]["kept"], json!([]));
+        }
+        assert_eq!(value["totals"]["scanned"], json!(0));
+        assert_eq!(value["totals"]["deleted"], json!(0));
+        assert_eq!(value["totals"]["would_delete"], json!(0));
+        assert_eq!(value["applied"], json!(false));
+        assert_eq!(value["dry_run"], json!(true));
+        assert_eq!(value["skip_reason"], Value::Null);
+    }
+
+    #[test]
+    fn state_file_reap_text_names_each_family_total_and_dry_run() {
+        let summary = crate::gc_sweep::StateFilesReapSummary::default();
+        let out = render_state_files_reap(&summary, false);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 6, "four families, total, and dry-run marker");
+        assert!(lines[0].starts_with("expired_claims:"));
+        assert!(lines[1].starts_with("plan_locks:"));
+        assert!(lines[2].starts_with("agent_locks:"));
+        assert!(lines[3].starts_with("pr_status_cache:"));
+        assert!(lines[4].starts_with("total:"));
+        assert_eq!(lines[5], "(dry-run: no changes made)");
     }
 }
