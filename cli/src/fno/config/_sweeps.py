@@ -34,6 +34,43 @@ class ReapReceiptsBlock(BaseModel):
     retain_days: int = 7
 
 
+class ReapBlock(BaseModel):
+    """Scope of the roster-side sweep (nested under 'config.agents.reap').
+
+    ``roster_scope`` names which claude rows the sweep may retire:
+    ``off`` retires nothing, ``provenanced`` (the default) only rows whose
+    provenance resolves to fno and whose work is done, ``all`` widens to
+    resolved rows with open work. One rule no value can cross: a row that
+    resolves to no fno node is never retirable at any value, including
+    ``all`` - an operator's hand-started session is safe by construction,
+    not by default value.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    roster_scope: str = "provenanced"
+
+    @field_validator("roster_scope", mode="before")
+    @classmethod
+    def _coerce_roster_scope(cls, value: object, info: ValidationInfo) -> object:
+        """Lowercase and accept only the three scope values.
+
+        A bad value degrades to the default and is recorded for doctor
+        (same idiom as SweepKeys): raising would fail load_settings() for
+        the whole process, and one typo must not widen the sweep.
+        """
+        name = info.field_name or ""
+        default = cls.model_fields[name].default
+        if not isinstance(value, str):
+            DEGRADED[f"agents.reap.{name}"] = repr(value)
+            return default
+        lowered = value.strip().lower()
+        if lowered in {"off", "provenanced", "all"}:
+            return lowered
+        DEGRADED[f"agents.reap.{name}"] = repr(value)
+        return default
+
+
 class SweepKeys(BaseModel):
     """Flat ``config.agents.*`` seconds that the sweeps read.
 
