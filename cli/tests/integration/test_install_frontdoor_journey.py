@@ -161,16 +161,20 @@ def test_authorized_target_init_journey(clean_machine):
 
     # 4. The manifest readback: written under the ISOLATED state root, naming
     #    this node AND the claim it acquired for it - the matching receipt.
-    #    Two candidate roots: this fixture scrubs FNO_SPACES_DIR so the manifest
-    #    lands under the isolated HOME, but the shared conftest's autouse
-    #    sandbox re-pins it at tmp/spaces and which one wins depends on fixture
-    #    ordering. The node-matching manifest is the assertion, not the path.
-    manifests = list(home.glob(".fno/spaces/*/target-state.md")) + list(
-        home.parent.glob("spaces/*/target-state.md")
+    #    Three candidate roots: repo-local (<repo>/.fno/, where a default
+    #    resolve writes it - the CI runner's case), the isolated HOME's spaces
+    #    dir, and the conftest autouse sandbox's tmp/spaces pin (which of the
+    #    three wins is fixture-ordering and config dependent). The
+    #    node-matching manifest is the assertion, not the path.
+    manifests = (
+        [repo / ".fno" / "target-state.md"]
+        + list(home.glob(".fno/spaces/*/target-state.md"))
+        + list(home.parent.glob("spaces/*/target-state.md"))
     )
+    manifests = [m for m in manifests if m.exists()]
     assert manifests, (
-        f"no session manifest under {home}/.fno/spaces or {home.parent}/spaces\n"
-        f"{init.stdout}\n{init.stderr}"
+        f"no session manifest in {repo}/.fno, {home}/.fno/spaces, "
+        f"or {home.parent}/spaces\n{init.stdout}\n{init.stderr}"
     )
     matching = [m for m in manifests if node in m.read_text()]
     assert matching, [m.name for m in manifests]
