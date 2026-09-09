@@ -292,7 +292,9 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
         return set()
 
 
-def live_worked_node_ids(*, strict: bool = False) -> dict[str, list[str]]:
+def live_worked_node_ids(
+    *, strict: bool = False, entries: list[dict] | None = None
+) -> dict[str, list[str]]:
     """Return open-phase nodes whose session rows name live roster workers.
 
     The graph session row identifies the node and phase; the one fleet roster
@@ -302,10 +304,11 @@ def live_worked_node_ids(*, strict: bool = False) -> dict[str, list[str]]:
     """
     try:
         from fno.claims.roster import _really_finished, read_roster
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
         from fno.paths import graph_json
 
-        entries = read_graph(graph_json())
+        if entries is None:
+            entries = read_graph_strict(graph_json())
         reading = read_roster()
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")

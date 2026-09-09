@@ -33,7 +33,7 @@ def _reading(state: str) -> RosterReading:
 
 
 def test_ac1_hp_names_a_live_worker(monkeypatch):
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_kw: [_entry("ac1-node")])
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry("ac1-node")])
     monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: _reading("working"))
 
     assert live_worked_node_ids() == {"ac1-node": ["bp-worker"]}
@@ -41,7 +41,7 @@ def test_ac1_hp_names_a_live_worker(monkeypatch):
 
 def test_ac5_edge_flips_when_worker_stops_without_waiting(monkeypatch):
     state = ["working"]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_kw: [_entry("ac1-node")])
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry("ac1-node")])
     monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: _reading(state[0]))
 
     assert live_worked_node_ids() == {"ac1-node": ["bp-worker"]}
@@ -50,7 +50,7 @@ def test_ac5_edge_flips_when_worker_stops_without_waiting(monkeypatch):
 
 
 def test_ac8_edge_degrades_loudly_when_roster_is_unreadable(monkeypatch, capsys):
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_kw: [_entry("ac1-node")])
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry("ac1-node")])
     monkeypatch.setattr(
         "fno.claims.roster.read_roster",
         lambda **_kw: RosterReading(False, 0, {}, "roster timeout"),
@@ -59,4 +59,18 @@ def test_ac8_edge_degrades_loudly_when_roster_is_unreadable(monkeypatch, capsys)
     assert live_worked_node_ids() == {}
     assert "worked overlay degraded: roster timeout" in capsys.readouterr().err
     with pytest.raises(RuntimeError, match="roster timeout"):
+        live_worked_node_ids(strict=True)
+
+
+def test_graph_corruption_is_not_an_empty_worked_answer(monkeypatch, capsys):
+    from fno.graph.store import GraphCorruptError
+
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict",
+        lambda *_a, **_kw: (_ for _ in ()).throw(GraphCorruptError("graph corrupt")),
+    )
+
+    assert live_worked_node_ids() == {}
+    assert "worked overlay degraded: graph corrupt" in capsys.readouterr().err
+    with pytest.raises(GraphCorruptError, match="graph corrupt"):
         live_worked_node_ids(strict=True)

@@ -28,7 +28,7 @@ def _entry(node_id: str = "ac1-node") -> dict:
 
 def test_ac1_hp_worked_json_names_worker(monkeypatch):
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **_kw: {"ac1-node": ["bp-worker"]})
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_kw: [_entry()])
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry()])
 
     result = runner.invoke(cli, ["worked", "--json"])
 
@@ -45,7 +45,7 @@ def test_ac1_hp_worked_json_names_worker(monkeypatch):
 
 def test_ac1_hp_worked_text_is_one_line_per_node(monkeypatch):
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **_kw: {"ac1-node": ["bp-worker"]})
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_kw: [_entry()])
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry()])
 
     result = runner.invoke(cli, ["worked"])
 

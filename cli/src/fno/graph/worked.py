@@ -11,19 +11,20 @@ def cmd_worked(
 ) -> None:
     """Show nodes with positively identified live workers."""
     from fno.graph.statuses import live_worked_node_ids
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
     from fno.paths import graph_json
 
     try:
-        worked = live_worked_node_ids(strict=True)
-        entries = {entry.get("id"): entry for entry in read_graph(graph_json())}
+        entries = read_graph_strict(graph_json())
+        entry_by_id = {entry.get("id"): entry for entry in entries}
+        worked = live_worked_node_ids(strict=True, entries=entries)
     except Exception as exc:  # noqa: BLE001 - the authority must refuse loudly
         typer.echo(f"Error: worked authority unavailable: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     rows: list[dict] = []
     for node_id, workers in worked.items():
-        entry = entries.get(node_id) or {}
+        entry = entry_by_id.get(node_id) or {}
         phases = []
         for session in entry.get("sessions") or []:
             phase = session.get("phase") if isinstance(session, dict) else None
