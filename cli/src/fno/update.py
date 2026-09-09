@@ -767,8 +767,10 @@ def update_readiness(
         except (OSError, subprocess.SubprocessError, ValueError, TypeError):
             front_script = None
     running = sys.executable or None
+    # Same deployment = the script and the interpreter share one bin dir; the
+    # console script and the interpreter are different files by design.
     same = (
-        Path(front_script).resolve() == Path(running).resolve()
+        Path(front_script).resolve().parent == Path(running).resolve().parent
         if front_script and running
         else None
     )
@@ -1008,8 +1010,10 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         # The post-repair verdict decides "fresh", never the gate above.
+        # A dry run executed no effect, so it may not claim one attempted.
         report = _component_verdict(
-            source, subtree, installed_bin.parent, installed_bin, attempted=True
+            source, subtree, installed_bin.parent, installed_bin,
+            attempted=not dry_run,
         )
         converged = bool(report and report.get("converged"))
         if not converged:
