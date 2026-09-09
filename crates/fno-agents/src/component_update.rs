@@ -31,6 +31,19 @@ pub enum Status {
     Unknown,
 }
 
+impl Status {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Status::Fresh => "fresh",
+            Status::Updated => "updated",
+            Status::Stale => "stale",
+            Status::Missing => "missing",
+            Status::Failed => "failed",
+            Status::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ComponentProbe {
     pub component: String,
@@ -76,6 +89,37 @@ pub struct ComponentVerdict {
     pub executable: Option<String>,
     pub repair: Option<String>,
     pub detail: Option<String>,
+    /// The operator-facing one-liner (no log prefix). Built beside the verdict
+    /// so every surface renders the evidence identically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+}
+
+/// The one-liner for a non-fresh row: status, both revs, the named instrument
+/// or failure detail, and the executable repair command.
+fn render_line(v: &ComponentVerdict) -> String {
+    let rev_text = match &v.observed_rev {
+        Some(r) => format!("rev {}", &r[..r.len().min(12)]),
+        None => "no revision reported".to_string(),
+    };
+    let exp_text = match &v.expected_rev {
+        Some(e) => format!("expected {}", &e[..e.len().min(12)]),
+        None => "unknown expected rev".to_string(),
+    };
+    let mut line = format!(
+        "component {}: {} ({}, {})",
+        v.component,
+        v.status.as_str(),
+        rev_text,
+        exp_text
+    );
+    if let Some(d) = &v.detail {
+        line.push_str(&format!("; {d}"));
+    }
+    if let Some(r) = &v.repair {
+        line.push_str(&format!("; repair: {r}"));
+    }
+    line
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +145,8 @@ fn repair_command(component: &str, req: &VerdictRequest) -> Option<String> {
 
 /// The per-component decision. Order matters: an instrument that could not
 /// answer gates everything (a probe failure must never collapse into fresh or
-/// missing, AC3-HP), then presence, then revision match.
+/// missing), then presence, then revision match. Fresh and Updated rows need
+/// no one-liner; every other row renders beside its verdict.
 pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdict {
     let expected = probe
         .expected_rev
@@ -116,14 +161,17 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
         executable: probe.executable.clone(),
         repair: None,
         detail: None,
+        line: None,
     };
     if let Some(err) = &probe.instrument_error {
         v.detail = Some(err.clone());
+        v.line = Some(render_line(&v));
         return v;
     }
     if let Some(ev) = &probe.contradicting_evidence {
         v.status = Status::Stale;
         v.detail = Some(ev.clone());
+        v.line = Some(render_line(&v));
         return v;
     }
     v.repair = repair_command(&probe.component, req);
@@ -140,6 +188,7 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
             if attempted {
                 v.detail = Some("deploy attempted but no executable landed".to_string());
             }
+            v.line = Some(render_line(&v));
             return v;
         }
         Some(_) => probe.post_rev.clone(),
@@ -163,6 +212,7 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
                     "deployed revision still differs from source after the refresh".to_string(),
                 );
             }
+            v.line = Some(render_line(&v));
         }
         None => {
             // Present but silent: fail toward repair, never toward fresh.
@@ -172,6 +222,7 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
                 Status::Stale
             };
             v.detail = Some("executable present but does not self-report a revision".to_string());
+            v.line = Some(render_line(&v));
         }
     }
     v

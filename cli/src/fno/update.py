@@ -451,33 +451,18 @@ def _component_verdict(
 
 
 def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update") -> list[str]:
-    """Render a verdict report as operator-facing one-liners. Unknown keeps its
-    named instrument; non-fresh rows carry the repair command."""
+    """Non-fresh rows rendered by the native verdict itself; None means the
+    deployed binary could not answer, which is said plainly."""
     if report is None:
         return [
             f"{prefix}: component verdict unavailable"
             " (the deployed fno-agents could not answer); treating as NOT converged"
         ]
-    lines: list[str] = []
-    for c in report.get("components", []):
-        if c.get("status") in ("fresh", "updated"):
-            continue
-        lines.append(_component_line(c, prefix))
-    return lines
-
-
-def _component_line(c: dict, prefix: str) -> str:
-    name, status = c.get("component"), c.get("status")
-    rev = c.get("observed_rev")
-    exp = c.get("expected_rev")
-    rev_text = "no revision reported" if not rev else f"rev {str(rev)[:12]}"
-    exp_text = "unknown expected rev" if not exp else f"expected {str(exp)[:12]}"
-    line = f"{prefix}: component {name}: {status} ({rev_text}, {exp_text})"
-    if c.get("detail"):
-        line += f"; {c['detail']}"
-    if c.get("repair"):
-        line += f"; repair: {c['repair']}"
-    return line
+    return [
+        f"{prefix}: {c['line']}"
+        for c in report.get("components", [])
+        if c.get("status") not in ("fresh", "updated") and c.get("line")
+    ]
 
 
 def _triad_same_build(bindir: Path, subtree: str) -> bool:

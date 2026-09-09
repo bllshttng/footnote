@@ -660,12 +660,14 @@ def _component_convergence(
     if report and isinstance(report.get("components"), list):
         return report["components"]
     # The deployed binary could not answer the verdict: Unknown rows with the
-    # named instrument, never a silent collapse into fresh.
+    # named gap, never a silent collapse into fresh.
     return [
         {
             "component": c,
             "status": "unknown",
-            "detail": "the deployed fno-agents could not answer the convergence verdict",
+            "line": "component "
+            + c
+            + ": unknown (the deployed fno-agents could not answer the convergence verdict)",
         }
         for c in ("python-tool", "fno", "fno-agents", "fno-agents-daemon", "fno-agents-worker")
     ]

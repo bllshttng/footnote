@@ -2880,14 +2880,18 @@ def test_component_verdict_transport_failure_is_never_fresh(
 
 
 def test_component_lines_name_repair_and_unknown_instrument() -> None:
-    """AC3-HP at the render layer: Failed names its repair command, Unknown
-    keeps the named instrument, fresh rows render nothing."""
+    """AC3-HP at the render layer: the native one-liner carries the repair
+    command and the named instrument; fresh rows render nothing."""
     report = {"components": [
         {"component": "fno", "status": "failed", "observed_rev": None,
          "expected_rev": "a" * 40, "repair": "cargo install --path /x --bins",
-         "detail": "deploy attempted but no executable landed"},
+         "detail": "deploy attempted but no executable landed",
+         "line": "component fno: failed (no revision reported, expected aaaaaaaaaaaa);"
+                 " deploy attempted but no executable landed; repair: cargo install --path /x --bins"},
         {"component": "fno-agents-worker", "status": "unknown", "observed_rev": None,
-         "expected_rev": "a" * 40, "detail": "hung on `version --json` (>20s)"},
+         "expected_rev": "a" * 40, "detail": "hung on `version --json` (>20s)",
+         "line": "component fno-agents-worker: unknown (no revision reported, expected aaaaaaaaaaaa);"
+                 " hung on `version --json` (>20s)"},
         {"component": "fno-agents", "status": "fresh"},
     ]}
     lines = update._component_lines(report)
