@@ -218,7 +218,12 @@ def _graph_section(
     # floor. Ranked recall is the point; a full-context reader makes the call.
     # A free-text seed has no domain to share, so it can never earn
     # _DOMAIN_BONUS the way a resolved node row can; lower the floor by
-    # exactly that bonus so a seed and its own node id rank the same set.
+    # exactly that bonus. This matches the node lane only for a candidate
+    # that would itself have shared domain: a cross-domain candidate now
+    # clears the seed lane's floor on token overlap alone (raw jac >= 0.05)
+    # where the node lane would have required jac >= 0.15 with no bonus to
+    # earn. Accepted: recall over precision is the point of this fix, and a
+    # domain-less probe cannot tell which candidates it would have matched.
     floor = _MIN_SCORE if resolved else _MIN_SCORE - _DOMAIN_BONUS
     scored = similar_nodes(probe, combined, k=5, floor=floor)
     duplicates = []
