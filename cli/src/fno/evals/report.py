@@ -148,7 +148,7 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
 
 def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
     revs = [v for r in rs if isinstance(v := r.get("bank_rev"), str)]
-    return max(set(revs), key=revs.count) if revs else None
+    return max(sorted(set(revs)), key=revs.count) if revs else None
 
 
 def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:

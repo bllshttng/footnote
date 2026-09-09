@@ -292,6 +292,12 @@ def test_compare_scores_one_revision_pair() -> None:
     assert cmp["baseline_rev"] == "new" and cmp["variant_rev"] == "v1rev"
 
 
+def test_common_rev_tie_breaks_deterministically() -> None:
+    from fno.evals.report import _common_rev
+
+    assert _common_rev([{"bank_rev": "bbb"}, {"bank_rev": "aaa"}]) == "aaa"
+
+
 # --- CLI ---
 
 def test_report_cli_regression_alarm_exit_4(tmp_path: Path) -> None:
