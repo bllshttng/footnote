@@ -505,6 +505,60 @@ fn watching_ignored_codex_harness_is_audible() {
     );
 }
 
+// A session whose init found the node already claimed records no claim key,
+// and the manifest is write-once, so the lease can never renew. The generic
+// renewal refusal reads as transient, and a reader who believes it re-arms a
+// watcher on every stop and never idles once. Name the permanent cause.
+#[test]
+fn watching_ignored_names_a_missing_claim_as_permanent() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    // new_manifest writes no target_claim_key / target_claim_holder, which is
+    // exactly the shape init leaves behind on claim_held_by_other.
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-watching-noclaim", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_watching()).unwrap();
+
+    let mock = MockBins::ci_pending();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "claude",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("recorded no node claim at init"),
+        "the permanent cause must be named: {}",
+        d.message
+    );
+    assert!(
+        d.message
+            .contains("arming another watcher will not change that"),
+        "the refusal must stop the re-arm loop it caused: {}",
+        d.message
+    );
+}
+
 #[test]
 fn watching_ignored_unaddressed_findings_are_audible() {
     let tmp = findings_cwd("sess-watching-findings");

@@ -1532,10 +1532,12 @@ pub use crate::review_freshness::{
 mod authorship;
 mod coverage_receipt;
 mod review_state;
+mod watch_lease;
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
+use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal, WATCH_SLACK_MS};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -9872,6 +9874,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
                     let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
                     let blocker = if can_idle { observed_async_wait } else { None };
+                    let claim = watch_lease::claim_pair(&manifest_content);
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
                         // idling, or the idle opens a dispatcher-stampede gap.
@@ -9879,16 +9882,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // shrinks the lease to 1min) and MUST return Ok(true)
                         // (holder match); anything else blocks (AC3-ERR).
                         let window_ms = watch_window_ms(timeout.as_deref());
-                        let renewed = match (
-                            scan_manifest_field(&manifest_content, "target_claim_key"),
-                            scan_manifest_field(&manifest_content, "target_claim_holder"),
-                        ) {
-                            (Some(key), Some(holder)) => matches!(
-                                crate::claims::renew(&key, &holder, window_ms, None),
-                                Ok(true)
-                            ),
-                            _ => false,
-                        };
+                        let renewed = claim.as_ref().is_some_and(|(key, holder)| {
+                            matches!(crate::claims::renew(key, holder, window_ms, None), Ok(true))
+                        });
                         if renewed {
                             emit(
                                 "loop_check_watch_idle",
@@ -9942,6 +9938,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         )
                     } else if blocker.is_none() {
                         "watching ignored: PR is not in an async wait class".to_string()
+                    } else if claim.is_none() {
+                        watch_lease::NO_CLAIM_REFUSAL.to_string()
                     } else {
                         "watching ignored: watch lease could not be renewed".to_string()
                     })
@@ -10352,45 +10350,6 @@ fn run_done(
         );
     }
     Ok(info)
-}
-
-/// Slack added beyond the declared watch window so the claim lease outlives the
-/// agent's watcher (x-e2c8): a watcher that fires right at its timeout must not
-/// race claim expiry.
-const WATCH_SLACK_MS: i64 = 12 * 60_000;
-
-/// Lease window for an idle watch: the declared timeout clamped to [5m, 2h]
-/// (never trust the tag for an unbounded hold) plus slack. Defaults to 30m when
-/// the tag omits or mangles `timeout`, giving the ~40m default lease.
-fn watch_window_ms(timeout: Option<&str>) -> i64 {
-    let declared = timeout
-        .and_then(crate::claims::parse_ttl_ms)
-        .unwrap_or(30 * 60_000);
-    declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
-}
-
-/// Whether a session's harness + substrate can park-and-wake on a `<watching>`
-/// idle (x-e2c8). Only a Claude session's harness-tracked background/Monitor
-/// tasks re-invoke the model when they exit, so only Claude may idle. A
-/// `fno-agents loop run` child exits on allow (FNO_DRIVER_LIB set), and
-/// codex/gemini have no self-wake on background-task exit - their waker is the
-/// fno-agents daemon consuming the watch event, shipped as a separate
-/// live-verified follow-up - so all of those keep today's block behavior rather
-/// than idling with nothing to wake them (a dead watch). This is the design's
-/// "unroutable harness -> status quo, never a dead watch" degradation.
-fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
-    author_harness == Some("claude") && !is_loop_run_child
-}
-
-fn watching_harness_refusal(author_harness: Option<&str>, is_loop_run_child: bool) -> String {
-    if is_loop_run_child {
-        "watching ignored: loop-run child cannot idle".to_string()
-    } else {
-        format!(
-            "watching ignored: harness {} cannot idle",
-            author_harness.unwrap_or("unknown")
-        )
-    }
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
