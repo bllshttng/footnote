@@ -1,6 +1,5 @@
-"""Watchdog-verdict lookup for the king board's blocked_child queue
-(x-3ecf Change 2). Registered via import from cli.py, matching
-transcript_reads.py, so cli.py itself stays net 0."""
+"""Watchdog-verdict lookup for blocked_child (x-3ecf). Registered via
+import from cli.py, matching transcript_reads.py."""
 
 from __future__ import annotations
 

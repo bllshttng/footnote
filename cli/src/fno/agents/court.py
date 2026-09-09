@@ -173,10 +173,7 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
 
 
 def find_presiding_crown(
-    scope: str,
-    level: Optional[int],
-    crowns: list[dict[str, Any]],
-    by_id: Optional[dict[str, dict]],
+    scope: str, level: Optional[int], crowns: list[dict[str, Any]], by_id: Optional[dict[str, dict]]
 ) -> Optional[dict[str, Any]]:
     """The live crown one rung above scope/level, or None (x-3ecf AC4-HP)."""
     if level is None or level <= 0:
