@@ -9,32 +9,118 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from fno.config import SettingsModel
 
 
-def _settings_key() -> tuple[Optional[str], ...]:
-    """The declaration the settings resolution reads from the process.
+def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
+    """The canonical root read off a linked worktree's ``.git`` pointer file.
 
-    Everything ``_candidate_paths`` consults: the four FNO_ env overrides,
-    ``HOME``, and the resolved repo root (itself keyed on cwd and
-    ``FNO_REPO_ROOT``). Two calls whose key agrees read the same settings
-    by construction; a test that changes any component gets a fresh load
-    with no cache_clear, which retires the per-test clearer registry and
-    the fixture swap (x-3d21 R5).
+    A linked worktree's ``.git`` is a FILE (``gitdir:
+    <canonical>/.git/worktrees/<name>``), so the main checkout's root is the
+    prefix before ``/.git/worktrees/``. Pure file IO: the settings cache key
+    is computed on every load and must never shell out to
+    ``git worktree list``. A real dir (this IS canonical) or any shape this
+    cannot parse returns ``None`` and the canonical candidate is skipped, so
+    it contributes nothing to the fingerprint, exactly like a missing file.
+    """
+    git_path = repo_root / ".git"
+    if not git_path.is_file():
+        return None
+    try:
+        text = git_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("gitdir:"):
+            gitdir = line[len("gitdir:") :].strip()
+            marker = "/.git/worktrees/"
+            idx = gitdir.find(marker)
+            if idx > 0:
+                return Path(gitdir[:idx])
+    return None
+
+
+def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
+    """``(path, mtime_ns, size)`` per settings candidate that exists - the
+    same triple ``config_io._global_merged_config`` keys on. An OSError
+    (missing or unreadable file) contributes nothing, so creating a candidate
+    later changes the key and reparses.
+
+    The locations are stated directly instead of calling ``_candidate_paths``:
+    that walk runs ``_ensure_migrated``, and the key is computed on EVERY
+    settings read, so a migration check would ride each one. The canonical
+    candidate is derived from the already-resolved repo root's ``.git``
+    pointer, never from a fresh subprocess.
+    """
+    from fno.config_io import _global_settings_path
+
+    env_config = os.environ.get("FNO_CONFIG")
+    if env_config:
+        locations = [Path(env_config)]
+    else:
+        locations = [
+            repo_root / ".fno" / "config.toml",
+            repo_root / ".fno" / "settings.yaml",
+            repo_root / ".fno" / "config.local.toml",
+        ]
+        if os.environ.get("FNO_NO_CANONICAL_CONFIG") != "1":
+            canonical = _canonical_root_from_gitfile(repo_root)
+            if canonical is not None and canonical != repo_root:
+                locations += [
+                    canonical / ".fno" / "config.toml",
+                    canonical / ".fno" / "settings.yaml",
+                ]
+        global_path = _global_settings_path()
+        if global_path.name == "settings.yaml":
+            locations.append(global_path.with_name("config.toml"))
+        locations.append(global_path)
+    fingerprint: list[tuple[str, int, int]] = []
+    for candidate in locations:
+        try:
+            st = candidate.stat()
+        except OSError:
+            continue
+        fingerprint.append((str(candidate), st.st_mtime_ns, st.st_size))
+    return tuple(fingerprint)
+
+
+def _settings_key() -> tuple:
+    """The declaration the settings resolution reads from the process, plus
+    a content fingerprint of the settings candidates.
+
+    The declaration half: the four FNO_ env overrides, ``HOME``, and the
+    resolved repo root (itself keyed on cwd and ``FNO_REPO_ROOT``). Two calls
+    whose key agrees read the same settings by construction; a test that
+    changes any component gets a fresh load with no cache_clear, which
+    retires the per-test clearer registry and the fixture swap (x-3d21 R5).
+
+    The fingerprint half exists because the declaration alone never covered
+    the file CONTENTS - the old docstring claimed it covered "everything
+    ``_candidate_paths`` consults", which is true of the locations and false
+    of the bytes in them, and a long-lived process filled that gap with a
+    stale parse. An edit now changes the key and reparses on its own, with
+    no invalidation protocol for writers to remember. Cost: keys vary with
+    file mtimes, so ``_load_settings_at``'s ``maxsize=8`` holds up to eight
+    recent parses and an evicted declaration is simply re-collected on
+    demand.
     """
     from fno.paths import resolve_repo_root
 
     env = os.environ.get
+    repo_root = resolve_repo_root()
     return (
         env("FNO_CONFIG"),
         env("FNO_GLOBAL_SETTINGS_PATH"),
         env("FNO_CONFIG_SEARCH_ROOT"),
         env("FNO_NO_CANONICAL_CONFIG"),
         env("HOME"),
-        str(resolve_repo_root()),
+        str(repo_root),
+        _settings_fingerprint(repo_root),
     )
 
 

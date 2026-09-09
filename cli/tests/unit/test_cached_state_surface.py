@@ -19,7 +19,7 @@ _NON_STATE_CACHE_REASONS = {
     ("fno.agents.mux_spawn", "_codex_cli_version"): "cache key is tool version discovery, not fno state",
     ("fno.agents.harness_map", "_shipped_verbs"): "cache key is the shipped plugin surface, not fno state",
     ("fno.agents.harness_map", "_carrier_vocab"): "cache key is the shipped package-data table, not fno state",
-    ("fno.config._loader", "_load_settings_at"): "cache key is the full declaration (_settings_key: env overrides + HOME + resolved repo root), which carries the state root",
+    ("fno.config._loader", "_load_settings_at"): "cache key is the full declaration plus a stat fingerprint of the settings candidates (_settings_key), which carries the state root and the file contents",
 }
 
 
@@ -174,3 +174,79 @@ def test_guard_accepts_a_cached_reader_keyed_by_a_root(tmp_path: Path):
     )
 
     assert _violations(tmp_path) == []
+
+
+# --- settings cache key: declaration + content fingerprint (x-b545) --------
+
+
+def test_settings_key_sees_a_config_edit_without_cache_clear(tmp_path, monkeypatch):
+    """AC11-HP: a live process that has called load_settings() sees new
+    config after a settings-file edit, with no cache_clear."""
+    from fno.config import load_settings
+
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text("project = 'one'\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg_file))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    assert load_settings().project.id == "one"
+    cfg_file.write_text("project = 'two'\n")
+    assert load_settings().project.id == "two"
+
+
+def test_settings_key_unchanged_calls_are_served_from_cache(tmp_path, monkeypatch):
+    """AC12-HP: no edit between two calls -> the same object, no reparse."""
+    from fno.config import load_settings
+
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text("project_id = 'one'\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg_file))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    assert load_settings() is load_settings()
+
+
+def test_settings_key_missing_candidate_contributes_nothing(tmp_path, monkeypatch):
+    """AC13-EDGE: a missing candidate raises nothing and contributes nothing."""
+    from fno.config import _loader
+
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    key = _loader._settings_key()
+    assert key[-1] == ()
+
+
+def test_settings_key_runs_no_migration_check_and_no_subprocess(
+    tmp_path, monkeypatch
+):
+    """AC14-EDGE: the key is computed on every settings read, so it stats
+    candidates directly - _ensure_migrated never runs from it and it never
+    shells out."""
+    import fno.config as cfg
+    from fno import paths as fno_paths
+    from fno.config import _loader
+
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        cfg, "_ensure_migrated",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("_ensure_migrated ran")),
+    )
+    monkeypatch.setattr(
+        fno_paths.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("subprocess ran")),
+    )
+    key = _loader._settings_key()
+    assert len(key) == 7
+
+
+def test_canonical_root_reads_the_gitfile_pointer(tmp_path):
+    """The canonical candidate is derived from the worktree's .git pointer by
+    file IO alone; a real .git dir (this IS canonical) yields None."""
+    from fno.config import _loader
+
+    main = tmp_path / "main"
+    main.mkdir()
+    linked = tmp_path / "wt"
+    linked.mkdir()
+    (linked / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
+    assert _loader._canonical_root_from_gitfile(linked) == main
+    (main / ".git").mkdir()
+    assert _loader._canonical_root_from_gitfile(main) is None

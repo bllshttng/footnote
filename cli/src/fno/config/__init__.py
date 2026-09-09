@@ -18,9 +18,9 @@ deltas. With no file, built-in defaults apply. This mirrors the shell reader
 
 Cache: load_settings() is an uncached wrapper over _load_settings_at(),
 keyed on the declaration (_settings_key: env overrides + HOME + resolved
-repo root). A same-key settings.yaml rewrite needs
-_load_settings_at.cache_clear() to be seen in-process; the next
-subprocess always sees the new value.
+repo root) PLUS a stat fingerprint of every candidate file. A same-key
+settings rewrite changes the fingerprint, so the cache reparses on its
+own; no cache_clear is needed to see an edit in-process.
 
 Design decisions (locked in 2026-05-14-path-config.md):
   - extra='ignore' for forward compatibility (do NOT change to 'forbid')
