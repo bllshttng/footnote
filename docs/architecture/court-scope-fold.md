@@ -2,11 +2,20 @@
 
 `fno agents court -n` folds every crown's scope into its row: counts by
 status for the whole scope, the active nodes with their worker, PR and
-session ids, and the omitted count stated rather than implied. The same
-fold renders as the local board's court section. Design notes that used to
-live in docstrings, gathered here.
+session ids, and the omitted count stated rather than implied. Design
+notes gathered here.
 
 ## Layering: the section crosses layers as a file, not an import
+
+The board's court section (a follow-up node; the readout below ships
+first) renders the same fold as HTML. Its data is the agents runtime's
+own (registry, claims, crown verdicts), while the board renderer is L1
+core and must not import `fno/agents/*` (L5 runtime); the
+company-boundary gate prohibits new edges. The contract between the
+layers is therefore a file: the runtime writes a section fragment and
+the renderer splices that fragment between markers on the local board.
+The section's CSS ships inside the fragment, so the board never needs to
+know the section exists.
 
 The court's data is the agents runtime's own (registry, claims, crown
 verdicts). `fno/graph/render_html.py` is L1 core and must not import

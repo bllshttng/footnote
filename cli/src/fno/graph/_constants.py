@@ -42,12 +42,6 @@ def _graph_html() -> Path:
     return _state_dir() / "graph.html"
 
 
-def _court_section_html() -> Path:
-    """The local board's court section fragment, written by the runtime
-    (`fno agents court --update-board`) and spliced at render time."""
-    return _state_dir() / "court-section.html"
-
-
 def _graph_archive_json() -> Path:
     """Route through paths.graph_archive_json() so the archive tracks any
     config.paths.graph_json override (it is a sibling of the working graph)."""
@@ -94,7 +88,6 @@ def __getattr__(name: str) -> Path:
         "GRAPH_JSON": _graph_json,
         "GRAPH_MD": _graph_md,
         "GRAPH_HTML": _graph_html,
-        "COURT_SECTION_HTML": _court_section_html,
         "GRAPH_ARCHIVE_JSON": _graph_archive_json,
         "LEDGER_JSON": _ledger_json,
         "BRIEFS_DIR": _briefs_dir,

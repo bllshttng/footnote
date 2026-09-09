@@ -289,17 +289,8 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
 
 
 def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
-    """Fold each crown's scope nodes onto its row as ``scope_nodes``, in place.
-
-    The fold lives in the native binary (`fno-agents court-fold`): it reads
-    graph.json and the claims dir itself, compiles scopes with the rules the
-    board's collector applies, and names workers through the same native
-    claim verdicts `claim sweep` uses, so a fold and the claims surface
-    cannot disagree about who holds a node. Python passes the crowns
-    `gather_court` already adjudicated and reads the answer back; any fault -
-    a stale binary, an unreadable graph, a timeout - marks the crown
-    unresolved rather than rendering an empty table.
-    """
+    """Fold each crown's scope onto its row via `fno-agents court-fold`; any
+    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md)."""
     import json as _json
     import subprocess
 
@@ -438,14 +429,6 @@ def register_court_command(app) -> None:
                 "JSON output."
             ),
         ),
-        update_board: bool = typer.Option(
-            False,
-            "--update-board",
-            help=(
-                "Refresh the local board's court section from this read and "
-                "exit; no table or JSON is printed."
-            ),
-        ),
     ) -> None:
         """The whole court: every live crown, its scope, its holder, its
         grantor, and whether the registry and the graph agree.
@@ -457,12 +440,6 @@ def register_court_command(app) -> None:
         kings over one scope, so ``conflicts`` is part of every gate read -
         the precise failure this command exists to end.
         """
-        if update_board:
-            from fno.agents.court_html import update_board
-
-            update_board()
-            return
-
         from fno.agents.court import render_court
 
         print(render_court(json_output, nodes=nodes))

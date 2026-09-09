@@ -1241,20 +1241,6 @@ def _dashboard_static_html(
     return "".join(parts)
 
 
-def _court_fragment() -> str:
-    """The local board's court section, read from the fragment the runtime
-    writes (`fno agents court --update-board`). The section's data is the
-    agents runtime's own (registry, claims, crown verdicts), so this renderer
-    never imports it: the layering contract is the fragment file, and a
-    missing or unreadable fragment renders as no section."""
-    from fno.graph._constants import COURT_SECTION_HTML
-
-    path = COURT_SECTION_HTML
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8")
-
-
 def _dashboard_html(
     entries: list[dict],
     *,
@@ -1312,17 +1298,6 @@ def _dashboard_html(
     static_board = _dashboard_static_html(
         rows, local=local, initial_done=projection == "roadmap"
     )
-    # Local only, and never raising: render_configured_targets runs after
-    # locked_mutate_graph writes graph.json, so a court section that throws
-    # would wedge every graph mutation. It degrades to nothing instead. The
-    # section content is the runtime's own (registry, claims, crown verdicts),
-    # delivered as a fragment file - this renderer imports none of it.
-    court_html = ""
-    if local:
-        try:
-            court_html = _court_fragment()
-        except Exception:  # noqa: BLE001 - the board outranks the section
-            court_html = ""
     vote_suffix = (
         ' --operator --evidence "REPLACE: what it cost"' if local else ""
     )
@@ -1365,12 +1340,7 @@ def _dashboard_html(
         f'<b id="totalCount">{len(rows)}</b> nodes. {opens_note}'
         '<b>Plan, unfinished</b> is the real queue: every node with a plan that has '
         f'not shipped. Set <b>from</b> to a date to narrow the window. {detail_note}</p></header>'
-        + (
-            f"<!-- court:begin -->{court_html}<!-- court:end -->"
-            if local
-            else ""
-        )
-        + '<div class="stats" id="stats"></div><div class="controls">'
+        '<div class="stats" id="stats"></div><div class="controls">'
         '<input type="search" id="q" placeholder="Search title, id, or description\u2026" aria-label="Search nodes">'
         '<div class="chips" id="statusChips" role="group" aria-label="Filter by status"></div>'
         '<div class="chips" id="projectChips" role="group" aria-label="Filter by project"></div>'
