@@ -1053,6 +1053,7 @@ def inject_spawn_defaults(
     slot_candidate: Optional[dict] = None
     slot_chain: List[str] = []
     grid_node_entry: Optional[dict] = None
+    grid_account_injected = False
     # Axis occupancy scanned ONCE, before the slot resolver: a lane named on
     # the command line changes the all-exhausted terminal (degrade, not
     # refuse), an occupied model axis stands the no-lanes grid down, and
@@ -1311,6 +1312,30 @@ def inject_spawn_defaults(
             inject += ["--effort", grid_candidate["effort"]]
             from_config.append(("effort", grid_candidate["effort"], "difficulty-grid"))
             has_effort = True
+        # The row's route rides beside the model it belongs to; a route or
+        # vendor pinned on argv is never overwritten.
+        if (
+            grid_candidate.get("route")
+            and not explicit_route
+            and not explicit_vendor_present
+        ):
+            inject += ["--route", grid_candidate["route"]]
+            from_config.append(("route", grid_candidate["route"], "difficulty-grid"))
+        # The capacity pick read the row account's quota; claude-only at the CLI.
+        if grid_candidate.get("account") and not _flag_present(out[1:], "--account"):
+            if grid_candidate["harness"] == "claude":
+                inject += ["--account", grid_candidate["account"]]
+                from_config.append(
+                    ("account", grid_candidate["account"], "difficulty-grid")
+                )
+                grid_account_injected = True
+            else:
+                print(
+                    f"fno agents spawn: account skipped (claude-only, grid "
+                    f"harness {grid_candidate['harness']!r}); "
+                    f"{grid_candidate['account']!r} ignored",
+                    file=err,
+                )
         _resolved["v"] = grid_candidate["harness"]
 
     # Lazy resolved-target HARNESS for the substrate/permission compatibility
@@ -1429,7 +1454,7 @@ def inject_spawn_defaults(
     # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
     # would otherwise carry a Claude account into a spawn that can't use it and
     # abort instead of cutting over.
-    if cfg_account and not _flag_present(out[1:], "--account"):
+    if cfg_account and not grid_account_injected and not _flag_present(out[1:], "--account"):
         prov = resolved_harness()
         if prov == "claude":
             inject += ["--account", cfg_account]

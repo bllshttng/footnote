@@ -34,6 +34,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "claim",
     "codex-assign-project",
     "codex-loaded-threads",
+    "component-verdict",
     "court-orphans",
     "detect",
     "digest",
@@ -178,6 +179,15 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "codex-loaded-threads") {
         return fno_agents::codex_inject::run_loaded_thread_discovery().await;
+    }
+
+    // `component-verdict` is the HIDDEN decision verb for deployed-component
+    // convergence: reads one JSON request on stdin (expected rev +
+    // per-component probes) and prints the per-component verdict. Binary-direct
+    // transport for update/doctor, matched with `matches!` like `state` so it
+    // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
+    if matches!(verb, "component-verdict") {
+        return fno_agents::component_update::run_component_verdict(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
@@ -2150,9 +2160,12 @@ fn run_reap(rest: &[String]) -> i32 {
             },
             None => 24 * 3600,
         };
-        // Exactly --verify, --since <dur>, --json/-J: anything else is a
-        // usage error, checked with a plain skip-list walk.
+        // Exactly --verify, --since <dur>, --expect-sessions <a,b>,
+        // --json/-J: anything else is a usage error, checked with a plain
+        // skip-list walk.
         let mut extras: Vec<&str> = Vec::new();
+        let mut expected: Vec<String> = Vec::new();
+        let mut cohort_given = false;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -2160,19 +2173,46 @@ fn run_reap(rest: &[String]) -> i32 {
                 "--since" => {
                     i += 1; // the duration value rides with --since
                 }
+                "--expect-sessions" => {
+                    cohort_given = true;
+                    let value = rest.get(i + 1).map(String::as_str).unwrap_or("");
+                    if value.is_empty() {
+                        eprintln!(
+                            "fno-agents: --expect-sessions needs a comma-separated session list (got: {:?})",
+                            rest.get(i + 1).map(String::as_str).unwrap_or("")
+                        );
+                        return 2;
+                    }
+                    expected.extend(
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    );
+                    i += 1; // the cohort value rides with --expect-sessions
+                }
                 other => extras.push(other),
             }
             i += 1;
         }
+        // A cohort given but normalizing to nothing ("," or whitespace) must
+        // be a usage error, never a silently disabled check (codex P2).
+        if cohort_given && expected.is_empty() {
+            eprintln!(
+                "fno-agents: --expect-sessions normalized to an empty cohort; name at least one session"
+            );
+            return 2;
+        }
         if !extras.is_empty() {
             eprintln!(
-                "fno-agents: reap --verify takes only --since/--json (got: {})",
+                "fno-agents: reap --verify takes only --since/--expect-sessions/--json (got: {})",
                 extras.join(" ")
             );
             return 2;
         }
         let home = AgentsHome::from_env();
-        let report = fno_agents::gc_verify::verify(&home, since);
+        let report = fno_agents::gc_verify::verify(&home, since, &expected);
         if json_out {
             println!("{}", report.to_json());
         } else {

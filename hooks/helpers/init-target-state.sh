@@ -1560,8 +1560,36 @@ PYEOF
       # requires. Unset (every hand-started or non-spawn run) => zero args and
       # an ordinary acquire, byte-for-byte as before.
       _HANDOVER_FLAGS=""
-      [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+      if [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]]; then
         _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
+      else
+        # The env var is how the spawner proves the handover, but a spawned
+        # worker can reach init without it. The spawner's claim then reads as
+        # a foreign 15-minute lease and the ordinary acquire refuses its own
+        # beneficiary (measured live 2026-09-09). The disk holder supplies the
+        # value, but a published holder is not proof of successorship: the
+        # claim store answers "who holds" to any reader, so the match is
+        # bound to THIS worker's provenance. The launch-window holder names
+        # its beneficiary, and the identity resolver proves a name is this
+        # session's own; only an exact match adopts the handover, so a
+        # bystander's init cannot take a live claim it was never minted for.
+        _DISK_HOLDER="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:${_NODE_ID}" --json --no-roster 2>/dev/null \
+          | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+        case "${_DISK_HOLDER:-}" in
+          spawn-handover:*)
+            # The same two rungs the identity resolver trusts: the spawn-time
+            # name export first, then the registry binding whoami exposes.
+            _SELF_NAME="${FNO_WORKER_NAME:-}"
+            if [[ -z "$_SELF_NAME" ]]; then
+              _SELF_NAME="$(fno whoami --json 2>/dev/null \
+                | sed -n 's/.*"worker_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            fi
+            if [[ -n "${_SELF_NAME:-}" && "${_DISK_HOLDER}" == "spawn-handover:${_SELF_NAME}" ]]; then
+              _HANDOVER_FLAGS="--handover-from ${_DISK_HOLDER}"
+            fi
+            ;;
+        esac
+      fi
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \

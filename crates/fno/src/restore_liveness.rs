@@ -129,6 +129,7 @@ mod tests {
         StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,

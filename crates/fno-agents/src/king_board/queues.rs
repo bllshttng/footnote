@@ -1,5 +1,5 @@
 //! The operator lane parser and the thirteen-queue board build (pure; no I/O).
-use super::classify::{node_driver, node_has_pr};
+use super::classify::{claim_is_dead, node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
@@ -423,7 +423,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|node| {
             let dead = claim_by_node
                 .get(s_str(node, "id").unwrap_or(""))
-                .map(|c| DEAD_CLAIM_STATES.contains(&s_str(c, "state").unwrap_or("")))
+                .map(|c| claim_is_dead(c, &inputs.holder_activity))
                 .unwrap_or(false);
             !dead
         })
@@ -484,10 +484,11 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }));
     }
 
-    // Stale claims: locks nobody will reap.
+    // Stale claims: locks nobody will reap. Asked of the holder, not the
+    // clock alone: an expired lease under a writing worker is a live lock.
     let stale_claim_rows: Vec<Value> = claim_rows
         .iter()
-        .filter(|row| DEAD_CLAIM_STATES.contains(&s_str(row, "state").unwrap_or("")))
+        .filter(|row| claim_is_dead(row, &inputs.holder_activity))
         .filter(|row| {
             let node_id = s_str(row, "key")
                 .and_then(|k| k.strip_prefix("node:"))

@@ -595,24 +595,25 @@ def test_custom_state_dir_propagates_to_briefs_dir(
 # ---------------------------------------------------------------------------
 
 
-def test_paths_cache_consistent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-FR: graph_json() returns same value even if settings file is modified."""
+def test_paths_cache_sees_a_settings_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settings cache key fingerprints the file contents (x-b545): a
+    same-key rewrite IS seen in-process, with no cache_clear. The edited
+    state_dir must stay inside the sandbox so the hermetic guard permits it."""
+    changed_dir = tmp_path / "changed"
     settings_file = _write_settings(tmp_path, "schema_version: 1\n")
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    # Clear caches explicitly
-    from fno import config as config_mod
-    import fno.paths as paths_mod
 
     from fno.paths import graph_json
 
     first = graph_json()
-    # Modify the file - cached value should not change
+    # Rewrite the file - the cache reparses and the new state_dir resolves.
     settings_file.write_text(
-        "schema_version: 1\nconfig:\n  state_dir: '/changed/'\n", encoding="utf-8"
+        f"schema_version: 1\nconfig:\n  state_dir: '{changed_dir}'\n",
+        encoding="utf-8",
     )
     second = graph_json()
-    assert first == second, "graph_json() should be stable within a process"
+    assert second == changed_dir.resolve() / "graph.json"
+    assert first != second, "a settings edit must invalidate the keyed cache"
 
 
 # ---------------------------------------------------------------------------

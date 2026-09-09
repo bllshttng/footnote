@@ -73,6 +73,23 @@ impl CascadeOutcome {
     }
 }
 
+/// The typed effect record for the confirmed stop (x-5aef task 1.1). The
+/// stop seam answers a bare bool, so the vocabulary is two-valued: a
+/// confirmed stop reads `confirmed-removed`, anything else `failed` - and a
+/// `failed` stop holds the row for retry, never retires it.
+pub(crate) fn stop_outcome_effect(confirmed: bool) -> EffectRecord {
+    EffectRecord {
+        op: "native-stop".into(),
+        outcome: if confirmed {
+            "confirmed-removed".into()
+        } else {
+            "failed".into()
+        },
+        detail: None,
+        at: crate::daemon::now_rfc3339_like(),
+    }
+}
+
 /// Apply the ACTIVE-SURFACE removal for one row through the production
 /// seams (the daemon roster read and `claude rm`), returning the typed
 /// outcome the sweep records on the receipt. The roster read unions every

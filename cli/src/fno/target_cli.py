@@ -2784,6 +2784,7 @@ def _start_codex_native(
     harness: Optional[str],
     beastmode: bool,
     no_merge: bool,
+    deliverables: Optional[int] = None,
 ) -> None:
     """Finish target bootstrap inside a worktree Codex Desktop already owns."""
     base = _prepare_codex_native_branch(cwd, node)
@@ -2877,6 +2878,8 @@ def _start_codex_native(
         cmd += ["--beastmode"]
     if no_merge:
         cmd += ["--no-merge"]
+    if deliverables is not None:
+        cmd += ["--deliverables", str(deliverables)]
     init = subprocess.run(cmd, cwd=str(cwd))
     if init.returncode != 0:
         typer.echo(
@@ -3270,6 +3273,12 @@ def start(
         "prose-level carrier: start resolves its argument to a bare node id, and "
         "the init fold reads no free text (x-9d11).",
     ),
+    deliverables: Optional[int] = typer.Option(
+        None, "--deliverables",
+        help="Declare the scope denominator for a plan-less node (forwarded to "
+        "init). Init refuses a plan-less code node without one and names this "
+        "flag, so start must carry it or the receipt is a dead end.",
+    ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.
 
@@ -3310,6 +3319,7 @@ def start(
                 harness=harness,
                 beastmode=beastmode,
                 no_merge=no_merge,
+                deliverables=deliverables,
             )
             return
         if _under_codex_worktrees(cwd):
@@ -3581,6 +3591,8 @@ def start(
         init_cmd += ["--harness", harness]
     if beastmode:
         init_cmd += ["--beastmode"]
+    if deliverables is not None:
+        init_cmd += ["--deliverables", str(deliverables)]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         if created_this_run and not in_place:

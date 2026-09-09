@@ -200,6 +200,18 @@ The grant is sent on every turn rather than only the first. The protocol makes a
 
 The grant is per THREAD, never per daemon. One shared app-server owns every thread on the machine. A grant applied at daemon scope widens every other worker at once.
 
+## Posture, grant, and the two failure lanes
+
+`workspace-write` grants the worker's checkout but does not grant the repository's `.git` metadata. A plain checkout has `.git` as a directory. A linked worktree has `.git` as a file pointing into the repository's common Git directory. The common directory is the one path that covers the linked-worktree gitdir, shared objects, refs, and index without widening the worker to full access.
+
+The registry row records two separate facts. `sandbox_posture` says which sandbox mode the worker launched with. `git_grant` is the resolved absolute Git common-directory path that the policy carried, so a reader can identify the repository covered by the grant. `None` means the grant did not resolve. It is not an empty-string success and it is distinct from a row written before the field existed.
+
+The spawn seam runs after defaults resolve and before either the Python dispatch or Rust client can mint a worker. When three conditions hold, the grant resolution runs. The harness is Codex, the payload is a bounded code workflow (`/target`, `/execute`, `/tdd`, `/fix`, or `/pr`), and the launch is not full-access. The seam then resolves `git rev-parse --path-format=absolute --git-common-dir` for the launch cwd. An empty result exits 2 with the cwd and query named, and no registry row is created. A resolved path launches normally. Full-access launches do not need this bounded-grant assertion. The predicate is the effective grant, not a required posture flag.
+
+The watchdog consumes the distress that target initialization already writes. The trigger is a last message naming a path under `.git` with `Operation not permitted`. When the node claim reads free and `origin/main..HEAD` holds zero commits, the verdict is `sandbox-blocked`. Its action is `reap`, which frees the parked worker slot. An unreadable claim or branch, a held claim, or any branch commit holds the row. The report names that guard instead of reaping on a stray string.
+
+The measured failure had fourteen workers with logs carrying one `.git` lock signature and the correct distress explanation. Nobody read the distress. The row's posture alone cannot distinguish a usable sandbox from the one that failed. The grant path and watchdog verdict make both facts durable and machine-readable.
+
 A live probe is the only instrument that can answer this. `codex_fake_daemon.rs` models no sandbox field at all. A green run against it measures the double and not the target. The fake records the frames it received instead, which pins the other half: fno's three hops put the roots on the wire.
 
 ## `thread/list` is a roster with the right cwd

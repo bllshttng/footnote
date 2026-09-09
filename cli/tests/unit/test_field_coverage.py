@@ -73,10 +73,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # v28 added adopted_by_session (the adoption voucher, x-5283),
     # storage_only: 55 -> 56. v29 added resolved_sandbox and
     # granted_writable_roots (the codex thread lane's resolved posture vs
-    # the sandbox_posture request), storage_only: 56 -> 58.
-    assert payload["declared_count"] == 58
+    # the sandbox_posture request), storage_only: 56 -> 58. v30 added
+    # git_grant (the effective Git common-dir receipt), storage_only:
+    # 58 -> 59.
+    assert payload["declared_count"] == 59
     assert payload["required_count"] == 43
-    assert payload["accounted_count"] == 58
+    assert payload["accounted_count"] == 59
     assert payload["known_gaps"] == {}
 
 

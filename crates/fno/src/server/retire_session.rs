@@ -129,6 +129,9 @@ impl Core {
                 .find(|member| detached.matches_member(member))
             {
                 member.tombstone = true;
+                // (x-8b51) A pane death is a real observed event, so the
+                // churn arm keeps tombstoning - it just names why now.
+                member.tombstone_reason = Some("worker pane died".into());
                 member.detached = false;
             }
         } else {

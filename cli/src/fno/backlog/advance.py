@@ -1246,6 +1246,8 @@ def _spawn_worker(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     vendor: Optional[str] = None,
+    grid_route: Optional[str] = None,
+    grid_account: Optional[str] = None,
     harness: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
@@ -1289,13 +1291,21 @@ def _spawn_worker(
     # A caller that resolved the grid hands its reason in; the consult below
     # is skipped under an explicit harness. grid_reason=None on a grid PICK.
     grid_why: Optional[str] = grid_reason
+    # Caller-supplied grid answers first: dispatch_lanes resolves the grid
+    # before placement and pins the harness, so the consult below never runs.
+    grid_lane_route: Optional[str] = grid_route
+    grid_lane_account: Optional[str] = grid_account
     if harness is None:
-        grid_harness, grid_model, grid_why = _grid_lane_for(node, model=model, provider=provider)
+        grid_harness, grid_model, grid_route_resolved, grid_account_resolved, grid_why = _grid_lane_for(
+            node, model=model, provider=provider
+        )
         if grid_harness is not None:
             model = grid_model
             # The resolver must see the grid's harness or it resolves a
             # claude substrate/command for a codex spawn (bg is claude-only).
             harness = grid_harness
+            grid_lane_route = grid_route_resolved
+            grid_lane_account = grid_account_resolved
 
     # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
     # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
@@ -1396,6 +1406,19 @@ def _spawn_worker(
     ]
     if vendor:
         cmd += ["--provider", vendor]
+    elif grid_lane_route:
+        # The row's route owns vendor AND model as one fact; an explicit
+        # dispatch-time vendor pin outranks it and is never replaced.
+        cmd += ["--route", grid_lane_route]
+    if grid_lane_account and resolved.get("harness") == "claude":
+        # The capacity pick read THIS account's quota; claude-only at the CLI.
+        cmd += ["--account", grid_lane_account]
+    elif grid_lane_account:
+        print(
+            f"advance: grid account {grid_lane_account!r} skipped "
+            f"(claude-only, harness {resolved.get('harness')!r})",
+            file=sys.stderr,
+        )
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -1661,19 +1684,15 @@ def _base_project_id(canonical_root: Path) -> str:
 
 def _grid_lane_for(
     node: Optional[dict], *, model: Optional[str], provider: Optional[str]
-) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """``(harness, model, decline_reason)`` the slot resolver picks for an UNPINNED spawn.
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
 
-    On a decline the reason is the chain's own terminal, verbatim: rewording
-    it forks the receipt vocabulary. Receipts only, never refusing (Locked
-    10). Deliberately ONE function: tests monkeypatch this name, and a caller
-    that reached past it would bypass every patch. Placement and spawn both
-    compose verb ``target`` through here so the two agree on one lane.
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
+    One seam: tests monkeypatch this name, and a caller reaching past it
+    bypasses every patch. A decline surfaces the chain's terminal verbatim,
+    never refusing (Locked 10). Route and account ride beside harness/model
+    as one row fact. Contract: docs/architecture/backlog-graph-verb-contracts.md"""
     if model is not None or (provider or "").strip() or node is None:
-        return None, None, None
+        return None, None, None, None, None
     try:
         from fno import route_resolve
 
@@ -1695,13 +1714,13 @@ def _grid_lane_for(
             inventory=inventory,
         )
     except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
-        return None, None, f"grid=unreadable ({str(exc)[:80]})"
+        return None, None, None, None, f"grid=unreadable ({str(exc)[:80]})"
     # The chain's last element is the terminal reason on every path, so it is
     # surfaced verbatim rather than reformatted - the strings are the existing
     # receipt vocabulary and rewording them here would fork it.
     terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
-        return None, None, terminal
+        return None, None, None, None, terminal
     # Placement commits a harness-keyed worktree, which unknown capacity must
     # not buy: the grid's unknown-permitted posture is right for injection
     # (defaults still compose the argv), wrong for a lane decision with no
@@ -1709,8 +1728,14 @@ def _grid_lane_for(
     state = capacity.get(candidate["harness"])
     verdict = state.get("state", "unknown") if isinstance(state, dict) else state
     if str(verdict).lower() not in ("ok", "low", "available"):
-        return None, None, f"grid=capacity-{str(verdict).lower()}"
-    return candidate["harness"], candidate["model"], None
+        return None, None, None, None, f"grid=capacity-{str(verdict).lower()}"
+    return (
+        candidate["harness"],
+        candidate["model"],
+        (candidate.get("route") or "").strip() or None,
+        (candidate.get("account") or "").strip() or None,
+        None,
+    )
 
 
 def _lane_harness(eff_provider: Optional[str], node_cwd: Optional[str] = None) -> str:
@@ -1993,7 +2018,7 @@ def dispatch_lanes(
                 # DECLINE pins too: an unpinned spawn re-consults the grid at the
                 # spawn seam, and a capacity change in between could land the worker
                 # on a harness the worktree was not keyed for.
-                lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
+                lane_grid_harness, lane_grid_model, lane_grid_route, lane_grid_account, lane_grid_why = _grid_lane_for(
                     node, model=resolved_model, provider=eff_harness
                 )
                 lane_placement_harness = _lane_harness(
@@ -2019,6 +2044,8 @@ def dispatch_lanes(
                     model=lane_grid_model or resolved_model,
                     provider=lane_grid_harness or eff_harness,
                     vendor=vendor,
+                    grid_route=lane_grid_route,
+                    grid_account=lane_grid_account,
                     # The placement value unconditionally: a grid pick is always a
                     # fixed point of _lane_harness today, and if that ever stops
                     # holding, the raw pick would reopen the split this pins shut.
@@ -2800,11 +2827,13 @@ def _join_node(
         # mismatch the spawn refuses.
         lane_h: Optional[str] = None
         lane_m: Optional[str] = None
+        lane_r: Optional[str] = None
+        lane_a: Optional[str] = None
         grid_why: Optional[str] = None
         pol = policies.get(band) if sandbox_on else None
         enforced = pol is not None and pol.verdict == "enforced"
         if band:
-            grid_h, grid_m, grid_why = _grid_lane_for(
+            grid_h, grid_m, grid_r, grid_a, grid_why = _grid_lane_for(
                 {
                     "difficulty": band,
                     "plan_path": str(plan_path),
@@ -2814,7 +2843,7 @@ def _join_node(
                 provider=None,
             )
             if grid_h in (None, "claude"):
-                lane_h, lane_m = grid_h, grid_m
+                lane_h, lane_m, lane_r, lane_a = grid_h, grid_m, grid_r, grid_a
             else:
                 # The grid PICKED, and the pick is unusable here: the thread
                 # substrate is claude-only, so a foreign harness reads as
@@ -2850,6 +2879,11 @@ def _join_node(
             "--harness", lane_h or "claude",
             # x-571f shape: an explicit model rides as a spawn flag.
             *(("--model", lane_m or model) if (lane_m or model) else ()),
+            # The grid's route rides beside the model it belongs to; a row
+            # without one adds nothing.
+            *(("--route", lane_r) if lane_r else ()),
+            # The capacity pick read the account's quota; claude-only already.
+            *(("--account", lane_a) if lane_a else ()),
             "--cwd", worktree, "--name", name,
             *(
                 (

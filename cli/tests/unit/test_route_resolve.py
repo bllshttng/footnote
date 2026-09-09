@@ -55,6 +55,57 @@ def test_config_only_model_resolves_for_its_band():
     assert any("grid candidate opencode/qwen" in step for step in chain)
 
 
+def test_declared_rows_read_the_real_loader_models(tmp_path, monkeypatch):
+    """x-947c: routing.models arrives from the loader as pydantic rows, not
+    mappings; _declared_rows must read them, never drop them at a Mapping
+    filter. Drives the REAL loader over a config file - no hand-built dict."""
+    from fno.config import load_settings
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "[[routing.models]]\n"
+        'name = "zai-flash"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'route = "zai/glm-5.3-flash[1m]"\n'
+        'account = "zai"\n'
+        'band = "medium"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    rows = rr._declared_rows(load_settings())
+    assert rows["zai-flash"] == {
+        "name": "zai-flash",
+        "harness": "claude",
+        "model": "glm-5.3-flash[1m]",
+        "route": "zai/glm-5.3-flash[1m]",
+        "account": "zai",
+        "band": "medium",
+        "effort": "",
+    }
+
+
+def test_grid_candidate_carries_route_and_account():
+    """AC2-HP (x-b545): the grid leg's candidate carries the declared row's
+    route and account, the same facts the lane leg always emitted. A routeless
+    row emits neither key, so every anthropic row is unchanged."""
+    inv = _inv([
+        {"name": "flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
+         "band": "high", "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+    ])
+    candidate, _chain = _grid(
+        "high", "p2", {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}}, inv=inv
+    )
+    assert candidate["route"] == "zai/glm-5.3-flash[1m]"
+    assert candidate["account"] == "zai-main"
+    inv = _inv([{"name": "bare", "harness": "claude", "model": "m-1", "band": "high"}])
+    candidate, _chain = _grid("high", "p2", {"claude": "ok"}, inv=inv)
+    assert "route" not in candidate
+    assert "account" not in candidate
+
+
 def test_later_row_overrides_per_field_and_keeps_the_rest():
     """AC2-HP: a same-named later row wins per field; fields it did not name
     keep the earlier row's value."""
@@ -610,3 +661,79 @@ def test_the_fallback_emits_one_row_per_model():
     on. A duplicate would reintroduce exactly the ordering bug above."""
     names = [r["name"] for r in rr._builtin_rows()]
     assert len(names) == len(set(names)), f"duplicate fallback rows: {names}"
+
+
+# --- declared rows: the loader's real return type ---------------------------- #
+
+
+def test_declared_rows_survive_the_real_loader(tmp_path):
+    """The slot payload's declared rows must accept what the loader returns.
+
+    The config loader hands over typed RoutingModelBlock objects, not Mappings,
+    so an isinstance-Mapping filter dropped every declared row and grid-routed
+    spawns were refused with 'declared rows: (none)'. Drives the REAL loader
+    (settings_from_files: the same parse + validate path as production) and
+    asserts the named row survives - a nonzero count alone cannot tell a right
+    answer from a silent empty.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[[routing.models]]\n"
+        'name = "claude-canonical-opus"\n'
+        'harness = "claude"\n'
+        'model = "claude-opus-5"\n'
+        'band = "high"\n'
+        "\n"
+        "[[routing.models]]\n"
+        'name = "zai-flash"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'band = "low"\n'
+    )
+    settings = settings_from_files([cfg])
+    # premise, not decoration: the loader returns typed blocks - the exact
+    # type the old Mapping filter rejected. If this ever returns dicts, the
+    # trap this guards against has moved.
+    assert all(hasattr(r, "model_dump") for r in settings.routing.models)
+
+    rows = rr._declared_rows(settings)
+
+    assert len(rows) == 2  # CONFIG-declared exactly, never the built-in fallback
+    assert "claude-canonical-opus" in rows
+    assert rows["claude-canonical-opus"]["model"] == "claude-opus-5"
+    assert rows["claude-canonical-opus"]["harness"] == "claude"
+    assert rows["zai-flash"]["band"] == "low"
+
+
+def test_repeated_declared_name_folds_per_field(tmp_path):
+    """A repeated name is a one-field override: unset fields keep the base
+    row's values (the config model's own contract). A wholesale replace would
+    re-home the lane to a default access path - a harness default or a lost
+    vendor/account bills the wrong route."""
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[[routing.models]]\n"
+        'name = "dual-home"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'route = "zai/glm-5.3-flash[1m]"\n'
+        'band = "low"\n'
+        "\n"
+        "[[routing.models]]\n"
+        'name = "dual-home"\n'
+        'model = "glm-5.3-flash"\n'
+    )
+    settings = settings_from_files([cfg])
+
+    rows = rr._declared_rows(settings)
+
+    assert len(rows) == 1
+    row = rows["dual-home"]
+    assert row["model"] == "glm-5.3-flash"  # the override wins on its field
+    assert row["harness"] == "claude"  # unnamed fields keep the base row's value
+    assert row["route"] == "zai/glm-5.3-flash[1m]"
+    assert row["band"] == "low"

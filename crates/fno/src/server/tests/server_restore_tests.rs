@@ -1,6 +1,7 @@
 //! (x-b64e) The restore test family: moved verbatim out of server.rs
 //! (file budget shrink). Parent helpers resolve through the glob.
 use super::*;
+use crate::restore_gate::{set_restore_stale_ids, RestoreStaleIdsGuard};
 
 #[test]
 fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
@@ -38,6 +39,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    tombstone_reason: None,
                     detached: false,
                     tab_name: None,
                     cwd: None,
@@ -48,6 +50,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    tombstone_reason: None,
                     detached: false,
                     tab_name: None,
                     cwd: None,
@@ -137,6 +140,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -147,6 +151,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -277,6 +282,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -287,6 +293,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -395,6 +402,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
             crate::squad_store::StoredMember {
                 attach_id: "deadbeef".into(),
                 tombstone: true,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -405,6 +413,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
             crate::squad_store::StoredMember {
                 attach_id: "c0ffee00".into(),
                 tombstone: true,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -451,10 +460,112 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
 }
 
 #[test]
+fn restore_lifts_a_tombstone_against_a_live_registry_row() {
+    // AC2-HP (x-8b51): a tombstone standing against a live registry row is a
+    // false death the walk lifts. The cleared clone takes the live path; the
+    // notice names both the id and the recorded reason.
+    let s = StoreScratch::new("restore-revive");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: "5eed1ead".into(),
+            tombstone: true,
+            tombstone_reason: Some("member pane died".into()),
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        }],
+    )
+    .unwrap();
+    let mut row = exited_claude_row("t-revived-agent", None);
+    row.exited = false;
+    row.attach_id = Some("5eed1ead".to_string());
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _reg = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![row]);
+    let _stale = RestoreStaleIdsGuard;
+    set_restore_stale_ids(&[]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&[]);
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    core.restore_squads(24, 80, 999);
+    let member = core
+        .squad_members
+        .values()
+        .flatten()
+        .find(|m| m.attach_id == "5eed1ead")
+        .expect("the revived member is stored");
+    assert!(
+        !member.tombstone,
+        "the false death is lifted: tombstone cleared"
+    );
+    assert!(member.tombstone_reason.is_none());
+}
+
+#[test]
+fn restore_keeps_a_tombstone_against_an_exited_row() {
+    // AC2-EDGE (x-8b51): a tombstone standing against an exited row is a
+    // TRUE death with recorded evidence: the tombstone stands, reason intact.
+    let s = StoreScratch::new("restore-true-death");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: "deadc0de".into(),
+            tombstone: true,
+            tombstone_reason: Some("member pane died".into()),
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        }],
+    )
+    .unwrap();
+    let mut row = exited_claude_row("t-exited-under-tombstone", None);
+    row.exited = true;
+    row.attach_id = Some("deadc0de".to_string());
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _reg = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![row]);
+    let _stale = RestoreStaleIdsGuard;
+    set_restore_stale_ids(&[]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&[]);
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    core.restore_squads(24, 80, 999);
+    let member = core
+        .squad_members
+        .values()
+        .flatten()
+        .find(|m| m.attach_id == "deadc0de")
+        .expect("the member is stored");
+    assert!(member.tombstone, "the true death stands");
+}
+
+#[test]
 fn restore_refusal_names_the_never_bound_marker() {
     let never_bound = crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,
@@ -496,6 +607,7 @@ fn restore_legacy_member_uses_unique_receipt_harness() {
     let member = crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,
@@ -538,6 +650,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -548,6 +661,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -618,6 +732,7 @@ fn restore_retires_a_gone_worker_before_the_hold_branch_and_skips_its_tab() {
         &[crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -696,6 +811,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -706,6 +822,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -780,10 +897,13 @@ fn restore_member_cwd_falls_back_silently_for_a_pre_xcaef_member() {
 }
 
 #[test]
-fn restore_zero_live_squad_gets_a_shell_and_tombstones_dead_members() {
-    // AC1-EDGE: a persisted workspace whose members are all dead
-    // materializes with one shell pane, each dead member a tombstone; the
-    // reconciled tombstone is written back to the store.
+fn restore_zero_live_squad_gets_a_shell_and_keeps_unknown_members() {
+    // (x-8b51, supersedes the x-8f11 absence-tombstone contract) A persisted
+    // workspace whose members' liveness is UNKNOWN (no readable registry:
+    // no death evidence either) keeps every member - idle, no pane, no
+    // tombstone - and gets one shell tab. Absence is never death; the
+    // x-2990 retirement at a readable-registry restore remains the removal
+    // path, and the keep is noticed, never silent.
     let _s = StoreScratch::new("restore-dead");
     crate::squad_store::upsert(
         "dead-ws",
@@ -794,27 +914,127 @@ fn restore_zero_live_squad_gets_a_shell_and_tombstones_dead_members() {
     .unwrap();
     let mut core = empty_core();
     core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
     // No live set (no registry/roster under the scratch home).
     core.restore_squads(24, 80, 999);
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("kept 1 member(s) with no death evidence"),
+        "the keep is named: {notices}"
+    );
     assert_eq!(core.session.squads.len(), 1);
     let sq = &core.session.squads[0];
     assert_eq!(sq.name.as_deref(), Some("dead-ws"));
     assert_eq!(sq.tabs.len(), 1, "zero live members -> one shell tab");
     let sid = sq.id;
     assert!(
-        core.squad_members[&sid][0].tombstone,
-        "the dead member is tombstoned at restore"
+        !core.squad_members[&sid][0].tombstone,
+        "absence is never death: the member is kept, not tombstoned"
     );
     let loaded = crate::squad_store::load();
     assert!(
-        loaded.squads[0].members[0].tombstone,
-        "the tombstone is persisted"
+        !loaded.squads[0].members[0].tombstone,
+        "no tombstone is persisted either"
     );
     // Reap the spawned shell so the test leaks no process.
     let pids: Vec<u64> = core.panes.keys().copied().collect();
     for pid in pids {
         core.reap_pane(pid);
     }
+}
+
+#[test]
+fn restore_tombstones_on_a_positively_falsified_pid_only() {
+    // AC1-EDGE (x-8b51): a member whose registry row claims a live status
+    // but whose recorded pid is positively falsified is dead WITH evidence:
+    // the walk tombstones it and the write carries the reason.
+    let s = StoreScratch::new("restore-stale-pid");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[stored_member("feedface", false)],
+    )
+    .unwrap();
+    let mut claude_row = exited_claude_row("t-stale-pid-agent", None);
+    claude_row.attach_id = Some("feedface".into());
+    claude_row.exited = false;
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _reg = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![claude_row]);
+    let _stale = RestoreStaleIdsGuard;
+    set_restore_stale_ids(&["feedface"]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&[]);
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    core.restore_squads(24, 80, 999);
+    let member = core
+        .squad_members
+        .values()
+        .flatten()
+        .find(|m| m.attach_id == "feedface")
+        .expect("the member is stored");
+    assert!(
+        member.tombstone,
+        "a falsified pid is positive death evidence"
+    );
+    assert_eq!(
+        member.tombstone_reason.as_deref(),
+        Some("recorded pid is gone"),
+        "the write carries the reason: {:?}",
+        member.tombstone_reason
+    );
+    let loaded = crate::squad_store::load();
+    assert_eq!(
+        loaded.squads[0].members[0].tombstone_reason.as_deref(),
+        Some("recorded pid is gone"),
+        "the persisted tombstone carries its recorded reason"
+    );
+}
+
+#[test]
+fn restore_never_tombstones_a_member_when_the_registry_is_unreadable() {
+    // AC1-HP (x-8b51): absence from the live set is NOT death. The registry
+    // is unreadable, so no death evidence exists; the member is kept and the
+    // walk moves on (companion to the keep notice above; the store is the
+    // assert).
+    let s = StoreScratch::new("restore-unreadable");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[stored_member("cafef00d", false)],
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _reg = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(
+        std::iter::empty::<crate::agents_view::RegistryAgent>().collect::<Vec<_>>(),
+    );
+    // Empty override = readable registry with ZERO rows: the member is
+    // unknown-liveness, never dead.
+    core.restore_squads(24, 80, 999);
+    let member = core
+        .squad_members
+        .values()
+        .flatten()
+        .find(|m| m.attach_id == "cafef00d")
+        .expect("the member is stored");
+    assert!(
+        !member.tombstone,
+        "absence is never death: no tombstone without evidence"
+    );
+    assert!(member.tombstone_reason.is_none());
 }
 
 #[test]
@@ -900,6 +1120,7 @@ fn stored_worker(
     crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: Some(cwd.into()),
@@ -1059,6 +1280,7 @@ fn workspace_restore_resumes_members_and_a_rerun_focuses() {
             crate::squad_store::StoredMember {
                 attach_id: "deadbee1".into(),
                 tombstone: false,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -1368,11 +1590,14 @@ fn restore_reconstructs_a_separate_unnamed_lane_as_its_own_squad() {
     assert!(lane.name.is_none(), "restored unnamed");
     assert_eq!(lane.tabs.len(), 1, "zero-live lane gets its fallback shell");
     let lane_sid = lane.id;
+    // (x-8b51) The dead member's liveness is UNKNOWN (no registry names it:
+    // no death evidence), so it is kept, not tombstoned - absence is never
+    // death; it stays a member under its own lane either way.
     assert!(
         core.squad_members[&lane_sid]
             .iter()
-            .any(|m| m.attach_id == "deadbeef" && m.tombstone),
-        "the dead member restored as a tombstone under its own lane"
+            .any(|m| m.attach_id == "deadbeef" && !m.tombstone),
+        "the dead member is kept (never absence-tombstoned) under its own lane"
     );
     let pids: Vec<u64> = core.panes.keys().copied().collect();
     for pid in pids {

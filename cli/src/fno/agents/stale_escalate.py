@@ -34,7 +34,7 @@ def _unique(findings):
     )
 
 
-def question_text(findings, key: str) -> str:
+def question_text(findings, key: str, unknown_dimensions=()) -> str:
     unique = _unique(findings)
     shown = [
         f"{f.kind} {f.subject}: {f.basis} -> clear: {f.clear_command}"
@@ -42,10 +42,19 @@ def question_text(findings, key: str) -> str:
     ]
     if len(unique) > MAX_LISTED_ROWS:
         shown.append(f"and {len(unique) - MAX_LISTED_ROWS} more")
+    # An incomplete scan escalates what it DID reach and names what it did
+    # not. Withholding the whole ask instead made the sweep permanently mute
+    # wherever a deleted worktree root can never be fetched again.
+    caveat = ""
+    if unknown_dimensions:
+        caveat = (
+            f" The scan was INCOMPLETE - {', '.join(sorted(unknown_dimensions))} "
+            f"went unread, so more findings may exist."
+        )
     return (
         f"[{MARKER}:{key}] The fleet watchdog found {len(unique)} "
         f"unfinished-work finding(s). Each names the one command that clears "
-        f"it. Findings: {'; '.join(shown)}"
+        f"it.{caveat} Findings: {'; '.join(shown)}"
     )
 
 
@@ -145,6 +154,7 @@ def escalate_unfinished(
     root: Path,
     session_id: "str | None",
     cwd: Path,
+    unknown_dimensions=(),
 ) -> "tuple[str, str]":
     if not findings:
         reset_answered(root, marker=MARKER)
@@ -168,7 +178,7 @@ def escalate_unfinished(
     append_question_event(
         operator_question(
             question_id=qid,
-            question=question_text(unique, key),
+            question=question_text(unique, key, unknown_dimensions),
             session_id=session_id,
             cwd=str(cwd),
             ask=f"clear the top finding first: {_ask_line(unique)}",

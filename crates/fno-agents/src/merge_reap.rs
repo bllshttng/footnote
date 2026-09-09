@@ -200,14 +200,25 @@ fn merge_cleanup_rows(
 
 /// Stop the row's harness before the registry row drops. `Some(short)` is the
 /// confirmed stop (empty for a pane row, whose pane `fno agents rm` already
-/// kills); `None` refuses and keeps the row for the next pass.
+/// kills); `None` refuses and keeps the row for the next pass. `agents` is
+/// the pass-level snapshot: read at most once per reaper pass, on the first
+/// claude row that reaches this seam.
 fn stop_harness_confirmed(
     home: &AgentsHome,
     entry: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> Result<String, &'static str> {
     // A mux row's pane death IS the harness stop; rm handles it.
     if entry.mux.is_some() {
         return Ok(String::new());
+    }
+    // Positive death evidence first: a finished claude agent never leaves the
+    // roster, so its stop can never be confirmed by absence. The evidence
+    // instrument is claude's roster, so only a claude row consults it.
+    if entry.harness_name() == "claude"
+        && crate::gc_sweep::claude_death_reason(entry, agents).is_some()
+    {
+        return Ok(row_stop_short(entry).unwrap_or_default());
     }
     match crate::gc_sweep::stop_row_process(home, entry) {
         true => Ok(row_stop_short(entry).unwrap_or_default()),
@@ -399,6 +410,7 @@ fn run_request(
     };
     for entry in &rows {
         match crate::gc_sweep::stage_session_retirement(
+            home,
             entry,
             ledger,
             false,
@@ -433,6 +445,7 @@ fn run_request(
                     crate::gc_sweep::RetireRefusal::NativeRemoval(_) =>
                         "native_removal_unconfirmed",
                     crate::gc_sweep::RetireRefusal::NoReceipt(_) => "no_receipt",
+                    crate::gc_sweep::RetireRefusal::GraphObligation(_) => "open_do_row",
                 }
             )),
         }
@@ -565,6 +578,11 @@ pub(crate) fn consume_merge_cleanup_requests(
     let mut total_requests = 0usize;
     let mut in_grace = 0usize;
     let mut acted: u64 = 0;
+    // The agents snapshot is read at most once per reaper pass, on the first
+    // claude row that reaches a stop seam - never rows x 15s on a degraded
+    // roster.
+    let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
+        std::cell::RefCell::new(None);
     for root in roots {
         for request in pending.iter().filter(|r| r.repo == *root) {
             total_requests += 1;
@@ -591,7 +609,11 @@ pub(crate) fn consume_merge_cleanup_requests(
                 continue;
             }
             let seams = RequestSeams {
-                stop: &|entry| stop_harness_confirmed(home, entry),
+                stop: &|entry| {
+                    let mut memo = agents_memo.borrow_mut();
+                    let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
+                    stop_harness_confirmed(home, entry, agents)
+                },
                 surface_removal: &crate::gc_native::apply_active_surface_removal,
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,
@@ -1115,15 +1137,24 @@ mod tests {
             !receipt.resume_argv.is_empty(),
             "the receipt must carry the resume form: {receipt:?}"
         );
-        let effects: Vec<&str> = receipt
+        let effects: std::collections::BTreeMap<String, String> = receipt
             .effects
             .iter()
-            .map(|effect| effect.outcome.as_str())
+            .map(|effect| (effect.op.clone(), effect.outcome.clone()))
             .collect();
         assert_eq!(
-            effects,
-            vec!["confirmed-removed"],
+            effects.get("native-stop").map(String::as_str),
+            Some("confirmed-removed"),
+            "the confirmed stop must be named: {receipt:?}"
+        );
+        assert_eq!(
+            effects.get("active-surface").map(String::as_str),
+            Some("confirmed-removed"),
             "the native active-surface outcome must be named: {receipt:?}"
+        );
+        assert!(
+            effects.contains_key("resume-evidence"),
+            "the resumability evidence op must be present: {receipt:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }

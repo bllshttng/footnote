@@ -40,6 +40,45 @@ impl Drop for RestoreRegistryRowsGuard {
     }
 }
 
+//  The attach-ids the restore walk may treat as POSITIVELY dead
+// (a claimed-live status their own recorded pid falsifies, claude rows).
+// In tests, `RESTORE_STALE_IDS` overrides the file, same posture as
+// `RESTORE_REGISTRY_ROWS`: a unit test cannot populate the real registry,
+// and reading it would race whatever live rows the machine holds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RESTORE_STALE_IDS: std::cell::RefCell<Option<std::collections::HashSet<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn stale_live_attach_ids_for_restore() -> std::collections::HashSet<String> {
+    #[cfg(test)]
+    if let Some(set) = RESTORE_STALE_IDS.with(|p| p.borrow().clone()) {
+        return set;
+    }
+    std::fs::read_to_string(agents_view::registry_path())
+        .ok()
+        .map(|raw| agents_view::stale_live_attach_ids(&raw))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn set_restore_stale_ids(ids: &[&str]) {
+    RESTORE_STALE_IDS.with(|p| {
+        *p.borrow_mut() = Some(ids.iter().map(|s| s.to_string()).collect());
+    });
+}
+
+#[cfg(test)]
+pub(crate) struct RestoreStaleIdsGuard;
+
+#[cfg(test)]
+impl Drop for RestoreStaleIdsGuard {
+    fn drop(&mut self) {
+        RESTORE_STALE_IDS.with(|p| p.borrow_mut().take());
+    }
+}
+
 /// The native session ids a reap receipt preserves: a retired session's
 /// squad membership can outlive its tombstone until the sweep's squad
 /// wiring lands, so restore consults the receipts store as the death

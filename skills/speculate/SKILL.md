@@ -104,17 +104,16 @@ parallel installs only do real work the first time.
 
 ### 4. Spawn Parallel Agents
 
-Launch all variations simultaneously using the Agent tool with `run_in_background: true`:
+Launch all variations simultaneously using the Agent tool with `run_in_background: true`. The model comes from configured role routing or the invoking harness default - no model literal is hardcoded here. Bind each worker to the worktree Step 3 actually created by naming its absolute path in the prompt. Do NOT pass `isolation: "worktree"`, which creates a second, different worktree the state file never tracks:
 
 ```
 For each variation N:
   Agent(
     description="Speculate v{N}: {constraint}",
-    model="sonnet",
     run_in_background=true,
-    isolation="worktree",
     prompt="You are implementing variation {N} of {COUNT} for: {feature}.
       Your creative direction: {constraint}.
+      Work in the prepared worktree: {absolute worktree path from Step 3, branch speculate/<slug>-v{N}}.
       {skill_context if --skill provided}
 
       Implement the feature following this direction.
@@ -153,6 +152,8 @@ This starts dev servers on sequential ports and opens browser tabs for side-by-s
 
 ### 7. Pick Winner
 
+Speculation's own terminal is the comparison. Selection and any merge are the user's separately explicit action at this boundary. They never run on a timer, a default, or the agent's own judgment:
+
 Present options to the user:
 
 ```
@@ -164,7 +165,9 @@ Which variation do you want to keep?
   n) Discard all (exploration only)
 ```
 
-- **Keep winner:** Merge winning branch to current branch, clean up losers
+The answer to THIS question is the authorization:
+
+- **Keep winner:** Merge winning branch to current branch, clean up losers (only on an explicit answer naming it)
 - **Keep all:** Leave all branches for manual selection
 - **Keep none:** Clean up everything
 
@@ -184,7 +187,7 @@ fno agents workspace worktree cleanup --prefix speculate/
 
 ## Known Limitations and Deferred Work
 
-- Speculation does not select or merge a winner. See [LIMITATIONS.md](LIMITATIONS.md).
+- Speculation never selects or merges a winner on its own. Selection and merge run only on the user's explicit answer at the comparison boundary. See [LIMITATIONS.md](LIMITATIONS.md).
 
 ## See Also
 

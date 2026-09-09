@@ -5679,9 +5679,8 @@ mod tests {
 
     #[test]
     fn gc_keeps_synthesized_idle_row() {
-        // An adopted orphan row named on no node must survive the retirement
-        // sweep: NoProvenance -> Keep, so the row stays addressable until the
-        // operator resumes it or a node names it.
+        // An adopted orphan row named on no node survives the sweep: NoProvenance
+        // -> Keep, addressable until the operator resumes it or a node names it.
         let row = crate::gc::GcRow {
             origin: Some("spawn".into()),
             crowned: false,
@@ -5691,6 +5690,7 @@ mod tests {
             worktree_clean: None,
             branch_merged: None,
             planning: None,
+            planning_closed: Vec::new(),
             confirm_hold: None,
         };
         assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);

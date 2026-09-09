@@ -167,6 +167,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
     let member = crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,

@@ -7,6 +7,9 @@ source "$ROOT_DIR/scripts/lib/codex_utils.sh"
 FAIL=0
 SKILLS_ROOT="${CODEX_SKILLS_ROOT:-}"
 SKILLS_ROOT_RECORD="$ROOT_DIR/.fno/codex-skills-root"
+INVENTORY=0
+PYTHON="${FNO_PYTHON:-python3}"
+SKILL_DISCOVERY_PY="$ROOT_DIR/scripts/lib/skill_discovery.py"
 
 usage() {
   cat <<USAGE
@@ -14,6 +17,8 @@ Usage: ./scripts/doctor.sh [options]
 
 Options:
   --skills-root <path>   Override Codex skills root checked by doctor
+  --inventory            Print the full discovery table (path, source, digest)
+                         and exit; findings still set the exit code
   -h, --help             Show this help
 USAGE
 }
@@ -28,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       fi
       SKILLS_ROOT="$2"
       shift 2
+      ;;
+    --inventory)
+      INVENTORY=1
+      shift
       ;;
     -h|--help)
       usage
@@ -101,20 +110,65 @@ if command -v codex >/dev/null 2>&1; then
     echo "  [hint] rerun setup/doctor with --skills-root \"\$HOME/.agents/skills\" or another writable Codex-scanned directory"
     FAIL=1
   else
-    BROKEN=0
-    COUNT=0
-    while IFS= read -r link; do
-      COUNT=$((COUNT + 1))
-      if [[ ! -e "$link" ]]; then
-        echo "  [broken] $(display_path "$link")"
-        BROKEN=$((BROKEN + 1))
-        FAIL=1
-      fi
-    done < <(find "$SKILLS_ROOT_RESOLVED" -maxdepth 1 -type l \( -name 'codex--*' -o -name 'plugin--*' \) | sort)
+    # Same resolver + same inventory as setup.sh: one engine, no drift.
+    # python3 stays an optional dep: without it the inventory is unmeasured,
+    # not failed.
+    if ! command -v "${FNO_PYTHON:-python3}" >/dev/null 2>&1; then
+      echo "  [warn] ${FNO_PYTHON:-python3} unavailable; skill inventory unmeasured"
+    else
+    if [[ -n "${CODEX_PLUGIN_CACHE:-}" ]]; then
+      CACHE_ARGS=(--cache "$CODEX_PLUGIN_CACHE")
+    else
+      CACHE_ARGS=()
+    fi
+    PROBE="$("$PYTHON" "$SKILL_DISCOVERY_PY" probe --repo "$ROOT_DIR" "${CACHE_ARGS[@]+${CACHE_ARGS[@]}}")"
+    PLUGIN_PATH="$(sed -n 's/^plugin=//p' <<< "$PROBE")"
+    PLUGIN_VERSION="$(sed -n 's/^version=//p' <<< "$PROBE")"
+    if [[ -n "$PLUGIN_PATH" ]]; then
+      echo "  [info] installed plugin: $PLUGIN_VERSION ($(display_path "$PLUGIN_PATH"))"
+    else
+      echo "  [info] installed plugin: none (development aliases are the source)"
+    fi
 
-    echo "  [info] symlinks: $COUNT"
-    if [[ "$BROKEN" -eq 0 ]]; then
-      echo "  [ok] no broken symlinks"
+    INV="$("$PYTHON" "$SKILL_DISCOVERY_PY" inventory --repo "$ROOT_DIR" --root "$SKILLS_ROOT_RESOLVED" --tsv "${CACHE_ARGS[@]+${CACHE_ARGS[@]}}")"
+    if [[ "$INVENTORY" -eq 1 ]]; then
+      "$PYTHON" "$SKILL_DISCOVERY_PY" inventory --repo "$ROOT_DIR" --root "$SKILLS_ROOT_RESOLVED" "${CACHE_ARGS[@]+${CACHE_ARGS[@]}}"
+    fi
+    BROKEN=0
+    STALE=0
+    DUP=0
+    FOREIGN=0
+    while IFS=$'\t' read -r name status owner digest note; do
+      case "$status" in
+        broken)
+          echo "  [broken] $name: ${note:-dangling symlink}"
+          BROKEN=$((BROKEN + 1)) ; FAIL=1 ;;
+        stale)
+          echo "  [stale] $name: $note (relink with ./scripts/setup.sh --provider codex)"
+          STALE=$((STALE + 1)) ; FAIL=1 ;;
+        duplicate)
+          echo "  [duplicate] $name: exposed by the installed plugin AND a source alias (rerun ./scripts/setup.sh --provider codex to pick one)"
+          DUP=$((DUP + 1)) ; FAIL=1 ;;
+        unavailable)
+          echo "  [warn] $name: unusable discovery metadata - $note"
+          echo "         fix belongs to the owning project; it is not advertised as ready here" ;;
+        absent-from-plugin)
+          echo "  [gap] $name: not in the installed plugin; reinstall the plugin or use --skills-source development" ;;
+        *)
+          if [[ "$owner" == external:* ]]; then
+            FOREIGN=$((FOREIGN + 1))
+          fi ;;
+      esac
+    done < <(echo "$INV")
+
+    COUNT=$(( $(echo "$INV" | wc -l | tr -d ' ') ))
+    echo "  [info] entries: $COUNT"
+    if [[ "$((BROKEN + STALE + DUP))" -eq 0 ]]; then
+      echo "  [ok] no broken, stale or duplicate entries"
+    fi
+    if [[ "$FOREIGN" -gt 0 ]]; then
+      echo "  [info] $FOREIGN foreign link(s) exposed; ./scripts/setup.sh --provider codex curates them (restore lines are printed)"
+    fi
     fi
   fi
 else

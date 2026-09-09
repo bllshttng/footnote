@@ -4609,7 +4609,7 @@ def cmd_watchdog(
     for v, row in pairs:
         try:
             outcome, detail = wd.apply_verdict(
-                v, lanes=lanes, cwd=row.cwd, rotation=rotation
+                v, lanes=lanes, cwd=row.cwd, node=row.node, rotation=rotation
             )
         except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
             outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
@@ -4631,7 +4631,7 @@ def cmd_watchdog(
         # Every non-skipped outcome emits: the `outcome` field carries which
         # one it was, so no list here decides what is worth recording.
         wd.emit_event(
-            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+            wd.outcome_event(outcome),
             {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
              "outcome": outcome},
         )

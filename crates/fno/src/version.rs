@@ -18,12 +18,19 @@ pub fn version_json() -> serde_json::Value {
     } else {
         "release"
     };
+    // The front door's own Python resolution (the executed-path receipt): the
+    // script this door would exec, so a receipt can name the deployment the
+    // user actually runs instead of the venv a caller guessed at. None (null)
+    // when the resolver could not answer.
+    let python_script =
+        crate::bootstrap::resolved_python_script().map(|p| p.to_string_lossy().into_owned());
     json!({
         "package": env!("CARGO_PKG_VERSION"),
         "git_rev": env!("FNO_MUX_GIT_REV"),       // full sha, or the literal "unknown"
         "crates_rev": env!("FNO_MUX_CRATES_REV"), // crates/ subtree rev, or "unknown"
         "dirty": env!("FNO_MUX_GIT_DIRTY") == "1",
         "profile": profile,
+        "python_script": python_script,
     })
 }
 

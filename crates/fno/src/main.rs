@@ -74,6 +74,9 @@ enum Role {
     MuxTab(Vec<OsString>),
     /// (x-d865) `mux layout <get> ...`: dump the nested layout tree + geometry.
     MuxLayout(Vec<OsString>),
+    ///  `mux rows [--json]`: the one row-set receipt - the last
+    /// derived `layout.agents` with the paint verdict per row.
+    MuxRows(Vec<OsString>),
     /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its
     /// location; a selector naming no agent is retried as a tab location -
     /// ordinal, stable id, or name (x-1499).
@@ -238,6 +241,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // (x-d865) layout script porcelains, same carry-verbatim shape.
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
+            // `mux rows [--json] [--session <name>]`: the one row-set
+            // receipt. No positional; the verb family parses its own flags.
+            Some("rows") => Role::MuxRows(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
             // (x-07c2, hidden) thread: drive the dedicated thread pane for a
             // row from outside the TUI - the door `fno agents attach` uses.
@@ -384,6 +390,7 @@ fn main() {
         Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
         Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
+        Role::MuxRows(args) => exit_mux(mux_cli::mux_rows::rows(&args, env_session.as_deref())),
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
         Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
         Role::MuxThreadReseat(rest) => exit_mux(mux_cli::reseat(&rest, env_session.as_deref())),

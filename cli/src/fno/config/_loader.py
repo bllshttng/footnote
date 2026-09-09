@@ -9,51 +9,98 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from fno.config import SettingsModel
 
 
-def _settings_key() -> tuple[Optional[str], ...]:
-    """The declaration the settings resolution reads from the process.
+def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
+    """Canonical root from a linked worktree's ``.git`` pointer file; None
+    when ``.git`` is a real dir or unparseable."""
+    git_path = repo_root / ".git"
+    if not git_path.is_file():
+        return None
+    try:
+        text = git_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.strip().startswith("gitdir:"):
+            gitdir = line.split(":", 1)[1].strip()
+            idx = gitdir.find("/.git/worktrees/")
+            if idx > 0:
+                return Path(gitdir[:idx])
+    return None
 
-    Everything ``_candidate_paths`` consults: the four FNO_ env overrides,
-    ``HOME``, and the resolved repo root (itself keyed on cwd and
-    ``FNO_REPO_ROOT``). Two calls whose key agrees read the same settings
-    by construction; a test that changes any component gets a fresh load
-    with no cache_clear, which retires the per-test clearer registry and
-    the fixture swap (x-3d21 R5).
-    """
+
+def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
+    """``(path, mtime_ns, size)`` per existing candidate; OSError contributes
+    nothing. Locations stated directly - never ``_candidate_paths`` (it
+    migrates); canonical from the ``.git`` pointer, no subprocess."""
+    from fno.config_io import _global_settings_path
+
+    env_config = os.environ.get("FNO_CONFIG")
+    if env_config:
+        locations = [Path(env_config)]
+    else:
+        locations = [
+            repo_root / ".fno" / "config.toml",
+            repo_root / ".fno" / "settings.yaml",
+            repo_root / ".fno" / "config.local.toml",
+        ]
+        if os.environ.get("FNO_NO_CANONICAL_CONFIG") != "1":
+            canonical = _canonical_root_from_gitfile(repo_root)
+            if canonical is not None and canonical != repo_root:
+                locations += [
+                    canonical / ".fno" / name
+                    for name in ("config.toml", "settings.yaml")
+                ]
+        global_path = _global_settings_path()
+        if global_path.name == "settings.yaml":
+            locations.append(global_path.with_name("config.toml"))
+        locations.append(global_path)
+    fingerprint: list[tuple[str, int, int]] = []
+    for candidate in locations:
+        try:
+            st = candidate.stat()
+        except OSError:
+            continue
+        fingerprint.append((str(candidate), st.st_mtime_ns, st.st_size))
+    return tuple(fingerprint)
+
+
+def _settings_key() -> _SettingsKey:
+    """Declaration + content fingerprint; a same-key edit reparses with no
+    cache_clear. Contract: docs/path-config.md "Settings cache key"."""
     from fno.paths import resolve_repo_root
 
     env = os.environ.get
+    repo_root = resolve_repo_root()
     return (
         env("FNO_CONFIG"),
         env("FNO_GLOBAL_SETTINGS_PATH"),
         env("FNO_CONFIG_SEARCH_ROOT"),
         env("FNO_NO_CANONICAL_CONFIG"),
         env("HOME"),
-        str(resolve_repo_root()),
+        str(repo_root),
+        _settings_fingerprint(repo_root),
     )
 
 
+_SettingsKey = tuple[
+    Optional[str], Optional[str], Optional[str], Optional[str], Optional[str],
+    str, tuple[tuple[str, int, int], ...],
+]
+
+
 @lru_cache(maxsize=8)
-def _load_settings_at(key: tuple[Optional[str], ...]) -> "SettingsModel":
-    """Load, deep-merge, and cache the settings for one declaration ``key``.
-
-    Every existing candidate is read and deep-merged, highest priority winning
-    key-by-key: $FNO_CONFIG (when set, the only candidate) ->
-    <worktree>/.fno/settings.yaml -> <canonical>/.fno/settings.yaml
-    -> ~/.fno/settings.yaml -> built-in defaults. See _candidate_paths for
-    the canonical (main worktree from `git worktree list`) step that lets a
-    linked worktree read shared config. A key absent from a higher-priority file
-    falls through to the next file down, so global can hold shared defaults
-    while each project sets only its deltas.
-
-    Raises ValidationError on invalid values (glob chars, PATH_MAX, etc.).
-    Emits WARNING for unknown keys.
-    """
+def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
+    """Load, deep-merge, and cache the settings for one declaration ``key``:
+    every existing candidate read and deep-merged, highest priority winning
+    per key. Raises ValidationError on invalid values; warns unknown keys.
+    Key contract: docs/path-config.md."""
     from fno.config import (
         SettingsModel,
         _aliased_layers,

@@ -61,12 +61,17 @@ pub struct GcRow {
     /// `Some(false)`, `None` (nothing names the work or the main line).
     /// Asked only after cleanliness answered `true`.
     pub branch_merged: Option<bool>,
-    /// The statuses of EVERY node this session is named on, when the row is
-    /// a PLANNING assignment (blueprint/think phase, or a `bp-` dispatch
-    /// label): a planner's job ends at plan-written-and-node-ready, never at
-    /// feature-shipped. `None` for every other row - their open-work gate is
-    /// unchanged.
-    pub planning: Option<Vec<String>>,
+    /// The `(node, status)` pairs of EVERY node this session is named on,
+    /// when the row is a PLANNING assignment (blueprint/think phase, or a
+    /// `bp-` dispatch label): a planner's job ends at plan-written-and-node-
+    /// ready, never at feature-shipped. `None` for every other row - their
+    /// open-work gate is unchanged.
+    pub planning: Option<Vec<(String, String)>>,
+    /// The node ids THIS session actually closed on the planning lane: its
+    /// own blueprint/think sessions[] row carrying a non-empty `ended_at`
+    /// (x-5aef task 1.2). Empty on any other row. An empty set never
+    /// retires a planner: an assignment nobody closed stays outstanding.
+    pub planning_closed: Vec<String>,
     /// A hold computed beside the work verdict (x-5a62): the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
@@ -110,6 +115,11 @@ pub enum KeepReason {
     /// absent merge_status does not hold - absence has three explanations
     /// and none is `unmerged` - and rides the basis as unrecorded instead.
     PrStateContradicts { node: String, detail: String },
+    /// The node reads planning-complete, but THIS session's own
+    /// blueprint/think row on it carries no `ended_at` (x-5aef): the
+    /// completion belongs to an earlier assignment, so this quiet
+    /// replanning worker keeps its row with the unclosed node named.
+    PlanningUnclosed { node: String },
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
@@ -138,6 +148,9 @@ impl KeepReason {
             }
             KeepReason::NodeConflict { .. } => "sources disagree",
             KeepReason::PrStateContradicts { .. } => "pr state contradicts",
+            KeepReason::PlanningUnclosed { .. } => {
+                "planning assignment never closed by this session"
+            }
             KeepReason::OpenWork { .. } => "open work",
             KeepReason::Active { .. } => "active",
             KeepReason::TranscriptUnresolved => "transcript unresolved",
@@ -198,16 +211,31 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // shipped (AC3-HP). One open node still parked at `idea` (or any
             // non-complete status) holds the row: the plan it was dispatched
             // to write never landed there.
-            if let Some(statuses) = &row.planning {
+            // x-5aef task 1.2 binds that verdict to the CURRENT assignment:
+            // every node must ALSO sit in the set this session closed (its
+            // own blueprint/think row carrying `ended_at`). A quiet
+            // replanning worker inherits no completion an earlier blueprint
+            // wrote. An absent or empty closed set fails closed, exactly as
+            // the empty-status guard below does.
+            if let Some(assignments) = &row.planning {
                 // An EMPTY status set fails closed: a lane that fires on a
                 // vacuous all() would retire a row the graph could not
                 // describe.
-                if !statuses.is_empty()
-                    && statuses
+                if !assignments.is_empty()
+                    && assignments
                         .iter()
-                        .all(|s| PLANNING_COMPLETE_STATUSES.contains(&s.as_str()))
+                        .all(|(_, s)| PLANNING_COMPLETE_STATUSES.contains(&s.as_str()))
                 {
-                    return grace_gate(row, grace_secs);
+                    let unclosed = assignments
+                        .iter()
+                        .find(|(n, _)| !row.planning_closed.contains(n));
+                    return match unclosed {
+                        None => grace_gate(row, grace_secs),
+                        Some((n, _)) => (
+                            GcAction::Keep,
+                            Some(KeepReason::PlanningUnclosed { node: n.clone() }),
+                        ),
+                    };
                 }
             }
             (
@@ -318,6 +346,7 @@ pub fn gc_sweep(
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
+        &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
         &crate::daemon::rm_take_worktree,
     );
@@ -353,6 +382,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
+        &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
         &crate::daemon::rm_take_worktree,
     );
@@ -602,6 +632,10 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
 
 #[cfg(test)]
 mod tests {
+    fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
+        crate::claude_roster::ClaudeAgentsSnapshot::unknown("test: no snapshot staged")
+    }
+
     use super::*;
 
     // --- the orphan process sweep ---
@@ -795,14 +829,16 @@ mod tests {
             worktree_clean: Some(true),
             branch_merged: Some(true),
             planning: None,
+            planning_closed: Vec::new(),
             confirm_hold: None,
         }
     }
 
     /// The planning lane (AC3-HP): a blueprinter named on a node that reached
-    /// ready has FINISHED its assignment - the plan was written and the node
-    /// moved on. Quiet past grace retires it without closing the feature or
-    /// inventing a node.
+    /// ready has FINISHED its assignment - the plan was written, the node
+    /// moved on, and THIS session's own blueprint row carries `ended_at`.
+    /// Quiet past grace retires it without closing the feature or inventing
+    /// a node.
     #[test]
     fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
         let planner = GcRow {
@@ -810,7 +846,8 @@ mod tests {
                 node: "x-70e1".into(),
                 status: "ready".into(),
             },
-            planning: Some(vec!["ready".to_string()]),
+            planning: Some(vec![("x-70e1".to_string(), "ready".to_string())]),
+            planning_closed: vec!["x-70e1".to_string()],
             ..retiring()
         };
         assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
@@ -821,7 +858,8 @@ mod tests {
                 node: "x-70e1".into(),
                 status: "in_progress".into(),
             },
-            planning: Some(vec!["in_progress".to_string()]),
+            planning: Some(vec![("x-70e1".to_string(), "in_progress".to_string())]),
+            planning_closed: vec!["x-70e1".to_string()],
             ..retiring()
         };
         assert_eq!(gc_decide(&dispatched, GRACE), (GcAction::Retire, None));
@@ -838,7 +876,7 @@ mod tests {
                 node: "x-70e1".into(),
                 status: "idea".into(),
             },
-            planning: Some(vec!["idea".to_string()]),
+            planning: Some(vec![("x-70e1".to_string(), "idea".to_string())]),
             ..retiring()
         };
         assert_eq!(
@@ -870,6 +908,66 @@ mod tests {
                 })
             )
         );
+    }
+
+    /// x-5aef AC4-HP: a `bp-` row whose node reads `ready` but whose OWN
+    /// blueprint row carries no `ended_at` keeps its row - the completion
+    /// belongs to an earlier assignment, and the reason names the unclosed
+    /// node. Fail closed: an absent closed set keeps the row too.
+    #[test]
+    fn ac4_hp_ready_node_without_a_closed_assignment_holds_the_row() {
+        let replanner = GcRow {
+            work: WorkState::Open {
+                node: "x-5aef".into(),
+                status: "ready".into(),
+            },
+            planning: Some(vec![("x-5aef".to_string(), "ready".to_string())]),
+            planning_closed: Vec::new(),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&replanner, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::PlanningUnclosed {
+                    node: "x-5aef".into(),
+                })
+            )
+        );
+        // The fail-closed twin: a different node closed, this one not.
+        let partial = GcRow {
+            planning: Some(vec![
+                ("x-5aef".to_string(), "ready".to_string()),
+                ("x-9999".to_string(), "done".to_string()),
+            ]),
+            planning_closed: vec!["x-9999".to_string()],
+            ..replanner
+        };
+        assert_eq!(
+            gc_decide(&partial, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::PlanningUnclosed {
+                    node: "x-5aef".into(),
+                })
+            )
+        );
+    }
+
+    /// x-5aef AC4-EDGE: the same row retires once its own blueprint row
+    /// gains `ended_at` - the closed set now names every assigned node.
+    #[test]
+    fn ac4_edge_a_closed_assignment_releases_the_row() {
+        let replanner = GcRow {
+            work: WorkState::Open {
+                node: "x-5aef".into(),
+                status: "ready".into(),
+            },
+            planning: Some(vec![("x-5aef".to_string(), "ready".to_string())]),
+            planning_closed: vec!["x-5aef".to_string()],
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&replanner, GRACE), (GcAction::Retire, None));
     }
 
     #[test]
@@ -982,6 +1080,7 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
@@ -1001,6 +1100,7 @@ mod tests {
                 true
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_e| (None, None),
             &|_e| None,
         );
@@ -1076,6 +1176,7 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
@@ -1118,6 +1219,7 @@ mod tests {
                 true
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_e| (None, None),
             &|_e| None,
         );
@@ -1178,6 +1280,7 @@ mod tests {
             &|_| None,
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_| (None, None),
             &|_| None,
         );

@@ -218,7 +218,8 @@ fn wait_for_raw_frame(
             // (v71) Prune reload: same one-shot control connection shape.
             | Ok(ServerMsg::SquadReloaded { .. })
             // (v75) Exact-session retirement: same one-shot control shape.
-            | Ok(ServerMsg::SessionRetired { .. }) => {}
+            | Ok(ServerMsg::SessionRetired { .. })
+            | Ok(ServerMsg::AgentRowsReceipt { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}

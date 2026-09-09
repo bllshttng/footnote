@@ -41,6 +41,7 @@ pub struct ClaudeAgentRow {
     /// config dir from the fno accounts config. Set by the union reader,
     /// never by `parse_all_agents` (the parse stays dir-blind).
     pub account: Option<String>,
+    pub pid: Option<u32>,
 }
 
 impl ClaudeAgentRow {
@@ -52,8 +53,21 @@ impl ClaudeAgentRow {
             name: None,
             cwd: None,
             account: None,
+            pid: None,
         }
     }
+
+    pub fn with_pid(mut self, pid: Option<u32>) -> Self {
+        self.pid = pid;
+        self
+    }
+}
+
+/// The one terminal-state set, shared by every death-evidence reader (rm's
+/// live gate, the reaper's stop confirmation). `blocked` is deliberately
+/// absent: a blocked row may be rotated and resumed, so it holds.
+pub fn is_terminal_roster_state(state: &str) -> bool {
+    matches!(state, "done" | "stopped" | "failed")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +105,9 @@ impl ClaudeAgentsSnapshot {
         }
     }
 
+    /// True when at least one row parsed. Known rows can carry warnings (a
+    /// partial list): presence checks on them are sound, absence checks are
+    /// not - gate those on [`Self::warning_text`] being empty.
     pub fn is_known(&self) -> bool {
         matches!(self, Self::Known { .. })
     }
@@ -183,7 +200,11 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
         let state = ["state", "status"]
             .into_iter()
             .find_map(|key| object.get(key).and_then(|value| value.as_str()));
-        let mut row = ClaudeAgentRow::new(short_id, state);
+        let pid = object
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok());
+        let mut row = ClaudeAgentRow::new(short_id, state).with_pid(pid);
         row.session_id = ["session_id", "sessionId"]
             .into_iter()
             .find_map(|key| object.get(key).and_then(|value| value.as_str()))
@@ -202,12 +223,22 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
         parsed_rows.push(row);
     }
     if !warnings.is_empty() {
-        if agent_rows > 0 && parsed_rows.is_empty() {
-            warnings.push(format!(
-                "0 of {agent_rows} Claude agent rows parsed; agent list is unverified"
-            ));
+        if parsed_rows.is_empty() {
+            if agent_rows > 0 {
+                warnings.push(format!(
+                    "0 of {agent_rows} Claude agent rows parsed; agent list is unverified"
+                ));
+            }
+            return ClaudeAgentsSnapshot::Unknown {
+                rows: parsed_rows,
+                warnings,
+            };
         }
-        return ClaudeAgentsSnapshot::Unknown {
+        // Partial parse stays Known: the rows that did parse are real, and
+        // presence/terminal-state checks on them are sound. Absence is not -
+        // the skipped rows could hide the row - so absence-proofs gate on
+        // warning_text() being empty, not on this verdict alone.
+        return ClaudeAgentsSnapshot::Known {
             rows: parsed_rows,
             warnings,
         };
@@ -226,16 +257,26 @@ fn run_all_agents_command() -> Result<ClaudeCommandOutput, String> {
 /// ambient root (whatever `CLAUDE_CONFIG_DIR` the process already carries);
 /// `Some(dir)` pins the dir, which is how an isolated account's rows become
 /// visible to a reader that would otherwise never see them.
-fn run_all_agents_command_in(
-    config_dir: Option<&std::path::Path>,
-) -> Result<ClaudeCommandOutput, String> {
+/// The exact argv the roster snapshot shells out with, built here so the
+/// regression test can assert on it without spawning. A duplicated
+/// `.args(...)` chain here once issued `claude agents --json --all agents
+/// --json --all`, which exits 1 and read every snapshot as Unknown - the
+/// regression test exists because this line is exactly the kind a second
+/// chain slips back into.
+fn all_agents_command(config_dir: Option<&std::path::Path>) -> std::process::Command {
     let mut command = std::process::Command::new("claude");
     if let Some(dir) = config_dir {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
+    command.args(["agents", "--json", "--all"]);
+    command
+}
+
+fn run_all_agents_command_in(
+    config_dir: Option<&std::path::Path>,
+) -> Result<ClaudeCommandOutput, String> {
+    let mut command = all_agents_command(config_dir);
     let mut child = command
-        .args(["agents", "--json", "--all"])
-        .args(["agents", "--json", "--all"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -642,6 +683,32 @@ impl ClaudeRoster {
 mod tests {
     use super::*;
 
+    // x-9419: the roster snapshot shells out with EXACTLY
+    // [agents, --json, --all]. A duplicated .args chain once issued
+    // `claude agents ... agents --json --all`, which the CLI refuses with
+    // exit 1, so every snapshot read Unknown, claude_row_provably_absent
+    // was permanently false, and no claude-harness row was ever reapable.
+    // Asserting the BUILT ARGV (not a snapshot) is the point: a snapshot
+    // test passes on any machine where claude is absent.
+    #[test]
+    fn the_agents_snapshot_argv_is_not_duplicated() {
+        let command = all_agents_command(None);
+        assert_eq!(command.get_program().to_string_lossy(), "claude");
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "agents".to_string(),
+                "--json".to_string(),
+                "--all".to_string()
+            ],
+            "the roster shellout argv must be exactly [agents, --json, --all]: {argv:?}"
+        );
+    }
+
     // A 2-worker roster in the confirmed live shape (extra keys present, to prove
     // they are ignored).
     const SAMPLE: &str = r#"{
@@ -909,7 +976,35 @@ mod tests {
               {"kind":"background","state":"stopped"}
             ]"#,
         );
-        assert!(matches!(snapshot, ClaudeAgentsSnapshot::Unknown { .. }));
+        // A partial list is Known but carries its warnings: the parsed rows
+        // are real, the skipped ones could hide anything.
+        let ClaudeAgentsSnapshot::Known { rows, warnings } = &snapshot else {
+            panic!("rows that parsed are real; partial parse must not poison them");
+        };
+        assert_eq!(rows.len(), 1);
+        assert!(!warnings.is_empty());
         assert!(snapshot.find("aaaa1111").is_some());
+    }
+
+    #[test]
+    fn all_agents_zero_parsed_stays_unknown() {
+        let snapshot = parse_all_agents(br#"[{"kind":"background"}]"#);
+        assert!(matches!(snapshot, ClaudeAgentsSnapshot::Unknown { .. }));
+        assert!(snapshot.warning_text().contains("0 of 1"));
+    }
+
+    #[test]
+    fn all_agents_rows_carry_pid_when_emitted() {
+        let snapshot = parse_all_agents(
+            br#"[
+              {"kind":"background","id":"aaaa1111","state":"done","pid":65340},
+              {"kind":"background","id":"bbbb2222","state":"working"}
+            ]"#,
+        );
+        let ClaudeAgentsSnapshot::Known { rows, .. } = snapshot else {
+            panic!("clean list must be known");
+        };
+        assert_eq!(rows[0].pid, Some(65340));
+        assert_eq!(rows[1].pid, None);
     }
 }

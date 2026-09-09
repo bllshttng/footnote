@@ -295,6 +295,151 @@ def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
     assert "fno-py" in line, "marker verify must be present"
 
 
+# ---------------------------------------------------------------------------
+# Deployed-component convergence: partial success names what did not converge
+# ---------------------------------------------------------------------------
+
+
+def _make_crate_source(tmp_path: Path) -> None:
+    """The autouse fixture's sentinel source has no crates/ tree; the rust leg
+    needs crates/fno-agents to exist or it skips as skipped-no-crate."""
+    (tmp_path / "crates" / "fno-agents").mkdir(parents=True, exist_ok=True)
+
+
+def _deployed_self_reporter(tmp_path: Path, payload: str) -> Path:
+    """A deployed-shape executable whose `version --json` answers `payload`."""
+    import shutil as shutil_mod
+
+    script = tmp_path / "bin" / "fno-agents"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/bin/sh\n"
+        f"echo '{payload}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    assert shutil_mod.which("git") is not None or True  # env sanity, no-op
+    return script
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_cargo_failure_preserves_python_update_and_refuses_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed cargo rebuild does not fail the Python update (warn-and-continue
+    is the locked semantics), and the receipt refuses freshness it cannot prove:
+    the deployed binary cannot answer the verdict, and the output says so."""
+    import types
+
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: "cafef00d")
+    monkeypatch.setattr(update_mod, "_rust_subtree_rev", lambda src: "b" * 40)
+    monkeypatch.setattr(update_mod, "_RUST_MARKER_FILE", tmp_path / "rust-marker")
+    _make_crate_source(tmp_path)
+    stale_bin = _deployed_self_reporter(
+        tmp_path,
+        '{"crates_rev": "%s", "dirty": false}' % ("0" * 40),
+    )
+    monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: stale_bin)
+
+    fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _fake_run(cmd, *a, **kw):
+        if cmd and cmd[0] == "cargo":
+            return types.SimpleNamespace(returncode=2, stdout="", stderr="")
+        return fake_ok
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
+    )
+
+    result = runner.invoke(app, ["doctor", "update"])
+    assert result.exit_code == 0, result.output
+    assert "WARNING: cargo install failed (exit 2)" in result.output
+    # Partial success: the Python install still exec'd, --refresh riding along.
+    assert captured.get("file") == "/bin/sh"
+    assert "--refresh" in captured["args"][2]
+    # No convergence claim without a verdict: the transport says it cannot prove.
+    assert "component verdict unavailable" in result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_malformed_version_output_halts_the_rust_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy whose landed binary emits unparseable `version --json` output
+    cannot prove convergence: the post-deploy verify halts the leg loudly and
+    no installer runs."""
+    import types
+
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: "cafef00d")
+    monkeypatch.setattr(update_mod, "_rust_subtree_rev", lambda src: "b" * 40)
+    monkeypatch.setattr(update_mod, "_RUST_MARKER_FILE", tmp_path / "rust-marker")
+    _make_crate_source(tmp_path)
+    garbage_bin = _deployed_self_reporter(tmp_path, "not-json-at-all")
+    monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: garbage_bin)
+
+    fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
+    )
+
+    result = runner.invoke(app, ["doctor", "update"])
+    assert result.exit_code == 1
+    assert "post-deploy verify FAILED" in result.output
+    # The deployed binary cannot answer the verdict, and the receipt says so
+    # instead of claiming freshness.
+    assert "component verdict unavailable" in result.output
+    assert not captured, "a halt must never reach the installer exec"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_missing_cargo_names_component_evidence_and_still_installs_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cargo absent from PATH: the rust leg skips, the receipt names the
+    evidence gap, and the Python install still proceeds."""
+    import shutil as shutil_mod
+    import types
+
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: "cafef00d")
+    monkeypatch.setattr(update_mod, "_rust_subtree_rev", lambda src: "b" * 40)
+    monkeypatch.setattr(update_mod, "_RUST_MARKER_FILE", tmp_path / "rust-marker")
+    _make_crate_source(tmp_path)
+    stale_bin = _deployed_self_reporter(
+        tmp_path,
+        '{"crates_rev": "%s", "dirty": false}' % ("0" * 40),
+    )
+    monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: stale_bin)
+    real_which = shutil_mod.which
+    monkeypatch.setattr(
+        shutil_mod,
+        "which",
+        lambda name, **kw: None if name == "cargo" else real_which(name),
+    )
+    fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
+    )
+
+    result = runner.invoke(app, ["doctor", "update"])
+    assert result.exit_code == 0, result.output
+    assert "cargo is not on PATH" in result.output
+    assert "component verdict unavailable" in result.output
+    assert captured.get("file") == "/bin/sh"
+
+
 def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -390,3 +535,46 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
     assert result.exception is None
     # execvp was reached (the real update_command ran to completion on this path).
     assert execvp_calls, "execvp must be reached via the real update_command delegation"
+
+
+def test_component_verdict_transport_builds_the_native_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transport hands the binary a bindir + expected rev, includes the mux
+    only when the source carries crates/fno, and forwards the python-tool
+    evidence when given."""
+    import types
+
+    import fno.update as update_mod
+
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    (source.parent / "crates" / "fno").mkdir(parents=True)
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    verdict_bin = bindir / "fno-agents"
+    captured: dict = {}
+
+    def _fake_run(cmd, *a, **kw):
+        captured["cmd"] = list(cmd)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout='{"converged": true, "components": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
+    report = update_mod._component_verdict(
+        source, "a" * 40, bindir, verdict_bin,
+        python_tool={"rev": "cafe", "expected": "beef", "evidence": "2 .py differ"},
+    )
+    cmd = captured["cmd"]
+    assert "--bindir" in cmd and str(bindir) in cmd
+    assert "--expected" in cmd and "a" * 40 in cmd
+    assert "--include-mux" in cmd
+    assert "--attempted" not in cmd
+    assert "--python-rev" in cmd and "cafe" in cmd
+    assert "--python-expected" in cmd and "beef" in cmd
+    assert "--python-evidence" in cmd and "2 .py differ" in cmd
+    assert report == {"converged": True, "components": []}

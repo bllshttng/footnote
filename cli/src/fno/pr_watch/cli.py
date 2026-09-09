@@ -310,8 +310,9 @@ def _wd_apply_and_emit(wd, verdict, *, cwd: str, agent: str, label: str) -> str:
     except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
         outcome, detail = "refused", f"{label} crashed: {exc!r}"
     wd.emit_event(
-        "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-        {"row_id": verdict.row_id, "verdict": verdict.verdict, "detail": detail},
+        wd.outcome_event(outcome),
+        {"row_id": verdict.row_id, "verdict": verdict.verdict, "detail": detail,
+         "outcome": outcome},
     )
     return outcome
 
@@ -778,23 +779,23 @@ def tick() -> None:
                             )
                             recoverable_results.extend(results)
                             for result_item in results:
-                                # A refused recovery candidate is refound and
-                                # refused again by every tick until it ages out of
+                                # A non-applied recovery candidate is refound and
+                                # re-decided by every tick until it ages out of
                                 # the recency window; publish it once per recovery
                                 # signature, not once per 600s forever. An applied
-                                # row registered and never recurs.
+                                # row registered and never recurs. A deferred row
+                                # was never attempted, so there is nothing to say.
                                 if result_item["outcome"] == "applied" or (
-                                    result_item["outcome"] == "refused"
+                                    result_item["outcome"] != "deferred"
                                     and result_item["session_id"] in fresh_recovery_ids
                                 ):
                                     _wd.emit_event(
-                                        "watchdog_applied"
-                                        if result_item["outcome"] == "applied"
-                                        else "watchdog_refused",
+                                        _wd.outcome_event(result_item["outcome"]),
                                         {
                                             "row_id": result_item["session_id"],
                                             "verdict": _wd.RECOVERABLE,
                                             "detail": result_item["detail"],
+                                            "outcome": result_item["outcome"],
                                         },
                                     )
                         # Stamp the recovery receipt gate: what was published

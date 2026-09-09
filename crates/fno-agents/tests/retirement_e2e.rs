@@ -2,7 +2,11 @@
 //! receipt, and the completion decision over staged native stores - each
 //! real decision/transport exercised once, deterministically, with named
 //! acceptance criteria. Later tasks extend this target with completion,
-//! lifecycle and resume cases.
+//! lifecycle and resume cases. The archived-session record journey
+//! (x-5aef AC6-HP) lives in `src/daemon/tests/gc_receipts.rs`
+//! (`the_archived_session_record_survives_cwd_deletion_and_resolves`),
+//! because its doors - the sweep's injected seams and the resume-hint
+//! resolver - are crate-private.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

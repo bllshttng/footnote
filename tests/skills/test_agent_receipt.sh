@@ -561,13 +561,13 @@ fi
 # ===========================================================================
 # US3 - --yolo opt-in: appended to the spawn/host argv only when explicit
 # ===========================================================================
-# ---- AC3-ERR: code payload without --yolo refuses before spawn --------------
+# ---- AC3-ERR: code payload without --yolo delegates; the spawn seam owns the gate
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json a1b2c3d4 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
-if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"Pass -Y/--yolo"* ]] \
-   && [[ ! -s "$SPAWN_LOG" ]]; then
-  pass "AC3-ERR no --yolo -> refused before spawn"
+if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" != *"Pass -Y"* ]] \
+   && grep -q "agents spawn" "$SPAWN_LOG"; then
+  pass "AC3-ERR no --yolo -> wrapper delegates, the seam owns the bounded-codex gate"
 else
   fail "AC3-ERR sandboxed code refusal: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi

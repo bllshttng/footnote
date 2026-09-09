@@ -285,6 +285,10 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
 # an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
 # re-attribute a row's cost. Same writer-protection rationale as v27.
+# v30 adds the effective git common-dir grant for Codex threads. The path is a
+# positive receipt of which repository metadata the sandbox can write; absence
+# means unresolved, never an empty string. Older rows remain readable and the
+# schema bump prevents an older writer from erasing the stamp.
 # The version NUMBER is read from the single-owner TOML that build.rs projects
 # from crates/fno-agents/src/registry_schema.toml; bump there, not here.
 def _read_schema_version() -> int:
@@ -458,6 +462,10 @@ class AgentEntry:
     # the Rust RegistryEntry so a Python write-back preserves the stamp
     # (additive-optional, the v11-v19 shape).
     sandbox_posture: Optional[str] = None
+    # v30: the effective git common-dir writable root for a Codex thread. A path
+    # identifies the repository; None means the grant was not resolved. This
+    # mirrors Rust so Python read-modify-write cannot erase the stamp.
+    git_grant: Optional[str] = None
     # What created this row, written once at birth and never restamped:
     # "operator" for a session a human started by hand (the SessionStart
     # register hook / ``fno agents register``), "spawn" for a worker footnote

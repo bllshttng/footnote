@@ -68,7 +68,7 @@ def _capture(monkeypatch, settings):
     monkeypatch.setattr(_hm, "resolve_dispatch", _spy)
     # The grid is a separate axis; keep it out of these argv assertions.
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda node, **kw: (None, None, "grid=test-stub")
+        advance, "_grid_lane_for", lambda node, **kw: (None, None, None, None, "grid=test-stub")
     )
     return captured
 
@@ -196,7 +196,7 @@ def test_failed_spawn_emits_no_receipt(monkeypatch, tmp_path):
     monkeypatch.setattr(advance.subprocess, "run", fake_run)
     monkeypatch.setattr("fno.config.load_settings", lambda: _settings())
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda node, **kw: (None, None, None)
+        advance, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
     )
     ev = tmp_path / "events.jsonl"
     with pytest.raises(advance.SpawnError):

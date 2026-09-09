@@ -76,4 +76,4 @@ This is a **router**, not a monolith. Parse the first argument token:
 
 ## Multi-CLI
 
-Claude-Code primary. `ship pr` needs everything `/pr` needs (`fno`, `gh`, `git`, a Haiku-capable provider for `create`). `ship doc` needs `fno` (the `research` + `evals grade` verbs). If a dependency is missing, the type fails loud and reports it - it never fakes a PR, a brief, or a grade.
+Claude-Code primary. `ship pr` needs everything `/pr` needs: `fno`, `gh`, `git`, and the `create` worker from `/pr`'s configured role routing (`/pr` owns that contract, not this skill). `ship doc` needs `fno` (the `research` + `evals grade` verbs). If a dependency is missing, the type fails loud and reports it - it never fakes a PR, a brief, or a grade.

@@ -13,15 +13,13 @@ Load references as needed when writing guides:
 | [references/guide-template.md](references/guide-template.md) | Writing a new how-to guide (Step 3) | Full template with frontmatter, required sections, formatting rules |
 | [references/content-elements.md](references/content-elements.md) | Adding screenshots, common issues, reader testing (Step 4) | Screenshot descriptions, common issues boxes, pro tips, reader testing prompts |
 
-## Step 0: Check if How-To Guides Enabled (MANDATORY)
+## Step 0: Scope the Guides
 
-Read from config.toml -> `config.docs.how_to_guides`
-If absent or false: "How-to guides are not configured. Run `/setup --full` to enable."
-If true: proceed. Read roles from `config.docs.roles`.
+How-to guides run on a ship-docs work order that requests them. There is no config gate: the retired doc keys are not in the schema, so do not read or write them. The request supplies the audience roles. The request can also override the directory.
 
 ### Locate How-To Directory
 
-Read from config.toml -> `config.docs.how_to_path` (default: `docs/howto`)
+Default `docs/howto`. The request can override it.
 
 ```
 {how_to_path}/{role}/{feature}.md
@@ -29,23 +27,19 @@ Read from config.toml -> `config.docs.how_to_path` (default: `docs/howto`)
 
 ### Discover Roles from Config
 
-Read `config.docs.roles` from config.toml:
+Read the roles from the work order (the request names the app's user roles):
 
 ```yaml
-config:
-  docs:
-    how_to_guides: true
-    how_to_path: docs/howto
-    roles: [admin, user]  # <- Your app's user roles
+roles: [admin, user]  # from the request; your app's user roles
 ```
 
-If `config.docs.roles` is absent or empty: skip role-based generation.
+If the request names no roles: write one guide set with no role split.
 
 ### Check for Existing Guides First
 
 ```bash
 # ALWAYS check if a guide already exists for this feature
-# Check each role from config.docs.roles
+# Check each role from the work order's role list
 ls {how_to_path}/{role}/
 ```
 
@@ -63,7 +57,7 @@ ls {how_to_path}/{role}/
 
 ## Target Audiences
 
-Roles are configured in config.toml -> `config.docs.roles`. Example:
+Roles come from the work order. Example:
 
 | Role | Directory | Concerns | Tone |
 |------|-----------|----------|------|
@@ -75,7 +69,7 @@ Roles are configured in config.toml -> `config.docs.roles`. Example:
 ### 1. Gather Context
 
 ```bash
-# Check existing guides for this feature across all roles (from config.docs.roles)
+# Check existing guides for this feature across all roles
 ls {how_to_path}/{role}/
 ```
 
@@ -110,11 +104,11 @@ For each issue found:
 
 ### 6. Save Guide
 
-**Output path:** `{config.docs.how_to_path}/{role}/{feature}.md`
+**Output path:** `{how_to_dir}/{role}/{feature}.md`
 
 **One file per role per feature.** If a feature is relevant to multiple roles, create separate files with audience-appropriate language.
 
-**NEVER save how-to guides in:** project `src/` or other non-configured locations. They always go in `{config.docs.how_to_path}/{role}/`.
+**NEVER save how-to guides in:** project `src/` or other non-requested locations. They always go in `{how_to_dir}/{role}/`.
 
 ## Quality Checklist
 
