@@ -1688,10 +1688,9 @@ def _grid_lane_for(
     """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
 
     One seam: tests monkeypatch this name, and a caller reaching past it
-    bypasses every patch; placement and spawn compose verb ``target`` through
-    here. A decline surfaces the chain's terminal verbatim, never refusing
-    (Locked 10). Route and account ride beside harness/model as one row fact.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    bypasses every patch. A decline surfaces the chain's terminal verbatim,
+    never refusing (Locked 10). Route and account ride beside harness/model
+    as one row fact. Contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None, None, None

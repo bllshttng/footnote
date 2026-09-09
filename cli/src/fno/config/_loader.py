@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
-    """Canonical root from a linked worktree's ``.git`` pointer, no
-    subprocess; None when ``.git`` is a real dir or unparseable."""
+    """Canonical root from a linked worktree's ``.git`` pointer file; None
+    when ``.git`` is a real dir or unparseable."""
     git_path = repo_root / ".git"
     if not git_path.is_file():
         return None
@@ -72,9 +72,8 @@ def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
 
 
 def _settings_key() -> _SettingsKey:
-    """Declaration (env overrides, HOME, repo root) + content fingerprint of
-    the candidates; a same-key edit now reparses with no cache_clear. Full
-    contract: docs/path-config.md "Settings cache key" (x-3d21 R5)."""
+    """Declaration + content fingerprint; a same-key edit reparses with no
+    cache_clear. Contract: docs/path-config.md "Settings cache key"."""
     from fno.paths import resolve_repo_root
 
     env = os.environ.get

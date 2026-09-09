@@ -105,10 +105,9 @@ def merge_event_histories(*histories: Iterable[dict]) -> list[dict]:
 
 
 def read_events(path: Optional[Path] = None) -> list[dict]:
-    """Read raw event envelopes across retained rotation, oldest first. The
-    Rust emitter keeps one ``.1`` generation; reading it before the active
-    file preserves failure/reset order across rotation. A truncated or
-    non-JSON line is skipped and never raises; absent files yield []."""
+    """Read raw event envelopes across retained rotation, oldest first; the
+    ``.1`` generation is read first so order survives rotation. A truncated
+    or non-JSON line is skipped; absent files yield []."""
     targets = [path] if path is not None else _default_event_paths()
     histories: list[list[dict]] = []
     for target in targets:

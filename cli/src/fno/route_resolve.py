@@ -330,9 +330,8 @@ _DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
 
 
 def _declared_rows(settings: object) -> dict[str, Any]:
-    """The CONFIG-declared rows exactly (never the built-in fallback). Rows
-    arrive as pydantic models or mappings; reads go through ``_field`` so
-    both shapes survive (x-947c: the Mapping filter dropped every model row)."""
+    """The CONFIG-declared rows exactly (never the built-in fallback); reads
+    via ``_field`` because rows arrive as pydantic models (x-947c)."""
     try:
         models = getattr(getattr(settings, "routing", None), "models", None) or []
         rows = [r for r in models if r is not None]
