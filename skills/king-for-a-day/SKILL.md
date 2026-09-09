@@ -320,6 +320,7 @@ An L-sized node with no design should get a `/think` pass, not a builder.
 When an S node is next in a chain you just serialized but unselectable for want of a plan, author the plan and link it.
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
+The machine enforces the implementation half in a court session: `hooks/king-delegation-guard.sh` refuses source writes and names the spawn and advance verbs; writes inside the plans directory stay allowed (`config.king.implementation_guard` turns it to `warn` or `off`).
 Use `fno do plan path` for the canonical filename.
 
 **3d. Batch blueprints: up to three per session, one plan per shape.**
