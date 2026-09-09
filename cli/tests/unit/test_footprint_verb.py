@@ -854,6 +854,26 @@ def test_live_root_pids_spares_an_advancing_row_and_names_only_the_silent_one(
     assert witness_calls == ["t-silent-row"]
 
 
+def test_live_root_pids_spends_no_advancing_probes_on_a_spent_deadline(monkeypatch) -> None:
+    """The advancing pass is a budget consumer: once the reading's deadline is
+    gone, probes stop and the rows fall to the witness, which fails closed."""
+    import time as time_mod
+
+    from fno import doctor_footprint
+
+    row = _codex_thread_row("t-late-row")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    def refused(*args, **kwargs):
+        raise AssertionError("advancing probe ran on a spent deadline")
+
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", refused)
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time_mod.monotonic() - 1)
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+
+
 def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) -> None:
     """A pane burns CPU inside the mux server process the reading attributes;
     whatever the probe answers, the pane adds no unattributed cost. Only an

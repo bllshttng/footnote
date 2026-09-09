@@ -440,7 +440,12 @@ def _live_root_pids(
         unresolved_rows = [
             row for row in unrouted_rows if id(row) not in resolved_codex_ids
         ]
-        advancing_ids = {id(row) for row in unresolved_rows if _row_is_advancing(row)}
+        advancing_ids: set[int] = set()
+        for row in unresolved_rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                break  # out of budget: the rest stay with the witness, fail closed
+            if _row_is_advancing(row):
+                advancing_ids.add(id(row))
         fleet_unrouted = [
             row
             for row in unresolved_rows
