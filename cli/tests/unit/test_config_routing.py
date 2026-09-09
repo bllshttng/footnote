@@ -13,9 +13,9 @@ from pathlib import Path
 from fno.config import RoutingBlock, RoutingModelBlock, SettingsModel
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-# The sample lives INSIDE the package so an installed wheel finds it (the
-# events-schema precedent); a source checkout does too.
-_SAMPLE = _REPO_ROOT / "cli" / "src" / "fno" / "routing_sample.toml"
+# The sample ships in its own data package beside fno/ (pure data; the Python
+# tree is budget-capped), packaged for the wheel by the same packages list.
+_SAMPLE = _REPO_ROOT / "cli" / "src" / "fno_routing_sample" / "routing_sample.toml"
 
 
 def _settings(payload: dict) -> SettingsModel:
