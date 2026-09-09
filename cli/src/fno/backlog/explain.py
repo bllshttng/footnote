@@ -110,8 +110,8 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
     return Gate(name, None, None, f"unreadable: {exc}", key=key)
 
 
-#: Sentinel for "no load decision supplied; sample one". Distinct from None,
-#: which means the shared read already ran and found the gate unreadable.
+#: Sentinel for "sample one"; None means the shared read ran and found the
+#: gate unreadable.
 _UNSAMPLED: object = object()
 
 
@@ -696,10 +696,9 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
-    # The spawn's load gate refuses machine-wide, so a preview that left stop
-    # empty would promise a dispatch the real spawn refuses (the dry run once
-    # passed every gate at load 255/120 while the arm died on exit 79). One
-    # decision sample feeds both this stop and the gates row below.
+    # The load gate refuses machine-wide; a preview that left stop empty
+    # would promise a dispatch the real spawn refuses. One decision sample
+    # feeds both this stop and the gates row below.
     from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
 
     load_decision = _explain_load_decision()

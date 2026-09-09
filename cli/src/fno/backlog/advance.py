@@ -3289,8 +3289,8 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        # The error is already the tail of stderr, so tail THIS too: the tick's
-        # visible window must end at the error's end, where the refusal is.
+        # The error is the tail of stderr already; tail this too so the
+        # visible window ends at the refusal.
         _tick(0, "spawn-failed", f"node={node_id} error={error[-140:]}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error

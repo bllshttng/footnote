@@ -1362,9 +1362,8 @@ def load_gate_decision(
         return None
     if snapshot.spawn_load_status == "unavailable":
         # OSError: unreadable. AttributeError: the platform has no getloadavg
-        # at all (the Rust gate cfg-guards the same case). Keep this message
-        # byte-identical to the Rust gate's: the reachable-paths baseline
-        # records the pair as a msg-twin.
+        # at all (the Rust gate cfg-guards the same case). Message stays
+        # byte-identical to the Rust gate's: baseline records the twin.
         message = "spawn-gate: could not read load average; skipping the load check"
         return ("skip_unreadable", message, {})
     load1 = snapshot.load_1m
