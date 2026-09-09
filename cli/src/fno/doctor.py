@@ -635,17 +635,13 @@ def _component_convergence(
 
     cargo_bin = _cargo_bin_path()
     report = _update._component_verdict(
-        src,
-        subtree,
-        cargo_bin.parent if cargo_bin else Path.home() / ".cargo" / "bin",
+        src, subtree, cargo_bin.parent if cargo_bin else Path.home() / ".cargo" / "bin",
         Path(verdict_bin),
         python_tool={
             "rev": marker,
             "expected": _source_rev(src),
             "evidence": (
-                f"{content_drift} .py file(s) on disk differ from source"
-                if content_drift
-                else None
+                f"{content_drift} .py file(s) on disk differ from source" if content_drift else None
             ),
             "error": None if marker else "the installed-rev marker could not be read",
         },
