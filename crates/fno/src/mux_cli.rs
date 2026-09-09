@@ -443,6 +443,8 @@ pub fn pick_session() -> Option<String> {
 }
 
 /// A logical picker keystroke, folded from raw bytes (arrows -> Up/Down).
+pub mod mux_rows;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickKey {
     Up,
@@ -5550,15 +5552,12 @@ fn render_reply(
         }
         ServerMsg::LayoutTree { squads } => {
             if json {
-                // Machine-first: the nested tree + geometry a consumer diffs.
                 println!(
                     "{}",
                     serde_json::to_string(&squads).unwrap_or_else(|_| "[]".into())
                 );
             } else {
-                // The operator-readable rendering (x-1499): one row per pane,
-                // joined to its worker, with both tab identifier forms and
-                // the geometry's units named once below the rows.
+                // The operator-readable rendering (x-1499): one row per pane.
                 let rows = layout_rows(&squads);
                 for row in &rows {
                     println!("{row}");
@@ -5569,6 +5568,7 @@ fn render_reply(
             }
             EXIT_OK
         }
+        ServerMsg::AgentRowsReceipt { rows } => mux_rows::render_receipt(&rows, json),
         ServerMsg::PaneLocation {
             fno_id,
             squad_id,

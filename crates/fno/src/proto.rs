@@ -312,7 +312,10 @@ fn default_true() -> bool {
 /// the stop leg on an Unmeasured row; floor stays 58.
 /// v75 (x-7649): `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
 /// the exact-session retirement op; floor stays 58.
-pub const PROTO_VERSION: u32 = 75;
+/// v76 (x-8b51): `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
+/// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor
+/// stays 58.
+pub const PROTO_VERSION: u32 = 76;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -711,6 +714,14 @@ pub enum ControlVerb {
         #[serde(default)]
         workers: bool,
     },
+    /// (x-8b51) The one row-set receipt: the server's last-published
+    /// `layout.agents`, one [`AgentRowReceipt`] per row ->
+    /// [`ServerMsg::AgentRowsReceipt`]. The instrument behind
+    /// `fno mux rows`: a row present here but absent on screen is a client
+    /// display suppressor (fold/collapse); a row absent here is a server
+    /// join bug. Presence and suppression were indistinguishable from
+    /// outside before this verb.
+    AgentRowsGet,
     /// Resolve an `fno_id` to its live location -> [`ServerMsg::PaneLocation`],
     /// or one of three DISTINCT error codes ([`err_code::REGISTRY_UNAVAILABLE`] /
     /// [`err_code::NOT_FOUND`] / [`err_code::NOT_PANE_HOSTED`]); an empty
@@ -1265,6 +1276,38 @@ pub struct AgentRow {
     /// reach command - the server re-derives the real tier.
     #[serde(default)]
     pub reach: Reach,
+}
+
+/// (v76, x-8b51) One row of the `fno mux rows` receipt: the facts a row-set
+/// reader needs, trimmed from [`AgentRow`]. `pane: None` is paneless (the
+/// substrate the field names); `reason` is the server's paint verdict -
+/// `None` means "would paint; any non-paint on screen is a client-side fold",
+/// never "unknown". A row present in this receipt but absent on screen is a
+/// display suppressor; a row absent from the receipt is a server join bug.
+/// That split is the verb's whole point.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRowReceipt {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// The squad the row renders under, as (id, name); `None` is the
+    /// catch-all elsewhere bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad: Option<(u64, Option<String>)>,
+    /// The pane hosting the row in this session; `None` = paneless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u64>,
+    #[serde(default)]
+    pub exited: bool,
+    #[serde(default)]
+    pub tombstone: bool,
+    /// The paint verdict: a `no_pane_reason` text, the tombstone marker, or
+    /// `None` (would paint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// What the row's gesture opens (carried verbatim; render-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumable: Option<bool>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -2159,6 +2202,8 @@ pub enum ServerMsg {
     /// Answer to [`ControlVerb::LayoutGet`]: the nested tree + per-pane geometry
     /// for the requested scope (Locked Decision 5).
     LayoutTree { squads: Vec<SquadLayout> },
+    /// Answer to [`ControlVerb::AgentRowsGet`] (x-8b51): the row-set receipt.
+    AgentRowsReceipt { rows: Vec<AgentRowReceipt> },
     /// Answer to [`ControlVerb::PaneWhere`]: where an `fno_id` lives right now.
     /// The multi-tab / multi-pane shape is mirroring-ready (one id can host
     /// several panes across tabs). Never emitted empty-but-successful.
@@ -4057,7 +4102,8 @@ mod tests {
         // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
         // version never moves backwards whichever branch lands first.
         // v75 (x-7649) took 75; floor stays 58.
-        assert_eq!(PROTO_VERSION, 75);
+        // v76 (x-8b51) took 76; floor stays 58.
+        assert_eq!(PROTO_VERSION, 76);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

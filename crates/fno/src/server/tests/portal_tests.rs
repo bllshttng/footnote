@@ -1929,6 +1929,7 @@ fn the_restore_notice_names_both_held_kinds() {
         &[crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -2124,6 +2125,7 @@ fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
         &[crate::squad_store::StoredMember {
             attach_id: "deadbee1".into(),
             tombstone: true,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
