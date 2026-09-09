@@ -567,12 +567,12 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
         for row in live_rows:
             if row.provider:
                 continue
-            if (row.origin or "unknown") != "spawn":
-                # Only spawn-minted rows can carry a spawn-time provider
-                # stamp, so only their absence is a defect this gate can name.
-                # Operator hand-starts and adopted rows are born unstamped;
-                # warning about them on every gate read taught nobody anything
-                # and rode stderr ahead of real refusals.
+            if row.origin == "operator":
+                # A hand-started session can never carry a spawn-time provider
+                # stamp; warning about it on every gate read taught nobody
+                # anything and rode stderr ahead of real refusals. Adopted and
+                # unknown-origin rows keep the warning: absence means unknown,
+                # and an unstamped spawn-minted row is the defect it names.
                 continue
             shape = (row.harness or "unknown", row.origin or "unknown")
             unattributed[shape] = unattributed.get(shape, 0) + 1

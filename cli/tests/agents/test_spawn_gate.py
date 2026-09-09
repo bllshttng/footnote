@@ -1087,9 +1087,10 @@ class TestRunGate:
         ) in capsys.readouterr().err
 
     def test_operator_origin_unstamped_row_is_silent(self, monkeypatch, capsys):
-        """A hand-started session can never carry a spawn-time provider
-        stamp; warning about it on every gate read taught nobody anything and
-        rode stderr ahead of real refusals."""
+        """Only the operator shape goes quiet: a hand-started session can
+        never carry a spawn-time provider stamp, and warning about it on every
+        gate read rode stderr ahead of real refusals. Adopted and unknown
+        origins keep the warning."""
         row = AgentEntry(
             name="operator-live",
             harness="claude",
