@@ -277,6 +277,21 @@ def test_compare_missing_sides() -> None:
     assert "u" not in cmp["tasks"] and "w" not in cmp["tasks"]
 
 
+def test_compare_scores_one_revision_pair() -> None:
+    rows = [
+        {**_row("t", "regression", True), "variant": "baseline", "bank_rev": "new"},
+        {**_row("t", "regression", True), "variant": "baseline", "bank_rev": "new"},
+        {**_row("t", "regression", False), "variant": "baseline", "bank_rev": "old"},
+        {**_row("t", "regression", True), "variant": "v1", "bank_rev": "v1rev"},
+    ]
+    cmp = compare_variants(rows, "v1")
+    t = cmp["tasks"]["t"]
+    # only the modal-rev baseline rows score: the "old" failure is excluded
+    assert t["baseline"]["runs"] == 2
+    assert t["baseline"]["pass_at_1"] == 1.0
+    assert cmp["baseline_rev"] == "new" and cmp["variant_rev"] == "v1rev"
+
+
 # --- CLI ---
 
 def test_report_cli_regression_alarm_exit_4(tmp_path: Path) -> None:

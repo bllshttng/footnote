@@ -48,6 +48,9 @@ class RunResult:
 
 VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
 
+#: The implicit round of rows written before the variant axis existed.
+BASELINE = "baseline"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -190,14 +193,14 @@ def run_task(
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per run.
 
-    Each run: fresh disposable worktree at ``task.repo_fixture`` -> optional
+    Each run: fresh disposable worktree at the checkout ref -> optional
     worker (skipped for a grade-only task) -> mechanical grade -> history row ->
     worktree removed (Invariant: removed after grading). A worker-spawn failure
     is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
     """
     if not VARIANT_RE.match(variant):
         raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
-    if variant == "baseline":
+    if variant == BASELINE:
         if variant_ref is not None:
             raise ValueError("variant_ref is not allowed when variant is baseline")
         variant_ref = task.repo_fixture

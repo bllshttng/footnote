@@ -147,6 +147,33 @@ def test_report_compare_json_cli(tmp_path: Path) -> None:
     assert payload["tasks"]["t"]["verdict"] == "regressed"
 
 
+def test_report_compare_rejects_bad_name(tmp_path: Path) -> None:
+    res = runner.invoke(evals_app, ["report", "--history", str(tmp_path / "h.jsonl"),
+                                    "--compare", "round2"])
+    out = res.stdout + (res.stderr or "")
+    assert res.exit_code == 1
+    assert "must be 'baseline' or 'v<N>', got 'round2'" in out
+
+
+def test_report_compare_honors_since(tmp_path: Path) -> None:
+    import json
+
+    hp = tmp_path / "h.jsonl"
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": False,
+                         "variant": "baseline"})
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
+                         "variant": "v1"})
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
+                         "variant": "v1"})
+    res = runner.invoke(evals_app, ["report", "--history", str(hp),
+                                    "--compare", "v1", "--since", "2", "--json"])
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    # The window is the last 2 rows overall: two v1 rows, no baseline in it.
+    assert payload["tasks"] == {}
+    assert payload["missing_in_baseline"] == ["t"]
+
+
 def _history_append(path: Path, row: dict) -> None:
     from fno.evals import history as _history
 

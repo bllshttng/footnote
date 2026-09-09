@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from fno.evals import history as _history
 from fno.config import load_settings
+from fno.evals.runner import BASELINE
 
 
 @dataclass(frozen=True)
@@ -44,17 +45,12 @@ class TaskStat:
 def load_rows(
     history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
 ) -> list[dict[str, object]]:
-    """Return history rows in order: one variant round by default (a missing key
-    reads as baseline), ``None`` for every round, ``since`` = last N of that round."""
+    """History rows in order: one round by default (missing key = baseline), ``None`` = all."""
     rows = [r for _, r in _history.iter_rows_tolerant(history_path)
             if variant is None or (r.get("variant") or BASELINE) == variant]
     if since is not None and since >= 0:
         rows = rows[-since:]
     return rows
-
-
-# The implicit round of rows written before the variant axis existed.
-BASELINE = "baseline"
 
 
 def _by_task(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -150,26 +146,29 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     return candidates
 
 
+def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
+    revs = [v for r in rs if isinstance(v := r.get("bank_rev"), str)]
+    return max(set(revs), key=revs.count) if revs else None
+
+
 def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:
-    """Score *variant* against baseline, per task (rows from variant=None). A
-    skipped task lands in missing_in_variant. Each *_rev: the modal bank_rev."""
+    """Score *variant* against baseline at one revision pair (rows from variant=None)."""
     by_id = _by_task(rows)
+    baseline_rev = _common_rev([r for r in rows if (r.get("variant") or BASELINE) == BASELINE])
+    variant_rev = _common_rev([r for r in rows if (r.get("variant") or BASELINE) == variant])
     tasks: dict[str, Any] = {}
     missing_in_variant: list[str] = []
     missing_in_baseline: list[str] = []
-    base_rows: list[dict[str, object]] = []
-    variant_rows: list[dict[str, object]] = []
     for tid, task_rows in sorted(by_id.items()):
-        b = [r for r in task_rows if (r.get("variant") or BASELINE) == "baseline"]
-        v = [r for r in task_rows if (r.get("variant") or BASELINE) == variant]
-        base_rows.extend(b)
-        variant_rows.extend(v)
+        b = [r for r in task_rows if (r.get("variant") or BASELINE) == BASELINE
+             and r.get("bank_rev") == baseline_rev]
+        v = [r for r in task_rows if (r.get("variant") or BASELINE) == variant
+             and r.get("bank_rev") == variant_rev]
         if not b:
-            if v:
-                missing_in_baseline.append(tid)
-            continue
+            missing_in_baseline.append(tid)
         if not v:
             missing_in_variant.append(tid)
+        if not b or not v:
             continue
         b_p1 = sum(1 for r in b if r.get("pass") is True) / len(b)
         v_p1 = sum(1 for r in v if r.get("pass") is True) / len(v)
@@ -178,18 +177,13 @@ def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, A
         tasks[tid] = {"baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
                       "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
                       "delta": round(delta, 4), "verdict": verdict}
-
-    def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
-        revs = [v for r in rs if isinstance(v := r.get("bank_rev"), str)]
-        return max(set(revs), key=revs.count) if revs else None
-
     return {
         "variant": variant,
         "tasks": tasks,
         "missing_in_variant": missing_in_variant,
         "missing_in_baseline": missing_in_baseline,
-        "baseline_rev": _common_rev(base_rows),
-        "variant_rev": _common_rev(variant_rows),
+        "baseline_rev": baseline_rev,
+        "variant_rev": variant_rev,
     }
 
 

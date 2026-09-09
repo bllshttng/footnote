@@ -20,6 +20,8 @@ from typing import Optional
 
 import typer
 
+from fno.evals.runner import BASELINE, VARIANT_RE
+
 
 def _resolve_bank_dir(bank: Optional[Path]) -> Path:
     """Resolve the bank dir: explicit --bank, else <repo-root>/evals/bank."""
@@ -58,7 +60,7 @@ def run_command(
     repeat: int = typer.Option(1, "--repeat", "-k", help="Run each task K times (pass^k)."),
     bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
     provider: Optional[str] = typer.Option(None, "--provider", help="Worker provider for the headless spawn."),
-    variant: str = typer.Option("baseline", "--variant", help="Round name: baseline, or v<N> for a scored change."),
+    variant: str = typer.Option(BASELINE, "--variant", help="Round name: baseline, or v<N> for a scored change."),
     ref: Optional[str] = typer.Option(None, "--ref", help="Git ref to check out for a non-baseline --variant."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
 ) -> None:
@@ -70,7 +72,7 @@ def run_command(
       2  a bank task is invalid (load-time discipline violation)
     """
     from fno.evals.bank import BankError, discover_bank
-    from fno.evals.runner import VARIANT_RE, run_task, sweep_orphans
+    from fno.evals.runner import run_task, sweep_orphans
     from fno.paths import resolve_canonical_repo_root
 
     if repeat < 1:
@@ -80,7 +82,7 @@ def run_command(
     if not VARIANT_RE.match(variant):
         typer.echo(f"Error: --variant must be 'baseline' or 'v<N>', got '{variant}'", err=True)
         raise typer.Exit(code=1)
-    if (variant == "baseline") != (ref is None):
+    if (variant == BASELINE) != (ref is None):
         typer.echo("Error: --variant v<N> and --ref REF must be used together", err=True)
         raise typer.Exit(code=1)
 
@@ -155,10 +157,8 @@ def report_command(
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
 
-    With ``--compare vN``, score that variant against baseline (always exit 0).
-
     Exit codes:
-      0  report rendered (or no data)
+      0  report rendered (or no data); a --compare view never fires the alarm
       4  regression alarm: a regression-tier task is below 100%
     """
     import json as _json
@@ -170,7 +170,10 @@ def report_command(
         history_file = evals_history()
 
     if compare is not None:
-        cmp = compare_variants(load_rows(history_file, variant=None), compare)
+        if not VARIANT_RE.match(compare):
+            typer.echo(f"Error: --compare must be 'baseline' or 'v<N>', got '{compare}'", err=True)
+            raise typer.Exit(code=1)
+        cmp = compare_variants(load_rows(history_file, since=since, variant=None), compare)
         if json_output:
             typer.echo(_json.dumps(cmp, indent=2))
         else:
