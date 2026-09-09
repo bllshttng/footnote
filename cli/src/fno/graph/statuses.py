@@ -7,6 +7,7 @@ Public API:
 """
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 
 from fno.graph._constants import LOCK_TTL_HOURS
@@ -289,3 +290,45 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
         if strict:
             raise
         return set()
+
+
+def live_worked_node_ids(*, strict: bool = False) -> dict[str, list[str]]:
+    """Return open-phase nodes whose session rows name live roster workers.
+
+    The graph session row identifies the node and phase; the one fleet roster
+    reading identifies the worker. A missing or finished roster row is not a
+    positive live-worker marker, so it does not suppress dispatch. An unreadable
+    roster is a loud degradation rather than an empty-work answer.
+    """
+    try:
+        from fno.claims.roster import _really_finished, read_roster
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        entries = read_graph(graph_json())
+        reading = read_roster()
+        if not reading.consulted:
+            raise RuntimeError(reading.reason or "roster not consulted")
+
+        worked: dict[str, list[str]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("status") in TERMINAL_RUNGS:
+                continue
+            node_id = entry.get("id")
+            if not isinstance(node_id, str) or not node_id:
+                continue
+            for row in entry.get("sessions") or []:
+                phase = row.get("phase") if isinstance(row, dict) else None
+                if not isinstance(phase, str) or not is_open_phase_row(row, phase):
+                    continue
+                roster_row = reading.row_for_session(row["session_id"])
+                if roster_row and not _really_finished(roster_row):
+                    worker = roster_row.get("name")
+                    if isinstance(worker, str) and worker:
+                        worked.setdefault(node_id, []).append(worker)
+        return worked
+    except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
+        if strict:
+            raise
+        print(f"worked overlay degraded: {exc}", file=sys.stderr)
+        return {}
