@@ -4815,6 +4815,46 @@ def cmd_ready(
     typer.echo(json.dumps(result["rows"], indent=2))
 
 
+@cli.command("worked", hidden=True)
+def cmd_worked(
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+) -> None:
+    """Show nodes with positively identified live workers."""
+    from fno.graph.statuses import live_worked_node_ids
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    try:
+        worked = live_worked_node_ids(strict=True)
+        entries = {entry.get("id"): entry for entry in read_graph(graph_json())}
+    except Exception as exc:  # noqa: BLE001 - the authority must refuse loudly
+        typer.echo(f"Error: worked authority unavailable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    rows: list[dict] = []
+    for node_id, workers in worked.items():
+        entry = entries.get(node_id) or {}
+        phases = []
+        for session in entry.get("sessions") or []:
+            phase = session.get("phase") if isinstance(session, dict) else None
+            if isinstance(phase, str) and phase not in phases:
+                phases.append(phase)
+        rows.append(
+            {
+                "id": node_id,
+                "status": entry.get("status") or "unknown",
+                "workers": workers,
+                "phases": phases,
+            }
+        )
+
+    if json_output:
+        typer.echo(json.dumps(rows))
+        return
+    for row in rows:
+        typer.echo(f"{row['id']}  {row['status']}  {', '.join(row['workers'])}")
+
+
 # -- lane-fill --
 
 
@@ -13690,6 +13730,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "find",
         "next",
         "ready",
+        "worked",
         "queued",
         "provenance",
         "roadmap",
