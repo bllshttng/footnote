@@ -1,11 +1,20 @@
 """A deliberate reopen outranks the automatic close that would undo it.
 
-Both close paths - `_cascade_close_parents` on a child close and
-`_sweep_close_done_epics` on reconcile - ask only whether every child carries
-`completed_at`. That predicate stays true forever once the last child merges,
-so a parent reopened afterwards was re-closed by the next sweep and the reopen
-could never hold. Measured 2026-09-05: a node reopened with a written reason
-was re-closed by reconcile seven minutes later.
+Four close paths read a reopen, and one deliberate verb (``cmd_done``, with
+its own --force plus --reason ladder) does not. The sweeps:
+
+- `_cascade_close_parents` on a child close - guarded by
+  `_reopen_outranks_child_closes`.
+- `_sweep_close_done_epics` on reconcile - guarded through
+  `_strandable_epic_ids`.
+- reconcile's PR-merged close (`cmd_reconcile`'s closeable partition) and the
+  contained merge cascade `_cascade_close_contained` - guarded by
+  `_reopen_outranks_merge` / the same child-keyed predicate (x-b685). The
+  PR-merged leg reads no children, so the child-keyed guard alone never
+  reached it: a container whose own PR shipped was re-closed on that evidence
+  alone. Measured 2026-09-05 a node reopened with a written reason was
+  re-closed by reconcile seven minutes later; measured 2026-09-09, twice
+  inside two minutes on the PR-merged path.
 
 `reopen` requires `--reason` because a close is evidenced by a merged PR while
 a reopen is nothing but human judgment. An automatic sweep discarding that
@@ -17,8 +26,15 @@ works" from "this fixture never closed anyway".
 """
 from __future__ import annotations
 
-from fno.graph._reconcile import _reopen_outranks_child_closes
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from fno.graph._reconcile import _reopen_outranks_child_closes, _reopen_outranks_merge
 from fno.graph.cli import (
+    _cascade_close_contained,
     _cascade_close_parents,
     _strandable_contained_ids,
     _strandable_epic_ids,
@@ -27,6 +43,9 @@ from fno.graph.cli import (
 CHILD_CLOSE = "2026-09-04T20:35:52+00:00"
 BEFORE_CLOSE = "2026-09-04T19:00:00+00:00"
 AFTER_CLOSE = "2026-09-05T04:17:40+00:00"
+MERGED_AT = "2026-08-30T12:00:00Z"
+BEFORE_MERGE = "2026-08-29T00:00:00+00:00"
+AFTER_MERGE = "2026-08-31T00:00:00+00:00"
 
 
 def _pair(*, reopened_at=None, child_closed=CHILD_CLOSE, parent_closed=None):
@@ -134,3 +153,197 @@ def test_contained_sweep_positive_control_same_fixture_closes_without_the_reopen
 def test_contained_reopen_before_the_owner_close_is_stale():
     owner, child = _contained_pair(reopened_at=BEFORE_CLOSE)
     assert _strandable_contained_ids([owner, child]) == {"c"}
+
+
+# ---------------------------------------------------------------------------
+# `_reopen_outranks_merge`: the merge-keyed twin (x-b685)
+# ---------------------------------------------------------------------------
+
+
+def _merged_node(*, reopened_at=None):
+    """A node closed on its own merged PR - the leg that reads no children."""
+    node = {"id": "n", "status": "in_review", "pr_number": 42}
+    if reopened_at is not None:
+        node["reopened_at"] = reopened_at
+    return node
+
+
+def test_reopen_after_the_merge_holds():
+    assert _reopen_outranks_merge(_merged_node(reopened_at=AFTER_MERGE), MERGED_AT) is True
+
+
+def test_merge_guard_positive_control_no_reopen_closes():
+    assert _reopen_outranks_merge(_merged_node(), MERGED_AT) is False
+
+
+def test_reopen_before_the_merge_is_stale():
+    """It expires by itself: a later PR merging closes the node again."""
+    assert _reopen_outranks_merge(_merged_node(reopened_at=BEFORE_MERGE), MERGED_AT) is False
+
+
+def test_reopen_exactly_at_the_merge_is_stale():
+    assert _reopen_outranks_merge(_merged_node(reopened_at=MERGED_AT), MERGED_AT) is False
+
+
+def test_missing_merge_stamp_protects():
+    """None on a reverse-mapped record when gh omits mergedAt - a real path."""
+    assert _reopen_outranks_merge(_merged_node(reopened_at=BEFORE_MERGE), None) is True
+
+
+def test_unreadable_merge_stamp_protects():
+    assert _reopen_outranks_merge(_merged_node(reopened_at=BEFORE_MERGE), "garbage") is True
+
+
+def test_merge_guard_unreadable_reopen_stamp_protects():
+    assert _reopen_outranks_merge(_merged_node(reopened_at="not-a-timestamp"), MERGED_AT) is True
+
+
+def test_merge_guard_blank_reopen_stamp_is_no_reopen():
+    assert _reopen_outranks_merge(_merged_node(reopened_at="   "), MERGED_AT) is False
+
+
+def test_merge_guard_naive_and_z_suffixed_stamps_compare():
+    node = _merged_node(reopened_at="2026-08-31T00:00:00Z")
+    assert _reopen_outranks_merge(node, "2026-08-30T12:00:00") is True
+
+
+# ---------------------------------------------------------------------------
+# the contained merge cascade reads the same guard
+# ---------------------------------------------------------------------------
+
+
+def test_contained_cascade_skips_a_reopened_child():
+    owner, child = _contained_pair(reopened_at=AFTER_CLOSE)
+    assert _cascade_close_contained([owner, child], "unit") == []
+    assert child.get("completed_at") is None
+
+
+def test_contained_cascade_positive_control_same_fixture_closes_without_the_reopen():
+    owner, child = _contained_pair()
+    assert _cascade_close_contained([owner, child], "unit") == ["c"]
+    assert child.get("completed_at")
+
+
+def test_contained_cascade_reopen_before_the_owner_close_is_stale():
+    owner, child = _contained_pair(reopened_at=BEFORE_CLOSE)
+    assert _cascade_close_contained([owner, child], "unit") == ["c"]
+
+
+# ---------------------------------------------------------------------------
+# end to end: `fno backlog reconcile` holds the reopened node
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Graph + ledger wired into the CLI; returns the graph path."""
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    g = tmp_path / "graph.json"
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"entries": []}\n', encoding="utf-8")
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr("fno.paths.retro_pending_dir", lambda: tmp_path / "retro")
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    return g
+
+
+def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at) -> str:
+    plan = tmp_path / "p.md"
+    plan.write_text(
+        "---\nnode: ab-reopen1\nstatus: ready\ncreated: 2026-08-09T00:00:00+00:00\n---\n\n# Plan\n",
+        encoding="utf-8",
+    )
+    node = {
+        "id": "ab-reopen1",
+        "title": "node ab-reopen1",
+        "domain": "code",
+        "status": "in_review",
+        "pr_number": 42,
+        "pr_url": "https://github.com/o/r/pull/42",
+        "plan_path": str(plan),
+        "cost_usd": None,
+        "cost_sessions": [],
+        "created_at": "2026-08-09T00:00:00+00:00",
+    }
+    if reopened_at is not None:
+        node["reopened_at"] = reopened_at
+    g.write_text(json.dumps({"entries": [node]}, indent=2) + "\n", encoding="utf-8")
+    return str(plan)
+
+
+def _stub_scan(monkeypatch: pytest.MonkeyPatch, plan: str) -> None:
+    import fno.graph._reconcile as rec
+
+    def _scan(entries, node_id=None):
+        return [
+            rec.MergeDriftRecord(
+                node_id="ab-reopen1",
+                plan_path=plan,
+                pr_number=42,
+                pr_url="https://github.com/o/r/pull/42",
+                pr_state="MERGED",
+                merged_at=MERGED_AT,
+            )
+        ]
+
+    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
+
+
+def _stub_gh_merged(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fno.graph._reconcile as rec
+    from fno.graph._reconcile import PrMergeState
+
+    monkeypatch.setattr(
+        rec,
+        "query_pr_merge_state",
+        lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=MERGED_AT),
+    )
+
+
+def test_reconcile_holds_a_reopen_postdating_the_merge(routed, tmp_path, monkeypatch):
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(routed, tmp_path, reopened_at=AFTER_MERGE)
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert any(h["node_id"] == "ab-reopen1" for h in payload["reopen_held"]), r.output
+    assert all(c.get("node_id") != "ab-reopen1" for c in payload["closed"])
+    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    assert entry.get("completed_at") is None
+
+
+def test_reconcile_positive_control_same_node_closes_without_the_reopen(
+    routed, tmp_path, monkeypatch
+):
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(routed, tmp_path, reopened_at=None)
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert payload["reopen_held"] == []
+    assert any(c.get("node_id") == "ab-reopen1" for c in payload["closed"]), r.output
+
+
+def test_reconcile_dry_run_previews_no_close_and_names_the_held_reopen(
+    routed, tmp_path, monkeypatch
+):
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(routed, tmp_path, reopened_at=AFTER_MERGE)
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--dry-run"])
+    # The held node is not in any would-close preview (an empty closeable
+    # prints none at all) and the hold roll names it.
+    assert "Would close" not in r.output, r.output
+    assert "deliberate reopen postdates the merge" in r.output
+    assert "reopened after PR #42 merged" in r.output

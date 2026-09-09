@@ -1160,6 +1160,7 @@ def summarize_promise_held(
     headlines = {
         "promise_unmet": "merged PR, unmet plan promise",
         "promise_unknown": "ship count unconfirmed, retryable read failure",
+        "reopen_held": "deliberate reopen postdates the merge",
     }
     # Grouped by the outcomes PRESENT, not by a hard-coded pair. A closed
     # enumeration is the same shape the `satisfied` property exists to kill:
@@ -1537,6 +1538,38 @@ def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
         if closed is not None and closed >= reopened:
             return False
     return True
+
+
+def _reopen_outranks_merge(node: dict, merged_at: object) -> bool:
+    """True when a deliberate reopen postdates the merge being closed on.
+
+    The PR-merged close leg reads no children, so the child-keyed guard never
+    reaches it: a container whose own PR shipped was re-closed on that evidence
+    alone, overriding the reopen (measured 2026-09-09, twice inside two
+    minutes). Same reasoning, keyed on the merge instead of child closes: a
+    reopen POSTDATING the merge is a statement about that merged PR and holds;
+    one predating it is stale, because the node genuinely became complete after
+    that judgment was formed - so a later PR merging on the same node closes it
+    again with no operator action.
+
+    Ambiguity favours the human, matching the child-keyed guard in both
+    directions: an unreadable ``reopened_at`` protects, and so does an
+    unreadable ``merged_at`` (None on a reverse-mapped record when gh omits
+    ``mergedAt``, so that branch is a real path, not padding). A node carrying
+    no ``reopened_at`` is unaffected - every node never reopened.
+    """
+    from fno.graph.board import _parse_iso
+
+    reopened_raw = node.get("reopened_at")
+    if not isinstance(reopened_raw, str) or not reopened_raw.strip():
+        return False
+    reopened = _parse_iso(reopened_raw)
+    if reopened is None:
+        return True
+    merged = _parse_iso(merged_at) if isinstance(merged_at, str) else None
+    if merged is None:
+        return True
+    return reopened > merged
 
 
 def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:

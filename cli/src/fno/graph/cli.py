@@ -8154,6 +8154,8 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
     """Close every node that shipped inside ``node_id``'s PR.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
+    from fno.graph._reconcile import _reopen_outranks_child_closes
+
     unit = next(
         (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
         {},
@@ -8171,6 +8173,11 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
             continue
         if e.get("completed_at"):
             continue  # already closed (out of band, or a previous sweep)
+        # Same guard its sweep twin `_strandable_contained_ids` already applies
+        # (x-b685): a reopen postdating the owner's close holds; without it the
+        # merge cascade re-closed a deliberately reopened contained child.
+        if _reopen_outranks_child_closes(e, [unit]):
+            continue
         nid = e.get("id")
         if not isinstance(nid, str) or not nid:
             continue  # unidentifiable row: nothing to report, nothing to close
@@ -10184,6 +10191,8 @@ def cmd_reconcile(
     promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
+        from fno.graph._reconcile import _reopen_outranks_merge
+
         gated: list = []
         for record in closeable:
             # Distinct name from the rollup loop's `node_obj`: that loop assigns
@@ -10195,6 +10204,17 @@ def cmd_reconcile(
                 "pr_number": record.pr_number,
                 "pr_url": record.pr_url,
             }
+            # Reopen guard BEFORE the promise gate: a deliberate reopen
+            # postdating the merge holds (x-b685) - the PR-merged close leg
+            # reads no children, so the child-keyed guard never reaches it.
+            # Skipping here spends no gh round trip on a node already held, and
+            # one filter covers the mutator and the --dry-run simulation,
+            # because both iterate this same list.
+            if _reopen_outranks_merge(gate_node, record.merged_at):
+                promise_held.append(
+                    (record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held")
+                )
+                continue
             # _effective_reconcile_cwd, not the raw node cwd: an archived
             # worktree is a dead dir, and handing it to subprocess(cwd=) makes
             # the probe runner fail to launch - a fail-CLOSED refusal that would
@@ -11003,6 +11023,7 @@ def cmd_reconcile(
             # PR whose plan promised work that has not all shipped.
             "promise_unmet": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unmet"],
             "promise_unknown": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unknown"],
+            "reopen_held": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "reopen_held"],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }
