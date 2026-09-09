@@ -36,7 +36,9 @@ The crown is bestowed, never inferred. Verify it before anything else:
 
 ## Arm the beat
 
-Six monitors, each a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands.
+Branch once on what the harness supports, before arming anything. Claude supports harness-tracked Monitors and self-injected native commands: run the full arm below. Codex supports none of them - no `/goal`, no `/loop`, no Monitor tool - and the codex posture line above is that branch: arm nothing native, inject neither command, and never read `CronList` or `/hooks` as a gate. The codex beat is the externally owned wake arm: verify the daemon waker row exists in `fno agents status`, and if it does not, report that honestly and stop - it is never a reason to attempt a native command. Every codex wake runs the check-in body below; that cadence is the reign.
+
+On Claude, arm six monitors, each a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands.
 
 1. **Unread mail, 60s.** Everything routes through it: worker reports, peer facts, the operator's answers. Read with `fno agents mail unread -n <handle>`. The handle is `-n`, never a positional; the positional form fails loudly rather than returning empty.
 2. **Board change, 120s.** Do NOT poll `fno inbox board --json` (about two minutes at load). Watch the cheap proxy until the board port lands: tail the project events journal for `pr_opened`, `loop_terminated`, `claim_released`, plus the `fno backlog ready` count. `fno backlog ready` emits JSON on stdout; `-J` exists only for parity, so a line-prefix parser reads it as zero rows forever, which is indistinguishable from a quiet board. Assert a non-zero count as a positive control before trusting a zero. When you do read the board, a bare call is already scoped to this crown (the caller's own manifest is the default); pass `--state <path>` only to read outside it.
@@ -49,7 +51,7 @@ Every arm emits on **probe failure** as well as on the watched condition. A moni
 
 Not monitored, because each has an owner: individual worker transcripts (court-mode watching, the machinery's job), per-PR CI (the merge arm and the heal driver), and the raw load average (item 5 names why).
 
-Then inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
+Then, still on the Claude branch only, inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
 
 Inject the loop, end the turn so the harness actually delivers it, then confirm a cron exists before going on:
 

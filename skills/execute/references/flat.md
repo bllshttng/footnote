@@ -42,15 +42,13 @@ If no frontend-craft executor is installed, plain execution is fine.
 
 ## 2. Execute Changes
 
-**Before each numbered change**, evaluate the plan's `## Kill Criteria`
-fenced YAML block (if present). If a predicate fires, stop, emit
-`<aborted reason="{name}">MISSION ABORTED: {reason}</aborted>`, and do
-NOT make further changes:
+**Before each numbered change**: the plan's `kill_criteria:` frontmatter block is the thing to evaluate (frontmatter only - the body never carries it). That frontmatter is the parser's only source - a `## Kill Criteria` section in the body is invisible to it. On a fired predicate, stop, emit `<aborted reason="{name}">MISSION ABORTED: {reason}</aborted>`, and make no further changes:
 
 ```bash
 PLAN_PATH="$1"   # the .md file path passed to /execute
 # kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63).
-# `fno do phase kill-check` prints `KILL_CRITERIA_FIRED <name>|<reason>` and exits
+# `fno do phase kill-check` reads the plan frontmatter, prints
+# `KILL_CRITERIA_FIRED <name>|<reason>` and exits
 # 1 when a predicate fires, exits 0 (empty) when none fire, and exits 2 when the
 # fno-agents binary is unavailable. Branch on the exit code: only rc 1 WITH the
 # marker aborts; rc 2 (or any other non-zero) is an infra failure that warns and
@@ -68,17 +66,11 @@ if [[ -n "$PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
 fi
 ```
 
-Backward compat: plans without a `## Kill Criteria` block (most focused
+Backward compat: plans without `kill_criteria:` frontmatter (most focused
 plans will not have one) return exit 0 (no abort). Malformed predicates
 log WARN to stderr and are skipped.
 
-**Session-project invariant:** a flat plan is single-project by construction.
-If a numbered change would edit a file **outside this session's project repo
-root**, STOP — do NOT `cd` into the other repo and edit it. Surface that work as
-a backlog node and spawn a worker into its project
-(`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`),
-or, if no node exists yet, report it so the user can `/blueprint` it. See
-[session-project-invariant.md](session-project-invariant.md).
+**Session-project invariant:** a flat plan is single-project by construction. If a numbered change targets a file **outside this session's project repo root**, STOP - do NOT `cd` into the other repo and edit it. Surface that work as a backlog node and spawn a worker into its project (`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`), or, if no node exists yet, report it so the user can `/blueprint` it. See [session-project-invariant.md](session-project-invariant.md).
 
 For each numbered change under `## Changes`:
 
@@ -97,7 +89,7 @@ Work sequentially through the numbered changes. If a change depends on a previou
 Run every step listed under `## Verification`:
 - Commands → execute and check output
 - Behavioral checks → verify manually or describe result
-- If any verification fails → stop and report what failed
+- A failed verification in the plan's scope gets REPAIRED, and the failed step re-runs - a fix-verify round per the change that broke it - while the plan's explicit iteration bound remains. At a spent bound, or on a failure genuinely outside this plan's scope, stop and name the real blocker. A green CI run never substitutes for a failed local verification, and neither substitutes for the configured review count.
 
 ## 3b. Status-breakpoint emit (x-dbaf, best-effort)
 
@@ -161,6 +153,6 @@ Lightweight, not forced:
 
 ## Error Handling
 
-- **Change fails:** Stop, report which change failed and why. Don't continue blindly.
-- **Verification fails:** Report the specific step that failed. Suggest a fix if obvious.
+- **Change fails:** repair an in-scope cause. On any other cause, stop and report which change failed and why. Do not continue blindly.
+- **Verification fails:** repair and re-run within the plan's iteration bound. At the bound, report the specific step that failed and the real blocker.
 - **Plan unclear:** Ask the user rather than guessing. The plan should be self-contained, but if it's not, surface the ambiguity.

@@ -9,9 +9,11 @@ metadata:
 
 # Cache Keepalive
 
-Schedules 4 pings via ScheduleWakeup to keep prompt cache warm during idle periods. Self-terminates after ~18 minutes. Max cost: ~$0.52.
+Schedules 4 pings via ScheduleWakeup to keep the prompt cache warm during idle periods. Self-terminates after ~18 minutes.
 
-ScheduleWakeup resumes the same conversation, which keeps cached tokens alive by definition. Each ping is a lightweight wake that re-reads the cached context and reschedules.
+**Capability gate.** The scheduler is Claude's ScheduleWakeup. Without it, report `schedule unavailable` and stop. Never claim warmth. Never substitute another timer (CronCreate fires new sessions and does not keep this cache warm).
+
+**Warmth is measured, never assumed.** A scheduled ping re-reads cached context, which makes the context cache-ELIGIBLE. It does not prove a cache HIT. Warmth is proven only by usage data (`cache_read_input_tokens > 0` in the transcript's last assistant usage). Report `warmth unverified` unless that number proves a cache read. Report the measured numbers rather than a defined-true claim.
 
 ## Configuration
 
@@ -87,11 +89,7 @@ else:
 fi
 ```
 
-Pricing per million tokens (use ONLY these values):
-- Opus 4.5/4.6: input=$5.00, cache_read=$0.50
-- Opus 4.0/4.1: input=$15.00, cache_read=$1.50
-- Sonnet (all): input=$3.00, cache_read=$0.30
-- Haiku 4.5: input=$1.00, cache_read=$0.10
+Pricing: resolve input and cache-read prices for the reported model from the provider's current pricing page at report time. Say the numbers were looked up then. Prices drift and were not independently measured here. Without a lookup, report `pricing unverified` and skip the cost comparison instead of quoting a stored literal.
 
 Calculate: uncached = TOTAL_CTX / 1M * input_price. cached = TOTAL_CTX / 1M * cache_read_price.
 
@@ -104,8 +102,8 @@ Cache keepalive active.
   Context: ~[X]K tokens ([MODEL])
   Cache miss would cost: ~$[uncached] | Cached: ~$[cached] | Savings: ~$[diff]
 
-  Schedule: 4 pings at ~270s intervals (~18 min total)
-  Total keepalive cost: ~$0.52
+  Schedule: 4 pings at ~270s intervals (~18 min total), armed via ScheduleWakeup
+  Keepalive cost: negligible (each ping is a cached-context re-read)
 
   Cancel: just type anything (user input naturally cancels the loop)
   Only fires when idle. Normal work refreshes cache automatically.
@@ -128,13 +126,13 @@ Determine current ping number by checking conversation for the most recent `[cac
 Output ONLY:
 
 ```
-[cache-keepalive] Ping N/4 | cache warm
+[cache-keepalive] Ping N/4 | cache eligible (warmth unverified unless usage proves a cache read)
 ```
 
 Then:
 
 - **Pings 1-2:** Schedule next ping with ScheduleWakeup at 270s
-- **Ping 3:** Send OS notification warning, then schedule final ping:
+- **Ping 3:** Send the OS notification warning (the one sanctioned shell action during a ping), then schedule the final ping:
   ```bash
   if [[ "$(uname)" == "Darwin" ]]; then
     osascript -e 'display notification "Return to your session or the cache will expire on next ping" with title "Cache Keepalive"' 2>/dev/null
@@ -142,6 +140,7 @@ Then:
     notify-send "Cache Keepalive" "Return to your session or the cache will expire on next ping" 2>/dev/null
   fi
   ```
+  If neither notifier exists, skip it silently. A missing notifier is not a keepalive failure.
 - **Ping 4:** Final warning, stop scheduling (let cache expire gracefully):
   ```
   [cache-keepalive] Ping 4/4 | final ping, cache protection ending. Type anything to continue working.
@@ -156,9 +155,10 @@ User input at any point naturally cancels the ScheduleWakeup loop. No explicit c
 
 - NEVER use CronCreate (fires new sessions, doesn't keep current cache warm)
 - NEVER more than 4 pings per activation
-- NEVER read files or run other tools (except ScheduleWakeup) during pings
+- NEVER read files or run other tools during pings. The two exceptions are ScheduleWakeup itself and the ping-3 OS notification
 - NEVER block user input (ScheduleWakeup yields to user naturally)
 - NEVER activate without project opt-in (when auto-activated via hook)
+- NEVER report "cache warm" without usage data proving a cache read
 
 ## Known Limitations and Deferred Work
 

@@ -1,0 +1,17 @@
+# Workflow-authority regression: the delivery-path skills must keep following
+# the authority their helpers enforce (ab-27541df5, ab-994222ee, x-3a64,
+# d-384d967c, d-608344c1). Grade-only, no worker step: the graded artifact is
+# the behavioral contract suite, which (a) runs the owning helpers and asserts
+# their receipts, (b) asserts each skill names the receipt it must obey, and
+# (c) seeds prohibited actions and false completions against the same graders
+# and requires the seed to fail while the authorized twin passes (AC4-HP).
+# Model comparisons and promotion claims stay on x-fd52; this node introduces
+# no evaluator and no schedule.
+id: workflow-authority-regression
+tier: regression
+grade:
+  - kind: exit
+    command: "cd cli && uv run pytest tests/unit/test_workflow_authority_contract.py tests/unit/test_skill_bundles.py -q"
+    expect: 0
+timeout_minutes: 10
+tags: [regression, workflow-authority, skill-contracts]

@@ -36,15 +36,16 @@ The command prints the `d-` id on stdout. Report that id and the subject.
 
 This store is machine-local. A stranger who clones the repository must obey some rules. Those rules do not reach that person from here. Land them in the code, a doc, or a gate, in a PR. When the operator wants the rule recalled by subject, record it here as well.
 
-Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`. So a chat-recorded law needs an attended terminal to withdraw. Supersession follows the same line. A chat recording can supersede another `chat_attested` row. It cannot supersede an `operator` row. Every live-state reader then stops seeing the operator's law.
+Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`. So a chat-recorded law needs an attended terminal to withdraw. Supersession is retiring by another name: every reader that filters `--state live` stops seeing the old row. A chat recording can supersede another `chat_attested` row. It cannot supersede an `operator` row, which is what keeps the retract guard honest.
 
 ## Refusals
 
-`fno inbox law set` refuses, records nothing, and exits **3** in five cases:
+`fno inbox law set` refuses, records nothing, and exits **3** in six cases:
 
 - the statement is coordination rather than durable law,
 - the rationale is missing,
 - `--supersedes` is not a `d-` decision id, or names no recoverable decision,
+- `--supersedes` names an `operator` law row while this recording is `chat_attested`,
 - `--graduation` is not a valid kind,
 - no harness session resolves and no terminal is attached, so nothing marks a decider.
 

@@ -15,7 +15,7 @@ hooks:
 
 # Audit Skill
 
-Analyze feature completeness from multiple perspectives, identify gaps, and create phased plan folders. Runs as a loop until ALL features are planned.
+Analyze feature completeness from the configured perspectives, identify gaps, and record them in a bounded evidence artifact. Plan documents are written only on an authorized run. The loop is bounded by the audit's own named unresolved questions, not by "nothing is missed".
 
 ## Purpose
 
@@ -40,16 +40,15 @@ If the setup script sets a completion promise, read it and follow its instructio
 | Option | Description |
 |--------|-------------|
 | `--max-iterations N` | Stop after N iterations (default: 20) |
-| `--output-dir PATH` | Where to create plan folders (default: from `.claude/settings.json` `plansDirectory`, or `config.plans.full_path`) |
-| `--perspectives LIST` | Comma-separated: ux,pm,po,eng (default: all) |
+| `--output-dir PATH` | Where to write plan documents when the run is authorized to produce plans (default: from `.claude/settings.json` `plansDirectory`, or `config.plans.full_path`) |
+| `--perspectives LIST` | Comma-separated lens subset; the resolved list is the authority for "do not skip any" (default: all five - ux, pm, po, eng, integration) |
 
-## Required Skills
+## Skills, loaded for their own act
 
-Load these skills during audit:
-- `/think` — For brainstorming and design exploration
-- `/blueprint` — For creating plan folders
-- `/tdd` — For writing testable stories (BDD criteria in references/)
-- `/setup` — For cross-project awareness (workspace config in references/)
+- `/think` — load for structured design exploration a lens needs
+- `/blueprint` — load for plan production on an authorized run
+- `/tdd` — load for acceptance-criteria writing on planned features
+- `/setup` — load for cross-project workspace context
 
 ## Process
 
@@ -76,14 +75,14 @@ Scan codebase and existing plans to build completeness matrix:
 ```
 
 **How to scan:**
-1. Read existing plan INDEX files
+1. Read existing plan documents in the output directory
 2. Search codebase for implemented features
-3. Run tests to verify what works
+3. Run the project's verification command once to ground the matrix - not once per lens
 4. Check for TODO comments and incomplete features
 
 ### 3. Multi-Perspective Gap Analysis
 
-Analyze from FOUR perspectives. Don't skip any.
+Analyze from every lens in the resolved `--perspectives` set (default: all five, including Integration Coherence). Do not skip a lens the run resolved.
 
 #### UX Research Perspective
 
@@ -257,44 +256,35 @@ Advanced features:
 - Ratio forecasting
 ```
 
-### 5. Create Plan Folders
+### 5. Plan Documents (authorized runs only)
 
-For each phase, use `/blueprint` skill to create:
+A plain audit's deliverable is the evidence artifact: the completeness matrix, the gap lists, and the progress file. On an authorized run that also asked for plans, use `/blueprint` per feature. The canonical blueprint writes ONE Markdown document per feature (single doc, locked frontmatter), never a phase folder of INDEX plus numbered files:
 
 ```
-{plans_path}/phase-1-go-live/
-├── 00-INDEX.md          # Phase overview, dependencies
-├── 01-sms-delivery.md   # Twilio integration tasks
-├── 02-rate-limiting.md  # Security tasks
-└── 03-staff-wizard.md   # Onboarding tasks
+{plans_path}/sms-delivery.md      # one blueprint doc per feature
+{plans_path}/rate-limiting.md
+{plans_path}/staff-wizard.md
 ```
 
-**Link to single Linear epic** if Linear is configured (`config.linear.enabled`):
-```yaml
-linear: {TEAM}-XXX  # "Phase 1: Go-Live"
-```
+On an operator request to turn gaps into work, file each audited gap as a backlog node (`fno backlog idea`). The audit itself does not create plans or nodes unless asked.
 
 ### 6. Loop Check
 
-After creating plans, ask:
+After each analysis pass, ask whether every gap named so far is ANSWERED, FILED (node or plan), or explicitly PARKED:
 
 ```markdown
 ## Remaining Gaps Check
 
-Have I covered:
-- [ ] All P1 blockers?
-- [ ] All user journey gaps?
-- [ ] All edge cases mentioned?
-- [ ] All accessibility issues?
-- [ ] All technical debt items?
-- [ ] All security concerns?
-- [ ] All critical user journeys traced end-to-end?
-- [ ] All orphaned features identified?
-- [ ] All stub dependencies documented?
+- [ ] Every P1 blocker found is answered, filed, or parked
+- [ ] Every user journey gap found is answered, filed, or parked
+- [ ] Every edge case and accessibility gap found is answered, filed, or parked
+- [ ] Each named unresolved question has an owner or a parking note
 
-If ANY unchecked → Continue planning
+If ANY unchecked → Continue (bounded by --max-iterations)
 If ALL checked → Loop complete
 ```
+
+"Cover everything that exists" is not a finish line. The named questions the audit raised are.
 
 ## Progress File Format
 
@@ -327,42 +317,39 @@ started: 2026-01-23T10:00
 
 ## Output Artifacts
 
-After audit loop completes:
+After the audit loop completes:
 
-1. **Phase folders** in output directory
-2. **Linear tickets** for each phase
-3. **Progress file** with analysis summary
-4. **Completeness matrix** in progress file
+1. **Progress file** with analysis summary (`.fno/audit-progress.txt`)
+2. **Completeness matrix** in the progress file - the bounded evidence artifact
+3. **Plan documents** in the output directory on an authorized run (one blueprint doc per feature)
 
 ## Completion
 
-If a completion promise is set in `.fno/audit-loop.local.md`, you may ONLY output it when ALL features for the topic are documented in plan folders. Do not stop after one pass — keep asking "what else is missing?" until truly feature-complete.
+With a completion promise set in `.fno/audit-loop.local.md`, output it only after every question the audit named is answered, filed, or parked. Keep the output inside the iteration bound. Do not stop after one pass. Do not keep looping past the bound either. At the bound, report the named questions that remain.
 
 ## Key Principles
 
-- **Don't stop early** — Keep asking "what else?"
-- **All perspectives** — UX, PO, PM, Eng, Integration Coherence
+- **Do not stop early** — Keep asking "what else?" within the iteration bound
+- **All resolved perspectives** — the `--perspectives` set, five by default (UX, PO, PM, Eng, Integration Coherence)
 - **Trace journeys, not features** — A feature isn't "done" if users can't reach it
 - **Check the wiring** — Every component must be connected to something upstream AND downstream
-- **Concrete plans** — Not just lists, actual plan folders
-- **Testable stories** — Every feature gets acceptance criteria
-- **Phased output** — P1/P2/P3 priority grouping
-- **Linked to Linear** — Every plan has a ticket (if Linear configured)
+- **Grounded output** — the evidence artifact first, plan documents only on an authorized run
+- **Testable stories** — Every planned feature gets acceptance criteria
+- **Priority grouping** — P1/P2/P3
 
 ## Red Flags
 
 **Never:**
 - Stop after one perspective
-- Create lists without plan folders
+- Create plans or nodes the run was not authorized to create
 - Skip edge cases and accessibility
 - Assume "good enough"
-- Output completion promise with remaining gaps
+- Output completion promise with named questions still unowned
 
 **Always:**
 - Scan codebase before analyzing
-- Cover all four perspectives
-- Create actual plan folders (not just notes)
-- Link plans to Linear tickets (if configured)
+- Cover every lens in the resolved set
+- Record findings in the progress file as you go
 - Update progress file after each iteration
 
 ## Session Cost Tracking (AUTO — enforced by stop hook)
