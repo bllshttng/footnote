@@ -1172,9 +1172,10 @@ fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
 }
 
 /// The WRITE half of a retirement set, shared by the scheduled sweep and the
-/// merge trigger: persist every receipt, drop the rows under one registry
-/// write guarded by `created_at`, then account and emit only for the names
-/// the write really removed.
+/// merge trigger: re-check the graph obligation under the commit, persist
+/// every receipt, drop the rows under one registry write guarded by
+/// `created_at`, then account and emit only for the names the write really
+/// removed.
 ///
 /// `caller` names the emitter's error op so a failed write says which door it
 /// came through. `to_retire` is drained of every order whose receipt refused
@@ -1190,6 +1191,51 @@ pub(crate) fn commit_retirements(
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> CommitReport {
     let mut report = CommitReport::default();
+    // The obligation re-check (x-5aef task 1.3): between the decision and
+    // this write, a node can gain an OPEN do row naming one of these
+    // sessions - the decision's evidence is stale by exactly the age of the
+    // graph read. One extra read per commit, and a commit only happens when
+    // rows are actually retiring, so steady state pays nothing. A failed
+    // re-read keeps every row: a read that cannot answer is not evidence
+    // the obligation is gone.
+    match read_graph_entries(home) {
+        None => {
+            for order in to_retire.values() {
+                report.kept_no_receipt.push((
+                    order.id.clone(),
+                    "graph unreadable at commit; every row kept".to_string(),
+                ));
+            }
+            to_retire.clear();
+            return report;
+        }
+        Some(graph) => {
+            let held: Vec<(String, String)> = to_retire
+                .iter()
+                .filter_map(|(name, _)| {
+                    let entry = entries.iter().find(|e| &e.name == name)?;
+                    let sid = entry
+                        .harness_session_id
+                        .as_deref()?
+                        .trim()
+                        .to_ascii_lowercase();
+                    graph
+                        .open_do
+                        .get(&sid)
+                        .and_then(|nodes| nodes.first().cloned())
+                        .map(|node| (name.clone(), node))
+                })
+                .collect();
+            for (name, node) in held {
+                if let Some(order) = to_retire.remove(&name) {
+                    report.kept_no_receipt.push((
+                        order.id,
+                        format!("graph obligation opened after the decision: {node}"),
+                    ));
+                }
+            }
+        }
+    }
     // Persist every receipt BEFORE the write drops its row: the ordering IS
     // the losslessness. A receipt that will not write holds its row for the
     // next sweep instead.

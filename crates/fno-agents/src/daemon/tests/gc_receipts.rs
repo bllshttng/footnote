@@ -3515,3 +3515,73 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
         std::fs::read(dir.path().join("graph.json")).unwrap()
     );
 }
+
+/// x-5aef AC5-HP: an open do row opening between the decision and the
+/// commit holds the row AT THE COMMIT GATE. The decision seam answers
+/// done-and-quiet; the graph the commit re-reads carries an open do row
+/// naming this session. The row keeps, the reason names the node, and the
+/// receipt is not counted as a retirement.
+#[test]
+fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    // The real graph: an open do row for this session on x-new - the
+    // obligation that "opens after the decision".
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-new",
+            "status": "ready",
+            "sessions": [open_do_row("codex", "s-commit")],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "commitw".into();
+        e.short_id = "commitw".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-commit".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    // The decision seam: done, no open do row - the stale evidence.
+    let graph = graph_read(&[("s-commit", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert!(
+        summary
+            .kept_no_receipt
+            .iter()
+            .any(|(id, reason)| id == "commitw"
+                && reason.contains("graph obligation opened after the decision: x-new")),
+        "{:?}",
+        summary.kept_no_receipt
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "commitw"),
+        "the row survives the commit gate"
+    );
+}
