@@ -77,16 +77,23 @@ jobs:
         working-directory: crates/fno-agents
         run: cargo build --release --target ${{ matrix.target.rust-target }} --bins
 
+      - name: Build fno front-door binary
+        working-directory: crates/fno
+        run: cargo build --release --target ${{ matrix.target.rust-target }} --bin fno
+
       - name: Stage binaries for the wheel build hook
         shell: bash
         run: |
           mkdir -p cli/src/fno/_bin
-          # US6: stage all three binaries (client + daemon + worker) so the wheel
-          # is binary-complete - daemon-backed verbs work on a pip-only box with
-          # no second install. `cargo build --bins` above produced all three; the
-          # build hook hard-fails if any is missing (a partial set never ships).
+          # US6 + x-538e: stage the fno front door (the mux binary that owns
+          # `fno` on PATH) plus the client + daemon + worker so the wheel is
+          # binary-complete - the advertised `fno` command AND daemon-backed
+          # verbs work on a pip-only box with no second install. The build hook
+          # hard-fails if any is missing (a partial set never ships).
           ext=""
           [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
+          cp "crates/fno/target/${{ matrix.target.rust-target }}/release/fno${ext}" \
+             "cli/src/fno/_bin/fno${ext}"
           for b in fno-agents fno-agents-daemon fno-agents-worker; do
             cp "crates/fno-agents/target/${{ matrix.target.rust-target }}/release/${b}${ext}" \
                "cli/src/fno/_bin/${b}${ext}"

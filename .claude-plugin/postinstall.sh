@@ -55,12 +55,58 @@ uv_installed_fno_version() {
 
 # Positive marker for a provisioned install: the console script exists AND the
 # venv ships compiled bytecode. A zero exit from uv proves nothing about what
-# landed, so every install path verifies before trusting itself.
+# landed, so every install path verifies before trusting itself. Deliberately
+# NOT the front-door check below: a Python-only source install must also pass
+# here, and it carries no Rust binaries.
 uv_install_verifies() {
   local td
   td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)" || return 1
   [[ -x "$td/fno/bin/fno-py" ]] || return 1
   [[ -n "$(find "$td/fno/lib" -name '*.pyc' -print -quit 2>/dev/null)" ]]
+}
+
+# The complete-install marker (x-538e): the Rust `fno` front door rides in the
+# release wheel as a shared_script, so a binary-complete install lands it in
+# the tool venv bin beside fno-py. Checked only on the wheel paths - a source
+# build has none and is reported as Python-only instead (AC2-EDGE).
+frontdoor_installed() {
+  local td
+  td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)" || return 1
+  [[ -x "$td/fno/bin/fno" ]]
+}
+
+# The install receipt (x-538e, AC2-HP/AC2-EDGE): name the actual front-door
+# path and PROVE both command families answer through it - `mux ls` is native
+# Rust (no Python), `--version` forwards to fno-py. A missing or shadowed
+# front door is a named incomplete install with the supported repair, never a
+# success inferred from uv's exit code.
+verify_frontdoor() {
+  local td winner out
+  td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)" || {
+    err "uv tool dir unreadable; cannot locate the installed fno front door."; return 1; }
+  local fno_bin="$td/fno/bin/fno"
+  if [[ ! -x "$fno_bin" ]]; then
+    err "incomplete install: no fno front door at $fno_bin. The installed wheel predates the complete payload; update to a release wheel that carries it, or run 'cargo install fno'."
+    return 1
+  fi
+  winner="$(command -v fno 2>/dev/null || true)"
+  if [[ -n "$winner" && "$winner" != "$fno_bin" ]]; then
+    log "note: 'fno' on PATH resolves to $winner; the mux forwards to the same fno-py, so both work."
+  fi
+  log "fno front door: $fno_bin"
+  if out="$("$fno_bin" mux ls 2>&1)"; then
+    log "fno mux answers (mux ls rc=0)."
+  else
+    err "incomplete install: 'fno mux ls' failed at $fno_bin: $(printf '%s' "$out" | head -1)"
+    return 1
+  fi
+  if out="$("$fno_bin" --version 2>&1)"; then
+    log "fno --version forwarded to the Python CLI ($out)."
+  else
+    err "incomplete install: 'fno --version' did not forward at $fno_bin: $(printf '%s' "$out" | head -1)"
+    return 1
+  fi
+  return 0
 }
 
 # `uv_install_verifies`, RE-CHECKED until it passes or the budget runs out.
@@ -121,8 +167,8 @@ uv_tool_install_retry() {
 install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
   if uv_tool_install_retry "$CLI_DIR"; then
-    log "installed Python-only fno from source. The Rust binaries are NOT included -"
-    log "run 'fno doctor update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
+    log "installed Python-only fno from source. INCOMPLETE install: no 'fno' front door and no Rust binaries -"
+    log "run 'fno doctor update --rust' for the daemon-backed verbs, or install a published PyPI wheel for the advertised 'fno' command."
     log "restart your shell (or source your env) to pick up PATH."
     next_steps
     return 0
@@ -134,10 +180,12 @@ if command -v uv >/dev/null 2>&1; then
   SRC_VERSION="$(src_version)"
 
   # Idempotent: already binary-complete at our version -> nothing to do. Require
-  # ALL THREE binaries, not just the client: a same-version single-binary install
-  # (e.g. a pre-G2 wheel) must NOT take this skip, or the daemon/worker stay
-  # missing - the exact incomplete state this postinstall repairs.
+  # the front door and ALL THREE agent binaries, not just the client: a
+  # same-version install missing the mux (e.g. a pre-x-538e wheel) must NOT take
+  # this skip, or the advertised `fno` command stays missing - the exact
+  # incomplete state this postinstall repairs.
   if [[ -n "$SRC_VERSION" && "$(uv_installed_fno_version)" == "$SRC_VERSION" ]] \
+     && command -v fno >/dev/null 2>&1 \
      && command -v fno-agents >/dev/null 2>&1 \
      && command -v fno-agents-daemon >/dev/null 2>&1 \
      && command -v fno-agents-worker >/dev/null 2>&1; then
@@ -152,7 +200,11 @@ if command -v uv >/dev/null 2>&1; then
   if uv_tool_install_retry fno >/dev/null; then
     INSTALLED="$(uv_installed_fno_version)"
     if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
-      log "installed binary-complete fno $INSTALLED from PyPI (CLI + all three Rust binaries on PATH)."
+      log "installed fno $INSTALLED from PyPI (front door + CLI + agent binaries on PATH)."
+      # The receipt proves the advertised command, not uv's exit code. A wheel
+      # that predates the complete payload stays installed (the Python CLI
+      # works) but the missing front door is named with its repair (AC2-EDGE).
+      verify_frontdoor || true
       log "restart your shell (or source your env) to pick up PATH."
       next_steps
       exit 0
@@ -176,7 +228,7 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
   PIP="$(command -v pip || command -v pip3)"
   log "uv unavailable; falling back to $PIP install --user from $CLI_DIR (Python-only)..."
   if "$PIP" install --user "$CLI_DIR"; then
-    log "installed Python-only fno via pip --user. Run 'fno doctor update --rust' for the Rust binaries."
+    log "installed Python-only fno via pip --user. INCOMPLETE install: no 'fno' front door - run 'fno doctor update --rust' for the Rust binaries, or install a published PyPI wheel for the advertised command."
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
     next_steps
     exit 0
