@@ -76,6 +76,7 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 /// The unplanned queue's ready source answers in-process now; the label
 /// names the function, the way `agents claim list` labels its source.
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
+pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
@@ -84,6 +85,16 @@ pub(crate) const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
 pub(crate) const SRC_NEEDS: &str = "fno agents needs --json";
 pub(crate) const SRC_DISTRESS: &str =
     "~/.fno/events.jsonl (blocked rows) + bus/messages.jsonl + fno agents distress-verdicts";
+
+fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
+    read.payload
+        .as_ref()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
@@ -291,6 +302,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_prs = budget.start(SRC_PRS);
     let s_stalled = budget.start("stalled_holder lookups");
     let s_ready = budget.start(SRC_READY);
+    let s_worked = budget.start(SRC_WORKED);
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
     let s_blocked_child = budget.start(SRC_DISTRESS);
@@ -367,6 +379,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     };
     warnings.extend(claimed_warnings);
 
+    let worked = match s_worked {
+        None => SourceRead::err(budget.spent_error()),
+        Some(slice) => {
+            let mut cmd = fno_py_cmd();
+            cmd.extend([
+                "backlog".to_string(),
+                "worked".to_string(),
+                "--json".to_string(),
+            ]);
+            run_json(cmd, &cwd, slice)
+        }
+    };
+    mark(&mut sources, "worked", &worked, false);
+    let worked_ids = worked_node_ids(&worked);
+
     // The reads that can take real wall time run concurrently: gh pr
     // list, `fno inbox outstanding`, the batched truth
     // probe, the ready selection (in-process; its plan-document disk reads
@@ -397,6 +424,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         let t_ready = s_ready.map(|_slice| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
+            let worked_ids = worked_ids.clone();
             s.spawn(move || {
                 // In-process now: the admission decision lives in this
                 // binary (backlog_ready::select) and reads the graph the
@@ -422,6 +450,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         claimed.insert(id.to_string());
                     }
                 }
+                claimed.extend(worked_ids);
                 let opts = crate::backlog_ready::ReadyOpts {
                     all: true,
                     repo_root: crate::paths::canonical_repo_root(&cwd)
@@ -847,6 +876,19 @@ mod tests {
             scope_ids: None,
             crown_scope: None,
         }
+    }
+
+    #[test]
+    fn worked_source_extracts_node_ids() {
+        let read = SourceRead::ok(json!([{
+            "id": "x-live",
+            "workers": ["bp-worker"],
+        }]));
+
+        assert_eq!(
+            worked_node_ids(&read),
+            HashSet::from(["x-live".to_string()])
+        );
     }
 
     #[test]

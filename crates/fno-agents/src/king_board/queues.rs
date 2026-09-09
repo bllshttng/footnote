@@ -5,7 +5,7 @@ use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
     SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, TERMINAL_RUNGS,
+    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -843,7 +843,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS}"),
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
             &if inputs.ready.is_ok() && inputs.claims.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
