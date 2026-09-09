@@ -217,10 +217,18 @@ def test_spawn_parent_edge_gemini_harness(workdir_claude, captured_emits, monkey
 
 
 def test_spawn_parent_edge_no_env_vars(workdir_claude, captured_emits, monkeypatch):
-    """AC-EDGE-none: absent all session env vars -> fields are None, spawn does not raise."""
+    """AC-EDGE-none: no marker AND no harness ancestor -> fields are None,
+    spawn does not raise.
+
+    The walk is pinned because it is now consulted here (x-5c25). Left ambient,
+    this test would pass or fail on whatever process happened to run pytest.
+    """
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
     monkeypatch.delenv("GEMINI_SESSION_ID", raising=False)
+    import fno.claims.session_pid as session_pid
+
+    monkeypatch.setattr(session_pid, "resolve_session_harness", lambda: None)
 
     from fno.agents.cli import agents_app
     from typer.testing import CliRunner
@@ -591,6 +599,9 @@ def test_spawn_with_no_requester_carries_lineage_reason_in_the_event(
     string itself, captured at spawn time into the durable journal."""
     monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
     monkeypatch.setenv("PWD", "/parent/working/dir")
+    import fno.claims.session_pid as session_pid
+
+    monkeypatch.setattr(session_pid, "resolve_session_harness", lambda: None)
 
     from fno.agents.cli import agents_app
     from typer.testing import CliRunner
@@ -615,3 +626,104 @@ def test_spawn_with_no_requester_carries_lineage_reason_in_the_event(
         f"lineage_reason must be a non-empty reason, got {reason!r}"
     )
     assert "identity disposition=" in reason
+
+
+# ---------------------------------------------------------------------------
+# x-5c25: a null parent must say which of its three meanings it carries
+# ---------------------------------------------------------------------------
+
+
+def test_ac5_hp_marker_less_spawn_still_names_the_harness(monkeypatch):
+    """AC5-HP: no marker in the env, but the process walk names claude.
+
+    Measured on 2026-09-08: 24 registry rows carried spawned_by_cwd and no
+    session, and every one of their agent_spawned events said
+    "identity disposition=empty, markers=no markers". The row could not be told
+    apart from a human-run spawn. The walk answers the family question when the
+    id cannot be proved, so the harness half is recorded and the id stays null.
+    """
+    import fno.claims.self_identity as self_identity
+    import fno.claims.session_pid as session_pid
+    from fno.agents.dispatch import _capture_parent_edge
+
+    class _Empty:
+        harness = None
+        session_id = None
+        disposition = "empty"
+        markers_present = ()
+
+    monkeypatch.setattr(self_identity, "resolve_self_identity", lambda: _Empty())
+    monkeypatch.setattr(session_pid, "resolve_session_harness", lambda: "claude")
+    monkeypatch.setenv("PWD", "/parent/working/dir")
+
+    assert _capture_parent_edge() == (None, "claude", "/parent/working/dir")
+
+
+def test_ac6_edge_no_harness_ancestor_names_nothing(monkeypatch):
+    """AC6-EDGE: a human shell has no marker and no harness ancestor. Both
+    halves stay null, which is now a distinct reading rather than the only one."""
+    import fno.claims.self_identity as self_identity
+    import fno.claims.session_pid as session_pid
+    from fno.agents.dispatch import _capture_parent_edge
+
+    class _Empty:
+        harness = None
+        session_id = None
+        disposition = "empty"
+        markers_present = ()
+
+    monkeypatch.setattr(self_identity, "resolve_self_identity", lambda: _Empty())
+    monkeypatch.setattr(session_pid, "resolve_session_harness", lambda: None)
+    monkeypatch.setenv("PWD", "/parent/working/dir")
+
+    assert _capture_parent_edge() == (None, None, "/parent/working/dir")
+
+
+def test_a_present_marker_that_resolves_to_nothing_stays_nothing(monkeypatch):
+    """The fallback is gated on an EMPTY marker set, not on a missing harness.
+    A marker that IS present and resolved to nothing is the contradiction
+    x-b57a / x-0992 rule must attribute nothing, and the walk must not
+    overturn it."""
+    import fno.claims.self_identity as self_identity
+    import fno.claims.session_pid as session_pid
+    from fno.agents.dispatch import _capture_parent_edge
+
+    class _Contradicted:
+        harness = None
+        session_id = None
+        disposition = "contradiction"
+        markers_present = (("CODEX_THREAD_ID", "codex", "t-1"),)
+
+    monkeypatch.setattr(self_identity, "resolve_self_identity", lambda: _Contradicted())
+    monkeypatch.setattr(session_pid, "resolve_session_harness", lambda: "claude")
+    monkeypatch.setenv("PWD", "/parent/working/dir")
+
+    assert _capture_parent_edge() == (None, None, "/parent/working/dir")
+
+
+def test_the_launch_edge_stamp_is_wired_into_the_spawn(workdir_claude, monkeypatch):
+    """x-5c25 AC1-HP, wiring half: a real spawn that names a node reaches
+    _stamp_launch_edge with that node. The helper's own behavior is covered in
+    test_spawn_graph_launch_edge.py; this proves the call site exists."""
+    import fno.agents.cli as agents_cli
+
+    seen: list = []
+    monkeypatch.setattr(agents_cli, "_stamp_launch_edge", seen.append)
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn, "resolve_provenance", lambda *a, **k: {"FNO_NODE": "x-1234"}
+    )
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session-abc123")
+
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "test-launch-wired", "-H", "claude", "--node", "x-1234",
+         "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+    assert seen == ["x-1234"], f"expected the stamp to see the node, got {seen!r}"

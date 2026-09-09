@@ -32,6 +32,19 @@ case "$1 $2" in
   "agents spawn-guard")
     [[ -n "${STUB_VERDICT:-}" ]] && printf '%s\n' "$STUB_VERDICT"
     exit "${STUB_VERDICT_RC:-0}" ;;
+  "agents dispatch")
+    if [[ "${FNO_AGENTS_RUNTIME:-}" == "rust" && "${STUB_RUST_DISPATCH_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
+    [[ "${STUB_CAPABILITIES_FAIL:-0}" == "1" ]] && exit 1
+    case "${4:-}" in
+      claude) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}' ;;
+      codex) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["codex","resume","{session_id}"]}}}}' ;;
+      agy) printf '%s\n' '{"keeper":{},"resume_strategy":{"forms":{"interactive_attach":{"tokens":[]}}}}' ;;
+      opencode) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":[]}}}}' ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
   "agents list")
     echo '{"agents":[]}'; exit 0 ;;
   "agents spawn"|"agents host")
@@ -54,6 +67,26 @@ case "$1 $2" in
     # (spawn.sh accepts a pane receipt only when every identity field matches).
     if [[ "${STUB_MUX:-0}" == "1" ]]; then
       echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"${STUB_MUX_SHORT_ID-}\",\"session_id\":\"${STUB_MUX_SESSION_ID-}\",\"harness\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
+    fi
+    if [[ "${STUB_CODEX_THREAD:-0}" == "1" ]]; then
+      thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000001}"
+      if [[ "${STUB_THREAD_SHORT_ONLY:-0}" == "1" ]]; then
+        echo "{\"name\":\"codex-thread\",\"short_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
+      fi
+      echo "{\"name\":\"codex-thread\",\"short_id\":\"\",\"session_id\":\"$thread_session\",\"harness_session_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
+    fi
+    if [[ "${STUB_KEEPER_THREAD:-0}" == "1" ]]; then
+      thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000002}"
+      echo "{\"name\":\"agy-thread\",\"short_id\":\"$thread_session\",\"harness\":\"agy\",\"status\":\"live\"}"; exit 0
+    fi
+    if [[ "${STUB_OPENCODE_THREAD:-0}" == "1" ]]; then
+      if [[ "${STUB_OPENCODE_TORN:-0}" == "1" ]]; then
+        echo '{"name":"opencode-thread","short_id":"deadbeef","harness":"opencode","status":"live"}'; exit 0
+      fi
+      if [[ "${STUB_OPENCODE_SHORT_ONLY:-0}" == "1" ]]; then
+        echo '{"name":"opencode-thread","short_id":"ses_dispatchtest1","harness":"opencode","status":"live"}'; exit 0
+      fi
+      echo '{"name":"opencode-thread","short_id":"ses_dispatchtest1","session_id":"ses_dispatchtest1","harness":"opencode","status":"live"}'; exit 0
     fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
@@ -252,14 +285,54 @@ out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='junk\ndeadbeef' \
   run --name spawn-torn --provider claude --message '/target x' --node "$NODE")"
 ok 'pane torn short_id -> failed'  "$(field "$out")" 'failed'
 
-# AC1-EDGE: the bg lane keeps the strict 8-hex rule. A real 8-hex validates...
+# AC1-EDGE: the thread lane keeps the strict 8-hex rule. A real 8-hex validates...
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='b92eec14' \
-  run --name spawn-bg --provider claude --message '/target x' --node "$NODE" --substrate bg)"
-ok 'bg 8-hex -> launched'          "$(field "$out")" 'launched'
-# ...but a name-slug on the bg lane is still rejected (that lane really returns hex).
+  run --name spawn-thread --provider claude --message '/target x' --node "$NODE" --substrate thread)"
+ok 'thread 8-hex -> launched'      "$(field "$out")" 'launched'
+# ...but a name-slug on the thread lane is still rejected (that lane returns hex).
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
-  run --name spawn-bg2 --provider claude --message '/target x' --node "$NODE" --substrate bg)"
-ok 'bg slug -> failed'             "$(field "$out")" 'failed'
+  run --name spawn-thread2 --provider claude --message '/target x' --node "$NODE" --substrate thread)"
+ok 'thread slug -> failed'          "$(field "$out")" 'failed'
+
+# AC2-THREAD: Codex thread receipts have no short_id; the full session identity
+# is the receipt handle and must be surfaced for logs/registry lookup.
+CODEX_THREAD_SESSION='019f0000-0000-7000-8000-000000000001'
+out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SESSION_ID="$CODEX_THREAD_SESSION" \
+  run --name codex-thread --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok   'codex thread full session -> launched' "$(field "$out")" 'launched'
+has  'codex thread full session surfaced'     "$out" "short_id=$CODEX_THREAD_SESSION"
+has  'codex thread logs use full session'    "$out" "fno agents logs $CODEX_THREAD_SESSION"
+out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SHORT_ONLY=1 STUB_THREAD_SESSION_ID="$CODEX_THREAD_SESSION" \
+  run --name codex-thread-short --provider codex --yolo --node "$NODE" --message 'Implement x' --substrate thread)"
+ok   'codex short-only session -> launched'   "$(field "$out")" 'launched'
+has  'codex short-only session surfaced'      "$out" "short_id=$CODEX_THREAD_SESSION"
+
+KEEPER_THREAD_SESSION='019f0000-0000-7000-8000-000000000002'
+out="$(STUB_VERDICT="$DISP" STUB_KEEPER_THREAD=1 STUB_THREAD_SESSION_ID="$KEEPER_THREAD_SESSION" \
+  run --name agy-thread --provider agy --message 'Implement x' --substrate thread)"
+ok   'agy keeper full session -> launched' "$(field "$out")" 'launched'
+has  'agy keeper full session surfaced'    "$out" "short_id=$KEEPER_THREAD_SESSION"
+
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 \
+  run --name opencode-thread --provider opencode --message 'Implement x' --substrate thread)"
+ok   'opencode ses session -> launched' "$(field "$out")" 'launched'
+has  'opencode ses session surfaced'    "$out" 'short_id=ses_dispatchtest1'
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 STUB_OPENCODE_SHORT_ONLY=1 \
+  run --name opencode-thread-short --provider opencode --node "$NODE" --message 'Implement x' --substrate thread)"
+ok   'opencode short-only session -> launched' "$(field "$out")" 'launched'
+has  'opencode short-only session surfaced'    "$out" 'short_id=ses_dispatchtest1'
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 STUB_OPENCODE_TORN=1 \
+  run --name opencode-thread-torn --provider opencode --message 'Implement x' --substrate thread)"
+ok   'opencode torn short_id -> failed'  "$(field "$out")" 'failed'
+
+out="$(STUB_VERDICT="$DISP" STUB_CAPABILITIES_FAIL=1 \
+  run --name thread-capabilities-fail --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok 'capability read failure -> failed' "$(field "$out")" 'failed'
+no 'capability read failure did not spawn' "$(calllog)" 'agents spawn --harness'
+out="$(FNO_AGENTS_RUNTIME=rust STUB_VERDICT="$DISP" STUB_RUST_DISPATCH_FAIL=1 STUB_CODEX_THREAD=1 \
+  run --name thread-rust-runtime --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok 'rust runtime capability read -> launched' "$(field "$out")" 'launched'
+has 'rust runtime capability read spawned' "$(calllog)" 'agents spawn --harness'
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane

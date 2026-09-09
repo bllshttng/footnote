@@ -2120,7 +2120,7 @@ fn run_reap(rest: &[String]) -> i32 {
     // store over `--since`, pinned to THIS build. Nonzero exit on any
     // unmet condition - empty window, stale build, partial effects - so the
     // plan's done probe cannot pass on CI-green alone.
-    if let Some(verify_pos) = rest.iter().position(|a| a == "--verify") {
+    if rest.iter().any(|a| a == "--verify") {
         let since = match rest.iter().position(|a| a == "--since") {
             Some(i) => match rest.get(i + 1).and_then(|v| parse_duration_secs(v)) {
                 Some(secs) => secs,

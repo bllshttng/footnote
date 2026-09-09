@@ -41,13 +41,15 @@ STUBDIR="$TMP/bin"; mkdir -p "$STUBDIR"
 cat > "$STUBDIR/fno" <<'STUB'
 #!/usr/bin/env bash
 case "$1 $2 $3" in
+  "agents dispatch capabilities"*)
+    printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}'; exit 0 ;;
   "agents spawn-guard"*)  printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
   "agents list "*)         printf '{"agents":[]}\n'; exit 0 ;;
   "agents spawn "*|"agents host "*)
     # Record the arg vector so a test can assert the --cwd the worker launches
     # at (the whole point of the delegation path: repo root, not a worktree).
     printf '%s\n' "$*" >> "${SPAWN_ARGS_LOG:-/dev/null}"
-    printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
+    printf '{"short_id":"%s"}\n' "${STUB_SHORT_ID-deadbeef}"; exit 0 ;;
   "claim release "*)       exit 0 ;;
   "workspace worktree ensure"|"agents workspace worktree")
     # Drop the matched verb tokens; the canonical spelling is 4 tokens
@@ -208,6 +210,22 @@ err9="$(cat "$TMP/err9")"
 has "handoff launched" "$out9" "result=launched"
 no  "handoff no worktree note" "$err9" "auto-worktree:"
 [[ -d "$TMP/conductor/workspaces/myrepo/handoff-doc-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: handoff payload got a worktree"; } || PASS=$((PASS+1))
+
+# 9b. thread receipts keep the strict session-id shape and use short_id for logs.
+out9b="$(HOME="$TMP" PATH="$STUBDIR:$PATH" STUB_SHORT_ID=deadbeef bash "$SPAWN" \
+  --name "thread-receipt-demo" --provider claude --payload-mode seed \
+  --substrate thread --message "Continue the worker thread." --cwd "$REPO" 2>"$TMP/err9b")"
+rc9b=$?
+ok   "thread receipt exit 0" "$rc9b" "0"
+has  "thread receipt launched" "$out9b" "result=launched"
+has  "thread receipt short_id" "$out9b" "short_id=deadbeef"
+has  "thread receipt logs hint" "$out9b" "fno agents logs deadbeef"
+out9c="$(HOME="$TMP" PATH="$STUBDIR:$PATH" STUB_SHORT_ID=spawn-x-61df-demo bash "$SPAWN" \
+  --name "thread-receipt-bad" --provider claude --payload-mode seed \
+  --substrate thread --message "Continue the worker thread." --cwd "$REPO" 2>"$TMP/err9c")"
+rc9c=$?
+ok   "thread non-hex receipt fails" "$rc9c" "1"
+has  "thread non-hex receipt failure" "$out9c" "result=failed"
 
 # 10. the resolved harness is forwarded to ensure (--harness claude for provider
 #     claude), so ensure's policy gate can land a claude payload harness-native.

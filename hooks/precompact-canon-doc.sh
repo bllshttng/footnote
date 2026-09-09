@@ -126,14 +126,45 @@ if command -v fno >/dev/null 2>&1; then
   PR_RAW="$(fno do pr list --state open 2>/dev/null || true)"
 fi
 
+# Crowned-ness, computed once from the already-fetched REG_ROWS and handed
+# into the heredoc below via env: the heredoc's stdout carries ONLY the auto
+# block text, matching every other fact in this script. An earlier version
+# smuggled this boolean out as a synthetic first stdout line for bash to
+# split off by position - fragile, since any reordering of the heredoc's own
+# output silently corrupts the auto block with no error (the whole heredoc is
+# wrapped in `|| true`).
+IS_CROWNED="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
+import json, os
+sid = os.environ.get("SID", "")
+try:
+    data = json.loads(os.environ.get("REG_ROWS") or "[]")
+except Exception:
+    data = []
+if isinstance(data, dict):
+    data = data.get("agents") or data.get("rows") or []
+rows = data if isinstance(data, list) else []
+mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
+r = mine[0] if mine else {}
+lvl = r.get("crown_level")
+scp = r.get("crown_scope")
+print("1" if (mine and (lvl is not None or scp is not None)) else "0")
+' 2>/dev/null || true)"
+[[ "$IS_CROWNED" == "1" ]] || IS_CROWNED=0
+
 # ---------------------------------------------------------------------------
 # Build the auto block. One python heredoc (quoted delimiter => no shell
 # escaping) reads the facts from env and emits the mechanical sections. JSON
 # parsing stays in python; bash never touches it.
+# No apostrophes anywhere in this heredoc body: bash's paren-matching for the
+# enclosing $(...) misreads an apostrophe followed later by a parenthesized
+# comment/string as an unterminated quote, and the script fails `bash -n`
+# with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
 AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
-             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" python3 <<'PY' 2>/dev/null || true
-import os, json
+             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
+import json
+import os
+import subprocess
 
 
 def rows_from(raw):
@@ -156,9 +187,10 @@ r = mine[0] if mine else {}
 
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
+crowned = os.environ.get("IS_CROWNED") == "1"
 if not mine:
     crown = "none (no registry row for this session)"
-elif lvl is None and scp is None:
+elif not crowned:
     crown = "none (uncrowned)"
 else:
     crown = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
@@ -201,6 +233,70 @@ if pr_rows:
                                     x.get("title", "-"), x.get("headRefName", "-"))
             for x in pr_rows]
 
+
+def _epic_children(epic_id):
+    """One epic's children via `epic status`, or None on any failure."""
+    try:
+        proc = subprocess.run(
+            ["fno", "backlog", "epic", "status", epic_id, "--json"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        data = json.loads(proc.stdout or "")
+    except Exception:
+        return None
+    children = data.get("children")
+    return children if isinstance(children, list) else None
+
+
+def nodes_under_purview(scope):
+    """The crown scope's children, id plus status, via the existing epic
+    status read. A portfolio crown stores its scope as a comma-joined set of
+    epics (fno.agents.crown.canonical_scope) - query each member and merge,
+    so a level-2 king over more than one epic sees every member's children,
+    not just the first. Bounded (5s per member) and degrade-only: a member
+    that is not a queryable epic (a level-1 whole-project crown, an
+    unreadable graph) contributes nothing rather than failing the whole
+    read; this whole block is skipped only when EVERY member yields nothing."""
+    if not scope:
+        return None
+    rows = []
+    seen_ids = set()
+    for member in (part.strip() for part in scope.split(",")):
+        if not member:
+            continue
+        for c in _epic_children(member) or []:
+            node_id = c.get("id")
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            rows.append(c)
+    if not rows:
+        return None
+    return "\n".join(
+        "- %s [%s] %s" % (c.get("id", "-"), c.get("status", "-"), c.get("slug", ""))
+        for c in rows
+    )
+
+
+# A king additionally holds its nodes under purview and its own live workers -
+# facts no other session has. Skipped whole when uncrowned so a non-king canon
+# doc stays byte-identical to the prior output (AC2-EDGE).
+if crowned:
+    nodes = nodes_under_purview(scp) or "_(nodes under purview: unavailable)_"
+    out += [
+        "",
+        "## King: nodes under purview (auto)",
+        "level %s over %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-"),
+        "",
+        nodes,
+        "",
+        # `workers` is spawned_by_session, not crown-scope-filtered: a
+        # successor omits a predecessor workers list, and unrelated-territory
+        # workers of this session leak in. Follow-up under x-5226.
+        "## King: live workers in scope (auto)",
+        workers,
+    ]
+
 print("\n".join(out))
 PY
 )"
@@ -212,13 +308,17 @@ PY
 # otherwise erase the judgment right when post-compact context needs it).
 # ---------------------------------------------------------------------------
 _session_block() {
-  # $1 = ordinal (1 or 2), $2 = default instruction text.
-  local ord="$1" default="$2" preserved=""
+  # $1 = heading label substring, $2 = default instruction text. Matched by
+  # the "## <label>" heading immediately above each marker, not by ordinal
+  # position: a king who hand-writes only the two crown headings on a first
+  # compaction (the doc did not exist yet to hold headings 1/2) still binds
+  # correctly, instead of silently landing in the wrong slot.
+  local label="$1" default="$2" preserved=""
   if [[ -f "$DOC_PATH" ]]; then
-    preserved="$(awk -v n="$ord" '
-      BEGIN { c=0 }
-      /<!-- fno:session -->/ { c++; if (c==n) { grab=1; next } }
-      grab && /<!-- \/fno:session -->/ { grab=0 }
+    preserved="$(awk -v label="$label" '
+      /^## / { heading = $0; next }
+      /<!-- fno:session -->/ { grab = (index(heading, label) > 0); next }
+      grab && /<!-- \/fno:session -->/ { grab=0; next }
       grab { print }
     ' "$DOC_PATH" 2>/dev/null)"
   fi
@@ -231,12 +331,19 @@ _session_block() {
 
 DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
 DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
+DEFAULT_GAPS="_Gaps and open thinking only this crown holds. Nothing external knows this. The session fills it at full context._"
+DEFAULT_WORKAROUNDS="_Workarounds in force only this crown is running. Nothing external knows this. The session fills it at full context._"
 
 # Capture the preserved-or-defaulted session blocks BEFORE opening the doc for
 # write. The assembly below redirects to $DOC_PATH, which truncates it on open;
 # reading inside that block would see an empty file and always default.
-SB1="$(_session_block 1 "$DEFAULT_MERGE")"
-SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
+SB1="$(_session_block "Merge order and why" "$DEFAULT_MERGE")"
+SB2="$(_session_block "Open decisions awaiting the operator" "$DEFAULT_DECISIONS")"
+SB3="" SB4=""
+if [[ "$IS_CROWNED" == "1" ]]; then
+  SB3="$(_session_block "Gaps and open thinking" "$DEFAULT_GAPS")"
+  SB4="$(_session_block "Workarounds in force" "$DEFAULT_WORKAROUNDS")"
+fi
 
 # A doc the session wrote by hand carries none of the markers above, so the
 # preserve helper reads nothing from it and the write below would truncate it
@@ -282,6 +389,18 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
   printf '%s\n' "$SB2"
   echo "<!-- /fno:session -->"
   echo ""
+  if [[ "$IS_CROWNED" == "1" ]]; then
+    echo "## Gaps and open thinking (session)"
+    echo "<!-- fno:session -->"
+    printf '%s\n' "$SB3"
+    echo "<!-- /fno:session -->"
+    echo ""
+    echo "## Workarounds in force (session)"
+    echo "<!-- fno:session -->"
+    printf '%s\n' "$SB4"
+    echo "<!-- /fno:session -->"
+    echo ""
+  fi
 } > "$DOC_PATH" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------

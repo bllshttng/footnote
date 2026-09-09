@@ -4,16 +4,25 @@
 //!
 //! The sweep owns the sequence (stop, active-surface removal, registry drop,
 //! tree prune); this module owns the ACTIVE-SURFACE removal - claude's agent
-//! list, codex's session index, cursor-agent's detached worker servers -
-//! through the same cascade the `rm` verb walks. A history deletion never
-//! happens here: the codex index drop keeps the rollout files, the claude
-//! list removal keeps the transcript, and an archive op (codex
-//! `thread/archive`) is history-preserving by construction.
+//! list, codex's session index, cursor-agent's detached worker servers,
+//! opencode's active session listing - through the same cascade the `rm` verb
+//! walks. A history deletion never happens here: the codex index drop keeps
+//! the rollout files, the claude list removal keeps the transcript, and an
+//! archive op (codex `thread/archive`, opencode `time.archived`) is
+//! history-preserving by construction.
+//!
+//! opencode is the one arm that does NOT run through the shared cascade. The
+//! cascade is also the `rm` verb's, and `rm` has a Python twin
+//! (`fno.agents.dispatch.rm_agent`) that leaves an opencode record alone on
+//! purpose. Archiving inside the cascade would move one of those two legs and
+//! not the other, so the arm lives here, in the retirement lane, which has no
+//! twin.
 //!
 //! Absence is only accepted after a complete enumeration of the exact
 //! identity; a failed read is `Unverified` or `Failed`, never absence.
 
 use crate::daemon::{cascade_harness_session_result_with, CascadeOutcome};
+use crate::opencode_serve::ArchiveOutcome;
 use crate::receipt::EffectRecord;
 use crate::state::RegistryEntry;
 
@@ -68,6 +77,9 @@ impl CascadeOutcome {
 /// seams (the daemon roster read and `claude rm`), returning the typed
 /// outcome the sweep records on the receipt.
 pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome {
+    if e.harness_name() == "opencode" {
+        return apply_opencode_archive(e);
+    }
     // The snapshot is computed ONCE here and handed to the cascade, matching
     // the rm handler: the pre-check, the removal and the post-read must see
     // the same listing generation, and a claude arm without a snapshot is a
@@ -79,4 +91,58 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
         &crate::claude_roster::read_all_agents,
         &crate::daemon::run_claude_rm,
     )
+}
+
+/// opencode's active-surface removal, wired to the production seams: the
+/// recorded serve and the archive PATCH.
+fn apply_opencode_archive(e: &RegistryEntry) -> CascadeOutcome {
+    let serve = crate::paths::AgentsHome::from_env_opt()
+        .and_then(|home| crate::opencode_serve::archive_capable_serve(&home))
+        .map(|handle| (handle.base_url, handle.token));
+    opencode_archive_outcome(
+        e.harness_session_id.as_deref(),
+        serve,
+        &crate::opencode_serve::archive_session,
+    )
+}
+
+/// Map one archive attempt onto the effect vocabulary.
+///
+/// Every skip answers `NotApplicable`, which is what an opencode row measured
+/// before this op existed. That is deliberate: a missing serve or a serve too
+/// old for the op is not evidence about the session, and answering `kept`
+/// there would hold every opencode row on a machine that runs no serve.
+///
+/// A transport error is `Unverified` (the row comes back next sweep). A write
+/// the server accepted and did not store is `Failed` - the same shape as a
+/// claude row surviving a successful `claude rm`.
+///
+/// The id must be shape-valid before any request carries it, the same gate the
+/// reachability probe applies before it reaches SQL. An id of another harness's
+/// shape would 404 and read as `confirmed-already-absent`: a receipt claiming a
+/// measured absence for a session this code never addressed.
+pub(crate) fn opencode_archive_outcome(
+    session_id: Option<&str>,
+    serve: Option<(String, String)>,
+    archive: &dyn Fn(&str, &str, &str) -> Result<ArchiveOutcome, String>,
+) -> CascadeOutcome {
+    let Some(sid) = session_id.filter(|s| crate::provider::is_opencode_session_id(s)) else {
+        return CascadeOutcome::NotApplicable;
+    };
+    let Some((base_url, token)) = serve else {
+        return CascadeOutcome::NotApplicable;
+    };
+    match archive(&base_url, &token, sid) {
+        Ok(ArchiveOutcome::Archived) => CascadeOutcome::Removed,
+        Ok(ArchiveOutcome::AlreadyArchived) => {
+            CascadeOutcome::AlreadyAbsent(format!("opencode session {sid} was already archived"))
+        }
+        Ok(ArchiveOutcome::Gone) => CascadeOutcome::AlreadyAbsent(format!(
+            "opencode session {sid} is absent from the store"
+        )),
+        Ok(ArchiveOutcome::Survived) => CascadeOutcome::Failed(format!(
+            "opencode session {sid} is still unarchived after an accepted archive write"
+        )),
+        Err(reason) => CascadeOutcome::Unverified(reason),
+    }
 }

@@ -6,9 +6,14 @@
 //! the daemon tick: a grace window anchored at `merged_at`, a doneness
 //! re-read against the graph, the harness stop FIRST, then the registry row,
 //! then the tree. That order is load-bearing: dropping the row before the
-//! harness stop orphans the session in its sideline (`fno agents rm` then
-//! reports "agent not found" while the session is still attached, and the
-//! recovery is `claude adopt` plus a second rm).
+//! harness stop orphans the session in its sideline, and the recovery is
+//! `claude adopt` plus a second removal.
+//!
+//! Only the trigger, the doneness re-read and the TREE are this module's own.
+//! The session half of each retirement - stop, the native active-surface
+//! removal, the resumable receipt, the guarded registry write - is
+//! `gc_sweep`'s, and this module calls it. One sequence, so a merge-triggered
+//! removal and a scheduled one leave the same record.
 //!
 //! This is the ONLY bound the machine has on registry row count: spawn_gate
 //! counts a row only while its pid is alive (or its short id is in the live
@@ -162,25 +167,19 @@ pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
         .any(|request| request.repo == repo)
 }
 
-/// One candidate row: its registry entry when the row still exists, `None`
-/// for a request-named row the registry no longer carries (removed by an
-/// earlier pass; the rm attempt settles it either way).
-struct CleanupRow {
-    name: String,
-    entry: Option<state::RegistryEntry>,
-}
-
 /// The rows this request may remove: registry rows whose cwd IS the merged
 /// worktree or whose name was minted for one of the closed nodes. Sorted by
 /// name. A request-named row the registry no longer carries is ALREADY gone,
-/// so it is not a candidate: rm on a missing name would fail and read as a
-/// refusal, and a re-pass after a held tree must read the row set as settled,
-/// not wedged.
-fn merge_cleanup_rows(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<CleanupRow> {
+/// so it is not a candidate: a re-pass after a held tree must read the row set
+/// as settled, not wedged.
+fn merge_cleanup_rows(
+    home: &AgentsHome,
+    request: &MergeCleanupRequest,
+) -> Vec<state::RegistryEntry> {
     let Ok(registry) = state::load_registry(&home.registry_json()) else {
         return Vec::new();
     };
-    let mut rows: Vec<CleanupRow> = registry
+    let mut rows: Vec<state::RegistryEntry> = registry
         .entries
         .into_iter()
         .filter(|entry| {
@@ -192,10 +191,6 @@ fn merge_cleanup_rows(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<C
                     .node_ids
                     .iter()
                     .any(|node| entry.name.starts_with(&format!("target-{node}-")))
-        })
-        .map(|entry| CleanupRow {
-            name: entry.name.clone(),
-            entry: Some(entry),
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -233,24 +228,6 @@ fn row_stop_short(entry: &state::RegistryEntry) -> Option<String> {
     }
     let roster = crate::claude_roster::ClaudeRoster::load_default().ok()?;
     roster.find(sid).map(|w| w.short_id().to_string())
-}
-
-fn rm_row(root: &str, name: &str, request_id: &str) -> bool {
-    let output = std::process::Command::new("fno")
-        .current_dir(root)
-        .args([
-            "agents",
-            "rm",
-            name,
-            "--audit-actor",
-            "merge-reaper",
-            "--audit-reason",
-            "pr-merged",
-            "--audit-request-id",
-            request_id,
-        ])
-        .output();
-    output.is_ok_and(|output| output.status.success())
 }
 
 /// The ONE remaining tree guard (the dirty guard is gone for a done node, by
@@ -325,8 +302,9 @@ struct RequestSeams<'a> {
     /// Stop the row's harness. `Ok(short)` names the stopped session (empty
     /// for a pane row); `Err` holds the row for this pass.
     stop: &'a dyn Fn(&state::RegistryEntry) -> Result<String, &'static str>,
-    /// Remove one registry row.
-    rm: &'a dyn Fn(&str) -> bool,
+    /// The native ACTIVE-SURFACE removal, typed: claude's agent list, codex's
+    /// session index, cursor-agent's worker servers.
+    surface_removal: &'a dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     /// The ONE tree guard: true = unpushed work, hold.
     tree_holds: &'a dyn Fn(&str) -> bool,
     /// Forced tree removal; true = gone (the caller emits and prunes).
@@ -335,14 +313,15 @@ struct RequestSeams<'a> {
 
 /// Settle one request past its grace window. Returns the acted count (rows
 /// removed + trees removed). Every step names itself in events.jsonl IN
-/// ORDER: stop, agent_removed (emitted by `fno agents rm` itself),
-/// worktree_removed, merge_cleanup_completed.
+/// ORDER: merge_reaper_stopped, agent_row_reaped (emitted by the shared
+/// commit), worktree_removed, merge_cleanup_completed.
 fn run_request(
     home: &AgentsHome,
     emitter: &EventEmitter,
     request: &MergeCleanupRequest,
     root: &str,
     states: Option<&HashMap<String, (String, Option<String>)>>,
+    ledger: Option<&[Value]>,
     now: i64,
     seams: &RequestSeams,
 ) -> u64 {
@@ -378,65 +357,121 @@ fn run_request(
     // 3. Candidates, with the crowned and operator-origin rows named out: an
     // idle king reads state=done, so exclusion is by NAME, never by roster
     // state.
-    let mut removed_rows: Vec<String> = Vec::new();
     let mut kept: Vec<String> = Vec::new();
-    let mut rows: Vec<CleanupRow> = Vec::new();
-    for row in merge_cleanup_rows(home, request) {
-        if let Some(entry) = &row.entry {
-            if entry.crown_level.is_some() {
-                kept.push(format!("{}:kept_crowned", row.name));
-                continue;
-            }
-            if entry.origin.as_deref() == Some("operator") {
-                kept.push(format!("{}:kept_operator", row.name));
-                continue;
-            }
+    let mut rows: Vec<state::RegistryEntry> = Vec::new();
+    for entry in merge_cleanup_rows(home, request) {
+        if entry.crown_level.is_some() {
+            kept.push(format!("{}:kept_crowned", entry.name));
+            continue;
         }
-        rows.push(row);
+        if entry.origin.as_deref() == Some("operator") {
+            kept.push(format!("{}:kept_operator", entry.name));
+            continue;
+        }
+        rows.push(entry);
     }
-    // 4+5. Stop the harness FIRST, then the row - in that order, per row, so
-    // a stop failure holds only its own row this pass.
-    let mut removal_failed: Option<String> = None;
-    for row in rows {
-        if let Some(entry) = &row.entry {
-            match (seams.stop)(entry) {
-                Ok(short) => {
-                    if !short.is_empty() {
-                        let _ = emitter.emit(
-                            "merge_reaper_stopped",
-                            &json!({
-                                "short_id": short,
-                                "name": row.name,
-                                "request_id": request.request_id,
-                                "harness": entry.harness_name(),
-                            }),
-                        );
-                    }
-                }
-                Err(reason) => {
-                    kept.push(format!("{name}:{reason}", name = row.name));
-                    continue;
-                }
+    // 4+5. The session half of every candidate runs through the SAME sequence
+    // the scheduled sweep runs - stop, native active-surface removal, the
+    // resumable receipt - and one registry write drops the staged rows under
+    // that sweep's `created_at` guard. The merge path keeps only what is its
+    // own: the trigger above and the tree below. A stop or receipt refusal
+    // keeps its own row; the rest of the request still settles.
+    let mut receipts = BTreeMap::new();
+    let mut to_retire = BTreeMap::new();
+    // The merge path names its own stop in the journal: `merge_reaper_stopped`
+    // is what puts the stop BEFORE the row drop in a reader's hands.
+    let stop = |entry: &state::RegistryEntry| match (seams.stop)(entry) {
+        Ok(short) => {
+            if !short.is_empty() {
+                let _ = emitter.emit(
+                    "merge_reaper_stopped",
+                    &json!({
+                        "short_id": short,
+                        "name": entry.name,
+                        "request_id": request.request_id,
+                        "harness": entry.harness_name(),
+                    }),
+                );
             }
+            true
         }
-        if !(seams.rm)(&row.name) {
-            removal_failed = Some(row.name);
-            break;
+        Err(_) => false,
+    };
+    for entry in &rows {
+        match crate::gc_sweep::stage_session_retirement(
+            entry,
+            ledger,
+            false,
+            &stop,
+            seams.surface_removal,
+            &mut receipts,
+        ) {
+            Ok(()) => {
+                to_retire.insert(
+                    entry.name.clone(),
+                    crate::gc_sweep::RetireOrder {
+                        id: entry.name.clone(),
+                        basis: format!(
+                            "merge-cleanup:{} all nodes done+merged",
+                            request.request_id
+                        ),
+                        created_at: entry.created_at.clone(),
+                        // The tree is this path's own authority (step 6),
+                        // under a done-and-merged rule the sweep's
+                        // clean-and-merged prune does not carry. The shared
+                        // commit never touches it.
+                        tree: crate::gc::TreeAction::None,
+                        worktree: None,
+                    },
+                );
+            }
+            Err(refusal) => kept.push(format!(
+                "{name}:{reason}",
+                name = entry.name,
+                reason = match refusal {
+                    crate::gc_sweep::RetireRefusal::StopRefused(_) => "stop_refused",
+                    crate::gc_sweep::RetireRefusal::NativeRemoval(_) =>
+                        "native_removal_unconfirmed",
+                    crate::gc_sweep::RetireRefusal::NoReceipt(_) => "no_receipt",
+                }
+            )),
         }
-        removed_rows.push(row.name);
     }
-    if let Some(name) = removal_failed {
+    let report = crate::gc_sweep::commit_retirements(
+        home,
+        emitter,
+        "merge_reap",
+        &rows,
+        &mut to_retire,
+        &receipts,
+        &|_| {},
+    );
+    kept.extend(
+        report
+            .kept_no_receipt
+            .iter()
+            .map(|(name, reason)| format!("{name}:{reason}")),
+    );
+    // A row staged but not removed is still live, whether the registry write
+    // failed or the `created_at` guard found a replacement session owning the
+    // name. Either way the tree must not go this pass, and the reason says
+    // what is true of both: the row is not gone.
+    if let Some(name) = to_retire
+        .keys()
+        .find(|name| !report.retired_names.contains(*name))
+    {
         let _ = emitter.emit(
             "merge_cleanup_refused",
             &json!({
                 "request_id": request.request_id,
                 "repo": request.repo,
                 "pr": request.pr,
-                "reason": format!("row-removal-failed:{name}"),
+                "reason": format!("row-not-removed:{name}"),
             }),
         );
         return 0;
     }
+    let removed_rows: Vec<String> = report.retired_names.iter().cloned().collect();
     // 6. The tree, after the rows: whatever its git status, a done and
     // merged node's tree goes; the branch and the transcript are the
     // recovery path. Unpushed (HEAD not in origin/main) holds. A HELD tree
@@ -521,8 +556,10 @@ pub(crate) fn consume_merge_cleanup_requests(
     let _ = std::fs::write(&stamp, now.to_string());
 
     // One doneness read per pass, not per request, and ONE journal read per
-    // pass partitioned in memory: N repo roots cost one fold, not N.
+    // pass partitioned in memory: N repo roots cost one fold, not N. The
+    // ledger the receipts enrich from is read on the same terms.
     let node_states = crate::gc_sweep::read_graph_node_states(home);
+    let ledger = crate::gc_sweep::ledger_rows(&crate::gc_sweep::default_ledger_path());
     let pending = pending_merge_cleanup_requests_all(home);
 
     let mut total_requests = 0usize;
@@ -555,7 +592,7 @@ pub(crate) fn consume_merge_cleanup_requests(
             }
             let seams = RequestSeams {
                 stop: &|entry| stop_harness_confirmed(home, entry),
-                rm: &|name| rm_row(root, name, &request.request_id),
+                surface_removal: &crate::gc_native::apply_active_surface_removal,
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,
             };
@@ -565,6 +602,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                 request,
                 root,
                 node_states.as_ref(),
+                ledger.as_deref(),
                 now,
                 &seams,
             );
@@ -776,6 +814,7 @@ mod tests {
             "status": "exited",
             "created_at": "2026-09-06T00:00:00Z",
             "harness": "claude",
+            "harness_session_id": format!("sess-{name}"),
             "short_id": "abc123",
             "origin": "spawn",
         });
@@ -811,12 +850,13 @@ mod tests {
 
     #[test]
     fn order_is_stop_then_rm_then_tree_then_completed() {
-        // AC2-ORDER, with the rm/tree subprocesses behind recording seams:
-        // the events must read, in order, stop -> (rm) -> worktree_removed ->
-        // merge_cleanup_completed, and the CALLS must interleave stop, rm,
-        // take_tree in that same order. An agent_removed row that appears
-        // before its stop (or a tree event before the row events) is the
-        // orphan-the-session bug this order exists to prevent.
+        // AC2-ORDER, with the tree subprocess behind a recording seam and the
+        // row removal now real (the shared commit writes this fixture's own
+        // registry): the events must read, in order, stop -> agent_row_reaped
+        // -> worktree_removed -> merge_cleanup_completed, and the CALLS must
+        // interleave stop, the native surface removal, take_tree in that same
+        // order. A row dropped before its stop (or a tree event before the row
+        // events) is the orphan-the-session bug this order exists to prevent.
         let home = temp_home("order");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
@@ -826,16 +866,18 @@ mod tests {
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
 
         let stop_calls = std::rc::Rc::clone(&calls);
-        let rm_calls = std::rc::Rc::clone(&calls);
+        let surface_calls = std::rc::Rc::clone(&calls);
         let tree_calls = std::rc::Rc::clone(&calls);
         let seams = RequestSeams {
             stop: &|_entry| {
                 stop_calls.borrow_mut().push("stop".to_string());
                 Ok("abc123".to_string())
             },
-            rm: &|name| {
-                rm_calls.borrow_mut().push(format!("rm:{name}"));
-                true
+            surface_removal: &|entry| {
+                surface_calls
+                    .borrow_mut()
+                    .push(format!("surface:{}", entry.name));
+                crate::daemon::CascadeOutcome::Removed
             },
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| {
@@ -849,6 +891,7 @@ mod tests {
             &request,
             "/repo",
             merged_states().as_ref(),
+            None,
             1_000_000,
             &seams,
         );
@@ -864,14 +907,15 @@ mod tests {
             .iter()
             .position(|k| k == "merge_reaper_stopped")
             .unwrap();
+        let reaped = kinds.iter().position(|k| k == "agent_row_reaped").unwrap();
         let removed = kinds.iter().position(|k| k == "worktree_removed").unwrap();
         let completed = kinds
             .iter()
             .position(|k| k == "merge_cleanup_completed")
             .unwrap();
         assert!(
-            stopped < removed,
-            "stop must precede the tree event: {kinds:?}"
+            stopped < reaped && reaped < removed,
+            "stop, then the row, then the tree: {kinds:?}"
         );
         assert!(
             removed < completed,
@@ -882,10 +926,10 @@ mod tests {
             *calls,
             vec![
                 "stop".to_string(),
-                "rm:target-x-1-worker".to_string(),
+                "surface:target-x-1-worker".to_string(),
                 "take_tree".to_string()
             ],
-            "stop, then row removal, then the tree: {calls:?}"
+            "stop, then the native surface removal, then the tree: {calls:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
@@ -903,10 +947,9 @@ mod tests {
             ],
         );
         let request = settled_request("/repo/wt");
-        let noop_stop = |_entry: &state::RegistryEntry| Ok("abc123".to_string());
         let seams = RequestSeams {
-            stop: &noop_stop,
-            rm: &|_name| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -916,6 +959,7 @@ mod tests {
             &request,
             "/repo",
             merged_states().as_ref(),
+            None,
             1_000_000,
             &seams,
         );
@@ -949,10 +993,9 @@ mod tests {
         let mut states = HashMap::new();
         states.insert("x-1".to_string(), ("in_progress".to_string(), None));
         let request = settled_request("/repo/wt");
-        let noop_stop = |_entry: &state::RegistryEntry| Ok("abc123".to_string());
         let seams = RequestSeams {
-            stop: &noop_stop,
-            rm: &|_name| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -962,6 +1005,7 @@ mod tests {
             &request,
             "/repo",
             Some(&states),
+            None,
             1_000_000,
             &seams,
         );
@@ -989,10 +1033,9 @@ mod tests {
         let wt = home.root().parent().unwrap().join("wt2");
         std::fs::create_dir_all(&wt).unwrap();
         let request = settled_request(wt.to_str().unwrap());
-        let noop_stop = |_entry: &state::RegistryEntry| Ok("abc123".to_string());
         let seams = RequestSeams {
-            stop: &noop_stop,
-            rm: &|_name| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
@@ -1002,6 +1045,7 @@ mod tests {
             &request,
             "/repo",
             merged_states().as_ref(),
+            None,
             1_000_000,
             &seams,
         );
@@ -1015,20 +1059,111 @@ mod tests {
             !events.contains("merge_cleanup_completed"),
             "a tree-held request must not settle: {events}"
         );
-        // The rm seam has no fixture side effect, so model pass one's
-        // removals by hand: the second pass must read an empty candidate
-        // set and take no action.
-        write_registry(&home, &[]);
+        // Pass one really removed the row (the shared commit writes this
+        // fixture's registry), so the second pass reads an empty candidate
+        // set and takes no action.
         let second = run_request(
             &home,
             &emitter,
             &request,
             "/repo",
             merged_states().as_ref(),
+            None,
             1_000_001,
             &seams,
         );
         assert_eq!(second, 0, "nothing left to remove");
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_merge_retirement_leaves_a_resumable_receipt() {
+        // The delegation's payoff: the merge path no longer shells out to
+        // `fno agents rm`, so a merge-triggered removal stages the SAME
+        // receipt the scheduled sweep does - the resume form plus the typed
+        // native effect. Before this, a merged worker's row vanished with no
+        // effect record naming what the native removal actually answered.
+        let home = temp_home("receipt");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[claude_row("target-x-1-worker", false)]);
+        let request = settled_request("/repo/wt");
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        let dir = home.root().join("reap-receipts");
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert_eq!(files.len(), 1, "one row retired, one receipt: {files:?}");
+        let receipt = crate::receipt::read_reap_receipt(&files[0]).unwrap();
+        assert_eq!(receipt.row_name, "target-x-1-worker");
+        assert!(
+            !receipt.resume_argv.is_empty(),
+            "the receipt must carry the resume form: {receipt:?}"
+        );
+        let effects: Vec<&str> = receipt
+            .effects
+            .iter()
+            .map(|effect| effect.outcome.as_str())
+            .collect();
+        assert_eq!(
+            effects,
+            vec!["confirmed-removed"],
+            "the native active-surface outcome must be named: {receipt:?}"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_unconfirmed_native_removal_keeps_the_row() {
+        // The applied gate, inherited from the sweep: a `kept` (unverified)
+        // native outcome holds the row for the next pass instead of dropping
+        // it. The old rm subprocess had no such reading - it either exited 0
+        // or the whole request refused.
+        let home = temp_home("unconfirmed");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[claude_row("target-x-1-worker", false)]);
+        let request = settled_request("/repo/wt");
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| {
+                crate::daemon::CascadeOutcome::Unverified("roster unreadable".into())
+            },
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0, "no row removed on an unconfirmed native removal");
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(registry.entries.len(), 1, "the row is kept for retry");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("target-x-1-worker:native_removal_unconfirmed"),
+            "the kept row must name the effect that held it, not the stop: {events}"
+        );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 }

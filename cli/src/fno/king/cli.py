@@ -8,6 +8,8 @@ from typing import NoReturn, Optional, cast
 
 import typer
 
+from fno.king.king_faq import faq_app
+
 king_app = typer.Typer(
     name="king",
     help="The king's board: what still needs doing, and the session manifest for its loop.",
@@ -696,6 +698,7 @@ agents_king_app.command("shape")(shape_cmd)
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
+agents_king_app.add_typer(faq_app, name="faq")
 
 
 def main() -> None:  # pragma: no cover - console-script shim

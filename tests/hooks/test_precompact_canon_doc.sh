@@ -226,6 +226,127 @@ else
   fail "nested-dir doc not written (parent not created)"
 fi
 
+# ---------------------------------------------------------------------------
+# 7. AC2-EDGE: an uncrowned session's doc carries no King block at all.
+# Assert a positive marker too (crown: none), not absence alone - an absence
+# also fires if crown classification or auto-block generation never ran.
+# ---------------------------------------------------------------------------
+if grep -q "crown: none" "$DOC" && ! grep -q "## King:" "$DOC"; then
+  pass "uncrowned doc carries no King block (AC2-EDGE)"
+else
+  fail "uncrowned doc unexpectedly carries a King block, or the auto block never ran"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. AC1-HP: a crowned session's doc gains the King block and both new
+# session headings. A fake `fno` on PATH stands in for the registry and the
+# epic-status read so the fixture never touches the real graph.
+# ---------------------------------------------------------------------------
+FAKE_BIN="$(mktemp -d -t canon-fake-fno-XXXXXX)"
+cat > "$FAKE_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"}]'
+    ;;
+  *"backlog epic status x-9e1e-fixture"*)
+    echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"},{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$FAKE_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN"' EXIT
+
+CROWNED_DOC="$TMP/crowned-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$CROWNED_DOC" \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "## King: nodes under purview (auto)" "$CROWNED_DOC" \
+  && grep -q "level 2 over x-9e1e-fixture" "$CROWNED_DOC" \
+  && grep -q "x-aaaa \[ready\] a" "$CROWNED_DOC" \
+  && grep -q "x-bbbb \[in_progress\] b" "$CROWNED_DOC"; then
+  pass "crowned doc gains the King block naming level, scope, and children"
+else
+  fail "crowned doc missing King block content"
+fi
+if grep -q "## Gaps and open thinking (session)" "$CROWNED_DOC" \
+  && grep -q "## Workarounds in force (session)" "$CROWNED_DOC"; then
+  pass "crowned doc gains the two new session headings"
+else
+  fail "crowned doc missing the new session headings"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. AC1-HP portfolio case: a level-2 crown over TWO epics (a comma-joined
+# scope, fno.agents.crown.canonical_scope's stored shape) sees BOTH epics'
+# children, not just the first.
+# ---------------------------------------------------------------------------
+PORTFOLIO_BIN="$(mktemp -d -t canon-fake-fno-portfolio-XXXXXX)"
+cat > "$PORTFOLIO_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-epic-a,x-epic-b","name":"king-fixture"}]'
+    ;;
+  *"backlog epic status x-epic-a"*)
+    echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
+    ;;
+  *"backlog epic status x-epic-b"*)
+    echo '{"children":[{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$PORTFOLIO_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN"' EXIT
+
+PORTFOLIO_DOC="$TMP/portfolio-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$PORTFOLIO_DOC" \
+  | env PATH="$PORTFOLIO_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "x-aaaa \[ready\] a" "$PORTFOLIO_DOC" && grep -q "x-bbbb \[in_progress\] b" "$PORTFOLIO_DOC"; then
+  pass "portfolio crown (comma-joined scope): both epics' children appear"
+else
+  fail "portfolio crown: missing children from one or both epics"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. A king hand-writes ONLY the two crown headings (the shape context-nudge.sh
+# now tells a king to write on a FIRST compaction, when the doc - and its
+# headings 1/2 - do not exist yet). The hook must bind each by heading text,
+# not by ordinal position, so both survive the fire that follows.
+# ---------------------------------------------------------------------------
+HANDWRITTEN_DOC="$TMP/handwritten-canon.md"
+cat > "$HANDWRITTEN_DOC" <<'DOC'
+## Gaps and open thinking (session)
+<!-- fno:session -->
+Unsure whether the blocked_child queue drains fairly under contention.
+<!-- /fno:session -->
+
+## Workarounds in force (session)
+<!-- fno:session -->
+Routing around the stale-epic-status cache by re-querying every 5s.
+<!-- /fno:session -->
+DOC
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$HANDWRITTEN_DOC" \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "Unsure whether the blocked_child queue drains fairly" "$HANDWRITTEN_DOC" \
+  && grep -q "Routing around the stale-epic-status cache" "$HANDWRITTEN_DOC" \
+  && grep -q "_Merge order and the reason for it" "$HANDWRITTEN_DOC"; then
+  pass "hand-written crown-only headings bind by label, not ordinal position"
+else
+  fail "hand-written crown headings lost or misplaced by the refire"
+fi
+
 echo
 echo "results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

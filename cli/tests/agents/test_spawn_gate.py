@@ -1053,7 +1053,10 @@ class TestRunGate:
         )
         python_codex_create = section(
             dispatch_python, "def _codex_create_path(\n",
-            "def _capture_parent_edge() ->",
+            # The lineage helpers that used to end this section moved to
+            # fno.agents.spawn_lineage (x-5c25, file budget); the re-export
+            # block that replaced them is the boundary now.
+            "# Moved to fno.agents.spawn_lineage",
         )
         python_claude_spawn = section(
             dispatch_python, "def _claude_create_path(\n",

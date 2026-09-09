@@ -81,6 +81,35 @@ Crown: level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami
 
 $(sed '/^<!--/d' "$BRIEF")"
 
+# This crown's own FAQ, appended after the static brief: bounded on both axes
+# (the verb caps entry COUNT; FAQ_MAX_BYTES below caps the aggregate payload,
+# since one detailed entry - or several - can still outgrow context on their
+# own) and degrade-safe (silence on a missing directory, an unreadable one, or
+# no entry for this scope - never a failed hook).
+FAQ_MAX_BYTES=4000
+if [[ -n "$CROWN_SCOPE" ]]; then
+    FAQ_ENTRIES="$(fno agents king faq list --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+    FAQ_BYTES="$(printf '%s' "$FAQ_ENTRIES" | wc -c | tr -d ' ')"
+    if [[ "$FAQ_BYTES" -gt "$FAQ_MAX_BYTES" ]]; then
+        # A raw `head -c` cut can split a multi-byte UTF-8 character mid-
+        # sequence, landing an invalid byte in the payload. Decode first and
+        # drop the trailing partial character instead of splitting it.
+        FAQ_ENTRIES="$(printf '%s' "$FAQ_ENTRIES" | python3 -c "
+import sys
+sys.stdout.write(sys.stdin.buffer.read(${FAQ_MAX_BYTES}).decode('utf-8', errors='ignore'))
+")
+
+_(truncated at ${FAQ_MAX_BYTES}B; \`fno agents king faq list --scope \"${CROWN_SCOPE}\"\` has the rest)_"
+    fi
+    if [[ -n "$(printf '%s' "$FAQ_ENTRIES" | tr -d '[:space:]')" ]]; then
+        CONTEXT="$CONTEXT
+
+## This crown's FAQ
+
+$FAQ_ENTRIES"
+    fi
+fi
+
 # Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing

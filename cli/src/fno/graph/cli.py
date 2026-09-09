@@ -2933,14 +2933,17 @@ def cmd_intake(
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
 ) -> None:
-    """Append a timestamped progress note to a backlog node (append-only).
+    """Append a timestamped progress note to a backlog node, and DELIVER it.
 
-    Distinct from ``update --details`` (which REPLACES the rationale) and the
-    single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
-    entries. The status-fanout backlog-progress adapter stamps one per
-    ``task_done``/``run_summary`` (); it is also hand-runnable.
+    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
+    verb mails a pointer to the node's holder, the owner's holder and the epic's
+    king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
+    fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
@@ -2959,7 +2962,8 @@ def cmd_note(
         note["source_session_id"] = identity.session_id
     if identity is not None and identity.harness:
         note["source_harness"] = identity.harness
-    found, _ = append_progress_note(_graph_path(), task_id, note)
+    entries: list[dict] = []
+    found, _ = append_progress_note(_graph_path(), task_id, note, entries_out=entries)
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
@@ -2968,20 +2972,22 @@ def cmd_note(
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
         typer.echo(f"noted {task_id}: {text}")
+    if not quiet:
+        try:
+            from fno.backlog.note_notify import deliver_note
+
+            receipts = deliver_note(task_id, text, _graph_path(), entries or None)
+        except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
+            receipts = [(f"notify FAILED {task_id}: {exc}", True)]
+        for line, undelivered in receipts:
+            typer.echo(line, err=undelivered or json_output)
 
 
 def _warn_if_note_is_long(text: str) -> None:
-    """Advise on a long note. Never refuse one.
+    """Advise on a long note, never refuse one.
 
-    ``progress_notes`` stays uncapped on purpose. It is an agent's only
-    append-only surface on a node, because ``update --details`` REPLACES, and a
-    refusal that destroys measured evidence is the wrong instrument for what is
-    really a volume problem. So this names the count and the cheaper
-    alternative, and lets the note land.
-
-    The multiplier is blunt on purpose: four times the encounter cap fires on
-    the notes that are already a problem and stays quiet on ordinary ones.
-    ponytail: fixed multiplier, make it config if the noise floor moves.
+    Why uncapped, and why the blunt multiplier:
+    docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno import style
 
@@ -3045,10 +3051,7 @@ def cmd_encounter(
     session_id = session_id if isinstance(session_id, str) else None
     harness = getattr(identity, "harness", None)
     harness = harness if isinstance(harness, str) else None
-    # `--operator` is a declaration, not proof. An agent can pass it, but the
-    # record keeps the casting session's identity beside the operator key and
-    # this single-operator machine has no cryptographic operator identity worth
-    # inventing for this signal.
+    # `--operator` is a declaration, not proof; see the contract doc.
     if not as_operator and (not session_id or not harness):
         typer.echo(
             "Error: no provable session identity, so this encounter would not be "
@@ -3058,11 +3061,8 @@ def cmd_encounter(
         )
         raise typer.Exit(code=5)
 
-    # The same escapes every other rule 7 surface honors, because
-    # `docs/style-rules.md` states rule 7 inherits them and a surface that
-    # quietly opts out makes that sentence false. Note what is NOT escapable:
-    # evidence is still REQUIRED above, and identity is still proven above.
-    # The cap is a length policy; those two are the falsifiability contract.
+    # Rule 7's escapes, inherited per docs/style-rules.md. Evidence and identity
+    # stay required above: the cap is length policy, not the falsifiability one.
     if (
         os.environ.get("FNO_STYLE_ENFORCE") != "0"
         and not style.has_exception(evidence)
@@ -8234,53 +8234,12 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
     return closed
 
 
-def _strandable_epic_ids(entries: list[dict]) -> set[str]:
-    """Open epics (parents) whose children are ALL done - closeable right now.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._reconcile import _reopen_outranks_child_closes
-
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("parent"), str):
-            children_by_parent.setdefault(e["parent"], []).append(e)
-    id_to_entry = {
-        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
-    out: set[str] = set()
-    for pid, kids in children_by_parent.items():
-        parent = id_to_entry.get(pid)
-        if (
-            parent is not None
-            and not parent.get("completed_at")
-            and all(k.get("completed_at") for k in kids)
-            and not _reopen_outranks_child_closes(parent, kids)
-        ):
-            out.add(pid)
-    return out
-
-
-def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
-    """Close every open epic whose children are all done (self-heal/migration).
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    id_to_entry = {
-        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
-    closed: list[str] = []
-    for _ in range(64):  # fixpoint, depth-capped against a malformed cycle
-        ready = _strandable_epic_ids(entries)
-        if not ready:
-            break
-        for pid in ready:
-            parent = id_to_entry.get(pid)
-            if parent is None or parent.get("completed_at"):
-                continue
-            _apply_completion_fields(parent)
-            if not parent.get("completion_note"):
-                parent["completion_note"] = _auto_closed_note(parent)
-            closed.append(pid)
-    return closed
+# In graph/_closures.py: this file is over the source budget.
+from fno.graph._closures import (  # noqa: E402
+    _strandable_epic_ids,
+    _sweep_close_done_epics,
+    _sweep_stamp_carried_sessions,
+)
 
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
@@ -10342,6 +10301,7 @@ def cmd_reconcile(
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
+    carried_stamped: list[str] = []
     contained_errors: list[dict] = []
     supersession_unverified: list[dict] = []
     # Blocked_by edges the sweep settled (): pruned to done blockers,
@@ -10380,6 +10340,8 @@ def cmd_reconcile(
         # is invisible to the SessionStart hook, which runs `reconcile --json`
         # and discards stderr.
         contained_errors_acc: list = []
+        # Reporting only: a repair nobody names reads as "nothing happened".
+        carried_stamped_acc: list = []
         supersession_unverified_acc: list[dict] = []
         blocked_by_settlement_acc: list[dict] = []
 
@@ -10515,6 +10477,21 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # AFTER both close sweeps: a node closed this pass is a
+                # passenger too. Guarded like them, for the same reason.
+                try:
+                    carried_stamped_acc.extend(_sweep_stamp_carried_sessions(entries))
+                except Exception as _cs_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append(
+                        {"owner": None, "stage": "carried-session-stamp",
+                         "error": str(_cs_exc)[:200]}
+                    )
+                    typer.echo(
+                        f"warning: the carried-session stamp failed: {_cs_exc}; "
+                        "nodes that shipped inside another node's PR still record "
+                        "no session (`fno backlog reconcile` retries next run)",
+                        err=True,
+                    )
                 # Same self-heal shape, and guarded the same way: a raise here
                 # would abort a sweep whose real job is closing merged PRs.
                 try:
@@ -10727,6 +10704,7 @@ def cmd_reconcile(
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
+        carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
     elif dry_run and (closeable or strandable or strandable_contained or status_drift):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
@@ -10784,6 +10762,10 @@ def cmd_reconcile(
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        try:  # a preview that omits a leg reads "in sync" where a run writes
+            carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
+        except Exception:  # noqa: BLE001 - a preview never raises
+            carried_stamped = []
 
     # W4 causal links: best-effort revert stamp, full sweep only. A merged
     # "Revert ..." PR referencing a PR carried by a graph node flips that
@@ -10995,6 +10977,7 @@ def cmd_reconcile(
             # (). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
+            "carried_stamped": carried_stamped,
             # Cascade/sweep and canonical-sync legs. In the payload because the
             # SessionStart hook reads --json and discards stderr: a leg whose
             # failure is unobservable is indistinguishable from one that never ran.
@@ -11041,6 +11024,7 @@ def cmd_reconcile(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not carried_stamped
         and not reverted_stamped
         and not promise_held
         and not promise_warnings
@@ -11094,6 +11078,9 @@ def cmd_reconcile(
                 f"{_lead} {len(contained_closed)} contained node(s) shipped "
                 f"inside {_whose} (cost stays on the delivery unit): " + ", ".join(contained_closed)
             )
+        if carried_stamped:
+            typer.echo(f"Recorded the shipping session on {len(carried_stamped)} node(s) "
+                       "carried in another node's PR: " + ", ".join(carried_stamped))
         if healed_epics:
             typer.echo(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
