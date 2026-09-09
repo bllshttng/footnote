@@ -10,7 +10,7 @@ fn keys_modal_legend_lists_severity_glyphs_in_header_order() {
     // so the modal's rows must equal SEVERITY_ORDER through lattice_glyph,
     // each with a non-empty label - the same glyphs the header band
     // counts, in the order the band lists them.
-    let m = super::build_keys_modal();
+    let m = super::keys_modal::build_keys_modal();
     let rows = &m.popup.rows;
     let start = rows
         .iter()
