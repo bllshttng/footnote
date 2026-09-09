@@ -41,8 +41,8 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 
 | Command | What it does |
 |---|---|
-| `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). |
-| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. |
+| `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF] [--lane NAME] [--cohort ID]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). `--lane NAME --cohort ID` qualifies a model lane (see Lanes and cohorts). |
+| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN] [--cohort-spec FILE]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. `--cohort-spec FILE` compares predeclared lane cohorts (see Lanes and cohorts). |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
 
@@ -58,6 +58,37 @@ A variant is a **git ref of this repository**. Every prompt, skill, and project 
 - **Every variant runs every case.** Comparability needs the shared denominator. A variant that skipped a task lands in the compare view's `missing in vN` list. It cannot silently shrink the scored set.
 - **The default report is baseline-only.** A failing `v1` never drags the baseline pass rate down. It never fires the regression alarm in doctor and triage health. Rows written before the variant axis carry no `variant` key and read as baseline.
 - **Compare.** `fno doctor evals report --compare v1` prints one line per task: baseline p@1 (n), the variant's p@1 (n), the delta, and a verdict. The verdict is `improved`, `regressed`, or `unchanged`. Then come the missing-task lists and the `git diff` line. `--json` emits the same as a dict.
+
+## Lanes and cohorts
+
+A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account) - the same rows `agents.profiles.*.lanes` already reference. This is never a second model/effort enum: an unknown lane name refuses with the list of declared lanes, and a lane that config never declared cannot be requested.
+
+`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider` (a lane is a complete coordinate). Every history row from the run records:
+
+- `requested_lane` / `requested_harness` / `requested_model` / `requested_effort` - what was asked for.
+- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id` - what the agent registry says actually ran, read back after the worker spawns (never re-derived; x-8975/x-1bd0 already resolved and recorded it).
+- `lane_status` - `ok`, `substituted` (capacity served a different harness than requested - excluded from the requested lane's cohort, never folded in as if it were a sample of it), or `unavailable` (the spawn was refused; no model is graded as the requested one).
+- `experiment_id` - the `--cohort` id, the join key a comparison groups on.
+
+A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score, however it is grouped.
+
+**Comparing cohorts.** Declare the comparison BEFORE the first run, in a small JSON file:
+
+```json
+{
+  "cohorts": [
+    {"id": "astra-baseline", "repeats": 5, "fixture_rev": "abc123", "observation_window": "2026-09-08..2026-09-09"},
+    {"id": "astra-trial", "repeats": 5, "fixture_rev": "abc123", "observation_window": "2026-09-08..2026-09-09"}
+  ],
+  "promotion_criteria": {"baseline": "astra-baseline", "candidate": "astra-trial", "min_pass_at_1": 0.9, "require_review": true}
+}
+```
+
+`fno doctor evals report --cohort-spec cohorts.json [--json]` folds each declared cohort's `ok`-status rows into sample count, `pass_at_1`, `pass_k`, a duration distribution, and (only when a row actually carries it) folded `usage` by source/unit and a `review_evidence` verdict of `observed` (every scored row carries review), `partial`, or `unobserved`. Missing evidence never reads as clean or zero-cost - `usage` is `None`, not `0`, when nothing reported it. A predeclared `fixture_rev` that the observed rows do not match is flagged `fixture_rev_mismatch`; more than one observed revision is `mixed_fixture_revisions`. Neither ever becomes a silent like-for-like claim.
+
+`promotion_criteria` scores exactly one candidate against one baseline and returns `recommended` plus the `reasons` blocking it when false: a missing cohort, a regression against baseline, an unmet `min_pass_at_1`, a fixture mismatch, or (when `require_review` is set) unobserved review evidence. This is a recommendation only - it never edits `config.routing.models`, `agents.profiles`, or any production lane order. Promotion stays a separate, reviewed act, exactly like `fno doctor evals graduate`.
+
+`usage` and `review` are attached by whatever caller has that evidence (a real delivery's ledger/scoreboard row, folded in separately) - the eval runner itself never invents a review verdict or a spend number; its only success marker is the task's own mechanical grade.
 
 ## Run cadence and demand
 

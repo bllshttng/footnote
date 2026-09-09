@@ -10,8 +10,10 @@ from typer.testing import CliRunner
 from fno.evals import history as _history
 from fno.evals.cli import evals_app
 from fno.evals.report import (
+    CohortSpec,
     GraduateError,
     build_report,
+    compare_cohorts,
     compare_variants,
     evals_health_summary,
     graduate_task_file,
@@ -330,4 +332,107 @@ def test_graduate_cli_unknown_id_exit_1(tmp_path: Path) -> None:
     (d / "cap.yaml").write_text("id: cap\ntier: capability\ngrade:\n  - {kind: exit, command: pytest}\n",
                                 encoding="utf-8")
     res = runner.invoke(evals_app, ["graduate", "nope", "--bank", str(d)])
+    assert res.exit_code == 1
+
+
+# --------------------------------------------------------------------------- #
+# cohort comparison (x-fd52 wave 2): AC2-HP, AC2-EDGE
+# --------------------------------------------------------------------------- #
+
+def _lane_row(cohort: str, lane: str, passed: bool, **kw) -> dict:
+    row = {"task_id": "t", "tier": "regression", "pass": passed,
+           "experiment_id": cohort, "requested_lane": lane,
+           "lane_status": "ok", "bank_rev": "rev1", "duration_s": 1.0}
+    row.update(kw)
+    return row
+
+
+def test_cohort_hp_shows_samples_reliability_duration_usage_and_criteria() -> None:
+    rows = [
+        _lane_row("cohort-a", "claude-sonnet", True, usage={"source": "api", "unit": "usd", "amount": 0.5}),
+        _lane_row("cohort-a", "claude-sonnet", True, usage={"source": "api", "unit": "usd", "amount": 0.5}),
+        _lane_row("cohort-b", "astra-high", True, usage={"source": "api", "unit": "usd", "amount": 0.9}),
+        _lane_row("cohort-b", "astra-high", True, usage={"source": "api", "unit": "usd", "amount": 0.9}),
+    ]
+    cohorts = [CohortSpec("cohort-a", repeats=2), CohortSpec("cohort-b", repeats=2)]
+    out = compare_cohorts(rows, cohorts, promotion_criteria={
+        "baseline": "cohort-a", "candidate": "cohort-b", "min_pass_at_1": 0.9,
+    })
+    a, b = out["cohorts"]["cohort-a"], out["cohorts"]["cohort-b"]
+    assert a["sample_count"] == 2 and a["pass_at_1"] == 1.0
+    assert b["sample_count"] == 2 and b["pass_at_1"] == 1.0
+    assert a["duration_s"] == {"min": 1.0, "max": 1.0, "mean": 1.0}
+    assert a["usage"] == [{"source": "api", "unit": "usd", "amount": 1.0}]
+    assert b["usage"] == [{"source": "api", "unit": "usd", "amount": 1.8}]
+    assert out["promotion"]["recommended"] is True
+    assert out["unattributed_count"] == 0
+
+
+def test_cohort_edge_missing_evidence_and_legacy_rows_are_explicit() -> None:
+    rows = [
+        _lane_row("cohort-a", "claude-sonnet", True),  # no usage, no review
+        {"task_id": "t", "tier": "regression", "pass": True},  # legacy: no fingerprint
+        _lane_row("cohort-a", "claude-sonnet", False, bank_rev="rev2"),  # fixture drift
+    ]
+    cohorts = [CohortSpec("cohort-a", repeats=2, fixture_rev="rev1")]
+    out = compare_cohorts(rows, cohorts)
+    a = out["cohorts"]["cohort-a"]
+    assert out["unattributed_count"] == 1  # legacy row never joins the cohort
+    assert a["usage"] is None  # never a fabricated zero-cost claim
+    assert a["review_evidence"] == "unobserved"  # never "clean"
+    assert a["mixed_fixture_revisions"] is True
+    assert a["fixture_rev_mismatch"] is True
+
+
+def test_cohort_substituted_and_unavailable_runs_excluded_from_sample() -> None:
+    rows = [
+        _lane_row("cohort-a", "claude-sonnet", True),
+        _lane_row("cohort-a", "claude-sonnet", True, lane_status="substituted"),
+        _lane_row("cohort-a", "claude-sonnet", False, lane_status="unavailable"),
+    ]
+    out = compare_cohorts(rows, [CohortSpec("cohort-a", repeats=1)])
+    a = out["cohorts"]["cohort-a"]
+    assert a["sample_count"] == 1
+    assert a["excluded_substituted"] == 1
+    assert a["excluded_unavailable"] == 1
+
+
+def test_cohort_promotion_blocked_on_regression_or_missing_cohort() -> None:
+    rows = [
+        _lane_row("cohort-a", "claude-sonnet", True),
+        _lane_row("cohort-a", "claude-sonnet", True),
+        _lane_row("cohort-b", "astra-high", True),
+        _lane_row("cohort-b", "astra-high", False),
+    ]
+    out = compare_cohorts(rows, [CohortSpec("cohort-a", repeats=2), CohortSpec("cohort-b", repeats=2)],
+                          promotion_criteria={"baseline": "cohort-a", "candidate": "cohort-b"})
+    assert out["promotion"]["recommended"] is False
+    assert out["promotion"]["reasons"]
+
+    missing = compare_cohorts(rows, [CohortSpec("cohort-a", repeats=2)],
+                              promotion_criteria={"baseline": "cohort-a", "candidate": "cohort-z"})
+    assert missing["promotion"]["recommended"] is False
+
+
+def test_cohort_report_cli(tmp_path: Path) -> None:
+    import json
+
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, _lane_row("cohort-a", "claude-sonnet", True))
+    _history.append_row(hp, _lane_row("cohort-a", "claude-sonnet", True))
+    spec = tmp_path / "cohorts.json"
+    spec.write_text(json.dumps({"cohorts": [{"id": "cohort-a", "repeats": 2}]}), encoding="utf-8")
+    res = runner.invoke(evals_app, ["report", "--history", str(hp), "--cohort-spec", str(spec), "--json"])
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["cohorts"]["cohort-a"]["sample_count"] == 2
+
+
+def test_cohort_report_cli_no_cohorts_declared_exits_1(tmp_path: Path) -> None:
+    import json
+
+    spec = tmp_path / "cohorts.json"
+    spec.write_text(json.dumps({"cohorts": []}), encoding="utf-8")
+    res = runner.invoke(evals_app, ["report", "--history", str(tmp_path / "h.jsonl"),
+                                    "--cohort-spec", str(spec)])
     assert res.exit_code == 1
