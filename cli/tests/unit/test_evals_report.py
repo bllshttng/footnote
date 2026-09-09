@@ -12,6 +12,7 @@ from fno.evals.cli import evals_app
 from fno.evals.report import (
     GraduateError,
     build_report,
+    compare_variants,
     evals_health_summary,
     graduate_task_file,
     graduation_candidates,
@@ -215,6 +216,65 @@ def test_health_summary_stale_days_resolves_from_config(
     summary = evals_health_summary(hp, now=_NOW)
     assert summary is not None
     assert summary["stale"] is True
+
+
+# --- variant axis (x-bd75): a missing variant key reads as baseline ---
+
+def test_load_rows_missing_variant_reads_as_baseline(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, _row("t", "regression", True))
+    assert len(load_rows(hp)) == 1  # the 28 legacy rows keep folding
+
+
+def test_load_rows_filters_variant(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("t", "regression", True), "variant": "baseline"})
+    _history.append_row(hp, {**_row("t", "regression", True), "variant": "v1"})
+    assert len(load_rows(hp)) == 1               # default fold: baseline only
+    assert len(load_rows(hp, variant="v1")) == 1
+    assert len(load_rows(hp, variant=None)) == 2  # None folds every round
+
+
+def test_since_applies_after_variant_filter(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("t", "regression", False), "variant": "baseline"})
+    _history.append_row(hp, {**_row("t", "regression", True), "variant": "v1"})
+    _history.append_row(hp, {**_row("t", "regression", True), "variant": "v1"})
+    rows = load_rows(hp, since=1, variant="v1")
+    assert len(rows) == 1 and rows[0]["variant"] == "v1"
+
+
+def test_compare_variants_improved() -> None:
+    rows = [
+        {**_row("t", "regression", True), "variant": "baseline"},
+        {**_row("t", "regression", False), "variant": "baseline"},
+        {**_row("t", "regression", True), "variant": "v1"},
+        {**_row("t", "regression", True), "variant": "v1"},
+    ]
+    cmp = compare_variants(rows, "v1")
+    t = cmp["tasks"]["t"]
+    assert t["delta"] == 0.5 and t["verdict"] == "improved"
+    assert t["baseline"]["runs"] == 2 and t["variant"]["runs"] == 2
+
+
+def test_variant_fails_do_not_fire_baseline_alarm(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("t", "regression", True), "variant": "baseline"})
+    _history.append_row(hp, {**_row("t", "regression", False), "variant": "v1"})
+    report = build_report(load_rows(hp))
+    assert report["regression_alarm"] == []
+    assert report["tasks"][0]["runs"] == 1
+
+
+def test_compare_missing_sides() -> None:
+    rows = [
+        {**_row("u", "regression", True), "variant": "baseline"},
+        {**_row("w", "regression", True), "variant": "v1"},
+    ]
+    cmp = compare_variants(rows, "v1")
+    assert cmp["missing_in_variant"] == ["u"]
+    assert cmp["missing_in_baseline"] == ["w"]
+    assert "u" not in cmp["tasks"] and "w" not in cmp["tasks"]
 
 
 # --- CLI ---

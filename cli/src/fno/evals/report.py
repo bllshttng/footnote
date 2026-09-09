@@ -41,24 +41,35 @@ class TaskStat:
         return 0 < self.passes < self.runs
 
 
-def load_rows(history_path: Path, *, since: Optional[int] = None) -> list[dict[str, object]]:
+def load_rows(
+    history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
+) -> list[dict[str, object]]:
     """Return history rows in file order.
 
-    ``since`` folds only the most recent N runs (the last N history lines);
-    ``None`` folds everything.
+    ``variant`` folds one round: rows written before the variant axis have no
+    key and read as ``baseline``, so the default fold is unchanged for them.
+    ``None`` folds every round. ``since`` applies after the variant filter:
+    ``--since 5`` means the last five rows *of that variant*.
     """
     rows = [r for _, r in _history.iter_rows_tolerant(history_path)]
+    if variant is not None:
+        rows = [r for r in rows if (r.get("variant") or "baseline") == variant]
     if since is not None and since >= 0:
         rows = rows[-since:]
     return rows
 
 
-def _stats(rows: list[dict[str, object]]) -> list[TaskStat]:
+def _by_task(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
     by_id: dict[str, list[dict[str, object]]] = {}
     for r in rows:
         tid = r.get("task_id")
         if isinstance(tid, str):
             by_id.setdefault(tid, []).append(r)
+    return by_id
+
+
+def _stats(rows: list[dict[str, object]]) -> list[TaskStat]:
+    by_id = _by_task(rows)
     stats: list[TaskStat] = []
     for tid in sorted(by_id):
         task_rows = by_id[tid]
@@ -128,11 +139,7 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     A candidate must have at least *n* recorded runs and every one of its most
     recent *n* runs must be a pass. Only capability-tier tasks graduate.
     """
-    by_id: dict[str, list[dict[str, object]]] = {}
-    for r in rows:
-        tid = r.get("task_id")
-        if isinstance(tid, str):
-            by_id.setdefault(tid, []).append(r)
+    by_id = _by_task(rows)
     candidates: list[str] = []
     for tid in sorted(by_id):
         task_rows = by_id[tid]
@@ -143,6 +150,60 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
         if all(r.get("pass") is True for r in task_rows[-n:]):
             candidates.append(tid)
     return candidates
+
+
+def compare_variants(
+    rows: list[dict[str, object]], variant: str
+) -> dict[str, Any]:
+    """Score *variant* against baseline, per task. *rows* is every round's rows.
+
+    Pass ``load_rows(path, variant=None)``. Tasks the variant skipped land in
+    ``missing_in_variant``: a skipped case silently shrinks the scored
+    denominator. ``baseline_rev``/``variant_rev`` are the most common
+    ``bank_rev`` in each set, the two shas of ``git diff``.
+    """
+    by_id = _by_task(rows)
+    tasks: dict[str, Any] = {}
+    missing_in_variant: list[str] = []
+    base_rows: list[dict[str, object]] = []
+    variant_rows: list[dict[str, object]] = []
+    for tid, task_rows in sorted(by_id.items()):
+        b = [r for r in task_rows if (r.get("variant") or "baseline") == "baseline"]
+        v = [r for r in task_rows if (r.get("variant") or "baseline") == variant]
+        base_rows.extend(b)
+        variant_rows.extend(v)
+        if not b:
+            continue
+        if not v:
+            missing_in_variant.append(tid)
+            continue
+        b_p1 = sum(1 for r in b if r.get("pass") is True) / len(b)
+        v_p1 = sum(1 for r in v if r.get("pass") is True) / len(v)
+        delta = v_p1 - b_p1
+        tasks[tid] = {
+            "baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
+            "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
+            "delta": round(delta, 4),
+            "verdict": "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged",
+        }
+    missing_in_baseline = sorted(
+        tid for tid, task_rows in by_id.items()
+        if tid not in tasks and tid not in missing_in_variant
+        and any((r.get("variant") or "baseline") == variant for r in task_rows)
+    )
+
+    def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
+        revs = [r["bank_rev"] for r in rs if isinstance(r.get("bank_rev"), str)]
+        return max(set(revs), key=revs.count) if revs else None
+
+    return {
+        "variant": variant,
+        "tasks": tasks,
+        "missing_in_variant": missing_in_variant,
+        "missing_in_baseline": missing_in_baseline,
+        "baseline_rev": _common_rev(base_rows),
+        "variant_rev": _common_rev(variant_rows),
+    }
 
 
 def _parse_ts(value: object) -> Optional[datetime]:
