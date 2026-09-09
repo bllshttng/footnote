@@ -11,6 +11,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     let member = StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: Some("worker-tab".into()),
         cwd: Some("/repo/worktree".into()),
