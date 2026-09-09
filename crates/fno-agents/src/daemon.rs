@@ -2236,8 +2236,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // it shells to runs ps + a kill, so it never runs on the core loop.
     let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_orphan_sweep = Instant::now();
-    // Retirement-sweep cadence stamp (x-d354): the throttle beside the gate.
+    // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
+    // plus the next interval cell the sweep body hands back (the idle-probe
+    // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
+    let retire_interval_next: Arc<crate::gc::RetireIntervalCell> =
+        Arc::new(std::sync::Mutex::new(None));
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as the sweeps beside
     // it rather than running inline in the select arm.
@@ -2329,20 +2333,16 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // `agents.retire_grace_s`; its held process is stopped first,
                 // its receipt is written before the drop, and its
                 // clean-and-merged worktree is pruned. Throttled to
-                // `agents.retire_interval_s` (x-d354, default grace/3); runs
-                // off-loop behind a one-in-flight gate like every sweep
-                // beside it (x-ef7f).
-                let grace_cwd = ctx.opts.agents_config_cwd.clone();
-                let retire_grace = crate::agents_config::retire_grace_secs(&grace_cwd);
-                let retire_interval = Duration::from_secs(crate::agents_config::retire_interval_s(
-                    &grace_cwd,
-                    retire_grace,
-                ));
+                // `agents.retire_interval_s` (x-d354, default grace/3), handed
+                // back by the sweep body so the tick never blocks on config
+                // reads; off-loop behind a gate like every sweep (x-ef7f).
+                let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
                 crate::gc::maybe_retirement_sweep(
                     &mut last_gc_sweep,
                     &gc_in_flight,
+                    &retire_interval_next,
                     ctx.home.clone(),
-                    grace_cwd,
+                    ctx.opts.agents_config_cwd.clone(),
                     ctx.home.events_jsonl(),
                     retire_interval,
                 );

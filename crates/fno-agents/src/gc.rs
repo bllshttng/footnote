@@ -321,8 +321,27 @@ use crate::gc_sweep;
 use crate::paths::AgentsHome;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+/// The next guard window's interval, resolved off-loop by the sweep body and
+/// handed back for later ticks to read: the idle-probe verdict pattern, so
+/// the select arm never blocks on config reads. Empty until the first sweep
+/// lands, which reads as the default.
+pub type RetireIntervalCell = Mutex<Option<Duration>>;
+
+/// The interval the next guard window compares against: the last value the
+/// sweep body handed back, or [`crate::agents_config::DEFAULT_RETIRE_INTERVAL_SECS`]
+/// before the first handoff.
+pub fn retire_interval_snapshot(cell: &Arc<RetireIntervalCell>) -> Duration {
+    Duration::from_secs(
+        cell.lock()
+            .ok()
+            .and_then(|c| *c)
+            .map(|d| d.as_secs())
+            .unwrap_or(crate::agents_config::DEFAULT_RETIRE_INTERVAL_SECS),
+    )
+}
 
 /// The daemon idle tick's retirement sweep: classify every row, retire the
 /// work-done-and-quiet ones (stop the held process first), prune their
@@ -646,6 +665,7 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
 pub fn maybe_retirement_sweep(
     last_sweep: &mut Instant,
     in_flight: &Arc<AtomicBool>,
+    next_interval: &Arc<RetireIntervalCell>,
     home: AgentsHome,
     grace_cwd: PathBuf,
     events: PathBuf,
@@ -656,6 +676,7 @@ pub fn maybe_retirement_sweep(
     }
     *last_sweep = Instant::now();
     let flag = Arc::clone(in_flight);
+    let next_interval = Arc::clone(next_interval);
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
         let emitter = EventEmitter::new(events, "daemon");
@@ -663,6 +684,12 @@ pub fn maybe_retirement_sweep(
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         unowned_sweeps(&home, &emitter, &grace_cwd);
+        // Hand back the NEXT window's interval, resolved off-loop: the tick
+        // that reads it never touches config.
+        let next = crate::agents_config::retire_interval_s(&grace_cwd, grace_secs.max(0) as u64);
+        if let Ok(mut slot) = next_interval.lock() {
+            *slot = Some(Duration::from_secs(next));
+        }
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
@@ -742,6 +769,7 @@ mod tests {
             .expect("runtime");
         rt.block_on(async {
             let in_flight = Arc::new(AtomicBool::new(false));
+            let cell: Arc<RetireIntervalCell> = Arc::new(Mutex::new(None));
             // Backdate the stamp: a fresh stamp means the guard correctly
             // waits out the window, so the test starts due like the daemon
             // is one interval after boot.
@@ -752,6 +780,7 @@ mod tests {
             crate::gc::maybe_retirement_sweep(
                 &mut last,
                 &in_flight,
+                &cell,
                 home.clone(),
                 grace_cwd.clone(),
                 home.events_jsonl(),
@@ -762,6 +791,7 @@ mod tests {
             crate::gc::maybe_retirement_sweep(
                 &mut last,
                 &in_flight,
+                &cell,
                 home.clone(),
                 grace_cwd,
                 home.events_jsonl(),
@@ -791,12 +821,13 @@ mod tests {
         std::env::set_var("FNO_AGENTS_RETIRE_INTERVAL_SECS", "25");
         let (dir, home) = retirement_sweep_tmp_home("interval-readback");
         let grace_cwd = dir.clone();
-        // The exact resolution the daemon arm performs on the loop thread.
+        // The interval a previous window handed back, as the daemon arm
+        // would read it, and the value the body re-resolves into the cell.
         let grace = crate::agents_config::retire_grace_secs(&grace_cwd);
         let interval =
             Duration::from_secs(crate::agents_config::retire_interval_s(&grace_cwd, grace));
-        std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
         assert!(interval.as_secs() >= 5, "interval floor is the 5s tick");
+        let cell: Arc<RetireIntervalCell> = Arc::new(Mutex::new(Some(interval)));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -807,8 +838,9 @@ mod tests {
             crate::gc::maybe_retirement_sweep(
                 &mut last,
                 &in_flight,
+                &cell,
                 home.clone(),
-                grace_cwd,
+                grace_cwd.clone(),
                 home.events_jsonl(),
                 interval,
             );
@@ -828,7 +860,15 @@ mod tests {
                 interval.as_secs(),
                 "the arms row must carry the interval the guard compared"
             );
+            // The body handed back the NEXT window's interval, resolved
+            // under the same env: the handoff loop is closed.
+            assert_eq!(
+                retire_interval_snapshot(&cell),
+                interval,
+                "the body must hand back the resolved interval"
+            );
         });
+        std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
