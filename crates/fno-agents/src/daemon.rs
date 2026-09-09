@@ -1334,14 +1334,12 @@ fn worktree_gate(cwd: &str) -> WorktreeGate {
     WorktreeGate::Unanswerable("the reapable probe could not answer".into())
 }
 
-/// (x-d545) A human removed ONE named row: its worktree goes with it, but
-/// only through the reapable gate plus the merge check - the same three
-/// buckets the `--merged` sweep and the watchdog honor (DIRTY untouched,
-/// clean-and-unmerged never auto-pruned, clean-and-MERGED loses the TREE and
-/// keeps the BRANCH: `git worktree remove` never deletes branches). A gate
-/// that cannot answer keeps the tree - removal never guesses. The row is
-/// removed either way; a protected worktree must not wedge the row on the
-/// sideline. `None`: the row owned no linked worktree, a clean no-op.
+/// A human removed ONE named row: its worktree goes with it, through the
+/// same reapable gate plus merge check the `--merged` sweep and watchdog
+/// honor (dirty untouched, clean-and-unmerged never auto-pruned, clean-and-
+/// merged loses the tree but keeps the branch - `git worktree remove` never
+/// deletes branches). A gate that cannot answer keeps the tree; the row is
+/// removed either way. `None`: the row owned no linked worktree.
 fn rm_take_worktree_with(
     entry: &state::RegistryEntry,
     gate: &dyn Fn(&str) -> WorktreeGate,
