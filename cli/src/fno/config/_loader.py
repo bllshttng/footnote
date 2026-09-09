@@ -18,8 +18,7 @@ if TYPE_CHECKING:
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
     """Canonical root from a linked worktree's ``.git`` pointer, no
-    subprocess; None when ``.git`` is a real dir (this IS canonical) or
-    unparseable, so the candidate contributes nothing (like a missing file)."""
+    subprocess; None when ``.git`` is a real dir or unparseable."""
     git_path = repo_root / ".git"
     if not git_path.is_file():
         return None
@@ -103,9 +102,8 @@ _SettingsKey = tuple[
 def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     """Load, deep-merge, and cache the settings for one declaration ``key``:
     every existing candidate read and deep-merged, highest priority winning
-    per key (the candidate chain lives in ``_candidate_paths``). Raises
-    ValidationError on invalid values (glob chars, PATH_MAX, etc.); emits
-    WARNING for unknown keys. Key contract: docs/path-config.md.
+    per key. Raises ValidationError on invalid values; warns unknown keys.
+    Key contract: docs/path-config.md.
     """
     from fno.config import (
         SettingsModel,

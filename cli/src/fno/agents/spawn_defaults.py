@@ -1320,8 +1320,7 @@ def inject_spawn_defaults(
         ):
             inject += ["--route", grid_candidate["route"]]
             from_config.append(("route", grid_candidate["route"], "difficulty-grid"))
-        # The capacity pick read the row account's quota, so the worker runs
-        # under it; accounts are claude-only at the spawn CLI.
+        # The capacity pick read the row account's quota; claude-only at the CLI.
         if grid_candidate.get("account") and not _flag_present(out[1:], "--account"):
             if grid_candidate["harness"] == "claude":
                 inject += ["--account", grid_candidate["account"]]
