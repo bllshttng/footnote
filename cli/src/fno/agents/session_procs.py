@@ -120,7 +120,9 @@ def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
     return out
 
 
-def codex_rollout_pid_map(session_ids, *, timeout: float = 5.0) -> dict[str, int]:
+def codex_rollout_pid_map(
+    session_ids: set[str], *, timeout: float = 5.0
+) -> dict[str, int]:
     """codex session id -> pid of the process holding that thread's rollout.
 
     Codex threads have no claude-style roster, so the rollout fd IS the
