@@ -78,6 +78,7 @@ pub mod codex_thread;
 mod codex_thread_entry;
 mod completion_output;
 pub mod component_update;
+pub mod court_fold;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod delivery_completion;
