@@ -51,7 +51,7 @@ Prove-it answers a second question beside does the change work: is what you just
 4. Confirm the output supports the claim as stated, not a weaker claim next to it.
 5. Only then write the claim, with its command, exit code and captured output beside it.
 
-The prohibitions are what the validator refuses: no success language before step 5, no partial check standing in for the whole, no extrapolation from a related check, no reuse of an earlier run's output. A record saying a probe executed is not evidence; the command and its output are. **A PASS with no `### Claims` section is REFUSED, and so is any claim row missing its `CMD:` - a claim with no command is a claim nobody checked.**
+The prohibitions are what the validator refuses: no success language before step 5, no partial check standing in for the whole, no extrapolation from a related check, no reuse of an earlier run's output. A record saying a probe executed is not evidence; the command and its output are. **A PASS with no `### Claims` section is REFUSED, and so is any claim row missing its claim text, its `CMD:`, its `EXIT:`, its `OUT:` or its `VERDICT:` - a claim with no command is a claim nobody checked - and a PASS whose rows do not state the terminal record's claim is refused: a narrower row cannot prove a broader claim.**
 
 A surface no command can drive is the one honest escape: it reports **BLOCKED** or **SKIP**, which carry no verdict and pass the validator untouched - never an unproven claim.
 

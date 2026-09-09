@@ -17,9 +17,10 @@ ROUTER = REPO_ROOT / "skills/review/SKILL.md"
 PLAN_VALIDATOR = REPO_ROOT / "skills/blueprint/scripts/validate-plan.sh"
 
 
+GOOD_CLAIM = "the change works at its surface"
 GOOD_CLAIMS = (
     "### Claims\n"
-    "1. CLAIM: the change works at its surface\n"
+    f"1. CLAIM: {GOOD_CLAIM}\n"
     "   CMD: `curl -s localhost:8080/header`\n"
     "   EXIT: 0\n"
     "   OUT: x-prove-it: 1\n"
@@ -28,11 +29,16 @@ GOOD_CLAIMS = (
 
 
 def _report(
-    tmp_path: Path, name: str, body: str, verdict: str, claims: str = GOOD_CLAIMS
+    tmp_path: Path,
+    name: str,
+    body: str,
+    verdict: str,
+    claims: str = GOOD_CLAIMS,
+    claim_text: str = GOOD_CLAIM,
 ) -> Path:
     path = tmp_path / name
     path.write_text(
-        f"{body}\n{claims}fno-prove-it: {{\"verdict\":\"{verdict}\",\"claim\":\"c\"}}\n",
+        f"{body}\n{claims}fno-prove-it: {{\"verdict\":\"{verdict}\",\"claim\":\"{claim_text}\"}}\n",
         encoding="utf-8",
     )
     return path
@@ -49,7 +55,7 @@ def test_selftest_passes():
         ["bash", str(VALIDATOR), "--selftest"], capture_output=True, text=True
     )
     assert out.returncode == 0, out.stdout + out.stderr
-    assert "11 passed, 0 failed" in out.stdout
+    assert "14 passed, 0 failed" in out.stdout
     assert "PASS: a claim with no command is refused" in out.stdout
 
 
@@ -94,13 +100,78 @@ def test_a_claim_row_with_claim_colon_inside_out_is_accepted(tmp_path):
             "   OUT: captured line 'CLAIM:' echoed inside the output\n"
             "   VERDICT: PASS\n"
         ),
+        claim_text="the route returns the header",
     )
     out = _validate(report)
     assert out.returncode == 0, out.stderr
     assert "accepted" in out.stdout
 
 
-def test_a_pass_whose_claim_carries_no_cmd_is_refused_and_named(tmp_path):
+def test_a_claim_row_without_a_verdict_is_refused(tmp_path):
+    """Absence of failure is not a positive verdict; VERDICT: is required."""
+    report = _report(
+        tmp_path,
+        "no-verdict.md",
+        "### Steps\n1. ✅ ran the route -> 200\n2. 🔍 empty value -> clean error\n",
+        "PASS",
+        claims=(
+            "### Claims\n"
+            f"1. CLAIM: {GOOD_CLAIM}\n"
+            "   CMD: `curl -s localhost:8080/header`\n"
+            "   EXIT: 0\n"
+            "   OUT: x-prove-it: 1\n"
+        ),
+    )
+    out = _validate(report)
+    assert out.returncode == 1
+    assert "REFUSED" in out.stderr
+    assert "VERDICT:" in out.stderr
+
+
+def test_an_empty_claim_text_row_is_refused(tmp_path):
+    """A row that names no claim checks nothing, whatever its fields say."""
+    report = _report(
+        tmp_path,
+        "empty-text.md",
+        "### Steps\n1. ✅ ran the route -> 200\n2. 🔍 empty value -> clean error\n",
+        "PASS",
+        claims=(
+            "### Claims\n"
+            "1. CLAIM:\n"
+            "   CMD: `curl -s localhost:8080/header`\n"
+            "   EXIT: 0\n"
+            "   OUT: x-prove-it: 1\n"
+            "   VERDICT: PASS\n"
+        ),
+        claim_text="curl starts",
+    )
+    out = _validate(report)
+    assert out.returncode == 1
+    assert "REFUSED" in out.stderr
+    assert "CLAIM: text" in out.stderr
+
+
+def test_a_terminal_claim_no_row_evidences_is_refused(tmp_path):
+    """A narrower or unrelated row cannot prove a broader terminal claim."""
+    report = _report(
+        tmp_path,
+        "uncovered.md",
+        "### Steps\n1. ✅ ran the route -> 200\n2. 🔍 empty value -> clean error\n",
+        "PASS",
+        claims=(
+            "### Claims\n"
+            "1. CLAIM: curl can start\n"
+            "   CMD: `curl -s localhost:8080/health`\n"
+            "   EXIT: 0\n"
+            "   OUT: ok\n"
+            "   VERDICT: PASS\n"
+        ),
+        claim_text="everything works",
+    )
+    out = _validate(report)
+    assert out.returncode == 1
+    assert "REFUSED" in out.stderr
+    assert "everything works" in out.stderr
     """A claim with no command is a claim nobody checked; the refusal quotes it."""
     report = _report(
         tmp_path,
@@ -114,6 +185,7 @@ def test_a_pass_whose_claim_carries_no_cmd_is_refused_and_named(tmp_path):
             "   OUT: badge text changed to saved\n"
             "   VERDICT: PASS\n"
         ),
+        claim_text="the badge refreshes on every focus event",
     )
     out = _validate(report)
     assert out.returncode == 1
@@ -150,6 +222,7 @@ def test_a_pass_with_a_failing_claim_row_is_refused(tmp_path):
             "   OUT: x-prove-it: 1\n"
             "   VERDICT: FAIL\n"
         ),
+        claim_text="the route returns the header",
     )
     out = _validate(report)
     assert out.returncode == 1
