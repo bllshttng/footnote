@@ -211,9 +211,11 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
 
     # Installer handoff happened after the rust leg, and the chained
     # installed-rev write (post-execvp, gated on installer exit 0) recorded
-    # the source HEAD.
+    # the source HEAD. --refresh must ride along: without it a uv wheel-cache
+    # hit reinstalls the same stale bytes and the update never converges.
     uv_text = uv_log.read_text(encoding="utf-8")
     assert "tool install --reinstall" in uv_text
+    assert "--refresh" in uv_text
     assert str(cli_src.resolve()) in uv_text
     installed_rev = home / ".fno" / "installed-rev"
     assert installed_rev.read_text(encoding="utf-8").strip() == head_rev
@@ -224,7 +226,75 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
         f"exit {result2.returncode}\nstdout:\n{result2.stdout}\nstderr:\n{result2.stderr}"
     )
     # The gate now reads the binary's self-reported rev, so the message quotes it
-    # "from binary".
+    # "from binary". The verdict is native: with the fixture's crates/ holding no
+    # mux crate, only the triad is classified, the deployed binary answers the
+    # component-verdict transport itself, and all three prove Fresh.
     assert f"rust bins fresh (rev {crates_rev[:12]} from binary)" in result2.stdout, result2.stdout
     cargo_lines_after = cargo_log.read_text(encoding="utf-8").strip().splitlines()
     assert cargo_lines_after == cargo_lines, "fresh short-circuit must not re-invoke cargo"
+
+
+def test_component_verdict_binary_journey(tmp_path: Path) -> None:
+    """Journey: the real deployed-shape binary answers `component-verdict` and
+    its report proves convergence only when every component's post-effect
+    probe matches. Stale bytes on one component keep the fleet unconverged
+    and name the executable repair."""
+    binary = os.environ.get("FNO_AGENTS_BIN")
+    if not binary:
+        pytest.skip(
+            "FNO_AGENTS_BIN unset: this journey drives the real fno-agents binary"
+        )
+
+    import json as jsonlib
+    import subprocess as subproc
+
+    def ask(request: dict) -> dict:
+        proc = subproc.run(
+            [binary, "component-verdict"],
+            input=jsonlib.dumps(request), capture_output=True, text=True, timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return jsonlib.loads(proc.stdout)
+
+    stale_bin = str(tmp_path / "fno-agents-worker")
+    Path(stale_bin).write_text("#!/bin/sh\n", encoding="utf-8")
+    Path(stale_bin).chmod(0o755)
+
+    fresh = ask({
+        "expected_rev": "a" * 40,
+        "components": [
+            {"component": "fno-agents", "executable": "/bin/true", "post_rev": "a" * 40},
+            {"component": "fno-agents-daemon", "executable": "/bin/true", "post_rev": "a" * 40},
+            {"component": "fno-agents-worker", "executable": stale_bin, "post_rev": "a" * 40},
+        ],
+    })
+    assert fresh["converged"] is True
+    assert all(c["status"] == "fresh" for c in fresh["components"])
+
+    stale = ask({
+        "expected_rev": "a" * 40,
+        "crates_agents_dir": "/src/crates/fno-agents",
+        "components": [
+            {"component": "fno-agents", "executable": "/bin/true", "post_rev": "a" * 40},
+            {"component": "fno-agents-daemon", "executable": "/bin/true", "post_rev": "a" * 40},
+            {"component": "fno-agents-worker", "executable": stale_bin, "post_rev": "0" * 40},
+        ],
+    })
+    assert stale["converged"] is False
+    worker = [c for c in stale["components"] if c["component"] == "fno-agents-worker"][0]
+    assert worker["status"] == "stale"
+    assert "cargo install --path /src/crates/fno-agents" in (worker["repair"] or "")
+
+    # An executable the probe cannot answer is Unknown with the named
+    # instrument, never collapsed into fresh or missing (AC3-HP).
+    hung = ask({
+        "expected_rev": "a" * 40,
+        "components": [
+            {"component": "fno-agents-worker", "executable": stale_bin,
+             "instrument_error": "hung on `version --json` (>20s)"},
+        ],
+    })
+    assert hung["converged"] is False
+    hv = hung["components"][0]
+    assert hv["status"] == "unknown"
+    assert "hung" in (hv["detail"] or "")

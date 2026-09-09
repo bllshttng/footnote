@@ -536,6 +536,65 @@ def _probe_and_classify(
     return _component_verdict(request, verdict_bin)
 
 
+def _front_door_python_script() -> Optional[str]:
+    """The Python script the cargo front door would exec, from the door's OWN
+    resolver (`fno version --json` -> `python_script`). None when no front
+    door is deployed, the deployed door predates the field, or the resolver
+    could not answer - a guessed uv environment is never reported as fact.
+    """
+    mux = _cargo_installed_mux() or shutil.which("fno")
+    if not mux:
+        return None
+    try:
+        result = subprocess.run(
+            [str(mux), "version", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "")
+    except (ValueError, TypeError):
+        return None
+    script = data.get("python_script") if isinstance(data, dict) else None
+    return script if isinstance(script, str) and script else None
+
+
+def _python_tool_probe(
+    source: Path,
+    *,
+    installed_rev: Optional[str] = None,
+    contradicting_evidence: Optional[str] = None,
+) -> dict:
+    """Build the python-tool component probe for the convergence verdict.
+
+    The deployment verified is the one the front door would actually exec
+    (its own resolver), never the venv the running interpreter guesses at;
+    the running interpreter is named alongside it so a mismatch between the
+    two is visible in the receipt rather than silently read as convergence
+    (AC2-HP).
+    """
+    script = _front_door_python_script()
+    probe: dict = {
+        "component": "python-tool",
+        "executable": script or sys.executable,
+        "post_rev": installed_rev,
+        "expected_rev": _source_rev(source),
+    }
+    if script is None:
+        probe["instrument_error"] = (
+            "the front door resolved no Python script; verify the uv tool venv manually"
+        )
+    if contradicting_evidence:
+        probe["contradicting_evidence"] = contradicting_evidence
+    return probe
+
+
 def _triad_same_build(bindir: Path, subtree: str) -> bool:
     """True iff all three triad bins in ``bindir`` self-report ``crates_rev ==
     subtree`` (and are not dirty). Now that daemon + worker carry a ``version``
@@ -913,10 +972,28 @@ def update_readiness(
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
+    # The two Python deployments a receipt must name: the script the cargo
+    # front door would exec (its own resolver) and the interpreter running
+    # this check. A mismatch means fno and fno-py resolve different
+    # deployments - the 2026-08-15 skew shape - and the receipt says so
+    # instead of declaring the reachable venv sufficient (AC2-HP).
+    front_script = _front_door_python_script()
+    running = sys.executable or None
+    same: Optional[bool] = None
+    if front_script and running:
+        try:
+            same = Path(front_script).resolve() == Path(running).resolve()
+        except OSError:
+            same = None
     return {
         "update_ready": update_ready,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
+        "python_tool": {
+            "script": front_script,
+            "running": running,
+            "same": same,
+        },
         "wire": {"running": running_wires, "source": source_wire, "bump": wire_bump},
         "shells": shells if shells_known else None,
         "shells_ended": shells_ended if shells_known else None,
