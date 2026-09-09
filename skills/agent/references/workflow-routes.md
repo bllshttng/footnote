@@ -12,7 +12,7 @@ Load this file only when the spawn is NOT a default claude pane build/seed: a na
 | `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `codex --exec` | daemon-managed PTY worker | pretty JSON `.short_id` |
 | `agy` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
 
-The `gemini` CLI is deprecated (Google retired it); `agy` is its first-class successor and the row that used to say "gemini" names `agy` now. A `gemini` provider token is refused at normalize.
+The `gemini` CLI is deprecated (Google retired it); `agy` is its first-class successor. `normalize` still resolves a `gemini` token for legacy seed and handoff payloads, so an old command runs - new dispatches name `agy`.
 
 All three create via `spawn`. The substrate axis (x-61df) selects the host: `pane` (default, owned-PTY drivable), `thread` (a persistent continuation lane), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). The per-harness support matrix, including refusals, lives in `docs/architecture/thread-lanes.md`; this skill does not restate provider verdicts. A one-shot Q&A is the `headless` substrate (x-cbb0: it subsumes the retired one-shot ask; today's `ask` verb is the sync lane to an existing worker). A codex/agy exec worker is a **single autonomous pass**, not the claude "refuse to stop until shipped" loop - do not imply loop-grade completion guarantees for them.
 
