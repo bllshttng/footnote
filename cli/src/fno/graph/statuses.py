@@ -37,12 +37,6 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # node settlement, so they cannot drift (x-94f8).
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
 
-# The statuses a reader means by "what is being worked on": everything that is
-# neither closed (done, superseded) nor unstarted (idea, deferred).
-ACTIVE_STATUSES: frozenset[str] = frozenset(
-    {"in_progress", "in_review", "ready", "blocked", "design"}
-)
-
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
 # and migrated to the dedicated ``deferred_at`` field, after which the prefix

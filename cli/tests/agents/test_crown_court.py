@@ -1181,11 +1181,12 @@ def test_nodes_flag_folds_json_and_moves_no_existing_key(
     assert [r["pr_number"] for r in sn["nodes"]] == [7]
 
 
-def test_nodes_table_adds_the_fold_block_and_the_plain_table_is_untouched(
+def test_nodes_flag_answers_json_and_the_plain_table_is_untouched(
     tmp_path: Path, monkeypatch
 ) -> None:
     """AC5-COMPAT: without the flag the table renders exactly as before; with
-    it the counts line and active rows appear under their crown."""
+    it the answer is JSON (the fold's row data is tabular and the board's
+    court section is its human view)."""
     from fno.agents.court import render_court
 
     _prepare(
@@ -1208,14 +1209,13 @@ def test_nodes_table_adds_the_fold_block_and_the_plain_table_is_untouched(
     )
 
     plain = render_court(as_json=False)
-    assert "not listed" not in plain
-    assert "SESSIONS" not in plain
+    assert "scope_nodes" not in plain
 
-    folded = render_court(as_json=False, nodes=True)
-    assert "1 node: ready 1   (0 not listed)" in folded
-    assert "SESSIONS" in folded
-    assert "tgt-e1" in folded
-    assert "#7" in folded
+    folded = json.loads(render_court(as_json=False, nodes=True))
+    sn = folded["crowns"][0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert sn["nodes"][0]["worker"] == "tgt-e1"
+    assert sn["nodes"][0]["pr_number"] == 7
 
 
 def test_a_failed_fold_names_the_crown_not_an_empty_scope(
@@ -1235,13 +1235,11 @@ def test_a_failed_fold_names_the_crown_not_an_empty_scope(
 
     text = render_court(as_json=False, nodes=True)
 
-    assert "scope fold: unresolved" in text
-    assert "king" in text
-    assert "not listed" not in text
-    payload = json.loads(render_court(as_json=True, nodes=True))
+    payload = json.loads(text)
     assert all(
         c["scope_nodes"]["status"] == "unresolved" for c in payload["crowns"]
     )
+    assert "could not run" in payload["crowns"][0]["scope_nodes"]["reason"]
 
 
 def test_the_flag_pays_no_extra_python_graph_read(tmp_path: Path, monkeypatch) -> None:

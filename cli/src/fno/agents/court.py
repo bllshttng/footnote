@@ -378,42 +378,20 @@ def _fmt_row(e: dict[str, Any]) -> str:
     )
 
 
-def _fold_lines(e: dict[str, Any]) -> list[str]:
-    """The indented scope-fold block printed under one crown's table row."""
-    sn = e.get("scope_nodes")
-    if not sn:
-        return []
-    if sn["status"] == "unresolved":
-        return [f"  scope fold: unresolved - {sn['reason']}"]
-    counts = ", ".join(f"{k} {v}" for k, v in sn["counts"].items())
-    lines = [
-        f"  {sn['total']} node{'s' if sn['total'] != 1 else ''}: "
-        f"{counts}   ({sn['omitted']} not listed)"
-    ]
-    lines.append(f"  {'NODE':<8} {'STATUS':<12} {'WORKER':<18} {'PR':<6} SESSIONS")
-    for r in sn["nodes"]:
-        pr = f"#{r['pr_number']}" if r.get("pr_number") else ""
-        sessions = ", ".join(str(s) for s in r.get("sessions") or [])
-        lines.append(
-            f"  {str(r['id']):<8} {str(r['status']):<12} "
-            f"{str(r.get('worker') or '-'):<18} {pr:<6} {sessions}"
-        )
-    return lines
-
-
 def render_court(as_json: bool, nodes: bool = False) -> str:
     """The full render: table + conflicts + summary, or its JSON mirror.
 
-    ``nodes`` folds each crown's scope into its row (``fold_scope_nodes``,
-    the native read); a fold that cannot run marks the crown unresolved
-    rather than rendering an empty table.
+    ``nodes`` folds each crown's scope into its row (the native read) and
+    always answers JSON - the fold's row data is tabular, and the board's
+    court section is its human view. A fold that cannot run marks the crown
+    unresolved rather than rendering an empty table.
     """
     import json
 
     court = gather_court()
     if nodes and court["crowns"]:
         fold_scope_nodes(court["crowns"])
-    if as_json:
+    if as_json or nodes:
         return json.dumps(court, indent=2, sort_keys=True)
 
     if court["crowns"] is None:
@@ -422,13 +400,7 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
         return "court: no live crowns"
 
     header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<14} AGREE SOURCE"
-    if nodes:
-        lines = [header]
-        for e in court["crowns"]:
-            lines.append(_fmt_row(e))
-            lines.extend(_fold_lines(e))
-    else:
-        lines = [header] + [_fmt_row(e) for e in court["crowns"]]
+    lines = [header] + [_fmt_row(e) for e in court["crowns"]]
     for c in court["conflicts"]:
         holders = ", ".join(c["holders"])
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
@@ -461,9 +433,9 @@ def register_court_command(app) -> None:
             "--nodes",
             "-n",
             help=(
-                "Fold each crown's scope nodes into its row: counts by status "
-                "for the whole scope, plus a row per active node with its "
-                "worker, PR and session ids."
+                "Fold each crown's scope nodes into its row (counts by status, "
+                "then the active nodes with worker, PR, session ids). Implies "
+                "JSON output."
             ),
         ),
         update_board: bool = typer.Option(
@@ -476,21 +448,14 @@ def register_court_command(app) -> None:
         ),
     ) -> None:
         """The whole court: every live crown, its scope, its holder, its
-        grantor, and whether the registry and the graph agree - the read that
-        answers "did the coronations work" without trusting the absence of a
-        disagreement.
+        grantor, and whether the registry and the graph agree.
 
         Exit 0 always: this is a read, and a caller gates on the JSON keys
         (``agree``, ``summary.disagreements``, ``summary.unknowns``, and
-        ``conflicts``), not the process status.
-
-        ``conflicts`` belongs in that list and is not derivable from the
-        counts. Two live rows holding one territory are each individually
-        corroborated by the graph, so both report ``agree: true`` and the
-        summary reads zero disagreements while the fleet has two kings over
-        one scope. A caller that gates on the counts alone reads that as a
-        healthy court, which is the precise failure this command exists to
-        end.
+        ``conflicts``), not the process status. Two live rows holding one
+        territory can each report ``agree: true`` while the fleet has two
+        kings over one scope, so ``conflicts`` is part of every gate read -
+        the precise failure this command exists to end.
         """
         if update_board:
             from fno.agents.court_html import update_board
