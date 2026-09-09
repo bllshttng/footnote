@@ -55,15 +55,7 @@ from typing import Any, Literal, NamedTuple, Optional
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name, slug_component
-from fno.agents.spawn_gate import (
-    EXIT_KING_SHARE,
-    EXIT_LOAD_REFUSED,
-    EXIT_NO_WAIT,
-    EXIT_PROVIDER_CAP,
-    EXIT_QUEUE_TIMEOUT,
-    EXIT_RAM_REFUSED,
-    EXIT_REGISTRY_SCHEMA,
-)
+from fno.agents import spawn_gate as _spawn_gate
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -241,18 +233,18 @@ class SpawnQueueRefused(SpawnError):
     and, when a reset is known, ``retry_at``."""
 
     def __init__(self, message: str, retry_at: Optional[float] = None):
-        super().__init__(message, exit_code=EXIT_PROVIDER_CAP)
+        super().__init__(message, exit_code=_spawn_gate.EXIT_PROVIDER_CAP)
         self.retry_at = retry_at
 
 
 #: spawn-gate exit -> machine verdict. 75-80 are capacity conditions true for
-#: every caller equally; 81 is a registry no spawn can pass. Imported by name,
-#: never a numeric range: a rename must break loudly.
+#: every caller equally; 81 is a registry no spawn can pass. Constants are read
+#: off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
-    EXIT_QUEUE_TIMEOUT: "capacity-refused", EXIT_NO_WAIT: "capacity-refused",
-    EXIT_RAM_REFUSED: "capacity-refused", EXIT_PROVIDER_CAP: "capacity-refused",
-    EXIT_LOAD_REFUSED: "capacity-refused", EXIT_KING_SHARE: "capacity-refused",
-    EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+    _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
+    _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
+    _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
+    _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
 }
 
 
@@ -1572,10 +1564,10 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
-        if proc.returncode == EXIT_PROVIDER_CAP:
+        if proc.returncode == _spawn_gate.EXIT_PROVIDER_CAP:
             gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
             exc = SpawnQueueRefused(
-                f"fno agents spawn exited {EXIT_PROVIDER_CAP} (slot queue refused): {gate_detail}",
+                f"fno agents spawn exited {_spawn_gate.EXIT_PROVIDER_CAP} (slot queue refused): {gate_detail}",
                 retry_at=_slot_queue_retry_at(proc.stdout or ""),
             )
             exc.detail = gate_detail
@@ -4365,7 +4357,7 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
-        if res.decision == "skipped" and res.exit_code not in (None, EXIT_PROVIDER_CAP):
+        if res.decision == "skipped" and res.exit_code not in (None, _spawn_gate.EXIT_PROVIDER_CAP):
             # A global refusal (load, RAM, queue, registry) ends the pass: the
             # condition is identical for every remaining child. A 78 skip is
             # provider-scoped and falls through: siblings on other routes may
