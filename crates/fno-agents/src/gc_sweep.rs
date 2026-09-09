@@ -568,10 +568,10 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
 
 /// Positive death evidence for a claude row, read off the `claude agents
 /// --json --all` snapshot. `Some(reason)` proves the session finished - the
-/// same standard rm's live gate already accepts (daemon `row_state_terminal`,
-/// commit 8b2ec21c9). A finished claude agent never leaves the roster; it
-/// stays listed with state `done`, so absence can never be the proof here.
-/// `blocked` is NOT terminal: the row may be rotated and resumed, so it holds.
+/// same standard rm's live gate accepts. A finished claude agent never
+/// leaves the roster; it stays listed with state `done`, so absence can
+/// never be the proof here. `blocked` is NOT terminal: the row may be
+/// rotated and resumed, so it holds.
 pub(crate) fn claude_death_reason(
     e: &state::RegistryEntry,
     agents: &crate::claude_roster::ClaudeAgentsSnapshot,
