@@ -50,7 +50,7 @@ def test_prompt_task_defaults_provider(tmp_path: Path, monkeypatch) -> None:
 
     seen: dict = {}
 
-    def fake_run_task(task, *, repeat, repo_root, worker_provider=None):
+    def fake_run_task(task, *, repeat, repo_root, worker_provider=None, **kw):
         seen["provider"] = worker_provider
         return [runner_mod.RunResult(task.id, task.tier, True, "", 0.0, 0)]
 
@@ -65,3 +65,89 @@ def test_prompt_task_defaults_provider(tmp_path: Path, monkeypatch) -> None:
     assert res.exit_code == 0
     assert seen.get("provider") == "claude"
     assert "defaulting" in res.stdout
+
+
+# --- variant axis (x-bd75) ---
+
+def test_bad_variant_name_exits_1_before_bank_load(tmp_path: Path) -> None:
+    # The bank dir does not exist: reaching "no bank" would mean validation
+    # never ran; the variant refusal must come first.
+    res = runner.invoke(evals_app, ["run", "--bank", str(tmp_path / "nope"),
+                                    "--variant", "round2"])
+    assert res.exit_code == 1
+    out = res.stdout + (res.stderr or "")
+    assert "must be 'baseline' or 'v<N>', got 'round2'" in out
+
+
+def test_variant_without_ref_exits_1(tmp_path: Path) -> None:
+    res = runner.invoke(evals_app, ["run", "--bank", str(tmp_path / "nope"),
+                                    "--variant", "v1"])
+    assert res.exit_code == 1
+    assert "--ref" in res.stdout + (res.stderr or "")
+
+
+def test_ref_with_baseline_variant_exits_1(tmp_path: Path) -> None:
+    res = runner.invoke(evals_app, ["run", "--bank", str(tmp_path / "nope"),
+                                    "--ref", "HEAD"])
+    assert res.exit_code == 1
+    assert "--variant" in res.stdout + (res.stderr or "")
+
+
+def test_variant_flags_pass_through_to_run_task(tmp_path: Path, monkeypatch) -> None:
+    import fno.evals.runner as runner_mod
+
+    seen: dict = {}
+
+    def fake_run_task(task, *, repeat, repo_root, worker_provider=None,
+                      variant="baseline", variant_ref=None):
+        seen["variant"] = variant
+        seen["variant_ref"] = variant_ref
+        return [runner_mod.RunResult(task.id, task.tier, True, "", 0.0, 0, variant)]
+
+    monkeypatch.setattr(runner_mod, "run_task", fake_run_task)
+    monkeypatch.setattr(runner_mod, "sweep_orphans", lambda root: 0)
+
+    d = _bank(tmp_path, "a.yaml",
+              "id: a\ntier: regression\ngrade:\n  - {kind: exit, command: 'true'}\n")
+    res = runner.invoke(evals_app, ["run", "--bank", str(d),
+                                    "--variant", "v2", "--ref", "HEAD"])
+    assert res.exit_code == 0
+    assert seen == {"variant": "v2", "variant_ref": "HEAD"}
+    assert "a [v2]" in res.stdout  # the summary line names the round
+
+
+def test_report_compare_cli(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
+                         "variant": "baseline", "bank_rev": "aaa"})
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": False,
+                         "variant": "baseline", "bank_rev": "aaa"})
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
+                         "variant": "v1", "bank_rev": "bbb"})
+    res = runner.invoke(evals_app, ["report", "--history", str(hp), "--compare", "v1"])
+    assert res.exit_code == 0  # a compare view never fires the alarm exit
+    assert "baseline" in res.stdout and "v1" in res.stdout
+    assert "improved" in res.stdout
+    assert "git diff aaa bbb" in res.stdout
+
+
+def test_report_compare_json_cli(tmp_path: Path) -> None:
+    import json
+
+    hp = tmp_path / "h.jsonl"
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
+                         "variant": "baseline"})
+    _history_append(hp, {"task_id": "t", "tier": "regression", "pass": False,
+                         "variant": "v1"})
+    res = runner.invoke(evals_app, ["report", "--history", str(hp),
+                                    "--compare", "v1", "--json"])
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["variant"] == "v1"
+    assert payload["tasks"]["t"]["verdict"] == "regressed"
+
+
+def _history_append(path: Path, row: dict) -> None:
+    from fno.evals import history as _history
+
+    _history.append_row(path, row)

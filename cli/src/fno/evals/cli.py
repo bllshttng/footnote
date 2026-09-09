@@ -58,21 +58,33 @@ def run_command(
     repeat: int = typer.Option(1, "--repeat", "-k", help="Run each task K times (pass^k)."),
     bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
     provider: Optional[str] = typer.Option(None, "--provider", help="Worker provider for the headless spawn."),
+    variant: str = typer.Option("baseline", "--variant", help="Round name: baseline, or v<N> for a scored change."),
+    ref: Optional[str] = typer.Option(None, "--ref", help="Git ref to check out for a non-baseline --variant."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
 ) -> None:
     """Run bank tasks in disposable worktrees and grade them mechanically.
 
     Exit codes:
       0  all runs graded (individual fails are in the summary + history)
-      1  no bank present, or --task/--tier selected nothing
+      1  no bank present, --task/--tier selected nothing, or a bad --variant/--ref pair
       2  a bank task is invalid (load-time discipline violation)
     """
     from fno.evals.bank import BankError, discover_bank
-    from fno.evals.runner import run_task, sweep_orphans
+    from fno.evals.runner import VARIANT_RE, run_task, sweep_orphans
     from fno.paths import resolve_canonical_repo_root
 
     if repeat < 1:
         typer.echo("Error: --repeat must be >= 1", err=True)
+        raise typer.Exit(code=1)
+
+    if not VARIANT_RE.match(variant):
+        typer.echo(f"Error: --variant must be 'baseline' or 'v<N>', got '{variant}'", err=True)
+        raise typer.Exit(code=1)
+    if variant == "baseline" and ref is not None:
+        typer.echo("Error: --ref needs a non-baseline --variant (baseline is the fixture ref)", err=True)
+        raise typer.Exit(code=1)
+    if variant != "baseline" and ref is None:
+        typer.echo(f"Error: --ref is required with --variant {variant}", err=True)
         raise typer.Exit(code=1)
 
     bank_dir = _resolve_bank_dir(bank)
@@ -121,10 +133,11 @@ def run_command(
 
     all_passed = True
     for t in tasks:
-        results = run_task(t, repeat=repeat, repo_root=repo_root, worker_provider=provider)
+        results = run_task(t, repeat=repeat, repo_root=repo_root, worker_provider=provider,
+                           variant=variant, variant_ref=ref)
         passes = sum(1 for r in results if r.passed)
         passk = "PASS" if passes == repeat else "FAIL"
-        typer.echo(f"  {t.tier:11} {t.id}: {passes}/{repeat} pass  (pass^{repeat}={passk})")
+        typer.echo(f"  {t.tier:11} {t.id} [{variant}]: {passes}/{repeat} pass  (pass^{repeat}={passk})")
         for r in results:
             if not r.passed:
                 typer.echo(f"      run {r.repeat_index}: {r.reason}")
@@ -140,9 +153,13 @@ def report_command(
     graduate: bool = typer.Option(False, "--graduate", help="List capability tasks eligible to graduate."),
     n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
+    compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
     history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
+
+    With ``--compare vN``, print the per-task variant-vs-baseline score
+    instead; a compare view never fires the regression alarm (exit 0).
 
     Exit codes:
       0  report rendered (or no data)
@@ -150,11 +167,30 @@ def report_command(
     """
     import json as _json
 
-    from fno.evals.report import build_report, graduation_candidates, load_rows
+    from fno.evals.report import build_report, compare_variants, graduation_candidates, load_rows
 
     if history_file is None:
         from fno.paths import evals_history
         history_file = evals_history()
+
+    if compare is not None:
+        cmp = compare_variants(load_rows(history_file, variant=None), compare)
+        if json_output:
+            typer.echo(_json.dumps(cmp, indent=2))
+            raise typer.Exit(code=0)
+        for tid, t in cmp["tasks"].items():
+            b, v = t["baseline"], t["variant"]
+            typer.echo(
+                f"  {tid}  baseline {b['pass_at_1']:.0%} ({b['runs']})  "
+                f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
+                f"delta={t['delta']:+.2f}  {t['verdict']}"
+            )
+        for label, missing in (("baseline", cmp["missing_in_baseline"]),
+                               (cmp["variant"], cmp["missing_in_variant"])):
+            if missing:
+                typer.echo(f"  missing in {label}: {', '.join(missing)}")
+        typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
+        raise typer.Exit(code=0)
 
     rows = load_rows(history_file, since=since)
     report = build_report(rows)
