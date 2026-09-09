@@ -5,10 +5,10 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/authorized_merge.rs	556	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1305	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1358	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	2353	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/bin/client.rs	3717	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	1314	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	1367	let err = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	2362	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	3726	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	1277	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2944	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3012	let mut pane_command = std::process::Command::new("fno");

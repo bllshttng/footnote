@@ -1146,3 +1146,5 @@ def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
     # The frozen shape is gone for positive reasons above; this names it: the
     # setup-time snapshot of the whole graph no longer exists to go stale.
     assert "var ALL = counts(NODES);" not in local
+
+
