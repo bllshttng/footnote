@@ -79,6 +79,27 @@ def test_a_pass_with_a_marked_probe_is_accepted(tmp_path):
     assert "accepted" in out.stdout
 
 
+def test_a_claim_row_with_claim_colon_inside_out_is_accepted(tmp_path):
+    """Mid-line 'CLAIM:' text in a field must not open a phantom row."""
+    report = _report(
+        tmp_path,
+        "claim-in-out.md",
+        "### Steps\n1. ✅ ran the route -> 200\n2. 🔍 empty value -> clean error\n",
+        "PASS",
+        claims=(
+            "### Claims\n"
+            "1. CLAIM: the route returns the header\n"
+            "   CMD: `curl -s localhost:8080/header`\n"
+            "   EXIT: 0\n"
+            "   OUT: captured line 'CLAIM:' echoed inside the output\n"
+            "   VERDICT: PASS\n"
+        ),
+    )
+    out = _validate(report)
+    assert out.returncode == 0, out.stderr
+    assert "accepted" in out.stdout
+
+
 def test_a_pass_whose_claim_carries_no_cmd_is_refused_and_named(tmp_path):
     """A claim with no command is a claim nobody checked; the refusal quotes it."""
     report = _report(

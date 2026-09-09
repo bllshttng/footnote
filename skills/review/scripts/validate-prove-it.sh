@@ -75,7 +75,7 @@ validate() {
     echo "validate-prove-it: REFUSED - PASS with no marked probe (🔍) in the Steps list; a happy-path replay is not a verification. Add at least one probe off the claim's path and re-run." >&2
     return 1
   fi
-  if ! grep -q 'CLAIM:' <<<"$claims_section"; then
+  if ! grep -Eq '^[[:space:]]*([0-9]+\.|-|\*)?[[:space:]]*CLAIM:' <<<"$claims_section"; then
     echo "validate-prove-it: REFUSED - PASS with no ### Claims section; a completion claim must record the command that proved it. Add a ### Claims block, one row per claim with CLAIM:, CMD:, EXIT:, OUT: and VERDICT:, and re-run." >&2
     return 1
   fi
@@ -108,10 +108,13 @@ _check_claim_rows() {
       }
       claim = ""
     }
-    /CLAIM:/ {
+    # The row-start pattern is anchored so mid-line text (an OUT: capture
+    # quoting "CLAIM:") cannot open a phantom row, and the empty-section grep
+    # above uses the SAME anchor, so anything one check sees the other parses.
+    /^[[:space:]]*([0-9]+\.|-|\*)?[[:space:]]*CLAIM:/ {
       if (claim != "") emit()
       line = $0
-      sub(/^.*CLAIM:[ ]*/, "", line)
+      sub(/^[[:space:]]*([0-9]+\.|-|\*)?[[:space:]]*CLAIM:[ ]*/, "", line)
       claim = line
       cmd = ""; exitv = ""; outv = ""
       next
@@ -228,7 +231,7 @@ EOF
 1. CLAIM: the badge refreshes on every focus event
    CMD: `npm run e2e -- badge.spec`
    EXIT: 0
-   OUT: 2 passed, badge text asserted on both focuses
+   OUT: 2 passed, captured line 'CLAIM:' echoed inside the output
    VERDICT: PASS
 ### Findings
 (none)
