@@ -36,13 +36,13 @@ LOC_HELPER="$PLUGIN_ROOT/hooks/helpers/check-impl-location.sh"
 [[ -f "$LOC_HELPER" ]] && bash "$LOC_HELPER" || echo "verdict=ok"
 ```
 
-If the output carries `verdict=canonical-protected` AND `TARGET_LOCATION_OK` is not `main-acknowledged`, REFUSE: do not resolve the mode, do not write. Name the branch (from the `branch=` line) and print the exact escape, then stop:
+If the output carries `verdict=canonical-protected` AND `TARGET_LOCATION_OK` is not `main-acknowledged`, REFUSE: do not resolve the mode, do not write. Name the branch (from the `branch=` line) and print the exact escape, then stop. The authorized-worktree path is the primary escape; the in-place branch and the acknowledge override are the last resorts:
 
 ```
 /execute refused: canonical checkout on '<branch>' (sibling terminals share .fno/).
-  worktree:  wt=$(fno agents workspace worktree ensure --repo . --name <slug> --harness <yours>) && cd "$wt"
-  branch:    git checkout -b feature/<slug>
-  override:  re-run with TARGET_LOCATION_OK=main-acknowledged
+  worktree:  wt=$(fno agents workspace worktree ensure --repo . --name <slug> --harness <yours>) && cd "$wt"   # for a bound node, `fno do target start <node>` does this
+  branch:    git checkout -b feature/<slug>          # in place, last resort
+  override:  re-run with TARGET_LOCATION_OK=main-acknowledged   # last resort
 ```
 
 Otherwise (`verdict=ok`, a linked worktree, or the helper absent) continue to Step 1.

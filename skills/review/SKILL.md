@@ -88,31 +88,44 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prov
 
 > A level is never inherited from a previous invocation: an explicit token records `explicit`, a bare invocation sizes from the diff, and no run reuses a typed level (that upstream behavior is a hazard, not a feature).
 
+> When any target token survives this step, export it as `REVIEW_TARGET` for the empty-diff guard below. A PR number resolves to its head ref here (`gh pr view <n> --json headRefName -q .headRefName`), so a PR named from a worktree that is not the PR's checkout is still inspected at its own head. A bare invocation leaves `REVIEW_TARGET` empty.
+
 ## Step 2: the default mode (the fno review lane)
 
 ### 2a. Empty-diff guard (before anything runs)
 
-If there is nothing to review, report it and exit cleanly - never review an empty diff:
+If there is nothing to review, report it and exit cleanly - never review an empty diff. The guard tests the TARGET Step 1 resolved, never the caller's tree by default: a named PR's diff is `$BASE..<pr head>`, a named branch's diff is `$BASE..<branch>`, a named path's diff is that path, and only a bare invocation (no target token) reads the caller's HEAD. The guard can never certify the caller's diff as a substitute for a target that resolved to something else:
 
 ```bash
 BASE="${BASE:-origin/main}"
 git fetch -q origin 2>/dev/null || true
-# Only fire the guard when we are CONFIDENT the tree is empty: no staged or
-# unstaged changes AND a resolvable base shows zero commits ahead. If BASE
-# does not resolve (no origin remote, non-main default branch), do NOT
-# short-circuit to "empty" - fall through to the lane's Phase 0, which
-# resolves the diff itself and reports emptiness from there. This avoids
-# silently skipping a review of committed work when the base ref is just
-# unknown here.
-if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null \
-   && git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1 \
-   && [ -z "$(git log "$BASE"..HEAD --oneline 2>/dev/null)" ]; then
-  echo "no changes to review"
-  exit 0
+# Only fire the guard when we are CONFIDENT the diff is empty. For a bare
+# invocation: no staged or unstaged changes AND a resolvable base shows zero
+# commits ahead of HEAD. If BASE does not resolve (no origin remote, non-main
+# default branch), do NOT short-circuit to "empty" - fall through to the
+# lane's Phase 0, which resolves the diff itself and reports emptiness from
+# there. This avoids silently skipping a review of committed work when the
+# base ref is just unknown here.
+if [ -z "$REVIEW_TARGET" ]; then
+  if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null \
+     && git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1 \
+     && [ -z "$(git log "$BASE"..HEAD --oneline 2>/dev/null)" ]; then
+    echo "no changes to review"
+    exit 0
+  fi
+else
+  # A target was named (Step 1 exported it as REVIEW_TARGET: a PR number,
+  # a branch, or a path). Empty means THAT target's diff is empty - e.g. a
+  # PR whose branch carries no commits ahead of its base - never the
+  # caller's tree.
+  if [ -z "$(git log "$BASE".."$REVIEW_TARGET" --oneline 2>/dev/null)" ]; then
+    echo "no changes to review on target $REVIEW_TARGET"
+    exit 0
+  fi
 fi
 ```
 
-(If `origin/main` is not the right base for this repo, set `BASE` accordingly.)
+(If `origin/main` is not the right base for this repo, set `BASE` accordingly. A PR target resolves to its head ref before this guard runs - `gh pr view <n> --json headRefName` - so the named PR's head is what is inspected.)
 
 ### 2b. Run the lane
 
@@ -166,7 +179,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 - **the fno lane** (the default) emits `code-review` through the lane's emit step ([single-lane.md](references/single-lane.md)): `pass` only when `fno do review classify` yields zero blocking findings, `fail` carrying the classified record. One contract, one emit path, no hook-availability dependency.
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
-- **code-review** is the gate entry the fno lane satisfies above. The native verb path remains for an operator who runs it by choice: `hooks/code-review-attest.sh` classifies the findings the native review produced and emits on EITHER outcome, with the dual Claude (`PostToolUse(ReportFindings)` / Skill-tool `SubagentStop`) and Codex (`Stop` payload with a readable structured completion) trigger shapes. `skills/review/scripts/emit-attestation.sh code-review` is recovery when the lane and the hook were both unavailable, never permission to attest a verdict a review did not produce. A spawned reviewer citizen or a separate operator session can emit the same label, yielding an `other_session` origin rather than `self_attested`; see the spawned-reviewer lane in the review-lanes architecture doc.
+- **code-review** is the gate entry the fno lane satisfies above. The native verb path remains for an operator who runs it by choice: `hooks/code-review-attest.sh` classifies the findings the native review produced and emits on EITHER outcome, with the dual Claude (`PostToolUse(ReportFindings)` / Skill-tool `SubagentStop`) and Codex (`Stop` payload with a readable structured completion) trigger shapes. `skills/review/scripts/emit-attestation.sh code-review` is recovery when the lane and the hook were both unavailable, never permission to attest a verdict a review did not produce. A separate session (operator or otherwise) can emit the same label, yielding an `other_session` origin rather than `self_attested`; see the attestation-origin section in the review-lanes architecture doc. Spawning a reviewer session of your own is retired by operator law d-384d967c - run the lane inline instead.
 - **declare** emits `declare` via Step 5 above. `sigma` is retired and emits nothing: a config still naming it fails loud at init with the default lane named as the replacement.
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).

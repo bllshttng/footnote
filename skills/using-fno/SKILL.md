@@ -29,7 +29,7 @@ Invoke plugin-qualified per harness: `/fno:<verb>` on claude/opencode, `$fno:<ve
 | `target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
 | `think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
 | `review` | Review a diff. Routes: `default` (inline lane), `peer` (cross-model), `prove-it`, `cleanup`. |
-| `pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
+| `pr` | PR lifecycle. Routes: `create` (the configured pr-create worker), `check`, `merged`. |
 | `fix` | Repair. Routes: `fix` (default), `investigate`. |
 
 Everything else stays invocable by full name: `blueprint`, `execute` (`execute waves` for orchestration), `ship` (`ship pr` = `pr`, `ship doc`), `setup`, `triage`, `agent`, `mail`, `law`, `ship-docs`, `audit`, `speculate`. The session skill list enumerates them; this set is the entry point, not an access boundary.
@@ -101,6 +101,6 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Merge an approved PR" | `fno do pr merge` |
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
 
-Prefer the smaller surface: a skill spawns a new agent context; a CLI call does not.
+Prefer the smaller surface: a CLI call runs in this context; a skill runs inline too unless it dispatches (think and review are inline by default; target's execute waves are the dispatch case).
 
 In a worktree Bash refuses heredocs, command substitution and loops, so write the script with Write and run `bash <file>`; use Read, Grep and Glob for every read; never lead a command with `cd`, the cwd persists.

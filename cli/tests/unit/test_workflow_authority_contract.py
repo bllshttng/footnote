@@ -172,3 +172,92 @@ def test_law_supersession_rule_matches_the_cli_guard():
     assert "can supersede another `chat_attested` row" in text
     assert "cannot supersede an `operator` row" in text
     assert "Every live-state reader then stops seeing the operator's law" not in text
+
+
+# ---- wave 2: harness and terminal routes -------------------------------------
+
+
+def test_reign_branches_on_harness_capability_before_arming():
+    text = _skill("skills/reign/SKILL.md")
+    arm = text[text.index("## Arm the beat") :]
+    assert "Branch once on what the harness supports" in arm
+    assert "On Claude, arm six monitors" in arm
+    assert "arm nothing native" in arm
+    assert "wake arm" in arm  # the codex beat is the external wake contract
+
+
+def test_review_empty_diff_guard_resolves_the_named_target():
+    text = _skill("skills/review/SKILL.md")
+    guard = text[text.index("### 2a. Empty-diff guard") :]
+    guard = guard[: guard.index("### 2b")]
+    assert "REVIEW_TARGET" in text[text.index("## Step 1") : text.index("## Step 2")]
+    assert 'if [ -z "$REVIEW_TARGET" ]' in guard
+    assert 'git log "$BASE".."$REVIEW_TARGET"' in guard
+
+
+def test_execute_repairs_in_scope_failures_within_the_bound():
+    text = _skill("skills/execute/references/flat.md")
+    assert "REPAIR it and re-run" in text
+    assert "iteration bound" in text
+    assert "neither substitutes for the configured review count" in text
+    assert "If any verification fails → stop and report what failed" not in text
+
+
+def test_execute_kill_criteria_reads_frontmatter_owner():
+    text = _skill("skills/execute/references/flat.md")
+    assert "kill_criteria:" in text
+    assert "frontmatter" in text
+    assert "`## Kill Criteria` fenced YAML block" not in text
+
+
+def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
+    text = _skill("docs/architecture/review-lanes.md")
+    assert "d-384d967c" in text
+    assert "No spawned-reviewer lane" in text
+    assert "--model opus" not in text
+    assert "the peer lane" in text
+    assert "NO `--fix` remains the review contract" in text
+
+
+def test_king_rule_and_exit_name_the_king_channel_not_decide():
+    text = _skill("skills/king-for-a-day/SKILL.md")
+    rule = text[text.index("**Rule.**") :]
+    assert "fno backlog note <node> <text>" in rule
+    assert "--authority" in rule
+    exit_section = text[text.index("Before you abdicate") :]
+    assert "fno backlog note" in exit_section
+    assert "refuses every agent session" in exit_section
+
+
+def test_king_mailbox_addresses_full_session_ids():
+    text = _skill("skills/king-for-a-day/SKILL.md")
+    assert "the bare 8-hex session prefix, the same id" not in text
+    assert "FULL session id" in text
+    assert "refuses an ambiguous short form" in text
+
+
+def test_speculate_ends_at_comparison_and_binds_workers_to_real_worktrees():
+    text = _skill("skills/speculate/SKILL.md")
+    assert 'model="sonnet"' not in text
+    assert 'isolation="worktree"' not in text
+    assert "absolute worktree path from Step 3" in text
+    assert "separately explicit action" in text
+    assert "never selects or merges a winner on its own" in text
+
+
+def test_audit_deliverable_is_bounded_artifact_plans_only_when_authorized():
+    text = _skill("skills/audit/SKILL.md")
+    assert "only when the run is authorized" in text
+    assert "until ALL features are planned" not in text
+    assert "Linear" not in text
+    assert "the resolved `--perspectives` set" in text
+
+
+def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
+    ship = _skill("skills/ship/SKILL.md")
+    assert "Haiku-capable provider" not in ship
+    assert "configured role routing" in ship
+    using = _skill("skills/using-fno/SKILL.md")
+    assert "Haiku worker" not in using
+    assert "the configured pr-create worker" in using
+    assert "a skill spawns a new agent context" not in using

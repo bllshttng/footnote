@@ -106,7 +106,7 @@ fno agents mail send '/code-review <level> --comment' --to-self --raw
 
 `<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno do target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
 
-No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the spawned-reviewer contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
+No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the review contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
 
 ## Lane 2a: what a codex `review/start` actually diffs
 
@@ -355,7 +355,7 @@ When a verdict was rendered is freshness's question. Which PR it was rendered fo
 
 The events journal is shared across every worktree of a repo by design: `setup-worktree.sh` links each worktree's `.fno/events.jsonl` to the canonical file. An unscoped scan therefore reads every branch's attestations into every PR's verdict list. Measured on 2026-08-16: five attestations, five heads, five branches, one file.
 
-The fix is the `branch` field on `review_attestation` plus one predicate, `attestation_in_scope`, applied by both scans (`local_latest_passes` and `unattested_reviewers_scan`) before any freshness call. An attestation naming the PR's head branch is in scope. So is any attestation pinning the PR's exact head sha: a foreign branch cannot share this head sha without being this commit. The spawned-reviewer lane needs that arm. Its worktree carries a branch of its own, so a branch-only match reads the reviewer's exact-HEAD pass as out of scope. An event predating the field counts only on that exact-head arm. The legacy line deliberately does not inherit the carry: an attestation on a moved head cannot be scoped to any PR.
+The fix is the `branch` field on `review_attestation` plus one predicate, `attestation_in_scope`, applied by both scans (`local_latest_passes` and `unattested_reviewers_scan`) before any freshness call. An attestation naming the PR's head branch is in scope. So is any attestation pinning the PR's exact head sha: a foreign branch cannot share this head sha without being this commit. A reviewer working in its own worktree needs that arm. Its worktree carries a branch of its own, so a branch-only match reads the reviewer's exact-HEAD pass as out of scope. An event predating the field counts only on that exact-head arm. The legacy line deliberately does not inherit the carry: an attestation on a moved head cannot be scoped to any PR.
 
 Out-of-scope lines are skipped entirely rather than marked stale: a stale verdict says "ask this reviewer to re-read", which is wrong advice about a reviewer on another branch. The verdict records which rule admitted it (`scope: attested_branch | legacy_head_match`), so a refusal under a moved head can name a pre-branch-field attestation.
 
@@ -508,23 +508,13 @@ That is a merge-authority decision, tracked separately.
 **A green PR whose only attestation is `self_attested` is covered. Merge it.**
 `self_attested` is not a hold condition and has never been one.
 
-**The spawned-reviewer lane.** A non-self attestation is producible today: the author spawns its own reviewer citizen, a different session by construction, so its attestation renders `attestation_origin = other_session`.
+**No spawned-reviewer lane.** Operator law d-384d967c (2026-09-05) retired the practice of spawning a separate session to review your own work: it wastes a lane unless the review crosses the harness or the model, so run the fno review lane inline, or hand the findings round to a subagent. A same-harness, same-model sibling session produces compliance, not independence - a different session id is a different session, never a different reviewer. The `other_session` origin a sibling mints is recorded honestly and reads exactly as the section above says: not independent. A non-self attestation comes from a review that genuinely crosses the harness or the model (the `peer` lane).
 
-```bash
-fno agents spawn --name <name>-review "/code-review <size> for PR <n> against main" \
-  --harness claude --substrate bg --model opus \
-  --permission-mode bypassPermissions --cwd <an isolated reviewer worktree>
-```
-
-The reviewer worktree must run `scripts/setup/setup-worktree.sh`. That script symlinks its `.fno/events.jsonl` to the repository's canonical journal.
-
-The shared journal lets the reviewer stay isolated from the author's files. Its exact-HEAD attestation is still visible to the author's loop-check.
+What survives from the retired lane is mechanics, not advice. An attestation from ANY session lands in the shared journal: the freshness and branch-scope predicates read it wherever it was emitted, and two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
 
 A `--fix` that touches only documentation now carries rather than invalidates. The freshness rule is therefore not the reason this constraint stands. The tree-corruption specimens are.
 
 NO `--fix` remains the review contract. The author applies findings and re-attests. The reviewer's prior attestation is then stale by design.
-
-Two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
 
 ## The pass condition and the four verdict states
 
@@ -534,18 +524,17 @@ The merge gate's pass condition is disposition-complete at the head, not clean. 
 
 The round budget is `config.review.max_rounds` (default 2). A round is one reviewed HEAD, counted across the whole life of the PR, so two verdicts at one unchanged head are one round. A pass is one round like any other and refunds nothing, though it still satisfies coverage. CI failures, lint failures and rebases are not rounds. A PR merges after one to three reviews and never waits for a clean round. The full statement, with the honest-limits contract, is [review-coverage-termination.md](review-coverage-termination.md). That contract covers what class-gating does and does not close, the CONFIRMED axis, and GitHub's per-identity limit.
 
-The lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author spawns a claude reviewer (or vice versa), so "different session" can mean "different model".
-The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the lane's headline value, `other_session`, is silently unreachable.
+The inline lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author's review runs through a reviewer that crosses the model or the harness, so "different session" can mean "different model".
+The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the peer lane's value, an honest `other_session` from a genuinely different reviewer, is silently unreachable.
 
 The king-mediated lane (Lane 3) still cannot produce independence by construction: it fires the review verb at the worker's own prompt line, so the author runs and emits it.
-That lane produces compliance, not independence; the spawned-reviewer lane is what produces the latter.
+That lane produces compliance, not independence; only a review that crosses the harness or the model produces the latter.
 
 Two workers held green PRs on 2026-08-07 waiting for a second attestation that no dispatched lane emitted then, and escalated to the operator to merge on their behalf; neither was blocked.
-The spawned-reviewer lane is the path that did not exist for them.
+The lane that did not exist for them is exactly the one d-384d967c retired: the answer was the peer lane, not a sibling session.
 
-No gate lands with the lane.
+No gate lands with the origin field.
 Producing a countable non-author attestation and gating on it are separate decisions; `self_attested` stays a recorded origin, never a hold condition.
-"Land, measure, then decide" no longer measures zero percent independent forever, because the lane above is what emits the `other_session` value the sequence was waiting on.
 Whether to hold a green PR on a self-attested-only attestation remains its own decision, tracked on its own.
 
 This records WHOSE process rendered a verdict; the role-routing note in
