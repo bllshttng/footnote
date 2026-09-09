@@ -74,19 +74,37 @@ def load_receipts() -> list[tuple[Path, dict]]:
 RECEIPT_HANDLE_KEYS = ("harness_session_id", "short_id", "row_name")
 
 
-def _receipt_answers(receipt: dict, needle: str) -> bool:
-    """True when this receipt answers to ``needle`` on any handle key.
+#: The live-row fields answering those same three handles. A receipt's
+#: ``row_name`` is a live row's ``name``; the other two keep their spelling.
+#: The two vocabularies must stay equal, or a name that finds a retired
+#: receipt finds no live row and the stale receipt is reported as the answer
+#: for a session that is running right now.
+LIVE_HANDLE_KEYS = ("harness_session_id", "short_id", "name")
 
-    Compared case-insensitively. An empty receipt field never matches an
-    empty argument: two blanks are not a hit.
+
+def _answers(get, keys: tuple[str, ...], needle: str) -> bool:
+    """True when ``get`` returns ``needle`` for any of ``keys``.
+
+    Compared case-insensitively. An empty field never matches an empty
+    argument: two blanks are not a hit.
     """
     if not needle:
         return False
-    for key in RECEIPT_HANDLE_KEYS:
-        value = receipt.get(key)
+    for key in keys:
+        value = get(key)
         if isinstance(value, str) and value and value.casefold() == needle:
             return True
     return False
+
+
+def _receipt_answers(receipt: dict, needle: str) -> bool:
+    """True when this receipt answers to ``needle`` on any handle key."""
+    return _answers(receipt.get, RECEIPT_HANDLE_KEYS, needle)
+
+
+def _entry_answers(entry, needle: str) -> bool:
+    """True when this live registry row answers to ``needle``."""
+    return _answers(lambda k: getattr(entry, k, None), LIVE_HANDLE_KEYS, needle)
 
 
 def _reaped_at(entry: tuple[Path, dict]) -> str:
@@ -142,17 +160,22 @@ def history_command(arg: str) -> None:
 
     live_rows = []
     live_err: str | None = None
+    needle = arg.casefold()
     try:
         entries = load_registry()
-        wanted = {arg} if arg_kind == "session" else joined_sids
-        live_rows = [e for e in entries if e.harness_session_id in wanted]
+        if arg_kind == "session":
+            # The same three handles a receipt answers to. Matching only the
+            # session id here left `live_sids` empty for a name query, so the
+            # receipt of a resumed session was reported as its present state.
+            live_rows = [e for e in entries if _entry_answers(e, needle)]
+        else:
+            live_rows = [e for e in entries if e.harness_session_id in joined_sids]
     except Exception as exc:  # noqa: BLE001 - a broken registry is one source's miss
         live_err = str(exc)
     live_sids = {e.harness_session_id for e in live_rows if e.harness_session_id}
 
     # --- reap receipts
     receipt_hits: list[tuple[Path, dict]] = []
-    needle = arg.casefold()
     for path, receipt in load_receipts():
         sid = receipt.get("harness_session_id")
         hit = (

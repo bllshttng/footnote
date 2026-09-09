@@ -85,11 +85,12 @@ fn exact_row<'a>(dest: &Destination<'a>) -> Option<&'a AgentRow> {
     }
 }
 
-/// True when this row kind is a GRAPH field rather than something a session
-/// did: no session ran it, so its session-shaped fields are inapplicable
-/// rather than missing.
-fn is_graph_derived(kind: &str) -> bool {
-    matches!(kind, "node_created" | "node_ended")
+/// True when the ROW itself records no session, so its session-shaped fields
+/// are inapplicable rather than missing. The kind is the wrong test: a
+/// `node_ended` on a node that ran carries the last do/ship session, and
+/// calling that "no session" contradicts the session the same view attaches.
+fn no_session(item: &FeedItem) -> bool {
+    item.session_id.is_none() && item.harness.is_none()
 }
 
 fn or_not_recorded(v: Option<&str>) -> String {
@@ -118,7 +119,7 @@ fn pane_value(item: &FeedItem, dest: &Destination<'_>) -> String {
         Destination::Exact(a) => seat(a),
         Destination::NameOnly(a) => format!("{} · the node's current worker", seat(a)),
         Destination::SessionOnly(_) => "not in the live roster".to_string(),
-        Destination::None if is_graph_derived(&item.kind) => {
+        Destination::None if no_session(item) => {
             format!("{NOT_APPLICABLE} - a graph field, not a session")
         }
         Destination::None => NOT_RECORDED.to_string(),
@@ -131,9 +132,9 @@ pub(crate) fn detail_fields(
     dest: &Destination<'_>,
 ) -> Vec<(&'static str, String)> {
     let row = exact_row(dest);
-    let graph_derived = is_graph_derived(&item.kind);
+    let unrun = no_session(item);
     let session_absent = || {
-        if graph_derived {
+        if unrun {
             format!("{NOT_APPLICABLE} - no session ran it")
         } else {
             NOT_RECORDED.to_string()

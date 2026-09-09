@@ -77,8 +77,10 @@ Three of those nine are measured to be mostly unrecorded. So the view separates 
 | Marker | Means |
 |---|---|
 | `NOT RECORDED` | the source lacks the fact |
-| `NOT APPLICABLE` | positive evidence the concept does not apply, as for a graph-derived row that no session ran |
+| `NOT APPLICABLE` | positive evidence the concept does not apply, as for a row that records no session at all |
 | a named live state | a reading, not an absence: `not in the live roster`, `no seat · retarget portal 0`, the session was removed |
+
+Which silence a cell shows is read from the ROW, never from its kind. A `node_ended` on a node that ran carries the last do or ship session, so its blank lane is `NOT RECORDED`. A `node_ended` on a node nothing ever ran carries no session, and only then is the lane inapplicable.
 
 Pane, parent and king are a live lookup against the roster, joined on the exact `harness_session_id`. Never on the row NAME. A later worker can reuse a name, and the view then answers about a different session.
 

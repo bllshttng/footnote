@@ -557,6 +557,31 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     assert!(by_other("pane").contains("the node's current worker"));
 }
 
+// The panel drags narrower than any prose fits, and the caller clips from the
+// end. The key must survive that clip: it is the only place it is advertised.
+#[test]
+fn the_header_keeps_its_key_at_every_draggable_width() {
+    use crate::client::feed_view::header_line;
+    for w in 0..=80usize {
+        let unfocused = header_line(false, w);
+        assert!(
+            unfocused.starts_with(" E focus")
+                || unicode_width::UnicodeWidthStr::width(unfocused) <= w,
+            "w={w} picked {unfocused:?}"
+        );
+        let focused = header_line(true, w);
+        assert!(
+            focused.starts_with(" esc release")
+                || unicode_width::UnicodeWidthStr::width(focused) <= w,
+            "w={w} picked {focused:?}"
+        );
+    }
+    // Below every prose spelling, the fallback leads with the key, so an
+    // 8-column clip still reads "E focus" rather than a truncated label.
+    assert_eq!(header_line(false, 8), " E focus");
+    assert!(header_line(true, 8).starts_with(" esc"));
+}
+
 // An absent field says WHICH silence it is. A blank cell would teach nothing
 // and would read as broken UI when the defect is upstream.
 #[test]
@@ -588,6 +613,15 @@ fn an_absent_field_names_its_own_kind_of_silence() {
         "{}",
         sid.1
     );
+    // A completed node that RAN carries the last do/ship session, so its
+    // lane was recorded somewhere and simply is not on this row. Calling it
+    // inapplicable would contradict the session the same view attaches to.
+    let mut ended = feed_item(Some("x-a"), Some("s-last"));
+    ended.kind = "node_ended".into();
+    ended.harness = Some("claude".into());
+    let fields = feed_detail::detail_fields(&ended, &destination(&[], &ended));
+    let model = fields.iter().find(|(l, _)| *l == "model").unwrap();
+    assert_eq!(model.1, feed_detail::NOT_RECORDED, "{}", model.1);
     // Lineage is measured to be unrecorded on almost every row: say so.
     let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
     assert_eq!(parent.1, feed_detail::NOT_RECORDED);

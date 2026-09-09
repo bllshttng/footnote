@@ -231,6 +231,29 @@ def test_live_row_reports_and_suppresses_its_receipt(history, tmp_path):
     assert "from:     " not in out  # the stale receipt is not reported
 
 
+def test_a_resumed_row_wins_its_own_name_over_a_stale_receipt(history):
+    """The receipt and the live row must answer the SAME handles.
+
+    A resumed session reappears under its old row name. Matching live rows on
+    the session id alone left the live set empty, so the suppression that
+    hides a stale receipt never fired and the retired paper was reported as
+    the present state of a running session.
+    """
+    entry = AgentEntry(
+        name="t-x6db9-worker",
+        cwd="/repo/live",
+        log_path="/repo/live/.fno/log",
+        harness="claude",
+        harness_session_id=_REAPED_SID,
+        short_id="tx6db9wor",
+    )
+    run = history(receipts=[_receipt()], entries=[entry])
+    for handle in ("t-x6db9-worker", "tx6db9wor", "T-X6DB9-WORKER"):
+        out = run(handle)
+        assert "name:     t-x6db9-worker" in out, out
+        assert _REASUME_VERBATIM not in out, out
+
+
 def test_total_miss_names_all_three_sources_and_exits_1(history):
     run = history()
     out = run("zz-not-a-thing")

@@ -154,18 +154,23 @@ pub(crate) fn feed_row_item(
 /// A clipped header is how the focus key stayed undiscoverable: the panel
 /// drags to any width, and at the 40-column default the full sentence does
 /// not fit.
+/// The last spelling in each list leads with the KEY. The panel drags
+/// narrower than any prose fits, and the caller pads and clips from the end,
+/// so a label-first fallback loses the only place the key is advertised.
 pub(crate) fn header_line(focused: bool, w: usize) -> &'static str {
-    let candidates: [&str; 3] = if focused {
+    let candidates: [&str; 4] = if focused {
         [
             " FEED FOCUSED · up/down row · left/right pan · enter details · esc release",
             " FEED FOCUSED · arrows move · enter details · esc release",
             " FOCUSED · enter details · esc release",
+            " esc release",
         ]
     } else {
         [
             " activity feed · click row for details · E focus · e close",
             " activity feed · click: details · E focus · e close",
             " feed · click: details · E focus",
+            " E focus",
         ]
     };
     candidates

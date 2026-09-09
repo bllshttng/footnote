@@ -393,6 +393,15 @@ pub fn project(
             node,
             session_id: Some(r.harness_session_id.clone()),
             harness: Some(r.harness.clone()),
+            // The receipt is the only surviving record of the lane this row
+            // ran. Dropping it here would report a model the store holds as
+            // NOT RECORDED.
+            model: r
+                .model_provenance
+                .as_ref()
+                .and_then(|m| m.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
             title: format!("{} removed by {removed_by}", r.row_name),
             actor: r.removed_by.clone(),
             // Copied verbatim. It was rendered from the capability table at
@@ -900,6 +909,33 @@ mod tests {
         );
         let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
         assert_eq!(only_reaped.len(), 1);
+    }
+
+    // The receipt outlives the registry row, so it is the only surviving
+    // record of the lane. A provenance view that drops it reports NOT
+    // RECORDED for a model the store is holding.
+    #[test]
+    fn a_reaped_row_keeps_the_model_its_receipt_recorded() {
+        let mut r = receipt_fixture();
+        r.model_provenance = Some(serde_json::json!({
+            "model": "glm-5.3-flash[1m]",
+            "basis": "requested",
+        }));
+        let p = project("", &[], std::slice::from_ref(&r));
+        let row = p
+            .rows
+            .iter()
+            .find(|row| row.kind == "session_reaped")
+            .expect("one reaped row");
+        assert_eq!(row.model.as_deref(), Some("glm-5.3-flash[1m]"));
+        // A receipt without the field stays silent rather than inventing one.
+        let p = project("", &[], std::slice::from_ref(&receipt_fixture()));
+        let bare = p
+            .rows
+            .iter()
+            .find(|row| row.kind == "session_reaped")
+            .expect("one reaped row");
+        assert_eq!(bare.model, None);
     }
 
     #[test]
