@@ -172,6 +172,27 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     return entries, True
 
 
+def find_presiding_crown(
+    scope: str, level: Optional[int], crowns: list[dict[str, Any]], by_id: Optional[dict[str, dict]]
+) -> Optional[dict[str, Any]]:
+    """The live crown one rung above scope/level, or None (x-3ecf AC4-HP)."""
+    if level is None or level <= 0:
+        return None
+    live = [c for c in crowns if c.get("status") != "manifest-only"]
+    if level == 2:
+        projects = {by_id.get(m, {}).get("project") for m in split_scope(scope)} if by_id else set()
+        projects.discard(None)
+        if len(projects) != 1:
+            return None
+        (proj,) = projects
+        return next((c for c in live if c.get("level") == 1 and c.get("scope") == proj), None)
+    if level == 1:
+        return next(
+            (c for c in live if c.get("level") == 0 and scope in split_scope(c.get("scope"))), None
+        )
+    return None
+
+
 def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 

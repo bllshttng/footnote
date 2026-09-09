@@ -593,14 +593,9 @@ def escalate_cmd(
         "NoProgress", "--reason", "-R", help="The terminal reason that triggered this."
     ),
 ) -> None:
-    """Tell the operator the king stopped with work still pending.
-
-    Called by BOTH king terminals (stop-hook NoProgress and the walk arm's
-    park), because a guard on one of two reachable paths is decorative.
-    Idempotent per stalled id set.
-    """
+    """Escalate to the presiding crown or operator with work pending (x-3ecf AC4-HP)."""
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
-    from fno.king.escalate import escalate
+    from fno.king.escalate import escalate, mail_presiding_king, resolve_presiding_king
     from fno.king.state import reign_state
     from fno.paths import resolve_repo_root
 
@@ -616,6 +611,7 @@ def escalate_cmd(
         live, unknown_reason = state.live, state.unknown_reason
     except Exception as exc:  # noqa: BLE001 - escalation must still fire
         live, unknown_reason = None, f"reign_state unreadable: {exc}"
+    presiding = resolve_presiding_king(session_id)
     try:
         outcome, qid = escalate(
             ids,
@@ -629,8 +625,12 @@ def escalate_cmd(
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"king: {outcome} {qid}", err=True)
-    typer.echo(qid)
+    holder = presiding["holder"] if presiding is not None else None
+    mailed = holder is not None and mail_presiding_king(holder, ids, reason)
+    target = f"king:{holder}" if mailed else f"operator:{qid}"
+    note = f", mailed presiding king {holder}" if mailed else ""
+    typer.echo(f"king: {outcome}{note} {qid}", err=True)
+    typer.echo(target)
 
 
 @king_app.command("drain")

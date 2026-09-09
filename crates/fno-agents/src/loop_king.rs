@@ -532,14 +532,16 @@ fn live_crown_holder_in_with_projects(
         .map(|row| row.name.clone())
 }
 
-/// Tell the operator the king stopped with work still pending.
+/// Tell the presiding crown - or the operator when nothing outranks this
+/// king - that it stopped with work still pending.
 ///
 /// Called from every `NoProgress` terminal in `king_decide`, via that
 /// function's shared `terminate` closure, so a terminal added later is covered
 /// without anyone remembering to wire it. Returns the one-line outcome to
 /// record, never an error: a failed escalation is named and moves on, since
 /// blocking the terminal on it leaves the king stopped with nobody told either
-/// way.
+/// way. Stdout carries `king:<holder>` or `operator:<qid>` (x-3ecf, AC4-HP) -
+/// the CLI resolves which target the receipt names, this fn only renders it.
 pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason: &str) -> String {
     let output = Command::new(fno_bin)
         .args([
@@ -556,8 +558,14 @@ pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason
         .output();
     match output {
         Ok(out) if out.status.success() => {
-            let qid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            format!("escalated to the operator as {qid}")
+            let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            match target.strip_prefix("king:") {
+                Some(holder) => format!("escalated to the presiding king {holder}"),
+                None => {
+                    let qid = target.strip_prefix("operator:").unwrap_or(&target);
+                    format!("escalated to the operator as {qid}")
+                }
+            }
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -712,6 +720,60 @@ impl Queue for KingQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shell script standing in for `fno`, executable, printing its
+    /// argument on stdout.
+    fn write_fno_stub(dir: &Path, stdout: &str) -> std::path::PathBuf {
+        let p = dir.join("fno");
+        std::fs::write(&p, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn escalate_stalled_names_the_presiding_king_from_a_king_prefixed_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let fno = write_fno_stub(dir.path(), "king:l1-king");
+        let out = escalate_stalled(
+            fno.to_str().unwrap(),
+            dir.path(),
+            &["undispatched:x-1234".to_string()],
+            "NoProgress",
+        );
+        assert_eq!(out, "escalated to the presiding king l1-king");
+    }
+
+    #[test]
+    fn escalate_stalled_names_the_operator_from_an_operator_prefixed_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let fno = write_fno_stub(dir.path(), "operator:q-abcd1234");
+        let out = escalate_stalled(
+            fno.to_str().unwrap(),
+            dir.path(),
+            &["undispatched:x-1234".to_string()],
+            "NoProgress",
+        );
+        assert_eq!(out, "escalated to the operator as q-abcd1234");
+    }
+
+    #[test]
+    fn escalate_stalled_falls_back_to_the_operator_wording_on_an_unprefixed_target() {
+        // Defensive parsing: an older CLI (bare qid, no prefix) must not read
+        // as a blank presiding-king name.
+        let dir = tempfile::tempdir().unwrap();
+        let fno = write_fno_stub(dir.path(), "q-legacy");
+        let out = escalate_stalled(
+            fno.to_str().unwrap(),
+            dir.path(),
+            &["undispatched:x-1234".to_string()],
+            "NoProgress",
+        );
+        assert_eq!(out, "escalated to the operator as q-legacy");
+    }
 
     #[test]
     fn mints_a_key_that_names_the_crown_and_never_repeats() {
