@@ -273,6 +273,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "provider_limits",
         "reap_receipts",
         "retire_grace_s",
+        "retire_interval_s",
         "silence_deadline_seconds",
         "single_flight_join_budget_seconds",
         "single_flight_ttl_seconds",
