@@ -63,7 +63,7 @@ This check applies to the review, validate, ship, external, and docs phases — 
 
 ## Linear Status Sync (optional - requires linear plugin)
 
-If the linear plugin is installed and the plan's frontmatter has a `linear:` field, sync status at phase transitions:
+If the linear plugin is installed and the plan has a `linear:` field in 00-INDEX.md, sync status at phase transitions:
 - `/execute waves` start sets "In Progress"
 - After `/review` syncs progress
 - After `/pr create` adds PR link comment

@@ -2,7 +2,7 @@
 
 When the harness reports a rate-limit or overload error during execution, load this reference. It tells the user their options.
 
-There is no `model_fallback.*` config block. Account and lane rotation already own capacity and outage handling. `fno config accounts`, the spawn-overlay grid, and `agents.profiles.*.on_exhausted` cover that. This reference covers only the one case those do not. The interactive session's own model just hit a rate limit or overload, mid-turn, in the harness the user is looking at right now.
+There is no `config.model_fallback` block. This reference has no reachable code path to drive. When `target-state.md` carries `status: IN_PROGRESS`, `hooks/target-stopfailure.sh` writes a `model_fallback_needed` flag. The current write-once manifest never sets that field. Account and lane rotation already own real capacity and outage handling. `fno config accounts`, the spawn-overlay grid, and `agents.profiles.*.on_exhausted` cover that. This reference covers only the one case those do not. The interactive session's own model just hit a rate limit or overload, mid-turn, in the current harness.
 
 On that error, present the options via AskUserQuestion. Name only what the error itself reported. Do not fabricate a cooldown or a next-model name from a chain that does not exist:
 
