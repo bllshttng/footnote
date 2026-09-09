@@ -124,6 +124,43 @@ pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -
     }
 }
 
+/// Holder tokens from DEAD-STATED claims, the launch-window leases the board
+/// must probe before it calls them dead. `read_claimed_nodes` skips these
+/// rows, so without this feed the truth probe never measures them and a
+/// stale lease under a writing worker can never classify active - the clock
+/// would win by starvation instead of by ordering.
+pub(crate) fn dead_claim_holders(claims: &SourceRead, cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !claims.is_ok() {
+        return out;
+    }
+    for row in &claims.rows() {
+        if out.len() >= cap {
+            break;
+        }
+        let state = s_str(row, "state").unwrap_or("");
+        if !DEAD_CLAIM_STATES.contains(&state) {
+            continue;
+        }
+        let holder = s_str(row, "holder").unwrap_or("");
+        if holder.is_empty() || out.contains(&holder.to_string()) {
+            continue;
+        }
+        out.push(holder.to_string());
+    }
+    out
+}
+
+/// The probe-map key for a claim: the holder string minus its harness prefix
+/// (`spawn-handover:t-w` -> `t-w`), or the whole string when it has none.
+pub(crate) fn holder_token(claim: &Value) -> String {
+    let holder = s_str(claim, "holder").unwrap_or("");
+    holder
+        .split_once(':')
+        .map(|(_, t)| t.to_string())
+        .unwrap_or_else(|| holder.to_string())
+}
+
 /// A claim is dead only when the clock says so AND its holder does not
 /// answer. The clock alone is a timer: a 15 minute handover lease expires
 /// under a worker that runs for hours, and the holder probe is the honest
@@ -135,9 +172,7 @@ pub(crate) fn claim_is_dead(
     if !DEAD_CLAIM_STATES.contains(&s_str(claim, "state").unwrap_or("")) {
         return false;
     }
-    let holder = s_str(claim, "holder").unwrap_or("");
-    let token = holder.split_once(':').map(|(_, t)| t).unwrap_or(holder);
-    !holder_is_active(activity.get(token))
+    !holder_is_active(activity.get(&holder_token(claim)))
 }
 
 /// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
@@ -187,9 +222,7 @@ pub(crate) fn node_driver<'a>(
         }
         return ("none", Some(claim));
     }
-    let holder = s_str(claim, "holder").unwrap_or("");
-    let token = holder.split_once(':').map(|(_, t)| t).unwrap_or(holder);
-    if holder_is_active(activity.get(token)) {
+    if holder_is_active(activity.get(&holder_token(claim))) {
         return ("active", Some(claim));
     }
     ("stalled", Some(claim))
@@ -322,6 +355,28 @@ mod tests {
         let claim = json!({"key": "node:x-live", "state": "live", "holder": "h"});
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         assert!(!claim_is_dead(&claim, &activity));
+    }
+
+    #[test]
+    fn dead_claim_holders_feed_names_the_clock_dead_but_unprobed() {
+        // The probe feed must cover the rows read_claimed_nodes skips, or the
+        // holder-first ordering can never see a probe for exactly the claims
+        // it exists to answer about.
+        let claims = crate::king_board::SourceRead::ok(json!([
+            {"key": "node:x-live", "state": "live", "holder": "claude:lives"},
+            {"key": "node:x-stale", "state": "stale", "holder": "spawn-handover:worker-a"},
+            {"key": "node:x-also", "state": "corrupted", "holder": "spawn-handover:worker-b"},
+            {"key": "node:x-bare", "state": "stale", "holder": ""},
+            {"key": "node:x-dup", "state": "stale", "holder": "spawn-handover:worker-a"},
+        ]));
+        let holders = dead_claim_holders(&claims, 20);
+        assert_eq!(
+            holders,
+            vec![
+                "spawn-handover:worker-a".to_string(),
+                "spawn-handover:worker-b".to_string()
+            ]
+        );
     }
 
     #[test]
