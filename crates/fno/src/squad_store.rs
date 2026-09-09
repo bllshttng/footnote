@@ -385,6 +385,27 @@ pub fn valid_worker_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Read the store without any side effect, for read-only verdict callers
+/// (the cascade fold). A missing, empty, corrupt, or version-skewed store
+/// reads as empty and the file stays put: the quarantine is the prune's
+/// own `load()` to perform and name.
+pub fn peek() -> Loaded {
+    let raw = match std::fs::read_to_string(squads_path()) {
+        Ok(raw) => raw,
+        Err(_) => return Loaded::default(),
+    };
+    if raw.trim().is_empty() {
+        return Loaded::default();
+    }
+    match serde_json::from_str::<StoreFile>(&raw) {
+        Ok(f) if f.version == STORE_VERSION => Loaded {
+            squads: f.squads,
+            ..Loaded::default()
+        },
+        _ => Loaded::default(),
+    }
+}
+
 /// Load the store for restore. A missing/empty file is a fresh store (no
 /// notice). An unreadable one also reads as empty, but says so. A corrupt file
 /// or unknown version is renamed aside (`squads.json.corrupt-<secs>`) and read

@@ -12,7 +12,10 @@ use crate::squad_store::{MemberEvidence, MemberLiveness, StoredSquad};
 /// graph, timeout) changes nothing - fail-open to the historical Unknown.
 /// A live name never asks: the caller folds live identities first.
 pub fn fold_cascade_verdicts(mut evidence: MemberEvidence) -> MemberEvidence {
-    let loaded = crate::squad_store::load();
+    // A peek, never a load: the fold only reads verdicts, and a load would
+    // quarantine a corrupt store ahead of the prune's own load, whose
+    // notice is the one the receipt and stderr must name.
+    let loaded = crate::squad_store::peek();
     // The Unmeasured expiry rides the same fold: 24h of unmeasured silence
     // after the last recorded activity is the bound a stale-sideline row
     // gets; a fresher or never-active row stays fail-safe Unknown.
