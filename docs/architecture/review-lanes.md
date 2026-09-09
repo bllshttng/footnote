@@ -7,7 +7,7 @@ How a diff gets reviewed: the fno-owned review lane by default, with each trigge
 | Mode | What it is | Gate weight | Harness availability |
 |---|---|---|---|
 | `/fno:review` (default, optional level) | the owned lane: inline finder angles, dedup, three-state verify (CONFIRMED/PLAUSIBLE/REFUTED), cite-or-drop, carry-forward, one `code-review` attestation | full: the emit satisfies the reviewers gate | every harness (it runs inline as ordinary tool calls) |
-| `/fno:review prove-it` | runtime evidence at the changed code's real surface, validator refuses an unprobed PASS | a PASS satisfies a declared `done_probe`; a FAIL blocks | every harness |
+| `/fno:review prove-it` | runtime evidence at the changed code's real surface, validator refuses an unprobed PASS and an unproven claim | a PASS satisfies a declared `done_probe`; a FAIL blocks | every harness |
 | `/fno:review cleanup` | apply-or-skip terminus, four angles once, skips recorded | none: no attestation, no threads | every harness |
 | `/fno:review peer` | cross-model second opinion | verdict-gated attestation with `--attest`, or a posted review with `--post` | needs a second provider |
 | `/fno:review research` | advisory research-verify panel over a doc deliverable | advisory only | needs the Task tool |
