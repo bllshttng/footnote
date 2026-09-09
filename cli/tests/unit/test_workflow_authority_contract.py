@@ -259,7 +259,7 @@ def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
     assert "configured role routing" in ship
     using = _skill("skills/using-fno/SKILL.md")
     assert "Haiku worker" not in using
-    assert "the configured pr-create worker" in using
+    assert "routed create worker" in using
     assert "a skill spawns a new agent context" not in using
 
 
