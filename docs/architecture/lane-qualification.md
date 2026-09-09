@@ -8,9 +8,9 @@ Three bank tasks isolate one axis each, so a lane's weakness shows up on the rig
 
 - `evals/bank/capability-lane-blueprint.yaml` - an ambiguous scope decision. It grades whether the worker names the correct in-scope file and rules the wrong one out.
 - `evals/bank/capability-lane-implementation.yaml` - an unambiguous implementation. It grades observed functional behavior only, with no scope judgment involved.
-- `evals/bank/capability-lane-review.yaml` - a seeded review defect. It grades a finding tied to the specific symbol and the specific wrong value it returns, never a generic "found a bug" match.
+- `evals/bank/capability-lane-review.yaml` - a seeded review defect. It grades a finding tied to the specific symbol and the specific wrong return value, never a generic "found a bug" match.
 
-Every cohort comparison runs all three against the same fixture revision, the same declared repeat count, and the same stopping rule. A lane that wins only on the implementation task, and loses on scope decisions, is a different qualification result than one that wins across all three. The split is the point.
+Every cohort comparison runs all three against the same fixture revision, the same declared repeat count, and the same stopping rule. A lane that wins only on implementation, and loses on scope decisions, is a different qualification result than one that wins across all three. The split is the point.
 
 ## Running a paired trial
 
@@ -29,7 +29,7 @@ Every cohort comparison runs all three against the same fixture revision, the sa
    }
    ```
 
-2. Run the baseline lane first, at the existing effort level. Vary one factor at a time: swap the model, or the effort, or the harness, never more than one per cohort. `--task` takes one id per invocation. Run all three:
+2. Run the baseline lane first, at the existing effort level. Vary one factor at a time. Swap only the model, or only the effort, or only the harness. `--task` takes one id per invocation. Run all three:
 
    ```bash
    for t in capability-lane-blueprint capability-lane-implementation capability-lane-review; do
@@ -53,11 +53,11 @@ Every cohort comparison runs all three against the same fixture revision, the sa
 
 ## Reading the result
 
-A `lane_status` of `substituted` on any row means capacity served a different harness than requested. Exclude that cohort from a promotion decision until it reruns clean. The comparison already excludes a substituted row from `sample_count`, but a cohort built entirely from substituted runs has zero real samples of the lane you meant to qualify.
+A `lane_status` of `substituted` on any row means capacity served a different harness than requested. Exclude that cohort from a promotion decision until it reruns clean. The comparison already excludes a substituted row from `sample_count`. A cohort built entirely from substituted runs still has zero real samples of the lane you meant to qualify.
 
-A `lane_status` of `unavailable` means the account could not reach the lane at all. Read this as `unavailable`. Never read it as a score of zero on the requested model.
+A `lane_status` of `unavailable` means the account cannot reach the lane at all. Read this as `unavailable`. Never read it as a score of zero on the requested model.
 
-`review_evidence` and `usage` come from whatever the caller attached to a row, never from the eval runner itself - the runner's only success marker is each task's own mechanical grade. A paired trial that cares only about the mechanical pass rate can ignore both fields entirely. They read `unobserved` / `None` and never masquerade as `observed` / `0`.
+`review_evidence` and `usage` come from whatever the caller attached to a row, never from the eval runner itself. The runner's only success marker is each task's own mechanical grade. A paired trial that cares only about the mechanical pass rate can ignore both fields entirely. They read `unobserved` / `None` and never masquerade as `observed` / `0`.
 
 ## One whole-delivery comparison before splitting roles
 
