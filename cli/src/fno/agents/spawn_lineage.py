@@ -42,7 +42,7 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     # x-5c25: with NO marker the walk still names the family, and an ANCESTOR
     # cannot be the stranger an inherited MARKER can. Gated on an empty marker
     # set, never a missing harness: a present marker that resolved to nothing
-    # is the contradiction x-b57a / x-0992 rule must attribute nothing.
+    # is a contradiction, and x-b57a / x-0992 rule that attributes nothing.
     harness = identity.harness
     if not harness and not identity.markers_present:
         from fno.claims.session_pid import resolve_session_harness
@@ -249,8 +249,7 @@ def _stamp_launch_edge(node: "str | None") -> None:
     The sibling of :func:`_stamp_spawned_session_row`, which records who WORKED
     it. Refuses rather than half-writes: no node, no write; no proven parent
     session, no write; never overwrites an existing edge, because launch is the
-    FIRST launch. Never raises. Why, and how to read a null, are in
-    docs/architecture/node-provenance.md.
+    FIRST launch. Never raises. Why: docs/architecture/node-provenance.md.
     """
     if not node:
         return
@@ -258,19 +257,16 @@ def _stamp_launch_edge(node: "str | None") -> None:
     if not session_id:
         return
 
-    # Decide on the cheap read before paying the locked write: the sibling
-    # stamp already spends a keeper cycle here. Say when nothing was written,
-    # or a graph missing the node commits an unchanged snapshot and exits 0,
-    # which is the absence this stamp exists to end.
+    # Read before paying the locked write; the sibling stamp already spends a
+    # keeper cycle here. Say when nothing was written, or a graph missing the
+    # node commits an unchanged snapshot and exits 0.
     try:
         from fno.graph.store import locked_mutate_graph, read_graph
         from fno.paths import graph_json
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
-            # The launch edge is a field on a footnote graph node. Under an
-            # external tracker this repo's graph.json is not the record, so
-            # there is no node here to stamp.
+            # Under an external tracker this graph.json is not the record.
             return
 
         existing = next((r for r in read_graph() if r.get("id") == node), None)
