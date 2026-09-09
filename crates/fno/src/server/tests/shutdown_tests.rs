@@ -4,6 +4,7 @@ fn deadbeef_member() -> crate::squad_store::StoredMember {
     crate::squad_store::StoredMember {
         attach_id: "deadbeef".into(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,
@@ -290,6 +291,7 @@ fn conflicting_squad_does_not_discard_a_fresh_disjoint_snapshot() {
     let newer_member = crate::squad_store::StoredMember {
         attach_id: "deadbeef".into(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,

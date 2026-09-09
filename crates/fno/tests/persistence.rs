@@ -559,6 +559,7 @@ fn build_tree_guard_refuses_a_write_without_agents_home() {
     let member = StoredMember {
         attach_id: "deadbeef".into(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,

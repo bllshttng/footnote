@@ -16,6 +16,7 @@ fn retirement_cannot_launder_a_newer_topology_generation() {
     let member = crate::squad_store::StoredMember {
         attach_id: String::new(),
         tombstone: false,
+        tombstone_reason: None,
         detached: false,
         tab_name: None,
         cwd: None,
@@ -57,6 +58,7 @@ fn retire_session_tombstones_the_identity_and_closes_only_its_panes() {
         crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -67,6 +69,7 @@ fn retire_session_tombstones_the_identity_and_closes_only_its_panes() {
         crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,

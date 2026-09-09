@@ -110,6 +110,13 @@ pub struct StoredMember {
     pub attach_id: String,
     #[serde(default)]
     pub tombstone: bool,
+    ///  Why the tombstone fired, when one did. A death claim written
+    /// from evidence names the evidence ("registry row exited", "recorded
+    /// pid is gone", a churn arm's pane death); a reader checks the verdict
+    /// instead of inferring it. `#[serde(default, skip_serializing_if)]`
+    /// keeps a pre-store readable and older stores compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone_reason: Option<String>,
     /// True while the live worker pane is intentionally off every visible
     /// tree. The keeper owns the PTY across mux-server restarts; restore uses
     /// this marker to re-adopt it without placing it back until the operator
@@ -149,6 +156,26 @@ pub struct StoredMember {
     /// Full harness session identity captured alongside `harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+}
+
+///  The one declared member-to-row join, stated here because the
+/// store holds BOTH identity keys and they disagree member to member: nine of
+/// ten overlapping members join by full `harness_session_id`, the tenth by
+/// `attach_id` against the row's short id. One function, so every caller that
+/// asks "is this member and this row the same session" gets the same answer.
+///
+/// Rule: when both sides carry a full harness session id, that comparison
+/// wins; otherwise the member's attach id against the row's short id. An
+/// id-less member joins nothing.
+pub fn member_joins_row(
+    member: &StoredMember,
+    row_short_id: Option<&str>,
+    row_session_id: Option<&str>,
+) -> bool {
+    if let (Some(ms), Some(rs)) = (member.harness_session_id.as_deref(), row_session_id) {
+        return ms == rs;
+    }
+    !member.attach_id.is_empty() && member.attach_id == row_short_id.unwrap_or("")
 }
 
 /// A durable per-squad identity for an UNNAMED squad, minted the first time it
@@ -2132,6 +2159,7 @@ pub fn retire_session_members_with_generations(
                     && !member.tombstone;
                 if matches {
                     member.tombstone = true;
+                    member.tombstone_reason = Some("session retired by harness".into());
                     retired += 1;
                 }
             }
@@ -2411,6 +2439,61 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn member_joins_row_prefers_the_full_session_id_then_the_short_id() {
+        //  The declared join, both keys: a member carrying a full
+        // harness session id joins on it and ignores the short ids; a member
+        // without one joins by attach id against the row's short id; an
+        // id-less member joins nothing.
+        let m_session = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: Some("claude".into()),
+            harness_session_id: Some("sess-full".into()),
+        };
+        assert!(member_joins_row(
+            &m_session,
+            Some("other-short"),
+            Some("sess-full")
+        ));
+        assert!(!member_joins_row(
+            &m_session,
+            Some("sess-full"),
+            Some("other-session")
+        ));
+        let m_short = StoredMember {
+            attach_id: "abc12345".into(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        };
+        assert!(member_joins_row(&m_short, Some("abc12345"), None));
+        assert!(!member_joins_row(&m_short, None, Some("abc12345")));
+        assert!(!member_joins_row(&m_short, Some("zzzzzzzz"), None));
+        let m_bare = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        };
+        assert!(!member_joins_row(&m_bare, Some("abc12345"), Some("sess")));
+    }
+
     /// A scratch store dir installed via the per-thread path override, so the
     /// store never touches a real file AND never mutates the process
     /// environment (no cross-test env race). Cleared on drop.
@@ -2439,6 +2522,7 @@ mod tests {
         StoredMember {
             attach_id: id.into(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -2798,6 +2882,7 @@ mod tests {
         let worker = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: Some("lane".into()),
             cwd: Some("/repo/wt".into()),
@@ -2851,6 +2936,7 @@ mod tests {
         let mut target = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -2861,6 +2947,7 @@ mod tests {
         let sibling = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -2870,6 +2957,7 @@ mod tests {
         };
         let already_gone = StoredMember {
             tombstone: true,
+            tombstone_reason: None,
             harness: Some("codex".into()),
             harness_session_id: Some("01a03a85-1111-7222-8333-444455556666".into()),
             ..target.clone()
@@ -2917,6 +3005,7 @@ mod tests {
         let hostile = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3287,6 +3376,7 @@ mod tests {
         let never_bound = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3340,6 +3430,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3381,6 +3472,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3412,6 +3504,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3446,6 +3539,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3502,6 +3596,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3552,6 +3647,7 @@ mod tests {
         let member = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -3604,6 +3700,7 @@ mod tests {
         let member = |worker: &str| StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -4320,6 +4417,7 @@ mod tests {
             s.members = vec![StoredMember {
                 attach_id: "deadbeef".into(),
                 tombstone: true,
+                tombstone_reason: None,
                 detached: false,
                 tab_name: None,
                 cwd: None,
@@ -4517,6 +4615,7 @@ mod tests {
         s.members = vec![StoredMember {
             attach_id: "deadbeef".into(),
             tombstone: true,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -4675,6 +4774,7 @@ mod tests {
         StoredMember {
             attach_id: id.into(),
             tombstone: true,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
@@ -4688,6 +4788,7 @@ mod tests {
         StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            tombstone_reason: None,
             detached: false,
             tab_name: None,
             cwd: None,
