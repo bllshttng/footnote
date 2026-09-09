@@ -977,7 +977,6 @@ def cmd_court(
 
 # Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
 from fno.agents.spawn_lineage import (  # noqa: E402
-    _resolve_spawn_merge_grant,
     _stamp_launch_edge,
     _stamp_spawned_session_row,
 )

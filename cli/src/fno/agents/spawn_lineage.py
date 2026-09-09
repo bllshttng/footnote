@@ -265,6 +265,13 @@ def _stamp_launch_edge(node: "str | None") -> None:
     try:
         from fno.graph.store import locked_mutate_graph, read_graph
         from fno.paths import graph_json
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # The launch edge is a field on a footnote graph node. Under an
+            # external tracker this repo's graph.json is not the record, so
+            # there is no node here to stamp.
+            return
 
         existing = next((r for r in read_graph() if r.get("id") == node), None)
         if existing is None:
