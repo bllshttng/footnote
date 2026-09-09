@@ -998,8 +998,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
                                  include_mux=False)
     if pre is not None and pre.get("converged"):
         typer.echo(
-            f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]}"
-            " from binary); skipping cargo install"
+            f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]} from binary);"
+            " skipping cargo install"
         )
         # The mux front door can still be absent or stale at a fresh triad
         # (its install is best-effort); reinstall when missing or rev-mismatched.
@@ -1103,8 +1103,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         for line in _component_lines(post_report):
             typer.echo(line, err=True)
         typer.echo(
-            "fno doctor update: ERROR: post-deploy verify FAILED - the deployed"
-            " fno-agents did not prove current (details above). NOT continuing.",
+            "fno doctor update: ERROR: post-deploy verify FAILED - the deployed fno-agents"
+            " did not prove current (details above). NOT continuing.",
             err=True,
         )
         raise typer.Exit(1)
