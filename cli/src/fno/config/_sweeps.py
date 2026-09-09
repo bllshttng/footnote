@@ -71,6 +71,40 @@ class ReapBlock(BaseModel):
         return default
 
 
+class StateReapBlock(BaseModel):
+    """Retention windows for expendable local state families."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    locks_retain_days: int = 7
+    expired_claims_retain_days: int = 30
+    pr_status_cache_retain_days: int = 14
+
+    @field_validator(
+        "locks_retain_days",
+        "expired_claims_retain_days",
+        "pr_status_cache_retain_days",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_days(cls, value: object, info: ValidationInfo) -> object:
+        name = info.field_name or ""
+        default = cls.model_fields[name].default
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            days = int(value)  # type: ignore[call-overload]
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            days = 0
+        if days > 0:
+            return days
+        DEGRADED[f"agents.state_reap.{name}"] = repr(value)
+        return default
+
+
 class SweepKeys(BaseModel):
     """Flat ``config.agents.*`` seconds that the sweeps read.
 

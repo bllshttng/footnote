@@ -68,7 +68,7 @@ from fno.config._evals import EvalsBlock
 # test already imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
 from fno.config._loader import _settings_key as _settings_key
-from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, SweepKeys
+from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, StateReapBlock, SweepKeys
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
@@ -2240,57 +2240,25 @@ def _finite_or(value: object, default: float) -> float:
 class AgentsBlock(SweepKeys):
     """Agent-runtime settings (nested under 'config.agents').
 
-    `confirm` drives the /fno:agent spawn-verb confirm gate
-    (ab-27541df5; namespace moved from `config.dispatch.confirm` to
-    `config.agents.confirm` in ab-f1b0ccd1). It selects when the
-    billed-launch confirm prompt is shown:
-
-      - always: confirm every billed build (the pre-amendment behavior)
-      - auto:   skip the confirm only for a resolved node-id build on a
-                caveat-free lane; confirm free-form features, codex/gemini
-                exec builds, --yolo, and merge grants
-      - never:  skip the confirm; any caveats print as warnings alongside
-                the receipt
-
-    Model default is "auto" so a skill reading `config.agents.confirm`
-    resolves even when settings.yaml has no agents block. An invalid value
-    raises a ValidationError (the read fails); the skill's read path treats
-    any failed read as "always" - less capability never means less safety
-    (degrade toward the confirm, never toward a silent launch).
+    `confirm` is always, auto (skip only resolved caveat-free node builds), or never. The default is auto; invalid values fail the read and callers degrade toward confirmation.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     a2a: A2aBlock = Field(default_factory=A2aBlock)
     defaults: SpawnDefaultsBlock = Field(default_factory=SpawnDefaultsBlock)
-    # x-3d5b: per-verb overlay of `defaults`, keyed by the seed's leading
-    # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
-    # rung above defaults in precedence. Resolved at the spawn seam.
+    # Per-verb overlays of defaults, one precedence rung above them.
     profiles: dict[str, SpawnProfileBlock] = Field(default_factory=dict)
-    # The operator's per-size fallback chains (S, M, L, `default`): ordered
-    # lists of partial axis bundles reusing `SpawnDefaultsBlock`, consulted
-    # only when a provider refuses and the account queue cannot answer. Every
-    # size wants more than one link, because providers cap on different meters
-    # with different periods. Held RAW and typed loosely on purpose: the
-    # strict check lives in the `fallback-chain` verb. A field validator here
-    # would fail `load_settings()` for the whole process, so one typo kills
-    # every `fno` command at its settings phase. Refuse on the path that reads
-    # it, not the path that loads it.
+    # Ordered per-size fallback chains, consulted only after provider and account refusal.
+    # Values stay raw so the consuming verb can name malformed links without making every
+    # settings load fail.
     fallback: dict[str, Any] = Field(default_factory=dict)
-    # Seconds of transcript silence after which `fno agents sweep` reports a
-    # worker as silent. A REPORT, never an action - nothing is stopped, spawned
-    # or unclaimed on this signal.
+    # Silence only reports; it never stops, spawns, or unclaims.
     silence_deadline_seconds: int = 600
     confirm: str = "auto"
-    # When true, the SessionStart register hook auto-joins EVERY hand-started
-    # session to the roster (discoverable + mail-addressable). Default false is
-    # opt-in: a session joins deliberately via `/fno-me` (`fno agents register`),
-    # so the roster stays the workers you coordinate with, not every terminal you
-    # opened. Spawned workers register at spawn regardless of this knob. Flip to
-    # true if your workflow is many hand-started sessions cross-talking.
+    # Hand-started sessions opt in; spawned workers always register.
     auto_register_sessions: bool = False
-    # Opt in per machine after happy is installed and paired. Only routed claude
-    # panes use it; primary claude, every other harness, and bg stay unchanged.
+    # Only routed Claude panes use this machine-local integration.
     happy_routed_panes: bool = False
     # Row-retirement grace in SECONDS (x-c672); the daemon's sweep retires a
     # row after this much quiet past done work. Full contract: FIELD_META.
@@ -2300,30 +2268,14 @@ class AgentsBlock(SweepKeys):
     retire_interval_s: int = Field(default=300, ge=0)
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)
+    state_reap: StateReapBlock = Field(default_factory=StateReapBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
-    # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults.
-    # provider_limits keeps its safe default on invalid input, because
-    # dropping zai's cap would fail open exactly when the fleet is busiest.
-    #   max_live    : cap on concurrent live worker processes (fno registry +
-    #                 claude roster union). Spawn queues at the cap.
-    #   provider_limits : per-provider budget (:class:`ProviderBudget`).
-    #                 `lanes` is the immediate-refusal spawn cap.
-    #                 `subagents` is the in-session fan-out width. Unlisted
-    #                 providers uncapped. A bare integer coerces to `lanes`.
-    #   min_free_gb : available-RAM floor for spawn preflight. <= 0 disables.
-    #   max_load_per_cpu : TRIGGER, not refusal. Above it the gate consults
-    #                 fleet attribution, because loadavg counts blocked
-    #                 processes and measures nobody's share. <= 0 disables
-    #                 the whole check.
-    #   max_fleet_cpu_share : the GOVERNOR. Above the trigger, refuse when
-    #                 the fleet holds more than this share of CPU capacity.
-    #                 Unreadable attribution refuses. An unknown share is
-    #                 not evidence of headroom.
-    #   hard_max_load_per_cpu : absolute backstop. Refuse above factor x cpu
-    #                 count no matter whose load. Machine dimensions, so
-    #                 scalars on agents.*, never ProviderBudget fields.
-    #   worker_qos  : utility (demote workers to background QoS) or off.
+    # Spawn-gate scalars degrade to safe defaults.
+    # max_live caps the roster union; provider_limits caps lanes and fan-out.
+    # min_free_gb is the RAM floor; nonpositive disables it.
+    # max_load_per_cpu triggers fleet attribution; max_fleet_cpu_share governs it.
+    # hard_max_load_per_cpu is the absolute backstop; worker_qos is utility or off.
     max_live: int = 3
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
@@ -2336,10 +2288,7 @@ class AgentsBlock(SweepKeys):
     max_fleet_cpu_share: float = 0.5
     hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
-    # Absolute override for footprint's sustained-CPU threshold, in cores. Set
-    # it to pin a small box; unset, the threshold derives from measured CPU
-    # capacity (a fraction per core) instead of the old hardcoded 1.0, which
-    # asked a 12-core machine's fleet to idle at 8% utilisation.
+    # Unset derives the sustained-CPU threshold from measured capacity.
     footprint_sustained_cpu_cores: Optional[float] = None
 
     @field_validator("profiles", mode="before")
