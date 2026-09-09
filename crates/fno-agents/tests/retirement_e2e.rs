@@ -226,6 +226,57 @@ fn ac2_edge_a_v1_receipt_reads_with_v2_fields_absent_not_invented() {
     assert!(receipt.effects.is_empty());
 }
 
+// --- native recovery after a wrapper failure (x-f55c task 1.4) --------------
+
+#[test]
+fn wrapper_failure_recovery_names_harness_session_cwd_and_native_argv() {
+    // The wrapper-failure shape: the fno row is gone (no registry write at
+    // all here) and the checkout is gone too - only the native session and
+    // its receipt remain.
+    let home = temp_home("resume-hint-wrapper-failure");
+    let cwd_dir = std::env::temp_dir().join(format!(
+        "retirement-e2e-missing-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cwd_dir).unwrap();
+    let cwd = cwd_dir.to_string_lossy().into_owned();
+    let row = registry_row(
+        "wrapper-fail-row",
+        "claude",
+        "cccccccc-1111-2222-3333-444444444444",
+        &cwd,
+    );
+    let receipt = build_reap_receipt(&row, None).expect("a claude row builds a receipt");
+    fno_agents::receipt::write_reap_receipt(&home, &receipt).unwrap();
+    std::fs::remove_dir_all(&cwd_dir).unwrap();
+
+    let hint = fno_agents::resume_receipt::resume_hint(&home, &receipt.harness_session_id)
+        .expect("a staged receipt must produce a hint");
+    assert!(hint.contains("claude"), "{hint}");
+    assert!(hint.contains(&receipt.harness_session_id), "{hint}");
+    assert!(hint.contains(&cwd), "{hint}");
+    assert!(
+        !receipt.resume_argv.is_empty(),
+        "the capability table must have staged an argv"
+    );
+    for token in &receipt.resume_argv {
+        assert!(
+            hint.contains(token),
+            "argv token {token} missing from: {hint}"
+        );
+    }
+}
+
+#[test]
+fn resume_hint_is_none_and_silent_when_no_receipt_matches() {
+    let home = temp_home("resume-hint-no-match");
+    assert!(fno_agents::resume_receipt::resume_hint(&home, "no-such-session").is_none());
+}
+
 // --- assignment-link recovery -------------------------------------------------
 
 #[test]

@@ -8,16 +8,25 @@ use crate::paths::AgentsHome;
 /// The preserved-record fallback (x-70e1 task 4): a session-shaped resume
 /// miss consults the reap-receipts store before refusing. A retirement that
 /// already removed the registry row keeps the resume tokens and the store
-/// context on disk; this prints them (never launching), so the same native
-/// session stays reachable without any active fno row. `Some(())` = a
-/// receipt matched and was printed.
+/// context on disk; this prints [`resume_hint`]'s text (never launching), so
+/// the same native session stays reachable without any active fno row.
 /// True when a receipt matched and was printed. Kept tiny at the call site:
 /// this file is over the shrink-only budget, and its caller needs one bool.
 pub(crate) fn maybe_hint_preserved_session(home: &AgentsHome, name: &str) -> bool {
-    print_resume_receipt_hint(home, name).is_some()
+    match resume_hint(home, name) {
+        Some(text) => {
+            eprint!("{text}");
+            true
+        }
+        None => false,
+    }
 }
 
-fn print_resume_receipt_hint(home: &AgentsHome, name: &str) -> Option<()> {
+/// Build the preserved-record hint text without printing it (x-f55c task
+/// 1.4): a test can read what a wrapper-failure recovery actually says,
+/// rather than only the bool `maybe_hint_preserved_session` prints from.
+/// `None` when no receipt matches `name` - nothing to print.
+pub fn resume_hint(home: &AgentsHome, name: &str) -> Option<String> {
     let dir = home.root().join("reap-receipts");
     let entries = std::fs::read_dir(&dir).ok()?;
     let needle = name.trim().to_ascii_lowercase();
@@ -53,37 +62,40 @@ fn print_resume_receipt_hint(home: &AgentsHome, name: &str) -> Option<()> {
     let chosen: Vec<&crate::receipt::ReapReceipt> = if exact.len() == 1 {
         exact
     } else if matches.len() > 1 {
-        eprintln!(
-            "fno agents resume: {name} has no registry row, and {} retirement receipts match it:",
+        let mut out = format!(
+            "fno agents resume: {name} has no registry row, and {} retirement receipts match it:\n",
             matches.len()
         );
         for receipt in &matches {
-            eprintln!("  {} ({})", receipt.harness_session_id, receipt.row_name);
+            out.push_str(&format!(
+                "  {} ({})\n",
+                receipt.harness_session_id, receipt.row_name
+            ));
         }
-        eprintln!("  resume by the exact session id to disambiguate.");
-        return Some(());
+        out.push_str("  resume by the exact session id to disambiguate.\n");
+        return Some(out);
     } else {
         matches.iter().collect()
     };
     let receipt = chosen[0];
-    eprintln!(
-        "fno agents resume: {name} has no registry row, but a retirement receipt preserves it."
+    let mut out = format!(
+        "fno agents resume: {name} has no registry row, but a retirement receipt preserves it.\n"
     );
-    eprintln!("  harness: {}", receipt.harness);
-    eprintln!("  session: {}", receipt.harness_session_id);
-    eprintln!("  original cwd: {}", receipt.cwd);
+    out.push_str(&format!("  harness: {}\n", receipt.harness));
+    out.push_str(&format!("  session: {}\n", receipt.harness_session_id));
+    out.push_str(&format!("  original cwd: {}\n", receipt.cwd));
     if !receipt.cwd.is_empty() && !Path::new(&receipt.cwd).exists() {
-        eprintln!(
-            "  note: the original cwd is gone; resume from a replacement checkout with the native command below."
+        out.push_str(
+            "  note: the original cwd is gone; resume from a replacement checkout with the native command below.\n",
         );
     }
-    eprintln!(
-        "  native resume: {}",
+    out.push_str(&format!(
+        "  native resume: {}\n",
         if receipt.resume_argv.is_empty() {
             receipt.resume.clone()
         } else {
             receipt.resume_argv.join(" ")
         }
-    );
-    Some(())
+    ));
+    Some(out)
 }
