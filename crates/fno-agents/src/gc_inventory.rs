@@ -632,7 +632,13 @@ pub fn census_with(home: &AgentsHome, readers: SourceReaders) -> Inventory {
         }
     }
     let configured = roots.len() as u64;
-    let enumerated = roots.iter().filter(|r| r.is_dir()).count() as u64;
+    // Readability, not existence: `is_dir` answers through the parent's
+    // stat and passes a mode-000 directory the census cannot actually list.
+    // The walk opens the dir, so the gate opens it too.
+    let enumerated = roots
+        .iter()
+        .filter(|r| std::fs::read_dir(r).is_ok())
+        .count() as u64;
     inventory.root_coverage = Some(RootCoverage {
         complete: enumerated == configured && configured > 0,
         enumerated,
