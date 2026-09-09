@@ -365,10 +365,7 @@ def _component_verdict(
         _log.warning("component-verdict transport failed: %s", exc)
         return None
     if result.returncode != 0:
-        _log.warning(
-            "component-verdict exited %s: %s",
-            result.returncode, (result.stderr or "").strip()[:200],
-        )
+        _log.warning("component-verdict exited %s: %s", result.returncode, (result.stderr or "").strip()[:200])
         return None
     try:
         report = json.loads(result.stdout)
@@ -381,9 +378,8 @@ def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update
     """Non-fresh rows with their native one-liner; None = cannot answer."""
     if report is None:
         return [
-            f"{prefix}: component verdict unavailable"
-            " (the deployed fno-agents could not answer); treating as NOT converged"
-        ]
+            f"{prefix}: component verdict unavailable (the deployed fno-agents"
+            " could not answer); treating as NOT converged"]
     return [
         f"{prefix}: {c['line']}"
         for c in report.get("components", [])
@@ -755,8 +751,8 @@ def update_readiness(
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
-    # Name both Python deployments: the script the front door execs (its own
-    # resolver) and the running interpreter (AC2-HP).
+    # Name both Python deployments: the front door's script and the running
+    # interpreter (AC2-HP).
     front_script: Optional[str] = None
     _mux = _cargo_installed_mux() or shutil.which("fno")
     if _mux:
@@ -996,12 +992,9 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         not force
         and installed_bin is not None
         and subtree is not None
-        and (
-            pre := _component_verdict(
-                source, subtree, installed_bin.parent, installed_bin, include_mux=False
-            )
-        )
-        is not None
+        and (pre := _component_verdict(
+            source, subtree, installed_bin.parent, installed_bin, include_mux=False
+        )) is not None
         and pre.get("converged")
     ):
         typer.echo(
