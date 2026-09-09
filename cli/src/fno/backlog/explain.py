@@ -116,10 +116,8 @@ _UNSAMPLED: object = object()
 
 
 def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
-    """One load-gate decision per report build, or None when unreadable.
-
-    The gates row and the stop share the sample: two footprint reads on an
-    already-loaded box is the preview costing more than the thing it previews.
+    """One load-gate decision per report build, or None when unreadable: the
+    gates row and the stop share one sample instead of paying it twice.
     """
     try:
         from fno.agents.spawn_gate import load_gate_decision
