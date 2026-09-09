@@ -9,15 +9,18 @@
 # paragraph itself warns about. A documented event with no producer reads as a
 # quiet board forever.
 #
-# The check: extract every backticked snake_case token from the numbered arm
-# lines of skills/reign/SKILL.md and docs/architecture/reign.md, subtract the
+# The check: extract every backticked token from the numbered arm lines of
+# skills/reign/SKILL.md and docs/architecture/reign.md - a bare word counts in
+# full, so a one-word kind with no underscore is still checked - subtract the
 # allowlist of words that are reader fields, graph fields, code paths, harness
-# vocabulary or check-run conclusions rather than journal events, and refuse
-# any remaining token with zero matching files. The grep is fixed-string,
-# case-sensitive, substring, and skips vendored, build and VCS trees; one
-# matching file passes, because the bar is "exists in the system's
-# vocabulary", not "is hot". docs/ is deliberately NOT scanned: a kind named
-# only in docs is exactly the fiction this refuses.
+# vocabulary or check-run vocabulary rather than journal events, and refuse
+# any remaining token with zero matching files. The producer grep demands the
+# token appear as a QUOTED literal (a JSON key value, a string argument) in
+# cli, crates, hooks or scripts, and skips vendored, build and VCS trees; one
+# matching file passes, because the bar is "named in the system's emit
+# vocabulary", not "is hot". A bare mention in a comment or prose does not
+# count: a kind named only in prose is exactly the fiction this refuses.
+# docs/ is deliberately NOT scanned for the same reason.
 #
 # Targets default to the two files in the checkout this script runs from, so
 # the arm list and its guard move together; a kind dropped from the arm list
@@ -40,7 +43,8 @@ fi
 
 # Not journal events: fno doctor event find output fields; graph and feed
 # fields; source paths; the reign registry reader and a capacity reading;
-# check-run conclusions from the CI arm's verdict rules.
+# check-run conclusions, verdict tokens and court words from the CI and
+# liveness arms' rules.
 ALLOWED='file_count
 match_count
 unreadable_files
@@ -55,7 +59,19 @@ reign_state
 sustained_cpu_cores
 timed_out
 action_required
-startup_failure'
+startup_failure
+red
+green
+pending
+conclusion
+failure
+error
+cancelled
+completed
+state
+success
+split
+conflicts'
 
 SCAN_DIRS=()
 for d in cli crates hooks scripts; do
@@ -77,10 +93,21 @@ for file in "${FILES[@]}"; do
     exit 1
   fi
   # The arm list is the numbered "**Name, cadence.**" lines inside the arm
-  # section; any other heading ends it.
+  # section; any other heading ends it. A span that is ONE bare word is a
+  # candidate in full (one-word kinds have no underscore to find); any other
+  # span (a command, a path, a tuple) gives up its snake_case tokens.
   tokens="$(awk '/Arm the beat|six arms and why each exists/{f=1;next} /^## /{f=0} f && /^[0-9]+\. \*\*/{print}' "$file" \
     | (grep -o '`[^`]*`' || true) | tr -d '`' \
-    | (grep -oE '_?[a-z][a-z0-9]*(_[a-z0-9]+)+' || true) | sort -u)"
+    | while IFS= read -r span; do
+        if [[ -z "$span" ]]; then
+          continue
+        elif printf '%s' "$span" | grep -qE '^_?[a-z][a-z0-9_]*$'; then
+          printf '%s\n' "$span"
+        else
+          printf '%s\n' "$span" | (grep -oE '_?[a-z][a-z0-9]*(_[a-z0-9]+)+' || true)
+        fi
+      done \
+    | sort -u)"
   while IFS= read -r tok; do
     [[ -z "$tok" ]] && continue
     if printf '%s\n' "$ALLOWED" | grep -qxF -- "$tok"; then
@@ -88,7 +115,7 @@ for file in "${FILES[@]}"; do
     fi
     case " $covered " in *" $tok "*) continue ;; esac
     tf="$(mktemp "${TMPDIR:-/tmp}/reign-arm-signals.XXXXXX")"
-    grep -rlF --exclude-dir=.venv --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules -I -- "$tok" "${SCAN_DIRS[@]}" > "$tf" 2>/dev/null || true
+    grep -rlE --exclude-dir=.venv --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules -I -- "(\"|')${tok}(\"|')" "${SCAN_DIRS[@]}" > "$tf" 2>/dev/null || true
     if [[ -s "$tf" ]]; then
       covered="$covered $tok"
     else
