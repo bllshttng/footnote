@@ -37,20 +37,20 @@ SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
 def _observe_worker(name: str) -> Optional[dict]:
-    """Real worker identity from the registry row the spawn wrote; unreadable/missing reads as unobserved.
-    Retries once on a miss: the spawn already blocked until the worker exited, so a first-look miss is
-    more likely a not-yet-flushed write than a real absence."""
+    """Registry identity for the spawned worker; retries once on a miss, since the
+    spawn already blocked until exit, so a first-look miss is likely unflushed, not absent."""
     from fno.agents.registry import load_registry
 
     for attempt in range(2):
         try:
-            for entry in load_registry():
-                if entry.name == name:
-                    return {"harness": entry.harness, "model": entry.model,
-                            "model_basis": entry.model_basis, "effort": entry.effort,
-                            "harness_session_id": entry.harness_session_id}
+            entries = load_registry()
         except Exception:  # noqa: BLE001
             return None
+        for entry in entries:
+            if entry.name == name:
+                return {"harness": entry.harness, "model": entry.model,
+                        "model_basis": entry.model_basis, "effort": entry.effort,
+                        "harness_session_id": entry.harness_session_id}
         if attempt == 0:
             time.sleep(0.5)
     return None

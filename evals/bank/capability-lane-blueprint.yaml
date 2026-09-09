@@ -32,15 +32,20 @@ prompt: |
 grade:
   - kind: file-exists
     path: scope-decision.md
-  - kind: grep
-    path: scope-decision.md
-    pattern: "in-scope: cli/src/fno/agents/cli.py"
   - kind: exit
-    # Absence check: a grep-only grade cannot express "must NOT contain X",
-    # so this asserts it via a negated shell exit instead - the fixture needs
-    # both the right file present and the wrong one ruled out, not just any
-    # two file paths.
-    command: "! grep -q 'in-scope: cli/src/fno/agents/keeper_lane.py' scope-decision.md"
+    # `kind: grep` is plain substring, so "in-scope: cli.py, keeper_lane.py"
+    # on one hedged line would satisfy a substring check for the right file
+    # while never writing the literal negated string, and would still pass
+    # a bare exists+substring grade. grep -qx anchors to the WHOLE line, and
+    # the line-count check refuses a hedge line appended after the two exact
+    # lines the prompt asks for - closing both routes to a hedged pass.
+    command: "grep -qx 'in-scope: cli/src/fno/agents/cli.py' scope-decision.md"
+    expect: 0
+  - kind: exit
+    command: "grep -qx 'out-of-scope: cli/src/fno/agents/keeper_lane.py' scope-decision.md"
+    expect: 0
+  - kind: exit
+    command: "[ \"$(wc -l < scope-decision.md)\" -eq 2 ]"
     expect: 0
 timeout_minutes: 15
 tags: [lane-qualification, blueprint, scope]
