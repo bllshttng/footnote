@@ -57,7 +57,7 @@ use crate::spawn_journal::{
     HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
-use crate::squad_store::StoredTabTree;
+use crate::squad_store::{SquadSnapshot, StoredTabTree};
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
@@ -70,6 +70,8 @@ mod pane_identity;
 mod pane_reseat;
 mod portal_reach;
 mod retire_session;
+mod shutdown_capture;
+mod squad_persistence;
 mod squad_sync;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
@@ -706,8 +708,8 @@ enum CoreMsg {
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
-    /// A pre-Attach `KillServer`: Bye every client, kill every pane child,
-    /// exit 0 (Locked 12's second and last exit path).
+    /// A pre-Attach `KillServer`: Bye clients, then the shared choke point
+    /// captures before killing non-keeper children and exits 0.
     Kill,
     // -- v4 control verbs (one-shot: reply on the oneshot, then the
     // connection task closes). Snapshot reads and the spawn/kill mutations
@@ -2407,6 +2409,10 @@ pub(crate) struct Core {
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
     restored: bool,
+    /// True while startup restore waits for off-loop re-entry plans.
+    restore_pending: bool,
+    /// Per-squad store generations produced or restored by this server.
+    store_generations: HashMap<String, u64>,
     /// Squads created before first attach. Their empty bootstrap persist must
     /// not overwrite an older squad waiting for restore.
     pre_restore_squads: HashSet<u64>,
@@ -6020,32 +6026,6 @@ impl Core {
         });
     }
 
-    /// Capture every template-managed, NAMED tab in squad `sid` into the store
-    /// (US8). Restore re-applies these. Unnamed template tabs stay live-only
-    /// (no durable identity to key on). A store-write failure degrades
-    /// persistence only - the live layout stands (matches `persist_squad`).
-    fn persist_template_specs(&mut self, sid: u64) {
-        let Some(sq) = self.session.squad(sid) else {
-            return;
-        };
-        let name = sq.name.clone();
-        let Some(name) = name.filter(|n| !n.is_empty()) else {
-            return; // an unnamed (attach-born) squad is never persisted
-        };
-        let specs: Vec<crate::squad_store::StoredTabSpec> = sq
-            .tabs
-            .iter()
-            .filter_map(|t| {
-                let tab_name = t.name.clone().filter(|n| !n.is_empty())?;
-                let spec = self.template_specs.get(&t.id)?.clone();
-                Some(crate::squad_store::StoredTabSpec { tab_name, spec })
-            })
-            .collect();
-        if let Err(e) = crate::squad_store::set_tab_specs(&name, &specs) {
-            self.persist_degraded(&e);
-        }
-    }
-
     /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8),
     /// returning how many tabs were created. Each spec gets a fresh named tab
     /// addressed by id (so a member tab of the same name never makes the target
@@ -7051,14 +7031,9 @@ impl Core {
             .any(|s| s.name == name)
     }
 
-    /// Write-through one persisted squad. Identity is `name` when named, else a
-    /// durable per-squad `key` minted here on first persist (operator decision:
-    /// every squad persists, not only named workspaces). `origins` is stored for
-    /// restore/owns_path but is NOT identity, so two same-origin unnamed squads
-    /// never collide.
-    fn persist_squad(&mut self, sid: u64) {
+    fn snapshot_squad(&mut self, sid: u64) -> Option<SquadSnapshot> {
         let Some(sq) = self.session.squad(sid) else {
-            return;
+            return None;
         };
         let name = sq.name.clone().unwrap_or_default();
         let mut key = sq.key.clone();
@@ -7090,7 +7065,7 @@ impl Core {
                 .iter()
                 .any(|stored| stored.name == name && stored.key == key && stored.origins == origins)
         {
-            return;
+            return None;
         }
         // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
         // into the AUTHORITATIVE in-memory list, not just the store copy. Other
@@ -7180,10 +7155,15 @@ impl Core {
             }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
-        if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
-            self.persist_degraded(&e);
-        }
-        self.persist_tab_trees(sid, &name, &key, &origins);
+        let (tab_trees, active_tab) = self.stored_tab_trees(sid)?;
+        Some(SquadSnapshot {
+            name,
+            key,
+            origins,
+            members,
+            tab_trees,
+            active_tab: Some(active_tab),
+        })
     }
 
     /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -
@@ -7253,20 +7233,6 @@ impl Core {
         Some((trees, active_tab))
     }
 
-    /// Write the topology lane for `sid` beside its membership row. A write
-    /// failure degrades persistence only (the live layout stands), the same
-    /// posture as every other persist here.
-    fn persist_tab_trees(&mut self, sid: u64, name: &str, key: &str, origins: &[String]) {
-        let Some((trees, active_tab)) = self.stored_tab_trees(sid) else {
-            return;
-        };
-        if let Err(e) =
-            crate::squad_store::set_tab_trees(name, key, origins, &trees, Some(active_tab))
-        {
-            self.persist_degraded(&e);
-        }
-    }
-
     /// How long a topology mutation stays dirty before the tick flushes it.
     /// One write per gesture, not one per drag event.
     const TOPOLOGY_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -7328,12 +7294,8 @@ impl Core {
         }
     }
 
-    /// Write the tree capture of every persistable squad when dirty (the
-    /// AgentRows-tick flush and the leaving-clients flush). Membership is
-    /// re-persisted with it: `persist_squad` is the one funnel that derives a
-    /// squad's durable identity, so the tree lane can never key differently
-    /// than the row it belongs to. ponytail: one store mutation per squad per
-    /// flush; batch into a single locked write if the flock ever shows it.
+    /// Write every dirty persistable squad through `persist_squad`, keeping
+    /// membership identity and topology keys on one path.
     fn flush_topology(&mut self) {
         if !self.topology_dirty {
             return;
@@ -7652,37 +7614,12 @@ impl Core {
         }
     }
 
-    /// Write-through a raw upsert from captured fields (used when the in-session
-    /// squad is already gone - a churned member's last pane). Identity is `name`
-    /// when named, else the durable `key`.
-    fn persist_stored(
-        &mut self,
-        name: &str,
-        key: &str,
-        origins: &[String],
-        members: &[crate::squad_store::StoredMember],
-    ) {
-        if let Err(e) = crate::squad_store::upsert(name, key, origins, members) {
-            self.persist_degraded(&e);
-        }
-    }
-
     /// The store identity of a live squad: `(name, key)`, `name` empty for an
     /// unnamed one. Captured BEFORE a mutation that may remove the squad, so the
     /// de-persist has something to key on afterwards.
     fn squad_identity(&self, sid: u64) -> Option<(String, String)> {
         let sq = self.session.squad(sid)?;
         Some((sq.name.clone().unwrap_or_default(), sq.key.clone()))
-    }
-
-    /// Write-through a delete of a squad's store entry, keyed by `name` when
-    /// named else by its durable `key` (an unnamed lane whose last pane closed).
-    /// A named caller may pass `""` for key; an unpersisted squad (empty key)
-    /// removes nothing.
-    fn persist_remove(&mut self, name: &str, key: &str) {
-        if let Err(e) = crate::squad_store::remove(name, key) {
-            self.persist_degraded(&e);
-        }
     }
 
     /// Notice every client exactly once that persistence is degraded (AC3-ERR),
@@ -7833,7 +7770,8 @@ impl Core {
         let live_cwds: Vec<String> = self.panes.values().map(|p| p.cwd.clone()).collect();
         let origin_exists = |path: &str| Path::new(path).exists();
         let now = crate::squad_store::now_epoch_secs();
-        let outcome = crate::squad_store::prune_with_evidence(
+        let outcome = crate::squad_store::prune_with_evidence_with_generations(
+            Some(&self.store_generations),
             |squad| {
                 crate::squad_store::prune_decision_with_evidence(
                     squad,
@@ -7847,7 +7785,11 @@ impl Core {
             &evidence,
         );
         match outcome {
-            Ok(outcome) => {
+            Ok((outcome, batch)) => {
+                if !self.persist_result(Ok(batch)) {
+                    self.notice(client_id, "sweep skipped: squad store changed");
+                    return;
+                }
                 self.reload_members_from_store();
                 // Refused restore placeholders are positive dead markers even
                 // when their registry row is gone. Remove their visible panes
@@ -8099,6 +8041,7 @@ impl Core {
             self.notice_all(format!("squad collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
+        self.store_generations = loaded.generations;
         if let Some(n) = loaded.notice {
             self.notice_all(n);
         }
@@ -8133,8 +8076,15 @@ impl Core {
                     .iter()
                     .any(|m| !m.tombstone && live.contains(&m.attach_id));
             if sweep {
-                if let Err(e) = crate::squad_store::remove("", &sq.key) {
-                    self.notice_all(format!("squad prune at restore skipped: {e}"));
+                match crate::squad_store::remove_with_generations(
+                    Some(&self.store_generations),
+                    "",
+                    &sq.key,
+                ) {
+                    Ok(batch) => self.store_generations.extend(batch.generations),
+                    Err(e) => {
+                        self.notice_all(format!("squad prune at restore skipped: {e}"));
+                    }
                 }
                 continue;
             }
@@ -9076,6 +9026,7 @@ impl Core {
             self.reconcile_external_lifecycle();
             return;
         }
+        self.restore_pending = true;
         self.resolve_plan_batch(
             client_id,
             wanted,
@@ -12755,11 +12706,14 @@ impl Core {
                                         .squad(squad)
                                         .map(|s| s.origins.clone())
                                         .unwrap_or_default();
-                                    if let Err(e) =
-                                        crate::squad_store::rename(&old, &new, &origins, &members)
-                                    {
-                                        self.persist_degraded(&e);
-                                    }
+                                    let result = crate::squad_store::rename_with_generations(
+                                        Some(&self.store_generations),
+                                        &old,
+                                        &new,
+                                        &origins,
+                                        &members,
+                                    );
+                                    self.persist_result(result);
                                 }
                                 (Some(old), None) => {
                                     self.persist_remove(&old, "");
@@ -13678,6 +13632,7 @@ impl Core {
                         cols,
                     } => {
                         self.restore_squads(rows, cols, home_sid);
+                        self.restore_pending = false;
                         // (x-7561) The external-tombstone reconcile runs
                         // AFTER restore, as the synchronous path orders it.
                         self.reconcile_external_lifecycle();
@@ -13748,12 +13703,10 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Kill => {
-                // kill-server: the second (and last) sanctioned exit path
-                // (Locked 12). Bye every client, kill every pane child
-                // (AC4-FR: nothing outlives the session), then shut down -
-                // the SocketGuard unlinks on the way out.
+                // Notify clients, then let the shared shutdown choke point
+                // capture before killing non-keeper children. Keeper-held
+                // panes outlive this server and are re-adopted by the next.
                 self.bye_all("killed");
-                self.kill_all_panes();
                 Flow::Shutdown
             }
             CoreMsg::WorkspaceRestore {
@@ -14370,13 +14323,10 @@ impl Core {
         }
     }
 
-    /// Kill every pane child EXCEPT keeper-hosted ones. Called from serve's
-    /// shutdown choke point (every exit path funnels there) and from
-    /// `CoreMsg::Kill`'s handler; the two layers keep their own call because
-    /// `handle()` must stay correct for callers outside serve. PtyShell has
-    /// no Drop that kills its child, so an exit path that skips this leaves
-    /// pane children to whatever SIGHUP the closing pty master happens to
-    /// deliver; a worker that ignores SIGHUP keeps running.
+    /// Kill every pane child EXCEPT keeper-hosted ones. Serve's shared
+    /// shutdown choke point owns this call so every graceful exit captures
+    /// first. PtyShell has no Drop that kills its child, so skipping this
+    /// leaves pane children to SIGHUP; a worker that ignores it keeps running.
     ///
     /// The keeper carve-out is the load-bearing line: a keeper-hosted pane's
     /// child outlives this server BY DESIGN, and a shutdown sweep that kills
@@ -14680,6 +14630,8 @@ async fn serve(
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
+        restore_pending: false,
+        store_generations: HashMap::new(),
         pre_restore_squads: HashSet::new(),
         topology_dirty: false,
         last_topology_flush: None,
@@ -15377,18 +15329,9 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
-        // Pane teardown lives at this choke point, not in each arm: every
-        // shutdown path funnels through here (CoreMsg::Kill, the idle reaper,
-        // SIGTERM/SIGINT, last-pane-closed), an arm that forgets the call
-        // leaves pane children to SIGHUP luck (x-48a5: the signal arms once
-        // did), and PtyShell::kill is idempotent, so a path whose panes are
-        // already gone pays nothing.
+        // Capture only from a safe restore state and current store generation.
+        core.capture_topology_now();
         core.kill_all_panes();
-        // (x-caef) The server is going down: write any dirty topology capture
-        // now - this is the "ending fno" moment whose loss is the operator's
-        // whole symptom. SIGTERM and the idle exit land here; a -9 cannot be
-        // caught, which is what the tick flush (<= ~3s of lag) bounds.
-        core.flush_topology();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as
         // "session ended (server closed)" client-side, so this is best-effort.
@@ -16445,6 +16388,7 @@ mod tests {
     // (x-b64e) The restore test family, same treatment: the file is
     // shrink-only under the file-budget gate. Moved verbatim.
     mod server_restore_tests;
+    mod shutdown_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
@@ -25251,6 +25195,8 @@ mod tests {
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
+            restore_pending: false,
+            store_generations: HashMap::new(),
             pre_restore_squads: HashSet::new(),
             topology_dirty: false,
             last_topology_flush: None,
