@@ -11,6 +11,7 @@ green verdict, and never a fixed-interval retry that sustains the refusal.
 from __future__ import annotations
 
 import json
+import fcntl
 import time
 
 import pytest
@@ -27,6 +28,60 @@ _VERBATIM_403 = (
     "GitHub Support for help, please include the request ID "
     "FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)"
 )
+
+
+def _replace_path_on_first_flock(monkeypatch, module, lock_path):
+    real_flock = module.fcntl.flock
+    replaced = False
+
+    def racing_flock(handle, operation):
+        nonlocal replaced
+        if not replaced and operation & fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    monkeypatch.setattr(module.fcntl, "flock", racing_flock)
+    return real_flock
+
+
+def _assert_locked(real_flock, lock_path):
+    with lock_path.open("a") as contender:
+        with pytest.raises(BlockingIOError):
+            real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_pr_status_cache_lock_revalidates_inode_for_backoff_writer(tmp_path, monkeypatch):
+    p = tmp_path / "cache" / "row.json"
+    lock_path = p.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    real_flock = _replace_path_on_first_flock(monkeypatch, _cache, lock_path)
+    real_write = _cache._write_row_locked
+
+    def checked_write(*args, **kwargs):
+        _assert_locked(real_flock, lock_path)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(_cache, "_write_row_locked", checked_write)
+    _cache._arm_backoff_row(p, fresh_output={"verdict": "error"})
+
+
+def test_pr_status_cache_lock_revalidates_inode_for_status_refresh(cache_env, monkeypatch, capsys):
+    cache_dir, _ = cache_env
+    lock_path = _row_path(cache_dir).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch()
+    real_flock = _replace_path_on_first_flock(monkeypatch, _cache, lock_path)
+
+    def checked_fetch(pr, cwd):
+        _assert_locked(real_flock, lock_path)
+        return _GREEN
+
+    monkeypatch.setattr(_status, "_fetch", checked_fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
 
 
 def _secondary_reason():

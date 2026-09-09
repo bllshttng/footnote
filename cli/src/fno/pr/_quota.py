@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -31,6 +32,38 @@ def proxy_identity_refusal(exc: BaseException) -> str:
 
 def quota_lock_path() -> Path:
     return graphql_quota_lock()
+
+
+def _open_locked_path(lock_path: Path):
+    while True:
+        handle = lock_path.open("a+")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                opened = os.fstat(handle.fileno())
+                current = lock_path.stat()
+                same_inode = (opened.st_dev, opened.st_ino) == (
+                    current.st_dev,
+                    current.st_ino,
+                )
+            except OSError:
+                same_inode = False
+            if same_inode:
+                return handle
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except BaseException:
+            handle.close()
+            raise
+        handle.close()
+
+
+@contextmanager
+def _locked_path(lock_path: Path):
+    handle = _open_locked_path(lock_path)
+    try:
+        yield handle
+    finally:
+        handle.close()
 
 
 _SHIM_SCAN_BYTES = 65536
@@ -322,8 +355,7 @@ def execute_graphql(
         return Result(127, "", "gh not found on PATH")
     lock = lock_path or quota_lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open("a+") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with _locked_path(lock) as handle:
         try:
             try:
                 env = delegate_environment()

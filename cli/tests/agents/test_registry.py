@@ -20,6 +20,22 @@ import pytest
 from fno.paths_testing import use_tmpdir
 
 
+def _replace_path_on_first_flock(monkeypatch, module, lock_path: Path):
+    real_flock = module.fcntl.flock
+    replaced = False
+
+    def racing_flock(handle, operation):
+        nonlocal replaced
+        if not replaced and operation & fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    monkeypatch.setattr(module.fcntl, "flock", racing_flock)
+    return real_flock
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -59,6 +75,24 @@ def test_registry_lock_rejects_nonterminating_timeout(tmp_path, timeout) -> None
     with pytest.raises(ValueError, match="finite and non-negative"):
         with _hold_registry_lock(tmp_path / "registry.json", timeout=timeout):
             pass
+
+
+@pytest.mark.parametrize("timeout", [None, 1.0])
+def test_registry_lock_revalidates_inode_after_path_replacement(
+    tmp_path: Path, monkeypatch, timeout
+) -> None:
+    from fno.agents import registry
+
+    registry_path = tmp_path / "registry.json"
+    lock_path = registry._registry_lock_path(registry_path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    real_flock = _replace_path_on_first_flock(monkeypatch, registry, lock_path)
+
+    with registry._hold_registry_lock(registry_path, timeout=timeout):
+        with lock_path.open("a") as contender:
+            with pytest.raises(BlockingIOError):
+                real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 # ---------------------------------------------------------------------------
@@ -2619,7 +2653,7 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
 def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
     """A rename keeps the session; the accounting must not announce one."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, rename_agent, update_registry
+    from fno.agents.registry import AgentEntry, rename_agent
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     events_path = tmp_path / ".fno" / "agents" / "events.jsonl"

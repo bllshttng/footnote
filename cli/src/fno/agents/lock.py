@@ -210,35 +210,52 @@ def hold_agent_lock(
     # peer process may currently hold; the holder JSON is only written
     # (via explicit truncate) once this process actually wins the flock,
     # below.
-    fh = open(lock_file, "a")
     handle = _LockHandle()
     on_wait_fired = False
     start = time.monotonic()
     deadline = start + timeout
+    fh = None
 
     try:
         while True:
+            fh = open(lock_file, "a")
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    pass
+
+                now = time.monotonic()
+                if now >= deadline:
+                    raise AgentLockTimeout(
+                        name=name, timeout=timeout, holder=_read_holder(lock_file)
+                    )
+
+                if (
+                    not on_wait_fired
+                    and on_wait is not None
+                    and (now - start) >= _ON_WAIT_THRESHOLD_SECONDS
+                ):
+                    on_wait()
+                    on_wait_fired = True
+
+                time.sleep(_POLL_INTERVAL_SECONDS)
+
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                pass
-
-            now = time.monotonic()
-            if now >= deadline:
-                raise AgentLockTimeout(
-                    name=name, timeout=timeout, holder=_read_holder(lock_file)
+                opened = os.fstat(fh.fileno())
+                current = lock_file.stat()
+                same_inode = (opened.st_dev, opened.st_ino) == (
+                    current.st_dev,
+                    current.st_ino,
                 )
-
-            if (
-                not on_wait_fired
-                and on_wait is not None
-                and (now - start) >= _ON_WAIT_THRESHOLD_SECONDS
-            ):
-                on_wait()
-                on_wait_fired = True
-
-            time.sleep(_POLL_INTERVAL_SECONDS)
+            except OSError:
+                same_inode = False
+            if same_inode:
+                break
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            fh.close()
+            fh = None
 
         # Stamp the holder now that the flock is ours. A zero-byte lock is
         # unfalsifiable by inspection, which is how a live 30s wait read to
@@ -290,8 +307,8 @@ def hold_agent_lock(
                     pass
                 handle._released = True
     finally:
-        if handle._detached:
+        if handle._detached and fh is not None:
             # Stash fh so POSIX flock stays held until process exit.
             _detached_handles.append(fh)
-        else:
+        elif fh is not None:
             fh.close()

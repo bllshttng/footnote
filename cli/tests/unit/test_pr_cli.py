@@ -8,6 +8,8 @@ retired - the bash is gone).
 from __future__ import annotations
 
 import json
+import fcntl
+import hashlib
 import re
 import shlex
 from pathlib import Path
@@ -18,6 +20,78 @@ from fno.cli import app
 from fno.pr import _merge, _quota
 
 runner = CliRunner()
+
+
+def _replace_path_on_first_flock(monkeypatch, module, lock_path: Path):
+    real_flock = module.fcntl.flock
+    replaced = False
+
+    def racing_flock(handle, operation):
+        nonlocal replaced
+        if not replaced and operation & fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    monkeypatch.setattr(module.fcntl, "flock", racing_flock)
+    return real_flock
+
+
+def _assert_locked(real_flock, lock_path: Path) -> None:
+    with lock_path.open("a") as contender:
+        try:
+            real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        real_flock(contender, fcntl.LOCK_UN)
+        raise AssertionError(f"protected section entered without locking {lock_path}")
+
+
+def test_plan_doc_lock_revalidates_inode_after_path_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.plan import locking
+
+    locks_dir = tmp_path / "locks"
+    plan = tmp_path / "plan.md"
+    digest = hashlib.sha1(str(plan.resolve()).encode()).hexdigest()
+    lock_path = locks_dir / f"plan-{digest}.lock"
+    locks_dir.mkdir()
+    lock_path.touch()
+    monkeypatch.setattr(locking.paths, "locks_dir", lambda: locks_dir)
+    real_flock = _replace_path_on_first_flock(monkeypatch, locking, lock_path)
+
+    with locking.plan_doc_lock(plan, timeout=1):
+        _assert_locked(real_flock, lock_path)
+
+
+def test_graphql_quota_lock_revalidates_inode_after_path_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lock_path = tmp_path / "github-graphql-quota.lock"
+    lock_path.touch()
+    real_flock = _replace_path_on_first_flock(monkeypatch, _quota, lock_path)
+    monkeypatch.setattr(_quota, "resolve_real_gh", lambda: "/usr/bin/gh")
+    monkeypatch.setattr(_quota, "delegate_environment", lambda: {})
+
+    def checked_runner(argv, **kwargs):
+        _assert_locked(real_flock, lock_path)
+        if argv[-2:] == ["api", "rate_limit"]:
+            return _quota.Result(
+                0,
+                '{"resources":{"graphql":{"remaining":5000,"reset":0}}}',
+                "",
+            )
+        return _quota.Result(0, '{"data":{}}', "")
+
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["api", "graphql", "-f", "query={viewer{login}}"],
+        runner=checked_runner,
+        lock_path=lock_path,
+    )
+    assert result.ok
 
 
 def test_pr_info_prints_rest_metadata(monkeypatch):

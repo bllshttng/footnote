@@ -27,6 +27,15 @@ from typing import Iterator
 from fno import paths
 
 
+def _same_lock_inode(fd: int, lock_path: Path) -> bool:
+    try:
+        opened = os.fstat(fd)
+        current = lock_path.stat()
+    except OSError:
+        return False
+    return (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+
+
 @contextmanager
 def plan_doc_lock(path: Path, timeout: float = 2.0) -> Iterator[None]:
     """Hold an exclusive advisory lock keyed on the plan doc's resolved path.
@@ -41,22 +50,30 @@ def plan_doc_lock(path: Path, timeout: float = 2.0) -> Iterator[None]:
     digest = hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()
     lock_path = lock_dir / f"plan-{digest}.lock"
     deadline = time.monotonic() + timeout
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fd = -1
     try:
         while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"plan_doc_lock: {lock_path} busy > {timeout}s")
+                    time.sleep(0.02)
+            if _same_lock_inode(fd, lock_path):
                 break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"plan_doc_lock: {lock_path} busy > {timeout}s")
-                time.sleep(0.02)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            fd = -1
         try:
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
 
 
 if __name__ == "__main__":  # ponytail: runnable self-check, no framework

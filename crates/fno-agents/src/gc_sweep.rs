@@ -135,6 +135,10 @@ pub struct GcSummary {
     pub pr_status_deleted: Vec<String>,
     /// `(PR-status filename, reason)` for entries the age reaper kept.
     pub pr_status_kept: Vec<(String, String)>,
+    /// Lock paths deleted after age, size, flock, and inode checks all passed.
+    pub stale_locks_deleted: Vec<String>,
+    /// `(lock path, reason)` for every old lock the safe reaper retained.
+    pub stale_locks_kept: Vec<(String, String)>,
 }
 
 /// The graph read that feeds a sweep: the entries (working graph plus
@@ -789,6 +793,7 @@ pub(crate) fn run(
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     expire_stale_state(home, dry_run, &mut summary);
+    expire_stale_locks(home, dry_run, &mut summary);
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -1634,6 +1639,7 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
 
 const EXPIRED_CLAIM_RETAIN_DAYS: u64 = 30;
 const PR_STATUS_RETAIN_DAYS: u64 = 14;
+const STALE_LOCK_RETAIN_DAYS: u64 = 7;
 
 /// Delete direct children whose mtime is past a family's retention window.
 /// Unknown age and refused deletion both fail closed: the entry stays and is
@@ -1701,6 +1707,151 @@ fn expire_stale_state(home: &AgentsHome, dry_run: bool, summary: &mut GcSummary)
         &mut summary.pr_status_deleted,
         &mut summary.pr_status_kept,
     );
+}
+
+fn lock_name(shared_root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(shared_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(unix)]
+fn opened_path_matches(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let opened = file.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    Ok((opened.dev(), opened.ino()) == (current.dev(), current.ino()))
+}
+
+#[cfg(not(unix))]
+fn opened_path_matches(_file: &std::fs::File, _path: &std::path::Path) -> std::io::Result<bool> {
+    Ok(true)
+}
+
+fn expire_stale_lock_dir(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    retain_days: u64,
+    dry_run: bool,
+    summary: &mut GcSummary,
+    before_revalidate: &dyn Fn(&std::path::Path),
+) {
+    if dry_run {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("lock") {
+            continue;
+        }
+        let name = lock_name(shared_root, &path);
+        let direct = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(err) => {
+                summary
+                    .stale_locks_kept
+                    .push((name, format!("metadata failed: {err}")));
+                continue;
+            }
+        };
+        if !direct {
+            summary
+                .stale_locks_kept
+                .push((name, "not a direct file".to_string()));
+            continue;
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                summary
+                    .stale_locks_kept
+                    .push((name, format!("open failed: {err}")));
+                continue;
+            }
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                summary
+                    .stale_locks_kept
+                    .push((name, format!("metadata failed: {err}")));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(err) => {
+                summary
+                    .stale_locks_kept
+                    .push((name, format!("metadata failed: {err}")));
+                continue;
+            }
+        };
+        if now.duration_since(modified).unwrap_or_default().as_secs() <= window_secs {
+            continue;
+        }
+        if metadata.len() != 0 {
+            summary
+                .stale_locks_kept
+                .push((name, "nonzero lock file".to_string()));
+            continue;
+        }
+        if let Err(err) = file.try_lock() {
+            let reason = match err {
+                std::fs::TryLockError::WouldBlock => "held".to_string(),
+                std::fs::TryLockError::Error(err) => format!("flock failed: {err}"),
+            };
+            summary.stale_locks_kept.push((name, reason));
+            continue;
+        }
+        before_revalidate(&path);
+        match opened_path_matches(&file, &path) {
+            Ok(true) => match std::fs::remove_file(&path) {
+                Ok(()) => summary.stale_locks_deleted.push(name),
+                Err(err) => summary
+                    .stale_locks_kept
+                    .push((name, format!("delete failed: {err}"))),
+            },
+            Ok(false) => summary
+                .stale_locks_kept
+                .push((name, "path replaced".to_string())),
+            Err(err) => summary
+                .stale_locks_kept
+                .push((name, format!("path revalidation failed: {err}"))),
+        }
+        let _ = file.unlock();
+    }
+}
+
+fn expire_stale_locks(home: &AgentsHome, dry_run: bool, summary: &mut GcSummary) {
+    let Some(shared_root) = home.root().parent() else {
+        return;
+    };
+    for dir in [
+        shared_root.join("locks"),
+        shared_root.join("agents").join("locks"),
+        shared_root.join("cache").join("pr-status"),
+    ] {
+        expire_stale_lock_dir(
+            shared_root,
+            &dir,
+            STALE_LOCK_RETAIN_DAYS,
+            dry_run,
+            summary,
+            &|_| {},
+        );
+    }
 }
 
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1903,6 +2054,95 @@ mod tests {
         assert!(status.exists());
         assert!(summary.expired_claims_deleted.is_empty());
         assert!(summary.pr_status_deleted.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_locks_deletes_only_unheld_old_zero_byte_files() {
+        let (base, home) = stale_state_home("locks");
+        let plan_dir = base.join("locks");
+        let agent_dir = base.join("agents/locks");
+        let cache_dir = base.join("cache/pr-status");
+        for dir in [&plan_dir, &agent_dir, &cache_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let old = plan_dir.join("plan-old.lock");
+        let held = agent_dir.join("held.lock");
+        let nonzero = cache_dir.join("nonzero.lock");
+        std::fs::write(&old, b"").unwrap();
+        std::fs::write(&held, b"").unwrap();
+        std::fs::write(&nonzero, b"holder").unwrap();
+        for path in [&old, &held, &nonzero] {
+            age_file(path, 8);
+        }
+        let held_file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&held)
+            .unwrap();
+        held_file.try_lock().unwrap();
+
+        let mut summary = GcSummary::default();
+        expire_stale_locks(&home, false, &mut summary);
+
+        assert!(!old.exists());
+        assert!(held.exists());
+        assert!(nonzero.exists());
+        assert!(summary
+            .stale_locks_deleted
+            .iter()
+            .any(|p| p == "locks/plan-old.lock"));
+        assert!(summary
+            .stale_locks_kept
+            .iter()
+            .any(|(p, why)| { p == "agents/locks/held.lock" && why.contains("held") }));
+        assert!(summary
+            .stale_locks_kept
+            .iter()
+            .any(|(p, why)| { p == "cache/pr-status/nonzero.lock" && why.contains("nonzero") }));
+        held_file.unlock().unwrap();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_locks_keeps_a_path_replaced_before_unlink() {
+        let (base, home) = stale_state_home("lock-race");
+        let lock_dir = base.join("locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let path = lock_dir.join("plan-race.lock");
+        std::fs::write(&path, b"").unwrap();
+        age_file(&path, 8);
+
+        let mut summary = GcSummary::default();
+        expire_stale_lock_dir(&base, &lock_dir, 7, false, &mut summary, &|candidate| {
+            if candidate == path {
+                std::fs::remove_file(candidate).unwrap();
+                std::fs::write(candidate, b"").unwrap();
+            }
+        });
+
+        assert!(path.exists());
+        assert!(summary
+            .stale_locks_kept
+            .iter()
+            .any(|(p, why)| { p == "locks/plan-race.lock" && why.contains("path replaced") }));
+        std::fs::remove_dir_all(&base).ok();
+        drop(home);
+    }
+
+    #[test]
+    fn expire_stale_locks_dry_run_deletes_nothing() {
+        let (base, home) = stale_state_home("lock-dry-run");
+        let path = base.join("locks/plan-old.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        age_file(&path, 8);
+
+        let mut summary = GcSummary::default();
+        expire_stale_locks(&home, true, &mut summary);
+
+        assert!(path.exists());
+        assert!(summary.stale_locks_deleted.is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 
