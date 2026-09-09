@@ -527,6 +527,22 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
     return refs
 
 
+def _normalized_pr_url(url: Optional[str]) -> Optional[str]:
+    """A PR URL reduced to its comparable form, or None.
+
+    Query, fragment and a trailing slash are display noise; the graph and gh
+    can differ on all three for the same PR. Lowercased because the host and
+    owner segments are case-insensitive in practice and the path segments the
+    comparison relies on are already lowercase.
+    """
+    if not isinstance(url, str):
+        return None
+    stripped = url.strip()
+    for sep in ("?", "#"):
+        stripped = stripped.split(sep, 1)[0]
+    return stripped.rstrip("/").lower() or None
+
+
 @dataclass
 class PrRowBinding:
     node_id: str
@@ -1576,13 +1592,19 @@ def classify_open_pr_bindings(
 ) -> list[OpenPrBinding]:
     """Classify every open-PR row against graph entries: ``bound`` (the node
     points back at this PR), ``missing`` (a unique real node resolves but does
-    not point back), ``untracked`` (the branch names no real node), or
+    not point back), ``untracked`` (neither key names a real node), or
     ``ambiguous`` (several real nodes, or one node named by several open PRs).
 
-    Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
-    board all read the same verdicts. Delimiter-bounded branch matching is
+    Two resolution keys, in order: delimiter-bounded branch matching is
     ``branch_node_ids`` - the same producer/gate authority the merged reverse
-    map's ``_branch_matches_node`` agrees with.
+    map's ``_branch_matches_node`` agrees with - and when it yields nothing,
+    the graph's own ``(pr_number, pr_url)`` back-pointer read through
+    ``node_pr_refs``. The branch key wins whenever it hits, so existing
+    verdicts are unchanged. The reverse key is scoped by URL because a
+    ``pr_number`` is only unique within one repository.
+
+    Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
+    board all read the same verdicts.
     """
     from fno.pr.closure import branch_node_ids
 
@@ -1594,6 +1616,17 @@ def classify_open_pr_bindings(
     node_by_id = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    by_pr_ref: dict[tuple[int, str], list[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        nid = entry.get("id")
+        if not isinstance(nid, str):
+            continue
+        for num, url in node_pr_refs(entry):
+            key_url = _normalized_pr_url(url)
+            if key_url is not None:
+                by_pr_ref.setdefault((num, key_url), []).append(nid)
     parsed: list[tuple[int, Optional[str], str, list[str]]] = []
     open_prs_by_node: dict[str, list[int]] = {}
     for row in open_rows:
@@ -1611,8 +1644,24 @@ def classify_open_pr_bindings(
     verdicts: list[OpenPrBinding] = []
     for number, url, head, matched in parsed:
         if not matched:
-            verdicts.append(OpenPrBinding(number, url, head, "untracked"))
-            continue
+            # Fallback: the node's own back-pointer. A reverse candidate
+            # already points at this PR, so this can only ever produce
+            # ``bound`` (or refuse on ambiguity) - never a heal.
+            key_url = _normalized_pr_url(url)
+            hits = by_pr_ref.get((number, key_url), []) if key_url else []
+            if not hits:
+                verdicts.append(OpenPrBinding(number, url, head, "untracked"))
+                continue
+            if len(hits) > 1:
+                verdicts.append(
+                    OpenPrBinding(
+                        number, url, head, "ambiguous",
+                        detail=f"{len(hits)} nodes carry this PR: "
+                        f"{' '.join(sorted(hits))}",
+                    )
+                )
+                continue
+            matched = hits
         if len(matched) > 1:
             verdicts.append(
                 OpenPrBinding(
@@ -1623,7 +1672,7 @@ def classify_open_pr_bindings(
             )
             continue
         nid = matched[0]
-        siblings = sorted(open_prs_by_node[nid])
+        siblings = sorted(open_prs_by_node.get(nid, []))
         if len(siblings) > 1:
             verdicts.append(
                 OpenPrBinding(

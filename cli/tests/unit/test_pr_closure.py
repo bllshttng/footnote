@@ -419,6 +419,87 @@ def test_open_binding_reads_only_the_branch_never_a_body():
     assert all(v.node_id != "x-prose" for v in verdicts)
 
 
+def test_open_binding_bound_through_the_graphs_reverse_key():
+    # AC1-HP: the branch names no node; the node's own pr_number/pr_url does.
+    # Specimen: PR 1476 on fix/review-cap-invocation-gate, node x-b527.
+    entries = [
+        _node(id="x-b527", pr_number=1476, pr_url="https://github.com/o/r/pull/1476")
+    ]
+    verdicts = _classify([_open_row(1476, "fix/review-cap-invocation-gate")], entries)
+    assert verdicts[0].verdict == "bound"
+    assert verdicts[0].node_id == "x-b527"
+
+
+def test_open_binding_ambiguous_when_two_nodes_carry_the_pr():
+    # AC2-EDGE: several reverse hits refuse rather than pick by list order.
+    entries = [
+        _node(id="x-1a2b", pr_number=1476, pr_url="https://github.com/o/r/pull/1476"),
+        _node(id="x-cdef", pr_number=1476, pr_url="https://github.com/o/r/pull/1476"),
+    ]
+    verdicts = _classify([_open_row(1476, "chore/no-node-here")], entries)
+    assert verdicts[0].verdict == "ambiguous"
+    assert verdicts[0].node_id is None
+    assert "x-1a2b" in verdicts[0].detail and "x-cdef" in verdicts[0].detail
+
+
+def test_open_binding_untracked_when_no_key_names_the_node():
+    # AC3-EDGE: the negative control - neither key resolves, node_id stays None.
+    entries = [_node(id="x-1a2b")]
+    verdicts = _classify([_open_row(5, "chore/tidy-docs")], entries)
+    assert verdicts[0].verdict == "untracked"
+    assert verdicts[0].node_id is None
+
+
+def test_open_binding_reverse_key_is_scoped_by_url():
+    # AC4-EDGE: a pr_number is only unique within one repo; a same-numbered PR
+    # on another owner/repo must never bind through the reverse key.
+    entries = [
+        _node(id="x-1a2b", pr_number=1476, pr_url="https://github.com/o/other/pull/1476")
+    ]
+    verdicts = _classify([_open_row(1476, "chore/tidy-docs")], entries)
+    assert verdicts[0].verdict == "untracked"
+    assert verdicts[0].node_id is None
+
+
+def test_open_binding_reverse_key_reads_additional_prs():
+    # Task-1 test 5: node_pr_refs unions the primary ref with additional_prs;
+    # the reverse index must too.
+    entries = [
+        _node(
+            id="x-1a2b", pr_number=None,
+            additional_prs=[{"number": 7, "url": "https://github.com/o/r/pull/7"}],
+        )
+    ]
+    verdicts = _classify([_open_row(7, "chore/tidy-docs")], entries)
+    assert verdicts[0].verdict == "bound"
+    assert verdicts[0].node_id == "x-1a2b"
+
+
+def test_open_binding_branch_match_still_wins_over_the_reverse_key():
+    # Locked decision 2: a branch naming a real node keeps winning; a different
+    # node's back-pointer at the same number must not steal the binding.
+    entries = [
+        _node(id="x-1a2b", pr_number=None),
+        _node(id="x-9z9z", pr_number=5, pr_url="https://github.com/o/r/pull/5"),
+    ]
+    verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
+    assert verdicts[0].verdict == "missing"
+    assert verdicts[0].node_id == "x-1a2b"
+
+
+def test_open_binding_heal_untouched_by_a_reverse_resolved_row():
+    # AC5-HP: a reverse-resolved row is bound, and only `missing` heals; the
+    # node here already carries the PR ref, so no heal and no advisory.
+    from fno.graph._reconcile import collect_open_binding_heals
+
+    entries = [_node(id="x-1a2b", pr_number=5, pr_url="https://github.com/o/r/pull/5")]
+    heals, advisories = collect_open_binding_heals(
+        entries, list_open=lambda **kw: [_open_row(5, "chore/tidy-docs")]
+    )
+    assert heals == []
+    assert advisories == []
+
+
 def test_open_pr_listing_refuses_a_truncated_result():
     from fno.graph._reconcile import ReconcileError, list_open_pr_branches
 
