@@ -46,9 +46,7 @@ class RunResult:
     variant: str = "baseline"
 
 
-# A variant is a scored round: the fixture itself (baseline) or a git ref of
-# this repo checked out instead of the fixture (v<N>). Enforced at parse time
-# so a typo never silently folds into the baseline score.
+# Parse-time name rule: a typo must never silently fold into the baseline score.
 VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
 
 
@@ -197,25 +195,16 @@ def run_task(
     worker (skipped for a grade-only task) -> mechanical grade -> history row ->
     worktree removed (Invariant: removed after grading). A worker-spawn failure
     is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
-
-    A non-baseline *variant* checks out *variant_ref* (a git ref of this repo)
-    instead of the fixture, so a scored change is a ref and its diff is
-    ``git diff <baseline_rev> <variant_rev>`` from the history rows.
     """
     if not VARIANT_RE.match(variant):
-        raise ValueError(
-            f"variant must match baseline|v<N> (e.g. baseline, v1, v2), got {variant!r}"
-        )
+        raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
     if variant == "baseline":
         if variant_ref is not None:
-            raise ValueError(
-                "variant_ref is not allowed when variant is baseline "
-                "(baseline is the fixture ref by definition)"
-            )
+            raise ValueError("variant_ref is not allowed when variant is baseline")
         checkout_ref = task.repo_fixture
+    elif variant_ref is None:
+        raise ValueError(f"variant_ref is required when variant is {variant!r}")
     else:
-        if variant_ref is None:
-            raise ValueError(f"variant_ref is required when variant is {variant!r}")
         checkout_ref = variant_ref
 
     # When no spawn is injected, bind the worker provider into the default spawn

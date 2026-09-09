@@ -158,8 +158,7 @@ def report_command(
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
 
-    With ``--compare vN``, print the per-task variant-vs-baseline score
-    instead; a compare view never fires the regression alarm (exit 0).
+    With ``--compare vN``, score that variant against baseline (always exit 0).
 
     Exit codes:
       0  report rendered (or no data)
@@ -177,19 +176,18 @@ def report_command(
         cmp = compare_variants(load_rows(history_file, variant=None), compare)
         if json_output:
             typer.echo(_json.dumps(cmp, indent=2))
-            raise typer.Exit(code=0)
-        for tid, t in cmp["tasks"].items():
-            b, v = t["baseline"], t["variant"]
-            typer.echo(
-                f"  {tid}  baseline {b['pass_at_1']:.0%} ({b['runs']})  "
-                f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
-                f"delta={t['delta']:+.2f}  {t['verdict']}"
-            )
-        for label, missing in (("baseline", cmp["missing_in_baseline"]),
-                               (cmp["variant"], cmp["missing_in_variant"])):
-            if missing:
-                typer.echo(f"  missing in {label}: {', '.join(missing)}")
-        typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
+        else:
+            for tid, t in cmp["tasks"].items():
+                b, v = t["baseline"], t["variant"]
+                typer.echo(
+                    f"  {tid}  baseline {b['pass_at_1']:.0%} ({b['runs']})  "
+                    f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
+                    f"delta={t['delta']:+.2f}  {t['verdict']}"
+                )
+            for label, missing in (("baseline", cmp["missing_in_baseline"]), (cmp["variant"], cmp["missing_in_variant"])):
+                if missing:
+                    typer.echo(f"  missing in {label}: {', '.join(missing)}")
+            typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
         raise typer.Exit(code=0)
 
     rows = load_rows(history_file, since=since)

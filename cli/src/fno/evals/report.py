@@ -44,12 +44,10 @@ class TaskStat:
 def load_rows(
     history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
 ) -> list[dict[str, object]]:
-    """Return history rows in file order.
+    """Return history rows in file order, one variant round only by default.
 
-    ``variant`` folds one round: rows written before the variant axis have no
-    key and read as ``baseline``, so the default fold is unchanged for them.
-    ``None`` folds every round. ``since`` applies after the variant filter:
-    ``--since 5`` means the last five rows *of that variant*.
+    Rows with no ``variant`` key read as baseline. ``None`` folds every round.
+    ``since`` applies after the filter: the last N rows *of that variant*.
     """
     rows = [r for _, r in _history.iter_rows_tolerant(history_path)]
     if variant is not None:
@@ -155,16 +153,15 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
 def compare_variants(
     rows: list[dict[str, object]], variant: str
 ) -> dict[str, Any]:
-    """Score *variant* against baseline, per task. *rows* is every round's rows.
+    """Score *variant* against baseline, per task. Rows come from variant=None.
 
-    Pass ``load_rows(path, variant=None)``. Tasks the variant skipped land in
-    ``missing_in_variant``: a skipped case silently shrinks the scored
-    denominator. ``baseline_rev``/``variant_rev`` are the most common
-    ``bank_rev`` in each set, the two shas of ``git diff``.
+    A task the variant skipped lands in missing_in_variant. Each *_rev is the
+    most common bank_rev in its set: the two shas for ``git diff``.
     """
     by_id = _by_task(rows)
     tasks: dict[str, Any] = {}
     missing_in_variant: list[str] = []
+    missing_in_baseline: list[str] = []
     base_rows: list[dict[str, object]] = []
     variant_rows: list[dict[str, object]] = []
     for tid, task_rows in sorted(by_id.items()):
@@ -173,6 +170,8 @@ def compare_variants(
         base_rows.extend(b)
         variant_rows.extend(v)
         if not b:
+            if v:
+                missing_in_baseline.append(tid)
             continue
         if not v:
             missing_in_variant.append(tid)
@@ -186,11 +185,6 @@ def compare_variants(
             "delta": round(delta, 4),
             "verdict": "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged",
         }
-    missing_in_baseline = sorted(
-        tid for tid, task_rows in by_id.items()
-        if tid not in tasks and tid not in missing_in_variant
-        and any((r.get("variant") or "baseline") == variant for r in task_rows)
-    )
 
     def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
         revs = [r["bank_rev"] for r in rs if isinstance(r.get("bank_rev"), str)]
