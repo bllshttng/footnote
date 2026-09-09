@@ -41,10 +41,34 @@ fn opt_str(payload: &Value, key: &str) -> Option<String> {
         .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_default())
 }
 
-/// Python `f"{x!r}"` spells a plain string in single quotes; every value this
-/// module interpolates is an operator-typed word, so plain quoting matches.
+/// Python `repr()` for a str: single quotes by default, double quotes when
+/// the value contains a single quote and no double quote, backslashes and
+/// control characters escaped. The receipts quote operator-typed values, so
+/// the spelling must match what the Python seam used to print.
 fn repr(s: &str) -> String {
-    format!("'{s}'")
+    let has_sq = s.contains('\'');
+    let has_dq = s.contains('"');
+    let (open, close) = if has_sq && !has_dq {
+        ('"', '"')
+    } else {
+        ('\'', '\'')
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(open);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(close);
+    out
 }
 
 /// The decision over the three billing axes. Inputs are facts the seam
@@ -558,6 +582,17 @@ mod tests {
             .as_object()
             .cloned()
             .expect("decision is an object")
+    }
+
+    #[test]
+    fn repr_matches_python_quoting_rules() {
+        // The check behind the byte-identical claim: quote switching on the
+        // embedded apostrophe, backslash escaping, control-character \xNN.
+        assert_eq!(repr("zai"), "'zai'");
+        assert_eq!(repr("it's"), "\"it's\"");
+        assert_eq!(repr("back\\slash"), "'back\\\\slash'");
+        assert_eq!(repr("a\nb"), "'a\\nb'");
+        assert_eq!(repr("tab\there"), "'tab\\there'");
     }
 
     #[test]

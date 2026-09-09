@@ -16,6 +16,7 @@ agents court	T1	agents court	3
 agents court-orphans	T1	agents court-orphans	0
 agents route-slot	T1	agents route-slot	0
 agents spawn-overlay	T1	agents spawn-overlay	0
+agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
 agents authorized-merge	T1	agents authorized-merge	0
 agents crown	T1	agents crown	17
