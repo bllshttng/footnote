@@ -197,7 +197,7 @@ def test_review_empty_diff_guard_resolves_the_named_target():
 
 def test_execute_repairs_in_scope_failures_within_the_bound():
     text = _skill("skills/execute/references/flat.md")
-    assert "REPAIR it and re-run" in text
+    assert "gets REPAIRED" in text
     assert "iteration bound" in text
     assert "neither substitutes for the configured review count" in text
     assert "If any verification fails → stop and report what failed" not in text
@@ -247,7 +247,7 @@ def test_speculate_ends_at_comparison_and_binds_workers_to_real_worktrees():
 
 def test_audit_deliverable_is_bounded_artifact_plans_only_when_authorized():
     text = _skill("skills/audit/SKILL.md")
-    assert "only when the run is authorized" in text
+    assert "only on an authorized run" in text
     assert "until ALL features are planned" not in text
     assert "Linear" not in text
     assert "the resolved `--perspectives` set" in text
