@@ -17040,10 +17040,8 @@ git_bounded();";
         // a working bridge substitutes the sized render for the map value's
         // `<level>` placeholder, and a missing binary keeps the placeholder.
         // Without the pin the expectation would depend on whatever fno the
-        // host has installed. `FNO_LOOPCHECK_FNO_BIN` is process-global and
-        // distress.rs's tests mutate it too, so hold its shared test lock
-        // across the set/run/restore section.
-        let _env_guard = crate::distress::fno_bin_env_test_lock().lock().unwrap();
+        // host has installed.
+        let _env_guard = crate::distress::fno_bin_env_test_lock().lock().unwrap(); // shared: distress.rs races this var too
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let mut pr = reviewers_gate_pr();
