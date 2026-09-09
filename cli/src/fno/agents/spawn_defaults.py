@@ -1201,57 +1201,13 @@ def inject_spawn_defaults(
 
         if slot_chain:
             _terminal = slot_chain[-1]
-            # Refusals arrive pre-composed from the verb; transport faults parse here.
+            # Refusals arrive composed from the verb's refusal_terminal owner;
+            # the exhausted queue rides its structured payload (exit 78).
             _refusal = _slot_meta.get("refusal") or {}
             if _refusal.get("text"):
                 _refuse(f"fno agents spawn: {_refusal['text']}")
-            if _terminal.startswith("slot=config "):
-                _refuse(f"fno agents spawn: {_terminal[len('slot=config '):]}")
-            if _terminal.startswith("slot=provider-count-unavailable "):
-                _rung, _detail = _terminal[
-                    len("slot=provider-count-unavailable "):
-                ].split(" ", 1)
-                _refuse(
-                    f"fno agents spawn: config.{_rung} provider count unavailable"
-                    f" for {_detail}"
-                )
-            if _terminal.startswith("slot=route-slot-unavailable"):
-                _refuse(
-                    f"fno agents spawn: {_terminal[len('slot='):]};"
-                    + (
-                        " (strict routing: config routing.enforce_inventory)"
-                        if enforced
-                        else ""
-                    )
-                )
-            if _terminal == "slot=manual_account_switch_required":
-                _refuse(
-                    "fno agents spawn: every lane needs a manual canonical "
-                    "account switch"
-                )
-            if _terminal == "slot=exhausted refuse":
-                _refuse(
-                    "fno agents spawn: every configured lane is exhausted"
-                )
-            if _terminal.startswith("slot=exhausted queue"):
-                _lanes = [
-                    {"name": _p[3], "reason": _p[4] if len(_p) > 4 else "exhausted"}
-                    for _p in (
-                        _line.split(" ", 4)
-                        for _line in slot_chain
-                        if _line.startswith("slot skip ")
-                    )
-                ]
-                _payload: dict = {
-                    "status": "refused",
-                    "reason": "slot_exhausted",
-                    "verb": profile_verb,
-                    "lanes": _lanes,
-                }
-                _retry = _terminal.partition("retry_at=")[2].strip()
-                if _retry:
-                    _payload["retry_at"] = float(_retry)
-                print(json.dumps(_payload))
+            if _slot_meta.get("exhausted"):
+                print(json.dumps(_slot_meta["exhausted"]))
                 raise SystemExit(78)
             if slot_candidate is not None and slot_candidate.get("lane_rung"):
                 lane = slot_candidate["lane_fields"]

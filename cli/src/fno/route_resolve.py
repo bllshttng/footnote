@@ -307,11 +307,20 @@ def resolve_slot(
             explicit_vendor_value=explicit_vendor_value,
         ))
     except RouteSlotUnavailable as exc:
+        # The transport fault never reaches the verb, so the Python side owns
+        # this one refusal composition: same shape the verb answers with.
+        text = f"route-slot-unavailable ({exc});"
+        if _routing_enforced(settings):
+            text += " (strict routing: config routing.enforce_inventory)"
+        if meta is not None:
+            meta["refusal"] = {"class": "unavailable", "text": text}
         return None, [f"slot=route-slot-unavailable ({exc})"], "unarmed"
     chain = [str(line) for line in (out.get("chain") or [])]
     if meta is not None:
         if isinstance(out.get("refusal_terminal"), dict):
             meta["refusal"] = out["refusal_terminal"]
+        if isinstance(out.get("exhausted_payload"), dict):
+            meta["exhausted"] = out["exhausted_payload"]
         meta["fingerprint"] = str(out.get("fingerprint") or "")
     return out.get("candidate"), chain, str(out.get("verdict") or "unarmed")
 

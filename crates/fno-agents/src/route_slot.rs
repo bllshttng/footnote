@@ -1706,7 +1706,46 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             .map(|r| format!(" retry_at={}", r as i64))
             .unwrap_or_default();
         chain.push(json!(format!("slot=exhausted queue{retry}")));
-        return queue_decision(chain);
+        // The structured refusal the seam prints verbatim (exit 78): the walk
+        // owns the lanes, reasons and reset time, so it composes the payload
+        // instead of the consumer re-parsing chain lines.
+        let lanes: Vec<Value> = chain
+            .iter()
+            .filter_map(|line| {
+                let rest = line.as_str()?.strip_prefix("slot skip ")?;
+                // The label is the lane's rung and, when it differs, its row
+                // name: the same lane_label the skip line was built with.
+                let mut tokens = rest.splitn(3, ' ');
+                let first = tokens.next().unwrap_or("");
+                let second = tokens.next();
+                let remainder = tokens.next();
+                let (name, reason) = match (second, remainder) {
+                    (Some(n), Some(r)) => (n, r),
+                    (Some(n), None) => (n, "exhausted"),
+                    (None, _) => (first, "exhausted"),
+                };
+                Some(json!({"name": name, "reason": reason}))
+            })
+            .collect();
+        let mut queue_refusal = json!({
+            "status": "refused",
+            "reason": "slot_exhausted",
+            "verb": payload
+                .get("rung_base")
+                .and_then(Value::as_str)
+                .unwrap_or("agents.profiles")
+                .strip_prefix("agents.profiles.")
+                .unwrap_or(""),
+            "lanes": lanes,
+        });
+        if let Some(r) = future {
+            queue_refusal["retry_at"] = json!(r);
+        }
+        let mut out = queue_decision(chain);
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("exhausted_payload".into(), queue_refusal);
+        }
+        return out;
     }
     chain.push(json!(format!("slot=exhausted {on_exhausted}")));
     exhausted_decision(chain)
@@ -1839,6 +1878,25 @@ fn refusal_terminal(chain: &[Value]) -> Option<(String, String)> {
             format!("{rest} (strict routing: config routing.enforce_inventory)"),
         ));
     }
+    if let Some(rest) = terminal.strip_prefix("slot=provider-count-unavailable ") {
+        let (rung, detail) = rest.split_once(' ')?;
+        return Some((
+            "provider-count".to_string(),
+            format!("config.{rung} provider count unavailable for {detail}"),
+        ));
+    }
+    if terminal == "slot=manual_account_switch_required" {
+        return Some((
+            "manual-account".to_string(),
+            "every lane needs a manual canonical account switch".to_string(),
+        ));
+    }
+    if terminal == "slot=exhausted refuse" {
+        return Some((
+            "exhausted-refuse".to_string(),
+            "every configured lane is exhausted".to_string(),
+        ));
+    }
     None
 }
 
@@ -1850,7 +1908,11 @@ fn queue_decision(chain: Vec<Value>) -> Value {
 }
 
 fn exhausted_decision(chain: Vec<Value>) -> Value {
-    json!({"status": "none", "verdict": "capacity-held", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain})
+    let mut out = json!({"status": "none", "verdict": "capacity-held", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain});
+    if let Some((class, text)) = refusal_terminal(out["chain"].as_array().expect("chain array")) {
+        out["refusal_terminal"] = json!({"class": class, "text": text});
+    }
+    out
 }
 
 /// A strict-policy refusal: the decision path is named, the candidate is
