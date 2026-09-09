@@ -546,7 +546,7 @@ fn session_liveness_answer_uncached(
 /// Pure(ish) core of `claim sweep`: build the pinned verdict object from a
 /// complete record set. `claim_sweep_payload` keeps the old single-directory
 /// test seam; the command path supplies the both-root set from `claims::list`.
-fn claim_sweep_payload_from_records(
+pub(crate) fn claim_sweep_payload_from_records(
     records: &[crate::claims::ClaimRecord],
     prefix: Option<&str>,
     keys: &[String],

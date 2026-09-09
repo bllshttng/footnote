@@ -14,6 +14,7 @@ agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents court	T1	agents court	3
 agents court-orphans	T1	agents court-orphans	0
+agents court-fold	T1	agents court-fold	0
 agents route-slot	T1	agents route-slot	0
 agents spawn-overlay	T1	agents spawn-overlay	0
 agents fallback-chain	T1	agents fallback-chain	0

@@ -1018,3 +1018,260 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     after = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
     assert after["held"] == 1
     assert adopted in spawn_gate.census().crowned_sessions
+
+
+# --- the scope fold: the native fold, relayed onto the crown rows
+
+
+def _stub_court_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool = False) -> None:
+    """A stub fno-agents binary that answers `court-fold` from a canned
+    scope_nodes map and court-orphans from an empty list (the fold tests pin
+    the RELAY, not the fold computation; court_fold.rs pins that)."""
+    import stat
+
+    script = tmp_path / "fno-agents"
+    body = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"NODES = {scope_nodes!r}\n"
+        f"FAIL = {repr(bool(fail))}\n"
+        "REIGN = json.dumps({'crowned': True, 'scope': 'x', 'shape': 'pass',\n"
+        "    'manifest_session': 's', 'registry_session': 's', 'live': True,\n"
+        "    'split': False, 'unknown_reason': None, 'crown_on_manifest': False})\n"
+        "if 'court-fold' in sys.argv:\n"
+        "    if FAIL:\n"
+        "        sys.exit(3)\n"
+        "    print(json.dumps({'scope_nodes': NODES}), end='')\n"
+        "    sys.exit(0)\n"
+        "if 'court-orphans' in sys.argv:\n"
+        "    print('[]', end='')\n"
+        "    sys.exit(0)\n"
+        "print(REIGN, end='')\n"
+    )
+    script.write_text(body, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+
+
+def test_the_fold_lands_on_the_crown_rows(tmp_path: Path, monkeypatch) -> None:
+    """The fold answer keys on scope and lands on every crown that names it;
+    a crown the fold answered nothing for reads unresolved, never missing."""
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {
+            "e-1": {
+                "status": "ok",
+                "total": 2,
+                "counts": {"in_progress": 1, "ready": 1},
+                "nodes": [{"id": "x-1", "slug": "", "status": "in_progress",
+                           "worker": "w1", "pr_number": 3, "sessions": ["s1"]}],
+                "omitted": 0,
+            }
+        },
+    )
+    crowns = [
+        {"holder": "king", "level": 2, "scope": "e-1"},
+        {"holder": "gone-king", "level": 2, "scope": "x-dede", "status": "manifest-only"},
+    ]
+
+    fold_scope_nodes(crowns)
+
+    assert crowns[0]["scope_nodes"]["status"] == "ok"
+    assert crowns[0]["scope_nodes"]["nodes"][0]["pr_number"] == 3
+    assert crowns[1]["scope_nodes"]["status"] == "unresolved"
+
+
+def test_a_half_crown_resolves_locally_without_the_binary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A scope-less or level-less crown rules no territory; the fold says so
+    per row without paying a subprocess."""
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+    crowns = [
+        {"holder": "half", "level": None, "scope": "alpha"},
+        {"holder": "scopeless", "level": 1, "scope": ""},
+    ]
+
+    fold_scope_nodes(crowns)
+
+    for crown in crowns:
+        assert crown["scope_nodes"]["status"] == "unresolved"
+        assert "no scope or no crown level" in crown["scope_nodes"]["reason"]
+
+
+def test_a_failed_fold_marks_crowns_unresolved_never_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A fold that cannot run (stale binary, unreadable graph) is stated per
+    crown - the rows never render as empty scopes."""
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
+
+    fold_scope_nodes(crowns)
+
+    sn = crowns[0]["scope_nodes"]
+    assert sn["status"] == "unresolved"
+    assert "could not run" in sn["reason"]
+
+
+def test_a_missing_binary_marks_crowns_unresolved(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.court import fold_scope_nodes
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
+
+    fold_scope_nodes(crowns)
+
+    assert crowns[0]["scope_nodes"]["status"] == "unresolved"
+
+
+def test_empty_court_folds_to_nothing(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+    fold_scope_nodes([])  # no crowns, no subprocess, no raise
+
+
+def test_nodes_flag_folds_json_and_moves_no_existing_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-JSON: -n -J adds scope_nodes per crown and nothing else moves, so a
+    caller gating on summary or conflicts is unaffected."""
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {
+            "e-1": {
+                "status": "ok", "total": 1, "counts": {"ready": 1},
+                "nodes": [{"id": "e-1", "slug": "", "status": "ready",
+                           "worker": None, "pr_number": 7, "sessions": []}],
+                "omitted": 0,
+            }
+        },
+    )
+
+    before = json.loads(render_court(as_json=True))
+    after = json.loads(render_court(as_json=True, nodes=True))
+
+    assert after["summary"] == before["summary"]
+    assert after["conflicts"] == before["conflicts"]
+    assert len(after["crowns"]) == len(before["crowns"])
+    for plain, folded in zip(before["crowns"], after["crowns"]):
+        plain_view = {k: v for k, v in folded.items() if k != "scope_nodes"}
+        assert plain_view == plain
+    sn = after["crowns"][0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert [r["pr_number"] for r in sn["nodes"]] == [7]
+
+
+def test_nodes_flag_answers_json_and_the_plain_table_is_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-COMPAT: without the flag the table renders exactly as before; with
+    it the answer is JSON (the fold's row data is tabular and the board's
+    court section is its human view)."""
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {
+            "e-1": {
+                "status": "ok", "total": 1, "counts": {"ready": 1},
+                "nodes": [{"id": "e-1", "slug": "", "status": "ready",
+                           "worker": "tgt-e1", "pr_number": 7, "sessions": ["s-e1"]}],
+                "omitted": 0,
+            }
+        },
+    )
+
+    plain = render_court(as_json=False)
+    assert "scope_nodes" not in plain
+
+    folded = json.loads(render_court(as_json=False, nodes=True))
+    sn = folded["crowns"][0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert sn["nodes"][0]["worker"] == "tgt-e1"
+    assert sn["nodes"][0]["pr_number"] == 7
+
+
+def test_a_failed_fold_names_the_crown_not_an_empty_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-READFAIL: a fold that cannot run says so on the crown's own row -
+    never crowns rendered as empty scopes."""
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+
+    text = render_court(as_json=False, nodes=True)
+
+    payload = json.loads(text)
+    assert all(
+        c["scope_nodes"]["status"] == "unresolved" for c in payload["crowns"]
+    )
+    assert "could not run" in payload["crowns"][0]["scope_nodes"]["reason"]
+
+
+def test_the_flag_pays_no_extra_python_graph_read(tmp_path: Path, monkeypatch) -> None:
+    """AC5-PERF (the part a unit test pins): the fold rides the native binary,
+    so -n performs the same single python graph read the plain render does."""
+    from fno.agents.court import render_court
+    from fno.tracker import metadata
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {"e-1": {"status": "ok", "total": 1, "counts": {"ready": 1},
+                 "nodes": [], "omitted": 1}},
+    )
+    calls: list = []
+    real = metadata.read_entries
+
+    def counting(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(metadata, "read_entries", counting)
+
+    render_court(as_json=False)
+    assert len(calls) == 1
+    render_court(as_json=False, nodes=True)
+    assert len(calls) == 2
+
+
