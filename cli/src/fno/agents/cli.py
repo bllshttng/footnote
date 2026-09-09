@@ -954,6 +954,16 @@ def cmd_court(
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON instead of the table."
     ),
+    nodes: bool = typer.Option(
+        False,
+        "--nodes",
+        "-n",
+        help=(
+            "Fold each crown's scope nodes into its row: counts by status for "
+            "the whole scope, plus a row per active node with its worker, PR "
+            "and session ids."
+        ),
+    ),
 ) -> None:
     """The whole court: every live crown, its scope, its holder, its grantor,
     and whether the registry and the graph agree - the read that answers "did
@@ -972,7 +982,7 @@ def cmd_court(
     """
     from fno.agents.court import render_court
 
-    print(render_court(json_output))
+    print(render_court(json_output, nodes=nodes))
 
 
 # Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.

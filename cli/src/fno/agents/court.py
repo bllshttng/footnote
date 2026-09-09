@@ -420,11 +420,49 @@ def _fmt_row(e: dict[str, Any]) -> str:
     )
 
 
-def render_court(as_json: bool) -> str:
-    """The full render: table + conflicts + summary, or its JSON mirror."""
+def _fold_lines(e: dict[str, Any]) -> list[str]:
+    """The indented scope-fold block printed under one crown's table row."""
+    sn = e.get("scope_nodes")
+    if not sn:
+        return []
+    if sn["status"] == "unresolved":
+        return [f"  scope fold: unresolved - {sn['reason']}"]
+    counts = ", ".join(f"{k} {v}" for k, v in sn["counts"].items())
+    lines = [
+        f"  {sn['total']} node{'s' if sn['total'] != 1 else ''}: "
+        f"{counts}   ({sn['omitted']} not listed)"
+    ]
+    lines.append(f"  {'NODE':<8} {'STATUS':<12} {'WORKER':<18} {'PR':<6} SESSIONS")
+    for r in sn["nodes"]:
+        pr = f"#{r['pr_number']}" if r.get("pr_number") else ""
+        sessions = ", ".join(str(s) for s in r.get("sessions") or [])
+        lines.append(
+            f"  {str(r['id']):<8} {str(r['status']):<12} "
+            f"{str(r.get('worker') or '-'):<18} {pr:<6} {sessions}"
+        )
+    return lines
+
+
+def render_court(as_json: bool, nodes: bool = False) -> str:
+    """The full render: table + conflicts + summary, or its JSON mirror.
+
+    ``nodes`` folds each crown's scope into its row (``fold_scope_nodes``) off
+    the ONE graph read this render performs; a failed read is stated in the
+    output rather than rendered as a court of empty scopes.
+    """
     import json
 
-    court = gather_court()
+    entries = None
+    if nodes:
+        from fno.tracker.metadata import read_entries
+
+        try:
+            entries = read_entries("agents.court")
+        except Exception:  # noqa: BLE001 - stated below, never a crash
+            entries = None
+    court = gather_court(entries=entries)
+    if nodes and entries is not None and court["crowns"]:
+        fold_scope_nodes(court["crowns"], entries)
     if as_json:
         return json.dumps(court, indent=2, sort_keys=True)
 
@@ -434,7 +472,18 @@ def render_court(as_json: bool) -> str:
         return "court: no live crowns"
 
     header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<14} AGREE SOURCE"
-    lines = [header] + [_fmt_row(e) for e in court["crowns"]]
+    if nodes:
+        lines = [header]
+        for e in court["crowns"]:
+            lines.append(_fmt_row(e))
+            lines.extend(_fold_lines(e))
+    else:
+        lines = [header] + [_fmt_row(e) for e in court["crowns"]]
+    if nodes and entries is None:
+        lines.append(
+            "\nscope fold skipped: the graph could not be read; "
+            "crown rows carry no scope nodes rather than empty ones."
+        )
     for c in court["conflicts"]:
         holders = ", ".join(c["holders"])
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")

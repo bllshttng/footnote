@@ -1265,3 +1265,117 @@ def test_fold_runs_over_the_whole_court_in_under_half_a_second_and_reads_no_grap
     assert elapsed < 0.5
     assert crowns[0]["scope_nodes"]["nodes"][0]["id"] == "e-1"
     assert crowns[1]["scope_nodes"]["nodes"][0]["pr_number"] == 7
+
+
+def test_nodes_flag_folds_json_and_moves_no_existing_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-JSON: -n -J adds scope_nodes per crown and nothing else moves, so a
+    caller gating on summary or conflicts is unaffected."""
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
+            {"id": "x-1", "parent": "e-1", "status": "in_progress", "pr_number": 3},
+        ],
+    )
+
+    before = json.loads(render_court(as_json=True))
+    after = json.loads(render_court(as_json=True, nodes=True))
+
+    assert after["summary"] == before["summary"]
+    assert after["conflicts"] == before["conflicts"]
+    assert len(after["crowns"]) == len(before["crowns"])
+    for plain, folded in zip(before["crowns"], after["crowns"]):
+        plain_view = {k: v for k, v in folded.items() if k != "scope_nodes"}
+        assert plain_view == plain
+    sn = after["crowns"][0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert [r["pr_number"] for r in sn["nodes"]] == [None, 3]
+
+
+def test_nodes_table_adds_the_fold_block_and_the_plain_table_is_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-COMPAT: without the flag the table renders exactly as before, fold
+    block included in neither; with it the counts line and active rows appear
+    under their crown."""
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
+            {"id": "x-1", "parent": "e-1", "status": "in_progress"},
+        ],
+    )
+
+    plain = render_court(as_json=False)
+    assert "not listed" not in plain
+    assert "SESSIONS" not in plain
+
+    folded = render_court(as_json=False, nodes=True)
+    assert "2 nodes: in_progress 1, ready 1   (0 not listed)" in folded
+    assert "NODE" in folded and "SESSIONS" in folded
+    assert "x-1" in folded
+
+
+def test_a_failed_read_under_the_flag_is_stated_and_the_table_survives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-READFAIL: an unreadable graph says the fold was skipped and still
+    prints the crown table - never crowns rendered as empty scopes."""
+    from fno.agents.court import render_court
+    from fno.tracker import metadata
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+    )
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")),
+    )
+
+    text = render_court(as_json=False, nodes=True)
+
+    assert "scope fold skipped" in text
+    assert "king" in text
+    assert "not listed" not in text
+    payload = json.loads(render_court(as_json=True, nodes=True))
+    assert all("scope_nodes" not in c for c in payload["crowns"])
+
+
+def test_the_flag_pays_one_read_not_two(tmp_path: Path, monkeypatch) -> None:
+    """AC5-PERF (the part a unit test can pin): -n performs the same single
+    graph read the plain render performs; the fold reads nothing."""
+    from fno.agents.court import render_court
+    from fno.tracker import metadata
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    calls: list = []
+    real = metadata.read_entries
+
+    def counting(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(metadata, "read_entries", counting)
+
+    render_court(as_json=False)
+    assert len(calls) == 1
+    render_court(as_json=False, nodes=True)
+    assert len(calls) == 2
