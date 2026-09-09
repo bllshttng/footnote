@@ -300,3 +300,58 @@ def test_load_audit_self_check_still_passes(repo: Path, env: dict) -> None:
     )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "FAIL" not in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Review-round pins: CODEX_HOME, installed-without-plugin, healthy cache,
+# relative --repo
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_cache_resolves_under_codex_home(repo: Path, tmp_path: Path) -> None:
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import skill_discovery as sd  # noqa: PLC0415
+
+    home = tmp_path / "cxhome"
+    _plugin_cache(home / "plugins", {"target": GOOD_DESC})  # <home>/plugins/cache/...
+    assert (home / "plugins" / "cache" / "footnote" / "fno" / "0.3.2").is_dir()
+    os.environ["CODEX_HOME"] = str(home)
+    try:
+        plugin = sd.find_installed_plugin()
+    finally:
+        del os.environ["CODEX_HOME"]
+    assert plugin is not None and plugin.version == "0.3.2"
+
+
+def test_installed_source_without_plugin_refuses_and_keeps_aliases(repo: Path, env: dict) -> None:
+    _link(_sroot(repo), "plugin--fno--target", repo / "skills" / "target")
+    r = _run(repo, env, "setup.sh", "--provider", "codex", "--skills-source", "installed")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "no usable plugin" in r.stderr
+    # The refusal must come BEFORE any alias removal.
+    assert (_sroot(repo) / "plugin--fno--target").is_symlink()
+
+
+def test_audit_healthy_installed_cache_is_not_stale(repo: Path, env: dict, tmp_path: Path) -> None:
+    """Installed mode has no aliases; the cache digest must be compared with
+    the SOURCE digest, so a byte-identical cache never reads as stale."""
+    src_md = (repo / "skills" / "target" / "SKILL.md").read_bytes()
+    _plugin_cache(tmp_path, {"target": "description: Run a target end to end"})
+    (tmp_path / "cache" / "footnote" / "fno" / "0.3.2" / "skills" / "target" / "SKILL.md").write_bytes(src_md)
+    r = subprocess.run(
+        [sys.executable, "scripts/diagnostics/codex-skill-load-audit.py",
+         "--discovery", "--repo", str(repo), "--skills-root", str(_sroot(repo)),
+         "--plugin-cache", str(tmp_path / "cache")],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "stale-cache" not in r.stdout
+    assert "one-source(plugin)" in r.stdout
+
+
+def test_relative_repo_root_classifies_ownership(repo: Path) -> None:
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import skill_discovery as sd  # noqa: PLC0415
+
+    alias = Path(".agents/skills/plugin--fno--target")
+    assert sd.link_owner(alias, Path(".")) == "footnote"

@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ALIAS_PREFIXES = ("fno--", "plugin--fno--")
-DEFAULT_PLUGIN_CACHE = "~/.codex/plugins/cache"
 # The growth-studio pack is Footnote's own; it names no foreign skill today.
 # A future explicit dependency is added here, never re-derived from names.
 PRESERVE = frozenset()
@@ -52,8 +51,16 @@ def sha256_file(path: Path) -> str | None:
         return None
 
 
-def find_installed_plugin(cache_root: Path) -> Plugin | None:
+def default_plugin_cache() -> Path:
+    """Codex installs under CODEX_HOME when set, ~/.codex otherwise."""
+    home = os.environ.get("CODEX_HOME") or "~/.codex"
+    return Path(home).expanduser() / "plugins" / "cache"
+
+
+def find_installed_plugin(cache_root: Path | None = None) -> Plugin | None:
     """Newest usable footnote/fno plugin under the codex cache, else None."""
+    if cache_root is None:
+        cache_root = default_plugin_cache()
     base = cache_root / "footnote" / "fno"
     if not base.is_dir():
         return None
@@ -143,7 +150,8 @@ def metadata_problems(md_path: Path, canonical: str | None = None) -> list[str]:
 
 def link_owner(target: Path, repo_root: Path) -> str:
     resolved = target.resolve()
-    if resolved == (repo_root / "skills").resolve() or repo_root in resolved.parents:
+    root = repo_root.resolve()
+    if resolved == (root / "skills").resolve() or root in resolved.parents:
         return "footnote"
     return f"external:{resolved}"
 
@@ -244,21 +252,21 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("probe")
     p.add_argument("--repo", required=True, type=Path)
-    p.add_argument("--cache", type=Path, default=Path(DEFAULT_PLUGIN_CACHE))
+    p.add_argument("--cache", type=Path, default=None)
     p = sub.add_parser("inventory")
     p.add_argument("--repo", required=True, type=Path)
     p.add_argument("--root", required=True, type=Path)
-    p.add_argument("--cache", type=Path, default=Path(DEFAULT_PLUGIN_CACHE))
+    p.add_argument("--cache", type=Path, default=None)
     p.add_argument("--json", action="store_true")
     p.add_argument("--tsv", action="store_true", help="name\\tstatus\\towner\\tdigest\\tnote")
     p = sub.add_parser("curate")
     p.add_argument("--repo", required=True, type=Path)
     p.add_argument("--root", required=True, type=Path)
-    p.add_argument("--cache", type=Path, default=Path(DEFAULT_PLUGIN_CACHE))
+    p.add_argument("--cache", type=Path, default=None)
     p.add_argument("--apply", action="store_true")
     p.add_argument("--json", action="store_true")
     args = ap.parse_args()
-    cache = args.cache.expanduser()
+    cache = (args.cache or default_plugin_cache()).expanduser()
     plugin = find_installed_plugin(cache)
     if args.cmd == "probe":
         # Absent plugin prints an EMPTY value: consumers select dev mode on -z.

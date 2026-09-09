@@ -194,13 +194,18 @@ def discovery(repo, skills_root, plugin_cache):
     print(f"{'name':<22} {'verdict':<18} {'source-digest':<18} loaded-from")
     for r in rows:
         cache_dig = cache_digs.get(r.name)
+        # The source digest is computed from the source tree itself, never
+        # from an alias row: in installed mode there is no alias and the row
+        # digest is None, which would otherwise read every healthy cache
+        # copy as stale.
+        src_dig = sd.sha256_file(sources[r.name]) if r.name in sources else None
         if r.name not in sources and r.alias:
             verdict, loaded = "alias-only", f"{r.source} via {r.alias}"
         elif r.name not in sources:
             verdict, loaded = "plugin-only", str(plugin.skills_dir / r.name) if plugin else "-"
-        elif plugin and cache_dig is not None and cache_dig != r.digest and r.owner == "footnote":
+        elif plugin and cache_dig is not None and cache_dig != src_dig:
             verdict = "stale-cache"
-            loaded = f"{plugin.skills_dir / r.name} (cache {cache_dig} != source {r.digest}); repair: reinstall via the supported flow (docs/HARNESSES.md)"
+            loaded = f"{plugin.skills_dir / r.name} (cache {cache_dig} != source {src_dig}); repair: reinstall via the supported flow (docs/HARNESSES.md)"
         elif r.alias:
             verdict = "one-source(alias)" if r.status == "ok" else r.status
             loaded = f"{r.source} via {r.alias}"

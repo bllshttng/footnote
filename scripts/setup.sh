@@ -106,6 +106,14 @@ setup_codex() {
     fi
   fi
 
+  # An installed request without a plugin must fail BEFORE any alias is
+  # removed: leaving no Footnote source at all is worse than the status quo.
+  if [[ "$mode" == "installed" && -z "$plugin_path" ]]; then
+    echo "Codex: --skills-source installed requested but no usable plugin found" >&2
+    echo "Codex: looked under \${CODEX_HOME:-\$HOME/.codex}/plugins/cache (override: CODEX_PLUGIN_CACHE)" >&2
+    exit 1
+  fi
+
   if [[ "$mode" == "installed" ]]; then
     local removed
     removed=$(find "$skills_root" -maxdepth 1 -type l \( -name 'fno--*' -o -name 'plugin--fno--*' \) | wc -l | tr -d ' ')

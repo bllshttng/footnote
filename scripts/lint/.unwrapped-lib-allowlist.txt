@@ -261,3 +261,10 @@ cargo-rustc-wrapper.sh
 # add -A guard in hooks/git-protection.py, which would source it the same way.
 # Pure sourcing library; no CLI of its own.
 rooted-writers.sh
+
+# The skill-discovery engine behind scripts/setup.sh, scripts/doctor.sh and
+# scripts/diagnostics/codex-skill-load-audit.py. It must run before fno may
+# even be installed (bootstrap-era, plain python3 with a pyyaml degrade), so
+# an fno wrapper would invert the dependency; the bash scripts are the entry
+# points. Pure library + standalone CLI of its own; no fno verb wraps it.
+skill_discovery.py
