@@ -1,28 +1,18 @@
 """Backlog + kanban hygiene sweep for ``fno backlog maintain`` (ab-9c144a4c).
 
 Legs that keep ``graph.json`` and the kanban board clean by composing
-detection logic over the entries list. The CLI command in ``cli.py`` orchestrates
-them; this module holds the pure, IO-light detectors so each leg is unit-testable
-without a live graph.
+detection logic over the entries list. The CLI command in ``cli.py``
+orchestrates them; this module holds the pure, IO-light detectors so each leg
+is unit-testable without a live graph.
 
-Three legs are DETERMINISTIC and apply under ``--apply``:
-
-  1. re-scope  - correct ``project``/``cwd`` drift (project-null, wrong project,
-                 or a worktree-path cwd) against the settings workspace map.
-                 Only ``project``/``cwd`` are ever changed, never priority/status.
-  2. leak-prune - remove nodes whose ``cwd`` is under a temp dir (pytest leaks).
-  2b. pr-url    - backfill a derived ``pr_url`` onto rows carrying a
-                 ``pr_number`` with none, keyed off each node's own ``cwd``.
-
-Three legs are JUDGMENT calls and ALWAYS propose-only (never mutate, regardless
-of ``--apply``):
-
-  3. dedup  - surface near-duplicate idea titles for human merge/supersede.
-  4. drain  - propose a reversible ``defer`` for stale ideas (older than N days).
-  5. cap    - report a Now column over its WIP cap; propose triage demotions.
-
-A final report leg appends a summary to health-history; that lives in the CLI
-command since it owns the write target.
+Deterministic legs (apply under ``--apply``): re-scope (correct
+``project``/``cwd`` drift against the settings workspace map - only those two
+fields ever change), leak-prune (nodes whose ``cwd`` is under a temp dir),
+pr-url backfill. Judgment legs (ALWAYS propose-only, regardless of
+``--apply``): dedup (near-duplicate idea titles), drain (reversible defer for
+stale ideas), cap (Now column over its WIP cap). A final report leg appends a
+health-history summary; that lives in the CLI command, which owns the write
+target.
 """
 from __future__ import annotations
 

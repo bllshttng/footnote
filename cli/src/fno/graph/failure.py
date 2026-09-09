@@ -25,10 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
-# Reason-prefix sentinel that marks an AUTO defer (vs a human/manual defer), so
-# health can always distinguish the two (Failure Modes / Invariants). Claude's
-# Discretion #2: a reason-prefix sentinel avoids the schema churn of a dedicated
-# field while staying greppable.
+# Reason-prefix sentinel marking an AUTO defer (vs a human/manual one), so
+# health can always distinguish the two; greppable without schema churn.
 AUTO_FAILURE_SENTINEL = "auto-failure:"
 
 _FAIL_TYPE = "node_failed"
@@ -37,18 +35,12 @@ _UNDEFER_TYPE = "node_undeferred"
 
 
 def events_path() -> Path:
-    """The global events log the walker mirrors loop ``node_*`` events into.
-
-    Resolved via ``paths.state_dir()`` (the canonical, config-aware resolver the
-    whole Python side uses for ``events.jsonl`` - including
-    ``agents.events.emit``; a literal ``~/.fno`` is rejected by the
-    no-hardcoded-paths CI guard). The default ``state_dir`` is ``~/.fno``,
-    which is exactly where the Rust walker mirrors its loop events, so reader and
-    producer coincide on every default install. ``read_events()`` also consumes
-    the Rust agents-home mirror when it differs, so a custom ``state_dir`` or
-    ``FNO_AGENTS_HOME`` cannot split the failure writer from this reader.
-    Resolved at call time so the conftest ``$HOME`` redirect is honored in tests.
-    """
+    """The global events log the walker mirrors loop ``node_*`` events into:
+    ``paths.state_dir()`` / ``events.jsonl`` (the config-aware resolver; a
+    literal ``~/.fno`` is rejected by the no-hardcoded-paths guard).
+    ``read_events()`` also consumes the Rust agents-home mirror when it
+    differs, so a custom state dir cannot split writer from reader. Resolved
+    at call time so the conftest ``$HOME`` redirect is honored in tests."""
     from fno import paths
 
     return paths.state_dir() / "events.jsonl"
