@@ -194,10 +194,12 @@ def test_lane_and_cohort_flags_pass_through_to_run_task(tmp_path: Path, monkeypa
     import fno.evals.bank as bank_mod
     import fno.evals.runner as runner_mod
 
+    from fno.route_resolve import InventoryRow
+
     seen: dict = {}
     monkeypatch.setattr(
         bank_mod, "resolve_lane",
-        lambda name, **kw: bank_mod.LaneCoordinate(name, "codex", "gpt-6-astra", "high", "", ""),
+        lambda name, **kw: InventoryRow(name=name, harness="codex", model="gpt-6-astra", effort="high"),
     )
 
     def fake_run_task(task, *, repeat, repo_root, worker_provider=None, **kw):

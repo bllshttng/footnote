@@ -1,10 +1,8 @@
-"""The x-fd52 paired-task experiment contract: AC4-HP, AC4-EDGE.
+"""The paired-task experiment contract: real fixtures, and lane refusals
+that say so explicitly rather than fabricate quality evidence.
 
-Ties the wave-4 bank fixtures (capability-lane-*.yaml) to the wave-1/2
-lane machinery: the same fixtures, repeats, and stopping rule must permit a
-reproducible comparison (AC4-HP), and account/budget/identity refusals must
-say so explicitly rather than fabricate quality evidence (AC4-EDGE). See
-docs/architecture/lane-qualification.md for the operator-facing recipe.
+See docs/architecture/lane-qualification.md for the operator-facing recipe.
+Cohort aggregation across paired runs is deferred to a follow-up.
 """
 from __future__ import annotations
 
@@ -12,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from fno.evals.bank import BankError, LaneCoordinate, LaneError, discover_bank, resolve_lane
-from fno.evals.report import CohortSpec, compare_cohorts
+from fno.evals.bank import BankError, LaneError, discover_bank, resolve_lane
 from fno.evals.runner import _lane_evidence
+from fno.route_resolve import InventoryRow
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BANK_DIR = REPO_ROOT / "evals" / "bank"
@@ -59,42 +57,12 @@ def test_bank_task_load_is_never_a_bare_ok_grade() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# AC4-HP: the same fixture, repeats and stopping rule permit a reproducible
-# comparison across configuration fingerprints
-# --------------------------------------------------------------------------- #
-
-def _lane_row(cohort: str, lane: str, passed: bool, rev: str = "fixture-rev-1") -> dict:
-    return {"task_id": "capability-lane-implementation", "tier": "capability",
-            "pass": passed, "experiment_id": cohort, "requested_lane": lane,
-            "lane_status": "ok", "bank_rev": rev, "duration_s": 1.0}
-
-
-def test_same_fixture_and_repeats_yield_a_reproducible_cohort_comparison() -> None:
-    rows = [_lane_row("baseline", "claude-sonnet", True) for _ in range(5)]
-    rows += [_lane_row("candidate", "astra-high", True) for _ in range(5)]
-    cohorts = [
-        CohortSpec("baseline", repeats=5, fixture_rev="fixture-rev-1"),
-        CohortSpec("candidate", repeats=5, fixture_rev="fixture-rev-1"),
-    ]
-    out = compare_cohorts(rows, cohorts, promotion_criteria={
-        "baseline": "baseline", "candidate": "candidate", "min_pass_at_1": 1.0,
-    })
-    b, c = out["cohorts"]["baseline"], out["cohorts"]["candidate"]
-    assert b["sample_count"] == c["sample_count"] == 5
-    assert b["fixture_revisions"] == c["fixture_revisions"] == ["fixture-rev-1"]
-    assert not b["fixture_rev_mismatch"] and not c["fixture_rev_mismatch"]
-    assert out["promotion"]["recommended"] is True
-
-
-# --------------------------------------------------------------------------- #
-# AC4-EDGE: identity mismatch, unavailable model/profile, malformed input,
-# and a budget/access-bound trial all say so explicitly - never a promoted
-# or graded claim built on unrun/misattributed work.
+# identity mismatch, unavailable lane, and malformed input all say so
+# explicitly - never a graded claim built on unrun or misattributed work.
 # --------------------------------------------------------------------------- #
 
 def test_identity_mismatch_is_substituted_not_folded_into_the_requested_lane() -> None:
-    lane = LaneCoordinate(name="astra-high", harness="codex", model="gpt-6-astra",
-                          effort="high", route="", account="")
+    lane = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
     observed = {"harness": "claude", "model": "claude-sonnet-5", "effort": "medium"}
     evidence = _lane_evidence(lane, observed)
     assert evidence["substituted"] is True
@@ -111,18 +79,3 @@ def test_malformed_bank_task_refuses_loudly_naming_id_and_file(tmp_path: Path) -
     bad.write_text("id: broken\ntier: capability\ngrade: []\n", encoding="utf-8")
     with pytest.raises(BankError, match="broken"):
         discover_bank(tmp_path)
-
-
-def test_budget_bound_trial_reports_unavailable_never_a_synthetic_pass() -> None:
-    """No account/budget could exercise the candidate lane at all: zero rows.
-    The comparison must say so, never silently score 100% of nothing."""
-    rows = [_lane_row("baseline", "claude-sonnet", True) for _ in range(3)]
-    out = compare_cohorts(
-        rows, [CohortSpec("baseline", repeats=3), CohortSpec("candidate", repeats=3, budget_usd=0.0)],
-        promotion_criteria={"baseline": "baseline", "candidate": "candidate"},
-    )
-    candidate = out["cohorts"]["candidate"]
-    assert candidate["sample_count"] == 0
-    assert candidate["pass_at_1"] is None  # never a fabricated rate
-    assert out["promotion"]["recommended"] is False
-    assert any("no scored samples" in r for r in out["promotion"]["reasons"])

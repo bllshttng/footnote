@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 
 from fno.evals import history as _history
-from fno.evals.bank import GradeCheck, LaneCoordinate, TaskSpec
+from fno.evals.bank import GradeCheck, TaskSpec
 from fno.evals.grading import grade
 import fno.evals.runner as _runner
 from fno.evals.runner import SpawnResult, evals_enabled, run_task
+from fno.route_resolve import InventoryRow
 
 
 # --------------------------------------------------------------------------- #
@@ -283,8 +284,7 @@ def _never_called_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResu
 # lane requested/observed evidence - AC1-HP, AC1-EDGE, AC1-ERR
 # --------------------------------------------------------------------------- #
 
-_LANE = LaneCoordinate(name="astra-high", harness="codex", model="gpt-6-astra",
-                       effort="high", route="", account="")
+_LANE = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
 
 
 def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) -> None:
