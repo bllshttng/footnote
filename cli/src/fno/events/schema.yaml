@@ -3957,6 +3957,10 @@ event_types:
         exit_code:
           type: integer
           description: "The spawn-gate exit code behind a machine-scoped skip (x-c6fe): 75-80 with capacity-refused, 81 with gate-unavailable."
+        kind:
+          type: string
+          enum: [reconcile]
+          description: "Present on skips emitted by the reconcile dispatcher (a G4 de-stub launch, not a cold dispatch); declared here because journal rows have carried it since the path landed."
         attempted:
           type: boolean
           description: "False on an epic-advance pass-stop row (x-c6fe LD4): the gate refused a sibling, the condition is machine-wide, and this child was never tried. Absent (the field omitted) on a child that was attempted."

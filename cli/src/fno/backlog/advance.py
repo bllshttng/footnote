@@ -305,6 +305,11 @@ def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
     )
 
 
+#: The machine-scoped skip reasons, derived from the map so the vocabulary
+#: has exactly one source. The epic-advance pass stops on any of these.
+_MACHINE_SCOPED_REASONS = frozenset(_GATE_REFUSAL_REASONS.values())
+
+
 def _slot_queue_retry_at(stdout: str) -> Optional[float]:
     """The ``retry_at`` from the seam's typed queue-refusal JSON, if any."""
     for line in reversed((stdout or "").splitlines()):
@@ -4323,10 +4328,6 @@ def advance_epic(
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
     total = 0
-    #: The first machine-scoped refusal ends the pass: the refusing condition
-    #: is identical for every remaining child, so attempting them only
-    #: manufactures one refusal per child.
-    _MACHINE_SCOPED = ("capacity-refused", "gate-unavailable")
     for idx, child in enumerate(children):
         if max_dispatch is not None and total >= max_dispatch:
             break  # overall cap reached; remaining ready children wait for a drain/re-run
@@ -4377,9 +4378,12 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
-        if res.decision == "skipped" and res.reason in _MACHINE_SCOPED:
-            # Name every child the pass did NOT try, so the journal shows what
-            # was skipped for the machine rather than implying it was considered.
+        if res.decision == "skipped" and res.reason in _MACHINE_SCOPED_REASONS:
+            # The first machine-scoped refusal ends the pass: the refusing
+            # condition is identical for every remaining child, so attempting
+            # them only manufactures one refusal per child. Name every child
+            # the pass did NOT try, so the journal shows what was skipped for
+            # the machine rather than implying it was considered.
             for remaining in children[idx + 1:]:
                 _emit(
                     EVENT_SKIPPED,
