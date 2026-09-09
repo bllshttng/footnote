@@ -2974,7 +2974,7 @@ def cmd_note(
         typer.echo(f"noted {task_id}: {text}")
     if not quiet:
         try:
-            from fno.graph.note_notify import deliver_note
+            from fno.backlog.note_notify import deliver_note
 
             receipts = deliver_note(task_id, text, _graph_path(), entries or None)
         except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not

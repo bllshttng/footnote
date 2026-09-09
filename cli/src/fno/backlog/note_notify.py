@@ -4,6 +4,10 @@ A worker reads its node once, at dispatch, so a note appended after that reaches
 nobody on its own. Nothing here raises: the note is already written, so a fault
 becomes a printed receipt. Contract, and every "why", in
 docs/architecture/backlog-graph-verb-contracts.md.
+
+It lives beside ``advance`` rather than under ``fno.graph`` because it reads the
+graph AND reaches the agent runtime for the claim, the crown and the send. That
+pair is what ``fno.backlog`` already holds; the core layer may not import it.
 """
 from __future__ import annotations
 

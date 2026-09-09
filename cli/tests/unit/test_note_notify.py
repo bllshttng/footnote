@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from fno.graph import note_notify
-from fno.graph.note_notify import deliver_note, note_recipients, pointer
+from fno.backlog import note_notify
+from fno.backlog.note_notify import deliver_note, note_recipients, pointer
 
 
 def _holders(**by_node: str):
