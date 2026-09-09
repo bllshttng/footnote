@@ -91,19 +91,19 @@ fno doctor update --check --json   # the one resolver, the mux TUI's only consum
 
 ## Component convergence: proving rather than reporting
 
-A "fresh" verdict used to rest on one instrument per surface: the installed-rev marker for the Python tool, the client binary's embedded `crates_rev` for all of Rust. The August 2026 skew incident broke both assumptions at once: a cache-hit reinstall renewed the marker while shipping old bytes, and four cargo binaries (`fno`, `fno-agents`, `fno-agents-daemon`, `fno-agents-worker`) drifted while the client's rev check saw only the client. Two deployments of one CLI answered different schema versions, and the documented repair commands repaired only one of them.
+A "fresh" verdict once rested on one instrument per surface: a marker for the Python tool, the client binary's rev for all of Rust. The August 2026 skew incident broke both assumptions. A cache-hit reinstall renewed the marker while shipping old bytes, and four cargo binaries drifted while the client's rev check saw only the client.
 
-The classification is now a native decision. `crates/fno-agents/src/component_update.rs` owns the verdict table: each deployed component is Fresh, Updated, Stale, Missing, Failed or Unknown, carrying the expected and observed revision, the executable path, a named instrument failure for Unknown, and an executable repair command. The hidden `fno-agents component-verdict` verb serves it (one JSON request on stdin, one report on stdout). Python is the transport: `cli/src/fno/update.py` probes each component independently, sends the evidence, and renders the rows.
+The classification is now native. `crates/fno-agents/src/component_update.rs` owns the verdict table. Each verdict carries the expected and observed revision, the executable path, a named instrument failure, and a repair command. Status is Fresh, Updated, Stale, Missing, Failed or Unknown. The hidden `fno-agents component-verdict` verb serves it. Python is the transport: `cli/src/fno/update.py` sends the probe request and renders the rows.
 
-What counts as convergence is strict. A no-op success or an attempted build proves nothing: every component must show a post-effect probe matching the expected revision. A repair that lands nothing is Failed, never fresh. A probe that cannot answer is Unknown with the named instrument, never collapsed into fresh or missing. For the Python tool, a positive content-drift count is contradicting evidence that beats a matching marker.
+Convergence is strict. A no-op success or an attempted build proves nothing. Every component must show a post-effect probe matching the expected revision. A repair that lands nothing is Failed, never fresh. A probe that cannot answer is Unknown with the named instrument, never collapsed into fresh or missing. For the Python tool, a positive content-drift count beats a matching marker.
 
 Three consumers read the same verdict:
 
-- `fno doctor update` gates its outcomes on it. The fresh-triad fast path classifies the triad and the mux front door after any repair; a component that did not converge downgrades the outcome to `partial` with per-component lines naming the repair command. A failed cargo rebuild renders the same evidence while preserving the Python install (warn-and-continue).
-- `fno doctor` probes all five components (the Python tool plus the four cargo binaries) on every run. All fresh prints one summary line; anything else renders per component with status, revisions, evidence and repair. A proven-stale sibling beside a fresh client now widens `rust_stale`, so `--fix` repairs it.
-- `fno version --json` (the mux front door) reports `python_script`: the Python script the door would actually exec, resolved by the door's own resolver. Readiness receipts name that script beside the running interpreter, so the two-deployments shape is visible instead of silent.
+- `fno doctor update` gates its outcomes on it. The fresh-triad fast path classifies the triad and the mux front door after any repair. A component that did not converge downgrades the outcome to `partial`, with rows naming the repair command. A failed cargo rebuild renders the same evidence while preserving the Python install.
+- `fno doctor` probes all five components on every run. All fresh prints one summary line. Anything else renders per component. A proven-stale sibling beside a fresh client widens `rust_stale`, so `--fix` repairs it.
+- `fno version --json` reports `python_script`: the script the door actually execs, resolved by the door's own resolver. Readiness receipts name that script beside the running interpreter.
 
-The front door's own re-provision passes `--refresh` to `uv tool install`, so a wheel-cache hit can no longer reinstall the same stale bytes and call the loop converged.
+The front door's own re-provision passes `--refresh` to `uv tool install`. A wheel-cache hit can no longer reinstall the same stale bytes and call the loop converged.
 
 ## Locked decisions
 
