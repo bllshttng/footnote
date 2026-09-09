@@ -782,11 +782,7 @@ def update_readiness(
         "update_ready": update_ready,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
-        "python_tool": {
-            "script": front_script,
-            "running": running,
-            "same": same,
-        },
+        "python_tool": {"script": front_script, "running": running, "same": same},
         "wire": {"running": running_wires, "source": source_wire, "bump": wire_bump},
         "shells": shells if shells_known else None,
         "shells_ended": shells_ended if shells_known else None,
