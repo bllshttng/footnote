@@ -3516,13 +3516,15 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
     );
 }
 
-/// x-5aef AC5-HP: an open do row opening between the decision and the
-/// commit holds the row AT THE COMMIT GATE. The decision seam answers
-/// done-and-quiet; the graph the commit re-reads carries an open do row
-/// naming this session. The row keeps, the reason names the node, and the
-/// receipt is not counted as a retirement.
+/// x-5aef AC5, hard version (the codex P1 on PR 1637): an open do row that
+/// opened after the decision must hold the row BEFORE the effects fire. The
+/// decision seam answers done-and-quiet; the real graph carries an open do
+/// row naming this session. The stop and surface seams COUNT their calls,
+/// proving the effects never fired; the row keeps under kept_open_do_row
+/// with the node named. A held session whose process was already stopped is
+/// not held at all - it is dead.
 #[test]
-fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
+fn a_graph_obligation_opened_after_the_decision_holds_before_the_effects() {
     use crate::daemon::CascadeOutcome;
 
     let (dir, home) = staged_graph_home();
@@ -3551,6 +3553,10 @@ fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
     let store = home.root().join("store");
     std::fs::create_dir_all(&store).unwrap();
     let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let stop_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let surface_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let stop_for_seam = std::rc::Rc::clone(&stop_calls);
+    let surface_for_seam = std::rc::Rc::clone(&surface_calls);
     // The decision seam: done, no open do row - the stale evidence.
     let graph = graph_read(&[("s-commit", "N1", "done")], &[]);
     let summary = gc_sweep::run(
@@ -3561,20 +3567,31 @@ fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
-        &|_| true,
-        &|_| CascadeOutcome::Removed,
+        &move |_| {
+            stop_for_seam.set(stop_for_seam.get() + 1);
+            true
+        },
+        &move |_| {
+            surface_for_seam.set(surface_for_seam.get() + 1);
+            CascadeOutcome::Removed
+        },
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
     assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert_eq!(stop_calls.get(), 0, "the stop must never fire");
+    assert_eq!(
+        surface_calls.get(),
+        0,
+        "the surface removal must never fire"
+    );
     assert!(
         summary
-            .kept_no_receipt
+            .kept_open_do_row
             .iter()
-            .any(|(id, reason)| id == "commitw"
-                && reason.contains("graph obligation opened after the decision: x-new")),
+            .any(|(id, node)| id == "commitw" && node == "x-new"),
         "{:?}",
-        summary.kept_no_receipt
+        summary.kept_open_do_row
     );
     assert!(
         state::load_registry(&home.registry_json())
@@ -3582,6 +3599,79 @@ fn a_graph_obligation_opened_after_the_decision_holds_the_row_at_commit() {
             .entries
             .iter()
             .any(|e| e.name == "commitw"),
+        "the row survives"
+    );
+}
+
+/// The commit gate as the SECOND belt: with the pre-effects re-check passed
+/// (no open do row at stage time on the real graph), a receipt staged by a
+/// direct stage call is not counted when the graph re-read at commit finds
+/// the obligation. This is the only way to observe the stage-to-commit span
+/// in a test: drive commit_retirements directly.
+#[test]
+fn the_commit_gate_drops_an_order_whose_obligation_opened() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-late",
+            "status": "ready",
+            "sessions": [open_do_row("codex", "s-late")],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "latew".into();
+        e.short_id = "latew".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-late".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let mut entry = &state::RegistryEntry::default();
+    let entries = state::load_registry(&home.registry_json()).unwrap();
+    entry = entries.entries.first().unwrap();
+    let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+    receipt.effects = vec![crate::gc_native::stop_outcome_effect(true)];
+    let mut receipts = std::collections::BTreeMap::new();
+    receipts.insert(entry.name.clone(), receipt);
+    let order = gc_sweep::RetireOrder {
+        id: "latew".into(),
+        basis: "test".into(),
+        created_at: entry.created_at.clone(),
+        tree: crate::gc::TreeAction::None,
+        worktree: None,
+    };
+    let mut to_retire = std::collections::BTreeMap::new();
+    to_retire.insert(entry.name.clone(), order);
+    let report = gc_sweep::commit_retirements(
+        &home,
+        &emitter,
+        "test",
+        std::slice::from_ref(entry),
+        &mut to_retire,
+        &receipts,
+        &|_| None,
+    );
+    assert!(report.retired.is_empty(), "{:?}", report.retired);
+    assert!(
+        report
+            .kept_no_receipt
+            .iter()
+            .any(|(id, reason)| id == "latew"
+                && reason.contains("graph obligation opened after the decision: x-late")),
+        "{:?}",
+        report.kept_no_receipt
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "latew"),
         "the row survives the commit gate"
     );
 }

@@ -2134,6 +2134,7 @@ fn run_reap(rest: &[String]) -> i32 {
         // skip-list walk.
         let mut extras: Vec<&str> = Vec::new();
         let mut expected: Vec<String> = Vec::new();
+        let mut cohort_given = false;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -2142,6 +2143,7 @@ fn run_reap(rest: &[String]) -> i32 {
                     i += 1; // the duration value rides with --since
                 }
                 "--expect-sessions" => {
+                    cohort_given = true;
                     let value = rest.get(i + 1).map(String::as_str).unwrap_or("");
                     if value.is_empty() {
                         eprintln!(
@@ -2162,6 +2164,14 @@ fn run_reap(rest: &[String]) -> i32 {
                 other => extras.push(other),
             }
             i += 1;
+        }
+        // A cohort given but normalizing to nothing ("," or whitespace) must
+        // be a usage error, never a silently disabled check (codex P2).
+        if cohort_given && expected.is_empty() {
+            eprintln!(
+                "fno-agents: --expect-sessions normalized to an empty cohort; name at least one session"
+            );
+            return 2;
         }
         if !extras.is_empty() {
             eprintln!(

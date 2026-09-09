@@ -434,6 +434,7 @@ fn run_request(
                     crate::gc_sweep::RetireRefusal::NativeRemoval(_) =>
                         "native_removal_unconfirmed",
                     crate::gc_sweep::RetireRefusal::NoReceipt(_) => "no_receipt",
+                    crate::gc_sweep::RetireRefusal::GraphObligation(_) => "open_do_row",
                 }
             )),
         }

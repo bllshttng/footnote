@@ -158,8 +158,8 @@ pub(crate) struct RetireOrder {
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
-/// sweep files them under `stop_refused` / `kept_no_receipt`, the merge
-/// trigger under its `kept` list.
+/// sweep files them under `stop_refused` / `kept_no_receipt` /
+/// `kept_open_do_row`, the merge trigger under its `kept` list.
 pub(crate) enum RetireRefusal {
     /// The harness stop did not confirm.
     StopRefused(String),
@@ -167,6 +167,11 @@ pub(crate) enum RetireRefusal {
     NativeRemoval(String),
     /// No resumable receipt could be staged.
     NoReceipt(String),
+    /// An open do row names this session on a node: an obligation that
+    /// opened between the decision and the effects. Checked BEFORE any
+    /// effect fires, because a held session whose process was already
+    /// stopped is not held at all - it is dead (the codex P1 on PR 1637).
+    GraphObligation(String),
 }
 
 /// What one commit actually wrote. `retired_names` is the removal truth: a
@@ -923,6 +928,7 @@ pub(crate) fn run(
                     summary.stop_refused.push((id, reason))
                 }
                 RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
+                RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
             }
             continue;
         }
@@ -1094,6 +1100,28 @@ pub(crate) fn stage_session_retirement(
 ) -> Result<(), RetireRefusal> {
     let ledger = ledger_rows
         .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
+    // The obligation re-check runs HERE, before any effect: an open do row
+    // naming this session that opened since the decision means fresh work
+    // was assigned, and stopping the session would kill it while the commit
+    // gate "holds" a corpse. One graph read per staged row; staging only
+    // happens on rows already classified would-retire, so steady state pays
+    // nothing. The commit-level re-check remains as the second belt for the
+    // effects-to-registry-drop span, where holding is harmless.
+    if !dry_run {
+        if let Some(graph) = read_graph_entries(home) {
+            let sid = e
+                .harness_session_id
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if let Some(nodes) = graph.open_do.get(&sid) {
+                if let Some(node) = nodes.first().cloned() {
+                    return Err(RetireRefusal::GraphObligation(node));
+                }
+            }
+        }
+    }
     // The record precedes the effects: a receipt that cannot be built or
     // persisted refuses BEFORE the harness is touched, so no effect ever
     // fires without its recovery record already on disk (AC3-EDGE).
