@@ -439,6 +439,34 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 flush_gate_metrics(&metrics_state);
             });
     }
+    if state.read_source == ReadSource::Sqlite {
+        let export_state = Arc::clone(&state);
+        let export_shutdown = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("fno-store-export".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if export_shutdown.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                let gate = export_state
+                    .gate
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner());
+                let result = crate::graph_sqlite::export_if_due(
+                    &export_state.graph,
+                    Duration::from_secs(60),
+                );
+                drop(gate);
+                if let (Err(error), Some(path)) = (result, &export_state.events) {
+                    let emitter = crate::events::EventEmitter::new(path, "daemon");
+                    let _ = emitter.emit("graph_export_failed", &json!({
+                        "graph": export_state.graph.display().to_string(),
+                        "error": error,
+                    }));
+                }
+            });
+    }
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
@@ -700,6 +728,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::EmptyFieldUpdate(_) => "empty_field_update",
         StoreError::Invalid(_) => "invalid",
         StoreError::ClaimsUnavailable(_) => "claims_unavailable",
+        StoreError::Sqlite(_) => "sqlite",
         StoreError::Io(_) => "io",
     }
 }
@@ -721,6 +750,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read_ids" => handle_read_ids(state, &params),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
+        "export_now" => handle_export_now(state),
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
@@ -1070,6 +1100,18 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
         .find(|(stored, _)| stored == version)
         .map(|(_, entries)| entries.clone())
 }
+
+fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
+    let _gate = state
+        .gate
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    let version = crate::graph_sqlite::export_now(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "version": version,
+        "path": state.graph.display().to_string(),
+    }))
+}
 fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let version = params
         .get("version")
@@ -1090,6 +1132,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
             plan_rungs: plan_rung_map(params),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
@@ -1270,6 +1313,7 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(current_version),
             plan_rungs: plan_rung_map(params),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
@@ -2237,7 +2281,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let p = params.get("params").cloned().unwrap_or(Value::Null);
     let client_base = params.get("base_version").and_then(Value::as_str);
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    let base = graph_store::file_content_version(&state.graph);
+    let base = state_version(state)?;
     if let Some(expected) = client_base {
         if base != expected {
             return Err(StoreError::Conflict);
@@ -2256,6 +2300,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             // in_progress like any full write); a caller that sends none
             // keeps stored statuses.
             plan_rungs: plan_rung_map(&p),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     )?;

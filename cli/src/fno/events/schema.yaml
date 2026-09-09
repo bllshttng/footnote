@@ -80,6 +80,17 @@ event_types:
         retry_count: { type: integer }
     consumers: [scripts/analysis/graph-write-gate-audit.py]
 
+  - name: graph_export_failed
+    retention: durable
+    description: "A debounced SQLite-to-JSON graph export failed after the SQLite mutation committed."
+    sources: [daemon]
+    data:
+      required: [graph, error]
+      properties:
+        graph: { type: string }
+        error: { type: string }
+    consumers: [operator]
+
   - name: event_migration_landed
     retention: durable
     description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."
