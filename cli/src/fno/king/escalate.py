@@ -27,9 +27,6 @@ MAX_LISTED_IDS = 20
 
 
 def _stalled_subject(stalled_ids: "list[str]") -> str:
-    """The shared "N board row(s) nothing is clearing: ..." clause, capped
-    at MAX_LISTED_IDS - used by both the operator question and the
-    presiding-king mail (x-3ecf)."""
     ids = sorted(set(stalled_ids))
     if not ids:
         return "a board the king could not read"
