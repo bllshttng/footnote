@@ -223,21 +223,28 @@ fn stale_local_rename_cannot_replace_a_newer_squad() {
 }
 
 #[test]
-fn member_only_store_reload_preserves_the_topology_generation_conflict() {
+fn member_only_store_reload_adopts_a_matching_topology_generation() {
     let _scratch = StoreScratch::new("shutdown-capture-store-reload");
     let (mut core, _) = template_core();
     core.restored = true;
     core.topology_dirty = true;
     core.flush_topology();
-    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
+    core.squad_members.insert(1, vec![deadbeef_member()]);
+    core.persist_stored("sq", "", &["/a".into()], &[deadbeef_member()]);
+    let evidence = crate::squad_store::MemberEvidence::from_sets(
+        std::collections::HashSet::new(),
+        ["deadbeef".to_string()].into_iter().collect(),
+    );
+    crate::squad_store::prune_with_evidence(|_| crate::squad_store::PruneDecision::Keep, &evidence)
+        .unwrap();
     core.reload_members_from_store();
     core.session.squad_mut(1).unwrap().tabs[0].name = Some("after-reload".into());
 
-    assert!(!core.capture_topology_now());
+    assert!(core.capture_topology_now());
     let stored = crate::squad_store::load();
     let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
-    assert_eq!(squad.tab_trees[0].tab_name, None);
-    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+    assert_eq!(squad.tab_trees[0].tab_name.as_deref(), Some("after-reload"));
+    assert!(squad.members.is_empty());
 }
 
 #[test]
