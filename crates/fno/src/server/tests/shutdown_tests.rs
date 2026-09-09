@@ -186,6 +186,43 @@ fn partial_local_write_cannot_launder_a_newer_topology_generation() {
 }
 
 #[test]
+fn stale_local_remove_cannot_delete_a_newer_squad() {
+    let _scratch = StoreScratch::new("shutdown-capture-stale-remove");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
+
+    core.persist_remove("sq", "");
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
+fn stale_local_rename_cannot_replace_a_newer_squad() {
+    let _scratch = StoreScratch::new("shutdown-capture-stale-rename");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
+
+    let result = crate::squad_store::rename_with_generations(
+        Some(&core.store_generations),
+        "sq",
+        "renamed",
+        &["/a".into()],
+        &[],
+    );
+    core.persist_result(result);
+    let stored = crate::squad_store::load();
+    assert!(stored.squads.iter().any(|s| s.name == "sq"));
+    assert!(!stored.squads.iter().any(|s| s.name == "renamed"));
+}
+
+#[test]
 fn store_reload_refreshes_the_shutdown_generation_baseline() {
     let _scratch = StoreScratch::new("shutdown-capture-store-reload");
     let (mut core, _) = template_core();

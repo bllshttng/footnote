@@ -715,7 +715,7 @@ pub fn upsert_with_generations(
     // lives here: a caller passing both minted a row that matched by name
     // while its key-keyed twin stayed alive.
     let key = if name.is_empty() { key } else { "" };
-    mutate_generations(expected, |squads| {
+    mutate_generations(expected, &[], |squads| {
         let existing = squads.iter().find(|s| same_squad(s, name, key));
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -756,7 +756,7 @@ pub fn set_tab_specs_with_generations(
     name: &str,
     tab_specs: &[StoredTabSpec],
 ) -> io::Result<SnapshotBatch> {
-    mutate_generations(expected, |squads| {
+    mutate_generations(expected, &[], |squads| {
         if let Some(s) = squads.iter_mut().find(|s| s.name == name) {
             s.tab_specs = tab_specs.to_vec();
         } else {
@@ -889,7 +889,8 @@ pub fn remove_with_generations(
     name: &str,
     key: &str,
 ) -> io::Result<SnapshotBatch> {
-    mutate_generations(expected, |squads| {
+    let protected: Vec<_> = generation_key(name, key).into_iter().collect();
+    mutate_generations(expected, &protected, |squads| {
         squads.retain(|s| !same_squad(s, name, key))
     })
 }
@@ -1796,7 +1797,8 @@ pub fn rename_with_generations(
     origins: &[String],
     members: &[StoredMember],
 ) -> io::Result<SnapshotBatch> {
-    mutate_generations(expected, |squads| {
+    let protected = [format!("name:{old}"), format!("name:{new}")];
+    mutate_generations(expected, &protected, |squads| {
         let existing = squads.iter().find(|s| s.name == old || s.name == new);
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -1982,9 +1984,31 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
 
 fn mutate_generations(
     expected: Option<&std::collections::HashMap<String, u64>>,
+    protected: &[String],
     f: impl FnOnce(&mut Vec<StoredSquad>),
 ) -> io::Result<SnapshotBatch> {
-    mutate_squads_file_with_generations(expected, |sf| f(&mut sf.squads)).map(|(_, batch)| batch)
+    mutate_file(|file| {
+        let conflicts: Vec<_> = match expected {
+            Some(expected) => protected
+                .iter()
+                .filter(|identity| {
+                    file.generations.get(*identity).copied().unwrap_or(0)
+                        != expected.get(*identity).copied().unwrap_or(0)
+                })
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        if !conflicts.is_empty() {
+            return SnapshotBatch {
+                generations: std::collections::HashMap::new(),
+                conflicts,
+            };
+        }
+        let before = squads_by_identity(file);
+        f(&mut file.squads);
+        changed_generations(file, before, expected)
+    })
 }
 
 /// Retire every member whose (harness, session id) matches, by the store's
@@ -2081,47 +2105,47 @@ fn mutate_squads_file_with_generations<T>(
     f: impl FnOnce(&mut StoreFile) -> T,
 ) -> io::Result<(T, SnapshotBatch)> {
     mutate_file(|file| {
-        let before: std::collections::HashMap<_, _> = file
-            .squads
-            .iter()
-            .filter_map(|squad| {
-                generation_key(&squad.name, &squad.key).map(|key| (key, squad.clone()))
-            })
-            .collect();
+        let before = squads_by_identity(file);
         let result = f(file);
-        let after: std::collections::HashMap<_, _> = file
-            .squads
-            .iter()
-            .filter_map(|squad| {
-                generation_key(&squad.name, &squad.key).map(|key| (key, squad.clone()))
-            })
-            .collect();
-        let identities: std::collections::HashSet<_> =
-            before.keys().chain(after.keys()).cloned().collect();
-        let mut generations = std::collections::HashMap::new();
-        let mut conflicts = Vec::new();
-        for identity in identities {
-            if before.get(&identity) != after.get(&identity) {
-                let observed = file.generations.get(&identity).copied().unwrap_or(0);
-                let generation = file.generations.entry(identity.clone()).or_default();
-                *generation = generation.saturating_add(1);
-                if expected.is_none_or(|expected| {
-                    expected.get(&identity).copied().unwrap_or(0) == observed
-                }) {
-                    generations.insert(identity, *generation);
-                } else {
-                    conflicts.push(identity);
-                }
-            }
-        }
-        (
-            result,
-            SnapshotBatch {
-                generations,
-                conflicts,
-            },
-        )
+        (result, changed_generations(file, before, expected))
     })
+}
+
+fn squads_by_identity(file: &StoreFile) -> std::collections::HashMap<String, StoredSquad> {
+    file.squads
+        .iter()
+        .filter_map(|squad| generation_key(&squad.name, &squad.key).map(|key| (key, squad.clone())))
+        .collect()
+}
+
+fn changed_generations(
+    file: &mut StoreFile,
+    before: std::collections::HashMap<String, StoredSquad>,
+    expected: Option<&std::collections::HashMap<String, u64>>,
+) -> SnapshotBatch {
+    let after = squads_by_identity(file);
+    let identities: std::collections::HashSet<_> =
+        before.keys().chain(after.keys()).cloned().collect();
+    let mut generations = std::collections::HashMap::new();
+    let mut conflicts = Vec::new();
+    for identity in identities {
+        if before.get(&identity) == after.get(&identity) {
+            continue;
+        }
+        let observed = file.generations.get(&identity).copied().unwrap_or(0);
+        let generation = file.generations.entry(identity.clone()).or_default();
+        *generation = generation.saturating_add(1);
+        if expected.is_none_or(|expected| expected.get(&identity).copied().unwrap_or(0) == observed)
+        {
+            generations.insert(identity, *generation);
+        } else {
+            conflicts.push(identity);
+        }
+    }
+    SnapshotBatch {
+        generations,
+        conflicts,
+    }
 }
 
 fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
