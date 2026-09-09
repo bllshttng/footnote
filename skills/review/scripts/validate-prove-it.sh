@@ -22,6 +22,10 @@
 #         row recording VERDICT: FAIL under a PASS (refused), and each of
 #         the no-verdict states passing through untouched.
 set -uo pipefail
+# A `| grep -q` consumer closes the pipe at its first match; without this trap
+# the next echo kills the script with SIGPIPE and a pipefail consumer reads
+# exit 141 as a failed probe even though every check passed.
+trap '' PIPE
 
 SELFTEST=0
 if [[ "${1:-}" == "--selftest" ]]; then
@@ -33,8 +37,11 @@ fi
 
 PASS_CT=0
 FAIL_CT=0
-spass() { echo "  PASS: $*"; PASS_CT=$((PASS_CT + 1)); }
-sfail() { echo "  FAIL: $*"; FAIL_CT=$((FAIL_CT + 1)); }
+# return 0 keeps the verdict on FAIL_CT, not on the echo's write status: with
+# stdout dead (a `| grep -q` consumer left), a failing echo must not flip the
+# `cmd && spass || sfail` chains into double-firing both counters.
+spass() { echo "  PASS: $*"; PASS_CT=$((PASS_CT + 1)); return 0; }
+sfail() { echo "  FAIL: $*"; FAIL_CT=$((FAIL_CT + 1)); return 0; }
 
 # validate <report-file>: exits 0 when the record is honest, 1 when a PASS
 # lacks its probe (the refusal this file exists for), 2 on a malformed record.
@@ -184,6 +191,11 @@ _check_claim_rows() {
 if [[ "$SELFTEST" -eq 1 ]]; then
   TMP="$(mktemp -d -t prove-it-selftest-XXXXXX)"
   trap 'rm -rf "$TMP"' EXIT
+  # The check output goes to a file and is cat'ed at the end: a selftest run
+  # behind a consumer that closed the pipe early (`| grep -q`) must not have
+  # builtin-write failures poison the counters or the exit status.
+  exec 3>&1
+  exec >"$TMP/selftest-output.txt"
 
   cat > "$TMP/good.md" <<'EOF'
 ## Verification: the route returns the header
@@ -432,7 +444,11 @@ EOF
 
   echo
   echo "prove-it selftest: $PASS_CT passed, $FAIL_CT failed"
-  [[ "$FAIL_CT" -eq 0 ]]
+  _st=0
+  [[ "$FAIL_CT" -eq 0 ]] || _st=1
+  exec 1>&3 3>&-
+  cat "$TMP/selftest-output.txt" 2>/dev/null || true
+  exit "$_st"
 else
   validate "$1"
 fi
