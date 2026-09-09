@@ -1542,21 +1542,8 @@ def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
 
 def _reopen_outranks_merge(node: dict, merged_at: object) -> bool:
     """True when a deliberate reopen postdates the merge being closed on.
-
-    The PR-merged close leg reads no children, so the child-keyed guard never
-    reaches it: a container whose own PR shipped was re-closed on that evidence
-    alone, overriding the reopen (measured 2026-09-09, twice inside two
-    minutes). Same reasoning, keyed on the merge instead of child closes: a
-    reopen POSTDATING the merge is a statement about that merged PR and holds;
-    one predating it is stale, because the node genuinely became complete after
-    that judgment was formed - so a later PR merging on the same node closes it
-    again with no operator action.
-
-    Ambiguity favours the human, matching the child-keyed guard in both
-    directions: an unreadable ``reopened_at`` protects, and so does an
-    unreadable ``merged_at`` (None on a reverse-mapped record when gh omits
-    ``mergedAt``, so that branch is a real path, not padding). A node carrying
-    no ``reopened_at`` is unaffected - every node never reopened.
+    Merge-keyed twin of :func:`_reopen_outranks_child_closes`; full contract:
+    docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph.board import _parse_iso
 
@@ -1567,9 +1554,39 @@ def _reopen_outranks_merge(node: dict, merged_at: object) -> bool:
     if reopened is None:
         return True
     merged = _parse_iso(merged_at) if isinstance(merged_at, str) else None
-    if merged is None:
-        return True
-    return reopened > merged
+    return merged is None or reopened > merged
+
+
+def _merge_postdates_reopen(
+    node: dict,
+    *,
+    skip_pr: Optional[int],
+    query: Callable[..., PrMergeState],
+    cwd: Optional[str] = None,
+) -> bool:
+    """True when a ref OTHER than ``skip_pr`` merged after the node's reopen.
+    Expiry half of :func:`_reopen_outranks_merge`; full contract:
+    docs/architecture/backlog-graph-verb-contracts.md
+    """
+    from fno.graph.board import _parse_iso
+
+    reopened_raw = node.get("reopened_at")
+    reopened = _parse_iso(reopened_raw) if isinstance(reopened_raw, str) else None
+    if reopened is None:
+        return False
+    for number, url in node_pr_refs(node):
+        if number == skip_pr:
+            continue
+        try:
+            state = query(number, repo=repo_slug_from_url(url), cwd=cwd)
+        except Exception:  # noqa: BLE001 - a read outage must not close on a guess
+            return False
+        if state.state != "MERGED" or not state.merged_at:
+            continue
+        merged = _parse_iso(state.merged_at)
+        if merged is not None and merged > reopened:
+            return True
+    return False
 
 
 def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:

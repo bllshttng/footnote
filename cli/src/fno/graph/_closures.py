@@ -111,14 +111,20 @@ def _sweep_stamp_carried_sessions(entries: list[dict]) -> list[str]:
     return stamped
 
 
-def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
+def _cascade_close_contained(
+    entries: list[dict], node_id: str, merged_at: object = None
+) -> list[str]:
     """Close every node that shipped inside ``node_id``'s PR.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+
+    With ``merged_at`` the child reopen keys on the merge, not the owner's
+    completed_at (the mutator stamps that with reconcile's wall clock moments
+    before calling). Full contract:
+    docs/architecture/backlog-graph-verb-contracts.md
     """
     # Local: graph/cli.py imports this module, so a module-level import back
     # into it would be a cycle.
     from fno.graph.cli import _apply_completion_fields
-    from fno.graph._reconcile import _reopen_outranks_child_closes
+    from fno.graph._reconcile import _reopen_outranks_child_closes, _reopen_outranks_merge
 
     unit = next(
         (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
@@ -137,10 +143,11 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
             continue
         if e.get("completed_at"):
             continue  # already closed (out of band, or a previous sweep)
-        # Same guard its sweep twin `_strandable_contained_ids` already
-        # applies: a reopen postdating the owner's close holds; without it the
-        # merge cascade re-closed a deliberately reopened contained child.
-        if _reopen_outranks_child_closes(e, [unit]):
+        # A reopen postdating the close evidence holds - see the contract doc.
+        if merged_at is not None:
+            if _reopen_outranks_merge(e, merged_at):
+                continue
+        elif _reopen_outranks_child_closes(e, [unit]):
             continue
         nid = e.get("id")
         if not isinstance(nid, str) or not nid:

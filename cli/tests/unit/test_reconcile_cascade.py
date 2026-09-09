@@ -183,7 +183,7 @@ def test_1_5a_observed_a_contained_node_has_no_pr_to_close_it(world, merged_pr,
     # cli namespace, the stranded-heal sweep through _closures since the trio
     # moved there); everything else is the pre-change path.
     with pytest.MonkeyPatch.context() as mp:
-        noop = lambda entries, node_id: []  # noqa: E731
+        noop = lambda entries, node_id, merged_at=None: []  # noqa: E731
         mp.setattr(gcli, "_cascade_close_contained", noop)
         mp.setattr(closures, "_cascade_close_contained", noop)
         assert _reconcile().exit_code == 0
@@ -311,7 +311,7 @@ def test_cascade_never_aborts_the_close_it_rides_on(world, merged_pr, dispatches
     import fno.graph.cli as gcli
     import fno.graph._closures as closures
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
     # Every cascade leg must raise (the mutator resolves the cascade through
@@ -792,7 +792,7 @@ def test_cascade_failure_reaches_the_json_payload_not_only_stderr(world, merged_
     """
     import fno.graph.cli as gcli
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
     monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
@@ -824,7 +824,7 @@ def test_dry_run_never_crashes_on_a_fallible_cascade(world, merged_pr, dispatche
     """
     import fno.graph.cli as gcli
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
     monkeypatch.setattr(gcli, "_cascade_close_contained", boom)

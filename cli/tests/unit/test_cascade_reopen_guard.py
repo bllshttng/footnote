@@ -32,7 +32,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.graph._reconcile import _reopen_outranks_child_closes, _reopen_outranks_merge
+from fno.graph._reconcile import (
+    _merge_postdates_reopen,
+    _reopen_outranks_child_closes,
+    _reopen_outranks_merge,
+)
 from fno.graph.cli import (
     _cascade_close_contained,
     _cascade_close_parents,
@@ -229,6 +233,96 @@ def test_contained_cascade_reopen_before_the_owner_close_is_stale():
     assert _cascade_close_contained([owner, child], "unit") == ["c"]
 
 
+def test_contained_cascade_reopen_between_merge_and_the_sweep_stamp_holds():
+    """The owner's completed_at is reconcile's wall clock, not the close's
+    evidence: a reopen made after the actual merge but before a delayed sweep
+    holds when the merge stamp is the comparison basis."""
+    owner = {"id": "unit", "status": "done", "completed_at": "2026-09-05T10:00:00+00:00"}
+    child = {
+        "id": "c",
+        "status": "in_progress",
+        "contained_in": "unit",
+        "reopened_at": "2026-09-05T00:00:00+00:00",
+    }
+    assert _cascade_close_contained([owner, child], "unit", merged_at="2026-09-04T12:00:00Z") == []
+    assert child.get("completed_at") is None
+
+
+def test_contained_cascade_positive_control_same_child_closes_keyed_on_the_owner_stamp():
+    """Without the merge stamp (self-heal sweep path) the owner's HISTORICAL
+    stamp is the evidence, and the same reopen predating it is stale."""
+    owner = {"id": "unit", "status": "done", "completed_at": "2026-09-05T10:00:00+00:00"}
+    child = {
+        "id": "c",
+        "status": "in_progress",
+        "contained_in": "unit",
+        "reopened_at": "2026-09-05T00:00:00+00:00",
+    }
+    assert _cascade_close_contained([owner, child], "unit") == ["c"]
+
+
+# ---------------------------------------------------------------------------
+# `_merge_postdates_reopen`: the hold's own expiry
+# ---------------------------------------------------------------------------
+
+
+def _query_map(mapping):
+    from fno.graph._reconcile import PrMergeState
+
+    def query(number, **kw):
+        state, merged_at = mapping[number]
+        return PrMergeState(number=number, state=state, url=None, merged_at=merged_at)
+
+    return query
+
+
+def _ref_node(*, reopened_at=AFTER_MERGE):
+    return {
+        "id": "n",
+        "pr_number": 42,
+        "pr_url": "https://github.com/o/r/pull/42",
+        "additional_prs": [{"number": 43, "url": "https://github.com/o/r/pull/43"}],
+        "reopened_at": reopened_at,
+    }
+
+
+def test_a_later_additional_merge_expires_the_hold():
+    node = _ref_node()
+    query = _query_map({43: ("MERGED", "2026-09-02T00:00:00Z")})
+    assert _merge_postdates_reopen(node, skip_pr=42, query=query) is True
+
+
+def test_an_earlier_additional_merge_does_not_expire_the_hold():
+    node = _ref_node()
+    query = _query_map({43: ("MERGED", "2026-08-29T00:00:00Z")})
+    assert _merge_postdates_reopen(node, skip_pr=42, query=query) is False
+
+
+def test_a_read_failure_refuses_the_expiry_conclusion():
+    from fno.graph._reconcile import ReconcileError
+
+    node = _ref_node()
+
+    def query(number, **kw):
+        raise ReconcileError("gh pr view timed out")
+
+    assert _merge_postdates_reopen(node, skip_pr=42, query=query) is False
+
+
+def test_the_tripped_record_pr_is_skipped():
+    """Its stamp already tripped the guard; only OTHER refs can expire it."""
+    node = _ref_node()
+    query = _query_map({42: ("MERGED", "2026-09-02T00:00:00Z")})
+    assert _merge_postdates_reopen(node, skip_pr=42, query=query) is False
+
+
+def test_expiry_scan_ignores_a_node_with_no_reopen():
+    node = _ref_node(reopened_at=None)
+    node.pop("reopened_at")
+    query = _query_map({43: ("MERGED", "2026-09-02T00:00:00Z")})
+    assert _merge_postdates_reopen(node, skip_pr=42, query=query) is False
+
+
 # ---------------------------------------------------------------------------
 # end to end: `fno backlog reconcile` holds the reopened node
 # ---------------------------------------------------------------------------
@@ -347,3 +441,60 @@ def test_reconcile_dry_run_previews_no_close_and_names_the_held_reopen(
     assert "Would close" not in r.output, r.output
     assert "deliberate reopen postdates the merge" in r.output
     assert "reopened after PR #42 merged" in r.output
+
+
+def test_reconcile_closes_when_a_later_additional_merge_expires_the_hold(
+    routed, tmp_path, monkeypatch
+):
+    """The hold is not forever: the record stamps the FIRST merged ref, so a
+    reopen postdating it holds only until another ref merges after the
+    reopen - then the node genuinely completed again and closes."""
+    import fno.graph._reconcile as rec
+    from fno.graph._reconcile import PrMergeState
+
+    def per_number(n, **kw):
+        if n == 43:
+            return PrMergeState(number=43, state="MERGED", url=None, merged_at="2026-09-02T00:00:00Z")
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=MERGED_AT)
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", per_number)
+    plan = _seed_merged_world(routed, tmp_path, reopened_at=AFTER_MERGE)
+    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    entry["additional_prs"] = [{"number": 43, "url": "https://github.com/o/r/pull/43"}]
+    routed.write_text(json.dumps({"entries": [entry]}, indent=2) + "\n", encoding="utf-8")
+    _stub_scan(monkeypatch, plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert payload["reopen_held"] == [], r.output
+    assert any(c.get("node_id") == "ab-reopen1" for c in payload["closed"]), r.output
+
+
+def test_locked_mutation_rechecks_the_reopen(routed, tmp_path, monkeypatch):
+    """The closeable list is a pre-lock snapshot: a reopen landing between the
+    scan and the locked transaction must hold there too, not just in the
+    partition. Scripted predicate: pass 1 (partition) clear, pass 2 (locked
+    mutation) tripped - the node must NOT close."""
+    import fno.graph._reconcile as rec
+
+    _stub_gh_merged(monkeypatch)
+    plan = _seed_merged_world(routed, tmp_path, reopened_at=AFTER_MERGE)
+    _stub_scan(monkeypatch, plan)
+
+    calls = []
+
+    def scripted(node, merged_at):
+        calls.append(1)
+        return len(calls) == 2
+
+    monkeypatch.setattr(rec, "_reopen_outranks_merge", scripted)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert len(calls) == 2, r.output
+    assert all(c.get("node_id") != "ab-reopen1" for c in payload["closed"])
+    assert any(h["node_id"] == "ab-reopen1" for h in payload["reopen_held"]), r.output
+    entry = next(e for e in json.loads(routed.read_text())["entries"] if e["id"] == "ab-reopen1")
+    assert entry.get("completed_at") is None

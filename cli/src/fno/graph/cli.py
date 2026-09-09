@@ -10103,9 +10103,10 @@ def cmd_reconcile(
     promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
-        from fno.graph._reconcile import _reopen_outranks_merge
+        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state
 
         gated: list = []
+        reopen_expired: list[str] = []
         for record in closeable:
             # Distinct name from the rollup loop's `node_obj`: that loop assigns
             # `_find_node(...)` (dict | None), so reusing the name here would pin
@@ -10116,17 +10117,6 @@ def cmd_reconcile(
                 "pr_number": record.pr_number,
                 "pr_url": record.pr_url,
             }
-            # Reopen guard BEFORE the promise gate: a deliberate reopen
-            # postdating the merge holds - the PR-merged close leg
-            # reads no children, so the child-keyed guard never reaches it.
-            # Skipping here spends no gh round trip on a node already held, and
-            # one filter covers the mutator and the --dry-run simulation,
-            # because both iterate this same list.
-            if _reopen_outranks_merge(gate_node, record.merged_at):
-                promise_held.append(
-                    (record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held")
-                )
-                continue
             # _effective_reconcile_cwd, not the raw node cwd: an archived
             # worktree is a dead dir, and handing it to subprocess(cwd=) makes
             # the probe runner fail to launch - a fail-CLOSED refusal that would
@@ -10134,9 +10124,19 @@ def cmd_reconcile(
             gate_cwd = _effective_reconcile_cwd(
                 gate_node.get("cwd") or "", gate_node.get("project")
             )
-            verdict = resolve_promise_evidence(
-                gate_node, cwd=gate_cwd if os.path.isdir(gate_cwd) else None
-            )
+            gate_cwd = gate_cwd if os.path.isdir(gate_cwd) else None
+            # Reopen guard BEFORE the promise gate: a deliberate reopen
+            # postdating the merge holds, and one filter covers the mutator
+            # and the --dry-run simulation (both iterate this same list).
+            if _reopen_outranks_merge(gate_node, record.merged_at):
+                # Expiry first: the record stamps the FIRST merged ref, so a
+                # later ref merging after the reopen closes the node instead.
+                if not _merge_postdates_reopen(gate_node, skip_pr=record.pr_number, query=query_pr_merge_state, cwd=gate_cwd):
+                    promise_held.append((record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held"))
+                    continue
+                # Expired: the locked recheck covers only a NEWER reopen.
+                reopen_expired.append(record.node_id)
+            verdict = resolve_promise_evidence(gate_node, cwd=gate_cwd)
             if verdict.warning and not json_out:
                 # Named, not silent: reconcile is the unattended close path, so a
                 # gate that skipped itself must still leave a trace.
@@ -10305,6 +10305,21 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
+                    # Locked recheck of the reopen guard: closeable is a
+                    # pre-lock snapshot, so a reopen landing between the scan
+                    # and this transaction would re-close here.
+                    if (
+                        record.node_id not in reopen_expired
+                        and _reopen_outranks_merge(node_obj, record.merged_at)
+                    ):
+                        promise_held.append(
+                            (
+                                record.node_id,
+                                f"reopened after PR #{record.pr_number} merged",
+                                "reopen_held",
+                            )
+                        )
+                        continue
                     _apply_completion_fields(node_obj, merge_status="merged")
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
@@ -10363,7 +10378,7 @@ def cmd_reconcile(
                     # contained nodes deliberately get no auto-continue.
                     try:
                         contained_closed_acc.extend(
-                            _cascade_close_contained(entries, record.node_id)
+                            _cascade_close_contained(entries, record.node_id, merged_at=record.merged_at)
                         )
                     except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
                         contained_errors_acc.append(
@@ -10661,7 +10676,7 @@ def cmd_reconcile(
                 # [] in the --json payload - asserting no errors for a leg that
                 # never completed.
                 try:
-                    _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
+                    _sim_contained.extend(_cascade_close_contained(_sim, record.node_id, merged_at=record.merged_at))
                 except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
                     typer.echo(
                         f"warning: dry-run contained cascade for "
