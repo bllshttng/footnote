@@ -202,6 +202,54 @@ def load_task(path: Path) -> TaskSpec:
     )
 
 
+class LaneError(ValueError):
+    """A requested lane name has no matching ``config.routing.models`` row.
+
+    Never a second model/effort enum: a lane is a NAME joined against the
+    x-1bd0 grid's own inventory (``config.routing.models``), the same table
+    ``agents.profiles.*.lanes`` rows join against. Unknown name -> refuse,
+    naming every declared lane, rather than guess or fall back to a default.
+    """
+
+
+@dataclass(frozen=True)
+class LaneCoordinate:
+    """The requested coordinate for one eval lane, read from config.
+
+    A snapshot of one ``[[routing.models]]`` row - reused, never duplicated.
+    """
+
+    name: str
+    harness: str
+    model: str
+    effort: str
+    route: str
+    account: str
+
+
+def resolve_lane(name: str, *, settings: object = None) -> LaneCoordinate:
+    """Resolve a named lane against the existing ``config.routing.models`` rows.
+
+    Later rows with the same name override earlier ones (RoutingBlock's own
+    per-field override semantics - see ``RoutingModelBlock``), so this reads
+    the same effective row a spawn lane would. Raises :class:`LaneError`
+    naming the known lanes when *name* matches no row.
+    """
+    if settings is None:
+        from fno.config import load_settings
+
+        settings = load_settings()
+    rows = [r for r in settings.routing.models if r.name == name]  # type: ignore[attr-defined]
+    if not rows:
+        known = sorted({r.name for r in settings.routing.models if r.name})  # type: ignore[attr-defined]
+        raise LaneError(f"unknown lane {name!r}; config.routing.models declares: {known}")
+    row = rows[-1]
+    return LaneCoordinate(
+        name=name, harness=row.harness, model=row.model,
+        effort=row.effort, route=row.route, account=row.account,
+    )
+
+
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     """Load every ``*.yaml`` under *bank_dir*, sorted by id.
 

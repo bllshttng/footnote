@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from fno.evals import history as _history
-from fno.evals.bank import GradeCheck, TaskSpec
+from fno.evals.bank import GradeCheck, LaneCoordinate, TaskSpec
 from fno.evals.grading import grade
 import fno.evals.runner as _runner
 from fno.evals.runner import SpawnResult, evals_enabled, run_task
@@ -277,6 +277,87 @@ def test_variant_bad_ref_is_graded_fail_with_ref_name(tmp_path: Path) -> None:
 
 def _never_called_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
     raise AssertionError("grade-only task must not spawn a worker")
+
+
+# --------------------------------------------------------------------------- #
+# lane requested/observed evidence - AC1-HP, AC1-EDGE, AC1-ERR
+# --------------------------------------------------------------------------- #
+
+_LANE = LaneCoordinate(name="astra-high", harness="codex", model="gpt-6-astra",
+                       effort="high", route="", account="")
+
+
+def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True, worker_name="eval-worker-1")
+
+    def observe(name: str):
+        assert name == "eval-worker-1"
+        return {"harness": "codex", "model": "gpt-6-astra", "model_basis": "verified",
+                "effort": "high", "harness_session_id": "sess-1"}
+
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
+             lane=_LANE, experiment_id="cohort-a", observe=observe)
+    row = list(_history.iter_rows(hp))[0]
+    assert row["requested_lane"] == "astra-high"
+    assert row["requested_harness"] == "codex"
+    assert row["requested_model"] == "gpt-6-astra"
+    assert row["observed_harness"] == "codex"
+    assert row["observed_model"] == "gpt-6-astra"
+    assert row["observed_session_id"] == "sess-1"
+    assert row["lane_status"] == "ok"
+    assert row["substituted"] is False
+    assert row["experiment_id"] == "cohort-a"
+
+
+def test_lane_edge_substitution_is_labeled_and_excluded(tmp_path: Path) -> None:
+    """AC1-EDGE: capacity serves a different harness -> substituted, not folded
+    into the requested lane's cohort."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True, worker_name="eval-worker-2")
+
+    def observe(name: str):
+        return {"harness": "claude", "model": "claude-sonnet-5", "effort": "medium"}
+
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
+             lane=_LANE, observe=observe)
+    row = list(_history.iter_rows(hp))[0]
+    assert row["substituted"] is True
+    assert row["lane_status"] == "substituted"
+    assert row["requested_harness"] == "codex"
+    assert row["observed_harness"] == "claude"
+
+
+def test_lane_err_unavailable_never_grades_a_substitute_as_requested(tmp_path: Path) -> None:
+    """AC1-ERR: a spawn refusal records unavailable with no observed model -
+    the run is graded a fail, never a pass under the requested lane."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        return SpawnResult(False, "spawn exit 2: account lacks model")
+
+    def _boom(name: str):
+        raise AssertionError("no worker ran; observe must not be called")
+
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
+                       lane=_LANE, observe=_boom)
+    assert not results[0].passed
+    row = list(_history.iter_rows(hp))[0]
+    assert row["lane_status"] == "unavailable"
+    assert "observed_model" not in row
+    assert row["requested_model"] == "gpt-6-astra"
 
 
 def _worktree_count(root: Path) -> int:
