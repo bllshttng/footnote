@@ -1191,6 +1191,10 @@ def publish_report(
         },
     )
 
+    unknown = [
+        dim for dim in DIMENSIONS
+        if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
+    ]
     wd.emit_event(
         "watchdog_unfinished_work_scan",
         {
@@ -1201,11 +1205,7 @@ def publish_report(
                 for dim in DIMENSIONS
                 if payload["counts"][dim] is not None
             },
-            "unknown_dimensions": [
-                dim
-                for dim in DIMENSIONS
-                if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
-            ],
+            "unknown_dimensions": unknown,
             "warnings": payload["warnings"],
         },
     )
@@ -1231,10 +1231,6 @@ def publish_report(
     # against a deleted worktree root fails on every future run too, so a
     # fleet with one dead root escalated nothing ever again while stdout
     # kept listing the findings and the exit code stayed 0.
-    unknown = [
-        dim for dim in DIMENSIONS
-        if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
-    ]
     try:
         from fno.agents.stale_escalate import escalate_unfinished
         from fno.carveout.core import resolve_carveout_root, resolve_session_id
