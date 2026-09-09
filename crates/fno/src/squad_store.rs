@@ -309,6 +309,8 @@ pub struct ExternalLifecycle {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct StoreFile {
     version: u32,
+    #[serde(default)]
+    generation: u64,
     /// The next pane id reserved across mux-server restarts. Pane ids are
     /// globally monotonic so a registry mux ref cannot silently retarget after
     /// a server restart.
@@ -339,6 +341,7 @@ pub enum LifecycleCas {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Loaded {
     pub squads: Vec<StoredSquad>,
+    pub generation: u64,
     /// The persisted pane-id floor; zero means no pane has been reserved yet.
     pub next_pane_id: u64,
     /// (x-7561) The tracked external-row lifecycle tombstones, `attach_id`
@@ -622,6 +625,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     let notice = (!notice_parts.is_empty()).then(|| notice_parts.join("; "));
     Loaded {
         squads,
+        generation: file.generation,
         next_pane_id: file.next_pane_id,
         external_lifecycle,
         notice,
@@ -758,6 +762,72 @@ pub fn set_tab_trees(
             });
         }
     })
+}
+
+/// Atomically replace one squad's membership and topology, returning its generation.
+pub fn set_snapshot(
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+    tab_trees: &[StoredTabTree],
+    active_tab: Option<usize>,
+) -> io::Result<u64> {
+    set_snapshot_inner(None, name, key, origins, members, tab_trees, active_tab)
+        .map(|generation| generation.expect("unconditional snapshot write"))
+}
+
+/// Replace one snapshot only if no squad writer advanced the expected generation.
+pub fn set_snapshot_if_generation(
+    expected: u64,
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+    tab_trees: &[StoredTabTree],
+    active_tab: Option<usize>,
+) -> io::Result<Option<u64>> {
+    set_snapshot_inner(
+        Some(expected),
+        name,
+        key,
+        origins,
+        members,
+        tab_trees,
+        active_tab,
+    )
+}
+
+fn set_snapshot_inner(
+    expected: Option<u64>,
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+    tab_trees: &[StoredTabTree],
+    active_tab: Option<usize>,
+) -> io::Result<Option<u64>> {
+    let key = if name.is_empty() { key } else { "" };
+    mutate_file_if_generation(expected, true, |file| {
+        let existing = file.squads.iter().find(|s| same_squad(s, name, key));
+        let created_at = existing
+            .map(|s| s.created_at.clone())
+            .filter(|stamp| !stamp.is_empty())
+            .unwrap_or_else(now_iso);
+        let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+        file.squads.retain(|s| !same_squad(s, name, key));
+        file.squads.push(StoredSquad {
+            name: name.to_string(),
+            key: key.to_string(),
+            origins: origins.to_vec(),
+            members: members.to_vec(),
+            created_at,
+            tab_specs,
+            tab_trees: tab_trees.to_vec(),
+            active_tab,
+        });
+    })
+    .map(|result| result.map(|(_, generation)| generation))
 }
 
 /// Delete the entry with this identity (`name` if named, else the durable
@@ -1463,7 +1533,7 @@ pub fn prune(
     live: Option<&std::collections::HashSet<String>>,
 ) -> io::Result<PruneOutcome> {
     let mut out = PruneOutcome::default();
-    mutate_file(|sf| {
+    mutate_squads_file(|sf| {
         let mut kept = Vec::with_capacity(sf.squads.len());
         for mut sq in sf.squads.drain(..) {
             let fate = classify_squad(&sq, &decide, live);
@@ -1497,7 +1567,7 @@ pub fn prune_with_evidence(
     evidence: &MemberEvidence,
 ) -> io::Result<PruneOutcome> {
     let mut out = PruneOutcome::default();
-    mutate_file(|sf| {
+    mutate_squads_file(|sf| {
         let mut kept = Vec::with_capacity(sf.squads.len());
         for mut sq in sf.squads.drain(..) {
             let fate = classify_squad_with_evidence(&sq, &decide, evidence);
@@ -1548,7 +1618,7 @@ pub fn prune_with_evidence(
 /// rather than healing on one machine and silently staying broken on another.
 pub fn collapse_duplicate_squads() -> io::Result<usize> {
     let mut dropped = 0usize;
-    mutate_file(|sf| {
+    mutate_squads_file(|sf| {
         for sq in sf.squads.iter_mut() {
             if sq.name.is_empty() && !sq.origins.is_empty() {
                 sq.key = origin_key(&sq.origins);
@@ -1840,7 +1910,7 @@ where
 /// corrupt file read here is treated as empty (the load path owns quarantine),
 /// so a write never fails on unreadable prior content.
 fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
-    mutate_file(|sf| f(&mut sf.squads))
+    mutate_squads_file(|sf| f(&mut sf.squads))
 }
 
 /// Retire every member whose (harness, session id) matches, by the store's
@@ -1929,6 +1999,26 @@ fn assert_writable() -> io::Result<()> {
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
 fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
+    mutate_file_if_generation(None, false, f).map(|result| {
+        result
+            .expect("unconditional store mutation cannot miss a generation")
+            .0
+    })
+}
+
+fn mutate_squads_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
+    mutate_file_if_generation(None, true, f).map(|result| {
+        result
+            .expect("unconditional store mutation cannot miss a generation")
+            .0
+    })
+}
+
+fn mutate_file_if_generation<T>(
+    expected: Option<u64>,
+    bump_generation: bool,
+    f: impl FnOnce(&mut StoreFile) -> T,
+) -> io::Result<Option<(T, u64)>> {
     #[cfg(not(test))]
     assert_writable()?;
     let path = squads_path();
@@ -1968,8 +2058,15 @@ fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
         Err(e) => return Err(e),
     };
     let mut file = parse_seed(seed, from_legacy)?;
+    if expected.is_some_and(|generation| generation != file.generation) {
+        return Ok(None);
+    }
     let result = f(&mut file);
     file.version = STORE_VERSION;
+    if bump_generation {
+        file.generation = file.generation.saturating_add(1);
+    }
+    let generation = file.generation;
 
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1978,7 +2075,7 @@ fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     // Atomic rename: a concurrent reader sees either the old or the new file,
     // never a torn one (AC1-FR).
     std::fs::rename(&tmp, &path)?;
-    Ok(result)
+    Ok(Some((result, generation)))
 }
 
 /// The mutate seed parse. Corruption at the PRIMARY path refuses the write
@@ -2767,6 +2864,7 @@ mod tests {
         let s = Scratch::new("hostile");
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             squads: vec![StoredSquad {
                 name: "w".into(),
                 key: String::new(),
@@ -2829,6 +2927,7 @@ mod tests {
         let s = Scratch::new("x6b0b-fold-twin");
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             squads: vec![
                 StoredSquad {
                     name: String::new(),
@@ -2875,6 +2974,7 @@ mod tests {
         let s = Scratch::new("x6b0b-fold-twin-reversed");
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             squads: vec![
                 StoredSquad {
                     name: "oss".into(),
@@ -2915,6 +3015,7 @@ mod tests {
         let s = Scratch::new("x6b0b-fold-name-twin");
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             squads: vec![
                 StoredSquad {
                     name: "oss".into(),
@@ -3334,6 +3435,7 @@ mod tests {
         );
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             next_pane_id: 0,
             squads: vec![
                 StoredSquad {
@@ -3389,6 +3491,7 @@ mod tests {
         let key = origin_key(&["/repo".into()]);
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             next_pane_id: 0,
             squads: vec![
                 StoredSquad {
@@ -3707,6 +3810,7 @@ mod tests {
         let s = Scratch::new("bad-lifecycle-id");
         let file = StoreFile {
             version: STORE_VERSION,
+            generation: 0,
             external_lifecycle: vec![
                 ExternalLifecycle {
                     attach_id: "deadbeef".into(),

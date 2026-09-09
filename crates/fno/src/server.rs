@@ -70,9 +70,11 @@ mod pane_identity;
 mod pane_reseat;
 mod portal_reach;
 mod retire_session;
+mod shutdown_capture;
 mod squad_sync;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
+use self::shutdown_capture::SquadSnapshot;
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -2407,6 +2409,10 @@ pub(crate) struct Core {
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
     restored: bool,
+    /// True while startup restore waits for off-loop re-entry plans.
+    restore_pending: bool,
+    /// Store generation produced or restored by this server.
+    store_generation: Option<u64>,
     /// Squads created before first attach. Their empty bootstrap persist must
     /// not overwrite an older squad waiting for restore.
     pre_restore_squads: HashSet<u64>,
@@ -7051,14 +7057,9 @@ impl Core {
             .any(|s| s.name == name)
     }
 
-    /// Write-through one persisted squad. Identity is `name` when named, else a
-    /// durable per-squad `key` minted here on first persist (operator decision:
-    /// every squad persists, not only named workspaces). `origins` is stored for
-    /// restore/owns_path but is NOT identity, so two same-origin unnamed squads
-    /// never collide.
-    fn persist_squad(&mut self, sid: u64) {
+    fn snapshot_squad(&mut self, sid: u64) -> Option<SquadSnapshot> {
         let Some(sq) = self.session.squad(sid) else {
-            return;
+            return None;
         };
         let name = sq.name.clone().unwrap_or_default();
         let mut key = sq.key.clone();
@@ -7090,7 +7091,7 @@ impl Core {
                 .iter()
                 .any(|stored| stored.name == name && stored.key == key && stored.origins == origins)
         {
-            return;
+            return None;
         }
         // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
         // into the AUTHORITATIVE in-memory list, not just the store copy. Other
@@ -7180,10 +7181,33 @@ impl Core {
             }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
-        if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
-            self.persist_degraded(&e);
+        let (tab_trees, active_tab) = self.stored_tab_trees(sid)?;
+        Some(SquadSnapshot {
+            name,
+            key,
+            origins,
+            members,
+            tab_trees,
+            active_tab,
+        })
+    }
+
+    /// Write one squad's membership and topology atomically.
+    fn persist_squad(&mut self, sid: u64) {
+        let Some(snapshot) = self.snapshot_squad(sid) else {
+            return;
+        };
+        match crate::squad_store::set_snapshot(
+            &snapshot.name,
+            &snapshot.key,
+            &snapshot.origins,
+            &snapshot.members,
+            &snapshot.tab_trees,
+            Some(snapshot.active_tab),
+        ) {
+            Ok(generation) => self.store_generation = Some(generation),
+            Err(e) => self.persist_degraded(&e),
         }
-        self.persist_tab_trees(sid, &name, &key, &origins);
     }
 
     /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -
@@ -7251,20 +7275,6 @@ impl Core {
             });
         }
         Some((trees, active_tab))
-    }
-
-    /// Write the topology lane for `sid` beside its membership row. A write
-    /// failure degrades persistence only (the live layout stands), the same
-    /// posture as every other persist here.
-    fn persist_tab_trees(&mut self, sid: u64, name: &str, key: &str, origins: &[String]) {
-        let Some((trees, active_tab)) = self.stored_tab_trees(sid) else {
-            return;
-        };
-        if let Err(e) =
-            crate::squad_store::set_tab_trees(name, key, origins, &trees, Some(active_tab))
-        {
-            self.persist_degraded(&e);
-        }
     }
 
     /// How long a topology mutation stays dirty before the tick flushes it.
@@ -7340,16 +7350,6 @@ impl Core {
         for sid in sids {
             self.persist_squad(sid);
         }
-    }
-
-    /// Capture the live topology at teardown, even when the dirty flag is clear.
-    fn capture_topology_now(&mut self) -> bool {
-        if !self.restored {
-            return false;
-        }
-        self.topology_dirty = true;
-        self.flush_topology();
-        true
     }
 
     /// Persist a just-attached session as a member of squad `sid` (idempotent) -
@@ -8105,6 +8105,7 @@ impl Core {
             self.notice_all(format!("squad collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
+        self.store_generation = Some(loaded.generation);
         if let Some(n) = loaded.notice {
             self.notice_all(n);
         }
@@ -9082,6 +9083,7 @@ impl Core {
             self.reconcile_external_lifecycle();
             return;
         }
+        self.restore_pending = true;
         self.resolve_plan_batch(
             client_id,
             wanted,
@@ -13684,6 +13686,7 @@ impl Core {
                         cols,
                     } => {
                         self.restore_squads(rows, cols, home_sid);
+                        self.restore_pending = false;
                         // (x-7561) The external-tombstone reconcile runs
                         // AFTER restore, as the synchronous path orders it.
                         self.reconcile_external_lifecycle();
@@ -14681,6 +14684,8 @@ async fn serve(
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
+        restore_pending: false,
+        store_generation: None,
         pre_restore_squads: HashSet::new(),
         topology_dirty: false,
         last_topology_flush: None,
@@ -15378,11 +15383,8 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
-        // Every graceful exit captures the live topology before pane teardown.
-        // A server that never attached must not persist its bootstrap layout.
-        if !core.capture_topology_now() {
-            eprintln!("fno mux: shutdown before the first attach; no layout captured");
-        }
+        // Capture only from a safe restore state and current store generation.
+        core.capture_topology_now();
         core.kill_all_panes();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as
@@ -25247,6 +25249,8 @@ mod tests {
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
+            restore_pending: false,
+            store_generation: None,
             pre_restore_squads: HashSet::new(),
             topology_dirty: false,
             last_topology_flush: None,
