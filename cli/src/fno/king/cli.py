@@ -627,12 +627,9 @@ def escalate_cmd(
         typer.echo(f"king: escalation failed: {exc}", err=True)
         raise typer.Exit(1) from exc
     mailed = presiding is not None and mail_presiding_king(presiding["holder"], ids, reason)
-    if mailed:
-        target = f"king:{presiding['holder']}"
-        typer.echo(f"king: {outcome}, mailed presiding king {presiding['holder']} ({qid})", err=True)
-    else:
-        target = f"operator:{qid}"
-        typer.echo(f"king: {outcome} {qid}", err=True)
+    target = f"king:{presiding['holder']}" if mailed else f"operator:{qid}"
+    note = f", mailed presiding king {presiding['holder']}" if mailed else ""
+    typer.echo(f"king: {outcome}{note} {qid}", err=True)
     typer.echo(target)
 
 
