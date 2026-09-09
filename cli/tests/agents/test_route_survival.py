@@ -1251,3 +1251,35 @@ def test_unrouted_bg_row_leaves_the_request_unknown(tmp_path, monkeypatch) -> No
     row = next(r for r in load_registry() if r.name == "plain-bg")
     assert row.requested_model is None
     assert row.requested_effort is None
+
+
+# --- a foreign endpoint is never offered the Artifact tool -------------------
+
+
+def test_foreign_route_settings_deny_artifact(tmp_path, monkeypatch):
+    """A route off api.anthropic.com writes ``permissions.deny: ["Artifact"]``.
+
+    claude 2.1.265 gave the Artifact tool an ``input_schema`` pattern holding
+    ``\\p{Cc}``. z.ai's Anthropic-compatible endpoint refuses any tools pattern
+    with a ``\\p{...}`` escape and answers ``400 [1210]``, so every fresh
+    interactive routed worker died on its first turn. The tool needs Anthropic's
+    own backend, so a routed worker loses nothing when it is not offered.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.model_routing import materialize_route_settings
+
+    path = materialize_route_settings(dict(ROUTE_ENV))
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert payload["permissions"] == {"deny": ["Artifact"]}
+
+
+def test_anthropic_route_settings_keep_artifact(tmp_path, monkeypatch):
+    """An Anthropic endpoint keeps the tool. The deny stays on the defect."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.model_routing import materialize_route_settings
+
+    env = dict(ROUTE_ENV)
+    env["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
+    path = materialize_route_settings(env)
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert "permissions" not in payload
