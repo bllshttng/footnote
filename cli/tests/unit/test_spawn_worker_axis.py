@@ -226,3 +226,50 @@ def test_codex_target_spelling_survives_an_unreadable_verb_roster(monkeypatch):
     assert harness_map.dispatch_command("claude", allow_merge=False) == (
         "/target --no-merge {id}"
     )
+
+
+# --- the failure capture (x-5e6f) -------------------------------------------
+
+
+def test_failed_spawn_captures_the_refusal_tail(monkeypatch):
+    """Head-capture recorded the advisory and cut the refusal: warnings print
+    during the pre-flight reads, the refusal prints immediately before exit.
+    The tail keeps it (the specimen error named an unstamped-row warning on a
+    box the load gate was refusing)."""
+    captured = _capture(monkeypatch, _settings())
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(
+            returncode=79,
+            stdout="",
+            stderr=(
+                "1 live row(s) were minted without a provider stamp "
+                "(harness=claude, origin=operator)\n"
+                "fno agents spawn: applied slot=agents.profiles.blueprint.lanes[0] "
+                "claude-canonical-opus\n"
+                "spawn-gate: the fleet holds 96.20/12.00 cores (801.7% of capacity), "
+                "over the max_fleet_cpu_share ceiling 50.0%; refusing to spawn "
+                "(--force to bypass)\n"
+            ),
+        )
+
+    monkeypatch.setattr(advance.subprocess, "run", fake_run)
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker("x-0000", None, "slug")
+    assert "refusing to spawn" in str(exc.value)
+    assert "max_fleet_cpu_share ceiling" in str(exc.value)
+    assert "cmd" not in captured, "failure came from the subprocess, not the argv"
+
+
+def test_failed_spawn_single_line_stderr_is_captured_whole(monkeypatch):
+    """Nothing to reorder; the one line survives intact."""
+    _capture(monkeypatch, _settings())
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=79, stdout="", stderr="boom: no spawn\n")
+
+    monkeypatch.setattr(advance.subprocess, "run", fake_run)
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker("x-0000", None, "slug")
+    assert "boom: no spawn" in str(exc.value)
+    assert exc.value.detail == "boom: no spawn"
