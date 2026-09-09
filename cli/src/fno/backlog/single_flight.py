@@ -153,6 +153,28 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
     )
 
 
+def acquire_flight_open(
+    key: str, *, scope: str
+) -> FlightGate | FlightHeld | None:
+    """`acquire_flight`, failing open.
+
+    A gate that cannot run at all - a sandboxed state root, a claim store
+    that refuses after bounded contention retries - returns `None` and the
+    caller proceeds ungated, which is the pre-gate behavior. The verbs this
+    guards promise "always exits 0": the protection must never become a new
+    way for them to traceback or mark a ritual leg failed.
+    """
+    try:
+        return acquire_flight(key, scope=scope)
+    except Exception as exc:  # noqa: BLE001 - fail open, never break the verb
+        typer.echo(
+            f"warning: single-flight gate unavailable for {key} ({exc}); "
+            "proceeding ungated",
+            err=True,
+        )
+        return None
+
+
 def _holder_process_is_dead(key: str) -> bool:
     """Probe the holder's pid directly.
 
@@ -179,10 +201,15 @@ def _holder_process_is_dead(key: str) -> bool:
     return False
 
 
-def report_held(held: FlightHeld, verb: str, *, json_out: bool) -> None:
+def report_held(
+    held: FlightHeld, verb: str, *, json_out: bool, extra: Optional[dict] = None
+) -> None:
     """Print the held receipt. Exit stays 0: a held tick is not an error."""
     if json_out:
-        typer.echo(json.dumps(held.payload()))
+        payload = held.payload()
+        if extra:
+            payload.update(extra)
+        typer.echo(json.dumps(payload))
         return
     typer.echo(
         f"{verb}: held, a run for this scope is already in flight "

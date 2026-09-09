@@ -74,6 +74,7 @@ def test_second_advance_reports_held_and_runs_nothing(iso, monkeypatch):
     assert payload["held"] is True
     assert payload["requests"] >= 1, "the held count is the positive marker"
     assert payload["holder"] == "a-previous-run"
+    assert payload["decision"] == "held", "the --json receipt shape holds"
 
 
 def test_second_epic_advance_reports_held(iso, monkeypatch):
@@ -149,6 +150,24 @@ def test_gate_releases_so_the_next_run_is_not_held(iso, monkeypatch):
     key = advance_flight_key(None)
     state = claim_status(key, root=claims_root_for(key))["state"]
     assert state == "free"
+
+
+def test_gate_unavailable_fails_open(iso, monkeypatch):
+    """A gate that cannot run (sandboxed state root, contention exhaustion)
+    never breaks the verb: it proceeds ungated, the pre-gate behavior."""
+    def _broken(*_a, **_k):
+        raise RuntimeError("claim write denied by the sandbox")
+
+    monkeypatch.setattr("fno.backlog.single_flight.acquire_flight", _broken)
+    calls = []
+    monkeypatch.setattr(
+        adv, "advance", lambda *a, **k: calls.append(1) or _advance_result()
+    )
+
+    result = runner.invoke(app, ["backlog", "advance", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout).get("held") is None
+    assert calls == [1], "the run went ahead without the gate"
 
 
 def test_a_dead_holder_does_not_wedge_the_scope(iso):

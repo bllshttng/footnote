@@ -9433,7 +9433,7 @@ def cmd_advance(
     from fno.backlog.single_flight import (
         FlightGate,
         FlightHeld,
-        acquire_flight,
+        acquire_flight_open,
         advance_flight_key,
         report_held,
     )
@@ -9453,7 +9453,7 @@ def cmd_advance(
         flight = (
             None
             if stop
-            else acquire_flight(advance_flight_key(epic), scope=f"advance --epic {epic}")
+            else acquire_flight_open(advance_flight_key(epic), scope=f"advance --epic {epic}")
         )
         if isinstance(flight, FlightHeld):
             report_held(flight, "backlog advance", json_out=json_out)
@@ -9498,9 +9498,12 @@ def cmd_advance(
     # One in flight for the board advance (x-ef2c), the same latch as the epic
     # path: the merge event, a groom leg and a manual run all fire this verb,
     # and nothing used to stop two of them from running at once.
-    flight = acquire_flight(advance_flight_key(None), scope="advance")
+    flight = acquire_flight_open(advance_flight_key(None), scope="advance")
     if isinstance(flight, FlightHeld):
-        report_held(flight, "backlog advance", json_out=json_out)
+        # `decision` keeps the documented --json receipt shape; a held run
+        # dispatched nothing.
+        report_held(flight, "backlog advance", json_out=json_out,
+                    extra={"decision": "held"})
         return
 
     try:
@@ -9538,7 +9541,8 @@ def cmd_advance(
         typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
         return
     finally:
-        flight.release()
+        if isinstance(flight, FlightGate):
+            flight.release()
     if json_out:
         typer.echo(
             json.dumps(
@@ -9698,8 +9702,9 @@ def cmd_reconcile(
         )
 
     from fno.backlog.single_flight import (
+        FlightGate,
         FlightHeld,
-        acquire_flight,
+        acquire_flight_open,
         reconcile_flight_key,
         report_held,
     )
@@ -9716,7 +9721,7 @@ def cmd_reconcile(
             pr_number=pr_number, repo=repo,
         )
         return
-    flight = acquire_flight(
+    flight = acquire_flight_open(
         reconcile_flight_key(node=node, pr_number=pr_number),
         scope="reconcile",
     )
@@ -9729,7 +9734,8 @@ def cmd_reconcile(
             pr_number=pr_number, repo=repo,
         )
     finally:
-        flight.release()
+        if isinstance(flight, FlightGate):
+            flight.release()
 
 
 def _reconcile_once(
