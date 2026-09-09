@@ -35,6 +35,8 @@ pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 mod list_rows;
 use self::list_rows::{attention_sort_key, handle_list};
+mod prune_outcome;
+pub(crate) use self::prune_outcome::PruneOutcome;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1165,28 +1167,6 @@ enum WorktreeGate {
     Reapable,
     Blocked(String),
     Unanswerable(String),
-}
-
-/// What actually happened to a prune attempt, so a caller can branch on
-/// the outcome instead of recording intent as fact. `Removed` carries the
-/// worktree path; `Kept` carries the reason already built by the gate or the
-/// removal attempt (the blocked gate, the unanswerable probe, or the failed
-/// `git worktree remove`), formatted exactly as `receipt()` prints it below.
-pub(crate) enum PruneOutcome {
-    Removed(String),
-    Kept(String),
-}
-
-impl PruneOutcome {
-    /// The exact strings `rm_take_worktree_with` printed before this type
-    /// existed - callers that only want the receipt text keep reading it
-    /// unchanged.
-    pub(crate) fn receipt(&self) -> String {
-        match self {
-            PruneOutcome::Removed(path) => format!("worktree removed: {path}"),
-            PruneOutcome::Kept(reason) => format!("worktree kept: {reason}"),
-        }
-    }
 }
 
 /// Per-subprocess budget for the rm worktree path, matching the Python
