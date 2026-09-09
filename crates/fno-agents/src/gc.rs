@@ -319,6 +319,10 @@ pub fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> 
 use crate::events::EventEmitter;
 use crate::gc_sweep;
 use crate::paths::AgentsHome;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 /// The daemon idle tick's retirement sweep: classify every row, retire the
 /// work-done-and-quiet ones (stop the held process first), prune their
@@ -630,6 +634,51 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
     );
 }
 
+/// The daemon idle tick's retirement-sweep arm, throttled to `interval`
+/// (x-d354). Before this guard the sweep was requested every 5s tick against
+/// a 900s grace, its settle pass writing the graph before it knew whether
+/// there was any work: a continuous graph consumer wearing a cadence label,
+/// with the one-in-flight gate ensuring the copies never stacked but never
+/// slowed either. Shaped like [`crate::orphan_reap::maybe_sweep`]: elapsed
+/// check, one-in-flight swap, stamp, off-loop body. The emitted `retire`
+/// tick row carries the same `interval` the guard compared, so the arms
+/// readout and the loop read one number.
+pub fn maybe_retirement_sweep(
+    last_sweep: &mut Instant,
+    in_flight: &Arc<AtomicBool>,
+    home: AgentsHome,
+    grace_cwd: PathBuf,
+    events: PathBuf,
+    interval: Duration,
+) {
+    if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    *last_sweep = Instant::now();
+    let flag = Arc::clone(in_flight);
+    tokio::task::spawn_blocking(move || {
+        let _gate = crate::daemon::SweepGate(flag);
+        let emitter = EventEmitter::new(events, "daemon");
+        let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
+        let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
+        let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
+        unowned_sweeps(&home, &emitter, &grace_cwd);
+        let journal = crate::loop_runtime::Journal::new_raw(
+            home.events_jsonl(),
+            crate::daemon::global_events_path(&home),
+        );
+        crate::tick_ledger::emit_tick(
+            &journal,
+            "retire",
+            "daemon",
+            summary.retired.len() as u64,
+            None,
+            None,
+            interval.as_secs(),
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
@@ -637,6 +686,151 @@ mod tests {
     }
 
     use super::*;
+
+    // --- the retirement sweep arm (x-d354) ---
+
+    fn retirement_sweep_tmp_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-retire-arm-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        (dir, home)
+    }
+
+    fn count_retire_rows(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path)
+            .map(|content| {
+                content
+                    .lines()
+                    .filter(|l| {
+                        l.contains("\"type\":\"control_plane_tick\"")
+                            && l.contains("\"arm\":\"retire\"")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn wait_for_retire_row(path: &std::path::Path) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let n = count_retire_rows(path);
+            if n >= 1 {
+                return n;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "retire tick row never landed in {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn retirement_sweep_guard_admits_one_run_per_window() {
+        let (dir, home) = retirement_sweep_tmp_home("one-run");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let in_flight = Arc::new(AtomicBool::new(false));
+            // Backdate the stamp: a fresh stamp means the guard correctly
+            // waits out the window, so the test starts due like the daemon
+            // is one interval after boot.
+            let mut last = Instant::now() - Duration::from_secs(301);
+            let grace_cwd = dir.clone();
+            // The interval is passed straight through (no resolution), so
+            // this test is independent of machine config.
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                home.clone(),
+                grace_cwd.clone(),
+                home.events_jsonl(),
+                Duration::from_secs(300),
+            );
+            // A second tick inside the window is refused by the elapsed
+            // check: no second run can start until the window closes.
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                home.clone(),
+                grace_cwd,
+                home.events_jsonl(),
+                Duration::from_secs(300),
+            );
+            let rows = wait_for_retire_row(&home.events_jsonl());
+            assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
+            // Give a still-running first sweep a moment, then confirm no
+            // second row appeared behind it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                count_retire_rows(&home.events_jsonl()),
+                1,
+                "no second run may land inside one guard window"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retirement_sweep_tick_row_reports_the_interval_the_loop_enforces() {
+        // Serialize env mutation against the resolver tests in agents_config
+        // (one shared crate-wide env lock).
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_AGENTS_RETIRE_INTERVAL_SECS", "25");
+        let (dir, home) = retirement_sweep_tmp_home("interval-readback");
+        let grace_cwd = dir.clone();
+        // The exact resolution the daemon arm performs on the loop thread.
+        let grace = crate::agents_config::retire_grace_secs(&grace_cwd);
+        let interval =
+            Duration::from_secs(crate::agents_config::retire_interval_s(&grace_cwd, grace));
+        std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
+        assert!(interval.as_secs() >= 5, "interval floor is the 5s tick");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let in_flight = Arc::new(AtomicBool::new(false));
+            let mut last = Instant::now() - Duration::from_secs(interval.as_secs() + 1);
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                home.clone(),
+                grace_cwd,
+                home.events_jsonl(),
+                interval,
+            );
+            wait_for_retire_row(&home.events_jsonl());
+            let row = std::fs::read_to_string(home.events_jsonl())
+                .unwrap()
+                .lines()
+                .filter(|l| {
+                    l.contains("\"type\":\"control_plane_tick\"")
+                        && l.contains("\"arm\":\"retire\"")
+                })
+                .last()
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                .expect("row read back");
+            assert_eq!(
+                row["data"]["interval_s"],
+                interval.as_secs(),
+                "the arms row must carry the interval the guard compared"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // --- the orphan process sweep ---
 

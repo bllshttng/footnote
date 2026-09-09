@@ -2372,6 +2372,12 @@ class AgentsBlock(SweepKeys):
     # non-default here changes both the idle tick and `fno agents reap`.
     # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
     retire_grace_s: int = Field(default=900, ge=0)
+    # Retirement-sweep cadence in SECONDS (x-d354): how often the daemon's
+    # idle tick runs the retirement sweep at all. The Rust resolver clamps
+    # this under a third of `retire_grace_s` (the interval must be a fraction
+    # of the grace, never a multiple), so 1800 against a 900 grace resolves
+    # to 300. Unset, unparseable, or below the 5s daemon tick resolves to 300.
+    retire_interval_s: int = Field(default=300, ge=0)
     # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
     # this window in the same GC sweep that writes new ones; the Pydantic
     # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
