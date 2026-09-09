@@ -2698,6 +2698,14 @@ class TestTickRecordsAndDeadline:
         # the first check, so the loop must stop rather than scan all three.
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
         monkeypatch.setattr(prcli, "_RECOVERY_ROOT_FLOOR_S", 10_000.0)
+        # A constant monotonic pins elapsed at zero, so the 60s wall-clock
+        # budget cannot burn in the legs ahead of this loop on a loaded
+        # runner - the break below must be the code's decision, not a race
+        # the machine won. tick() imports the stdlib module locally, so the
+        # patch lands on the shared module object both names resolve to.
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
 
         app = typer.Typer()
         app.command()(prcli.tick)
