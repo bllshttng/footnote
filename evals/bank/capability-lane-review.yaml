@@ -1,4 +1,4 @@
-# Capability tier: a seeded review defect (x-fd52 wave 4), paired with
+# Capability tier: a seeded review defect, paired with
 # capability-lane-blueprint.yaml and capability-lane-implementation.yaml
 # under the same declared repeats/budget/stopping-rule
 # (docs/architecture/lane-qualification.md). The grade is a correct finding
@@ -23,8 +23,8 @@ prompt: |
       symbol: clamp_repeat_count
       defect: <one line naming the specific wrong behavior>
 
-  The defect line must describe the actual bug: a `requested` of 0 or a
-  negative number returns 0 instead of the documented minimum of 1.
+  The defect line must name the actual wrong return value against the
+  docstring's own documented contract, not a generic description of "a bug".
 grade:
   - kind: file-exists
     path: review-findings.md

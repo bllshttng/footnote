@@ -360,6 +360,22 @@ def test_lane_err_unavailable_never_grades_a_substitute_as_requested(tmp_path: P
     assert row["requested_model"] == "gpt-6-astra"
 
 
+def test_lane_grade_only_task_records_not_applicable_never_unavailable(tmp_path: Path) -> None:
+    """A grade-only task never attempts a worker, so a requested lane must not
+    read as a false capacity denial: unavailable means capacity said no."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    task = _task(grade=[GradeCheck("exit", command="true")])  # no prompt: grade-only
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, lane=_LANE)
+    assert results[0].passed
+    row = list(_history.iter_rows(hp))[0]
+    assert row["lane_status"] == "not-applicable"
+    assert row["requested_lane"] == "astra-high"
+    assert "observed_model" not in row
+
+
 def _worktree_count(root: Path) -> int:
     proc = subprocess.run(["git", "worktree", "list", "--porcelain"],
                           cwd=str(root), capture_output=True, text=True)

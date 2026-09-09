@@ -67,8 +67,10 @@ A **lane** is a NAME joined against the existing `config.routing.models` invento
 
 - `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
 - `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: what the agent registry says actually ran. This is read back after the worker spawns, never re-derived.
-- `lane_status`: `ok`, `substituted`, or `unavailable`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one.
+- `lane_status`: `ok`, `substituted`, `unavailable`, or `not-applicable`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`.
 - `experiment_id`: the `--cohort` id, a join key for a future comparison.
+
+The observed fields come from one post-spawn read of the agent registry. A registry row that rotates out before that read is a known gap. The run then reads `unavailable` even though the worker ran on the requested lane. Treat a lone `unavailable` row as worth a rerun before trusting it as a real capacity refusal.
 
 A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score. Folding these rows into a cohort comparison (reliability, duration, cost, review evidence per cohort, a promotion recommendation) is not yet built. For now, read the raw history rows for a `--cohort` id directly to compare lanes.
 

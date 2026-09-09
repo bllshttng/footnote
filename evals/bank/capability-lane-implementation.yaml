@@ -1,4 +1,4 @@
-# Capability tier: an unambiguous implementation task (x-fd52 wave 4),
+# Capability tier: an unambiguous implementation task,
 # paired with capability-lane-blueprint.yaml and capability-lane-review.yaml
 # under the same declared repeats/budget/stopping-rule
 # (docs/architecture/lane-qualification.md). No scope decision here - the

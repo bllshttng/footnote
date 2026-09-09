@@ -1,4 +1,4 @@
-# Capability tier: an ambiguous scope decision (x-fd52 wave 4). A ready node
+# Capability tier: an ambiguous scope decision. A ready node
 # names a symptom in one module but a plausible-looking neighbor shares part
 # of the name. The worker must pick the file the symptom actually points at
 # and explicitly rule the neighbor out, not just list every file that matches
@@ -37,9 +37,9 @@ grade:
     pattern: "in-scope: cli/src/fno/agents/cli.py"
   - kind: exit
     # Absence check: a grep-only grade cannot express "must NOT contain X",
-    # so this asserts it via a negated shell exit instead (AC1 "compiled
-    # scope" evidence needs both the right file present and the wrong one
-    # ruled out, not just any two file paths).
+    # so this asserts it via a negated shell exit instead - the fixture needs
+    # both the right file present and the wrong one ruled out, not just any
+    # two file paths.
     command: "! grep -q 'in-scope: cli/src/fno/agents/keeper_lane.py' scope-decision.md"
     expect: 0
 timeout_minutes: 15

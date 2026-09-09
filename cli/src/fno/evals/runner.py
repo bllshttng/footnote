@@ -50,8 +50,10 @@ def _observe_worker(name: str) -> Optional[dict]:
     return None
 
 
-def _lane_evidence(lane: Optional[Any], observed: Optional[dict]) -> dict[str, object]:
-    """Requested vs. observed config for one run; a harness/model mismatch is ``substituted``."""
+def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *, attempted: bool = True) -> dict[str, object]:
+    """Requested vs. observed config for one run; a harness/model mismatch is ``substituted``.
+    A grade-only task never attempts a worker, so ``attempted=False`` reads as
+    ``not-applicable`` rather than a false ``unavailable`` capacity signal."""
     if lane is None:
         return {}
     fields: dict[str, object] = {
@@ -59,7 +61,7 @@ def _lane_evidence(lane: Optional[Any], observed: Optional[dict]) -> dict[str, o
         "requested_model": lane.model, "requested_effort": lane.effort,
     }
     if observed is None:
-        fields["lane_status"] = "unavailable"
+        fields["lane_status"] = "not-applicable" if not attempted else "unavailable"
         return fields
     fields.update(
         observed_harness=observed.get("harness"), observed_model=observed.get("model"),
@@ -301,7 +303,7 @@ def run_task(
             _remove_worktree(repo_root, workdir)
 
         observed = observe_fn(worker_name) if spawned and worker_name else None
-        lane_evidence = _lane_evidence(lane, observed)
+        lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt))
 
         duration = round(time.monotonic() - started, 3)
         passed = outcome is not None and outcome.passed
