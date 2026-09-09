@@ -233,13 +233,9 @@ _ADVANCE_FAILED_TYPE = "advance_failed"
 
 def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
     """Most recent ``advance_failed`` error inside the same window
-    ``consecutive_failures`` counts.
-
-    Scans newest -> oldest and stops at the SAME reset boundary the streak
-    stops at, so the cause can never outlive the streak it explains. The
-    newest ``advance_failed`` carrying a non-empty ``error`` wins; a streak
-    built from ``node_failed`` events with no ``advance_failed`` in the
-    window yields "" and the caller keeps the bare reason.
+    ``consecutive_failures`` counts: newest -> oldest, stopping at the SAME
+    reset boundary, so the cause never outlives the streak it explains. A
+    window with no ``advance_failed`` error yields "" (bare reason kept).
     """
     for raw in reversed(list(events)):
         ev = _classify(raw)

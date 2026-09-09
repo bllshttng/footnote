@@ -219,3 +219,15 @@ def test_my_feature(tmp_path, monkeypatch):
 ```
 
 The helper writes a minimal `config.toml` and sets `FNO_CONFIG`. The settings cache keys on that declaration, so no cache clearing is needed.
+
+## Settings cache key
+
+`fno.config._loader._settings_key` is what `load_settings()` caches on, and it has two halves.
+
+The declaration half: the four `FNO_` env overrides, `HOME`, and the resolved repo root (itself keyed on cwd and `FNO_REPO_ROOT`). Two calls whose declaration agrees read the same settings by construction, which is what retires any per-test cache-clearing registry.
+
+The fingerprint half: a `(path, mtime_ns, size)` stat of every candidate file, the same triple `config_io._global_merged_config` keys on. The declaration alone never covered the file contents, and a long-lived process filled that gap with a stale parse: `fno config get` (a fresh process) always looked right while a worker or daemon kept serving the pre-edit model. An edit now changes the key and reparses on its own, with no invalidation protocol for writers to remember. Creating a candidate later also changes the key; a missing or unreadable candidate contributes nothing.
+
+Two rules the implementation must keep: the key computation stats candidate locations directly and never calls `_candidate_paths()` (that walk runs the one-shot yaml-to-toml migration, and the key runs on every settings read), and it never shells out - the canonical candidate is read off the repo root's `.git` pointer file by plain IO, not from a fresh `git worktree list`.
+
+Cost: keys vary with file mtimes, so `_load_settings_at`'s `maxsize=8` holds up to eight recent parses; an evicted declaration is simply re-collected on demand.

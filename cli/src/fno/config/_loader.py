@@ -17,16 +17,11 @@ if TYPE_CHECKING:
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
-    """The canonical root read off a linked worktree's ``.git`` pointer file.
-
-    A linked worktree's ``.git`` is a FILE (``gitdir:
-    <canonical>/.git/worktrees/<name>``), so the main checkout's root is the
-    prefix before ``/.git/worktrees/``. Pure file IO: the settings cache key
-    is computed on every load and must never shell out to
-    ``git worktree list``. A real dir (this IS canonical) or any shape this
-    cannot parse returns ``None`` and the canonical candidate is skipped, so
-    it contributes nothing to the fingerprint, exactly like a missing file.
-    """
+    """Canonical root from a linked worktree's ``.git`` pointer, no subprocess
+    (the key runs on every load; see docs/path-config.md "Settings cache key").
+    None when ``.git`` is a real dir (this IS canonical) or unparseable, so
+    the canonical candidate is skipped - it contributes nothing, like a
+    missing file."""
     git_path = repo_root / ".git"
     if not git_path.is_file():
         return None
@@ -38,25 +33,18 @@ def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
         line = line.strip()
         if line.startswith("gitdir:"):
             gitdir = line[len("gitdir:") :].strip()
-            marker = "/.git/worktrees/"
-            idx = gitdir.find(marker)
+            idx = gitdir.find("/.git/worktrees/")
             if idx > 0:
                 return Path(gitdir[:idx])
     return None
 
 
 def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
-    """``(path, mtime_ns, size)`` per settings candidate that exists - the
-    same triple ``config_io._global_merged_config`` keys on. An OSError
-    (missing or unreadable file) contributes nothing, so creating a candidate
-    later changes the key and reparses.
-
-    The locations are stated directly instead of calling ``_candidate_paths``:
-    that walk runs ``_ensure_migrated``, and the key is computed on EVERY
-    settings read, so a migration check would ride each one. The canonical
-    candidate is derived from the already-resolved repo root's ``.git``
-    pointer, never from a fresh subprocess.
-    """
+    """``(path, mtime_ns, size)`` per existing settings candidate; OSError
+    contributes nothing. Locations are stated directly (never
+    ``_candidate_paths`` - it runs ``_ensure_migrated`` on every key
+    computation) and the canonical candidate comes from the already-resolved
+    repo root's ``.git`` pointer, never a fresh subprocess."""
     from fno.config_io import _global_settings_path
 
     env_config = os.environ.get("FNO_CONFIG")
@@ -98,25 +86,9 @@ def _settings_key() -> tuple[
     str,
     tuple[tuple[str, int, int], ...],
 ]:
-    """The declaration the settings resolution reads from the process, plus
-    a content fingerprint of the settings candidates.
-
-    The declaration half: the four FNO_ env overrides, ``HOME``, and the
-    resolved repo root (itself keyed on cwd and ``FNO_REPO_ROOT``). Two calls
-    whose key agrees read the same settings by construction; a test that
-    changes any component gets a fresh load with no cache_clear, which
-    retires the per-test clearer registry and the fixture swap (x-3d21 R5).
-
-    The fingerprint half exists because the declaration alone never covered
-    the file CONTENTS - the old docstring claimed it covered "everything
-    ``_candidate_paths`` consults", which is true of the locations and false
-    of the bytes in them, and a long-lived process filled that gap with a
-    stale parse. An edit now changes the key and reparses on its own, with
-    no invalidation protocol for writers to remember. Cost: keys vary with
-    file mtimes, so ``_load_settings_at``'s ``maxsize=8`` holds up to eight
-    recent parses and an evicted declaration is simply re-collected on
-    demand.
-    """
+    """Declaration (env overrides, HOME, repo root) + content fingerprint of
+    the candidates; a same-key edit now reparses with no cache_clear. Full
+    contract: docs/path-config.md "Settings cache key" (x-3d21 R5)."""
     from fno.paths import resolve_repo_root
 
     env = os.environ.get

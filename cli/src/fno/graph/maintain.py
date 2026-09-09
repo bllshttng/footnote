@@ -1092,6 +1092,18 @@ class FailureDefer:
     streak: int
     error: str = ""
 
+    def reason(self) -> str:
+        """The deferred_reason: sentinel first (is_auto_failure_deferred and
+        the triage surfacing match the prefix), streak, then the spawn error
+        the drains actually died on. The error is capped at 200 at emission;
+        the slice keeps a legacy long row from growing the reason."""
+        from fno.graph.failure import AUTO_FAILURE_SENTINEL
+
+        base = f"{AUTO_FAILURE_SENTINEL} {self.streak} consecutive failed attempts"
+        if self.error:
+            return f"{base}: {self.error[:200]}"
+        return base
+
 
 def detect_failure_defers(
     entries: list[dict], events, threshold: int

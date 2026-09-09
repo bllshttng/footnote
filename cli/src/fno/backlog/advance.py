@@ -1291,9 +1291,8 @@ def _spawn_worker(
     # A caller that resolved the grid hands its reason in; the consult below
     # is skipped under an explicit harness. grid_reason=None on a grid PICK.
     grid_why: Optional[str] = grid_reason
-    # Caller-supplied grid answers first (dispatch_lanes resolves the grid
-    # before worktree placement and passes a non-None harness, which skips
-    # the consult below); the internal consult overwrites them when it runs.
+    # Caller-supplied grid answers first: dispatch_lanes resolves the grid
+    # before placement and pins the harness, so the consult below never runs.
     grid_lane_route: Optional[str] = grid_route
     grid_lane_account: Optional[str] = grid_account
     if harness is None:
@@ -1408,22 +1407,18 @@ def _spawn_worker(
     if vendor:
         cmd += ["--provider", vendor]
     elif grid_lane_route:
-        # The grid's own answer, carried as the route it read off the row: the
-        # route owns vendor AND model as one fact. An explicit dispatch-time
-        # `vendor` pin outranks it (AC3-EDGE) and is never replaced.
+        # The row's route owns vendor AND model as one fact; an explicit
+        # dispatch-time `vendor` pin outranks it and is never replaced.
         cmd += ["--route", grid_lane_route]
     if grid_lane_account:
-        # The grid's capacity pick read THIS account's quota, so the worker
-        # must launch under it: an ambient launch would spend an account whose
-        # capacity never justified the pick. --account is claude-only at the
-        # spawn CLI, so another harness skips with a note instead of refusing.
+        # The capacity pick read THIS account's quota, so the worker must run
+        # under it. --account is claude-only at the spawn CLI: skip elsewhere.
         if resolved.get("harness") == "claude":
             cmd += ["--account", grid_lane_account]
         else:
             print(
                 f"advance: grid account {grid_lane_account!r} skipped "
-                f"(accounts are claude-only, resolved harness "
-                f"{resolved.get('harness')!r})",
+                f"(claude-only, harness {resolved.get('harness')!r})",
                 file=sys.stderr,
             )
     if node_cwd:
@@ -1698,11 +1693,10 @@ def _grid_lane_for(
     it forks the receipt vocabulary. Receipts only, never refusing (Locked
     10). Deliberately ONE function: tests monkeypatch this name, and a caller
     that reached past it would bypass every patch. Placement and spawn both
-    compose verb ``target`` through here so the two agree on one lane.
-    Route and account ride beside harness and model because the candidate's
-    row declares them as one fact; the account especially must reach the
-    spawn, or the worker launches under an ambient account whose capacity
-    never justified the pick.
+    compose verb ``target`` through here so the two agree on one lane. Route
+    and account ride beside harness and model because the row declares them
+    as one fact; without the account the worker launches under an ambient
+    account whose capacity never justified the pick.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
