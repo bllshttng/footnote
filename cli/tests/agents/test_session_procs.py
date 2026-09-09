@@ -251,3 +251,58 @@ def test_roster_sessions_overlays_session_pid(tmp_path, monkeypatch):
     # A join miss keeps the recorded pid (an interactive session has no socket).
     monkeypatch.setattr(sp, "bg_socket_pid_map", lambda root=None: {})
     assert roster_sessions()[0]["pid"] == 5
+
+
+def test_codex_rollout_pid_map_joins_session_meta_to_holder(monkeypatch):
+    """x-9958 Task 3: thread id -> pid through the rollout fd. Only codex-named
+    processes are probed; the id comes from the rollout's session_meta record,
+    never the filename, and one unreadable process never fails the walk."""
+    import sys
+    from types import SimpleNamespace
+
+    from fno.agents import discover
+    from fno.agents import session_procs as sp
+
+    holder = SimpleNamespace(
+        pid=907,
+        info={"name": "codex"},
+        open_files=lambda: [
+            SimpleNamespace(path="/x/sessions/rollout-t1.jsonl"),
+            SimpleNamespace(path="/x/sessions/notes.txt"),
+        ],
+    )
+
+    def deny():
+        raise AssertionError("non-codex process probed")
+
+    bystander = SimpleNamespace(pid=1, info={"name": "launchd"}, open_files=deny)
+    failing = SimpleNamespace(
+        pid=908,
+        info={"name": "codex"},
+        open_files=lambda: (_ for _ in ()).throw(RuntimeError("denied")),
+    )
+    fake = SimpleNamespace(
+        Error=RuntimeError,
+        process_iter=lambda keys: iter([holder, bystander, failing]),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    monkeypatch.setattr(
+        discover,
+        "_codex_session_meta",
+        lambda path: {"id": "tid-907"} if path.name.startswith("rollout-t1") else {},
+    )
+
+    assert sp.codex_rollout_pid_map({"tid-907", "tid-404"}) == {"tid-907": 907}
+
+
+def test_codex_rollout_pid_map_degrades_to_empty(monkeypatch):
+    """x-9958 Task 3: best-effort by design - no wanted ids asks nothing, and a
+    psutil-less host answers {} which callers read as unknown, never as no
+    sessions."""
+    import sys
+
+    from fno.agents import session_procs as sp
+
+    assert sp.codex_rollout_pid_map(set()) == {}
+    monkeypatch.setitem(sys.modules, "psutil", None)  # `import psutil` raises
+    assert sp.codex_rollout_pid_map({"tid-1"}) == {}
