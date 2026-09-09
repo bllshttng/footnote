@@ -61,16 +61,16 @@ A variant is a **git ref of this repository**. Every prompt, skill, and project 
 
 ## Lanes and cohorts
 
-A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account) - the same rows `agents.profiles.*.lanes` already reference. This is never a second model/effort enum: an unknown lane name refuses with the list of declared lanes, and a lane that config never declared cannot be requested.
+A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account). `agents.profiles.*.lanes` already references these same rows. This is never a second model/effort enum. An unknown lane name refuses and lists the declared lanes. A lane that config never declared cannot be requested.
 
-`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider` (a lane is a complete coordinate). Every history row from the run records:
+`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider`, since a lane is a complete coordinate. Every history row from the run records:
 
-- `requested_lane` / `requested_harness` / `requested_model` / `requested_effort` - what was asked for.
-- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id` - what the agent registry says actually ran, read back after the worker spawns (never re-derived; x-8975/x-1bd0 already resolved and recorded it).
-- `lane_status` - `ok`, `substituted` (capacity served a different harness than requested - excluded from the requested lane's cohort, never folded in as if it were a sample of it), or `unavailable` (the spawn was refused; no model is graded as the requested one).
-- `experiment_id` - the `--cohort` id, the join key a comparison groups on.
+- `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
+- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: what the agent registry says actually ran. This is read back after the worker spawns, never re-derived. x-8975/x-1bd0 already resolved and recorded it.
+- `lane_status`: `ok`, `substituted`, or `unavailable`. Capacity serving a different harness than requested is `substituted` and is excluded from the requested lane's cohort - never folded in as if it were a sample of it. A refused spawn is `unavailable`, and no model is graded as the requested one.
+- `experiment_id`: the `--cohort` id, the join key a comparison groups on.
 
-A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score, however it is grouped.
+A row missing `experiment_id` or `requested_lane` is legacy/unattributed. However it is grouped, it can never join a cohort's score.
 
 **Comparing cohorts.** Declare the comparison BEFORE the first run, in a small JSON file:
 
@@ -84,11 +84,11 @@ A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can
 }
 ```
 
-`fno doctor evals report --cohort-spec cohorts.json [--json]` folds each declared cohort's `ok`-status rows into sample count, `pass_at_1`, `pass_k`, a duration distribution, and (only when a row actually carries it) folded `usage` by source/unit and a `review_evidence` verdict of `observed` (every scored row carries review), `partial`, or `unobserved`. Missing evidence never reads as clean or zero-cost - `usage` is `None`, not `0`, when nothing reported it. A predeclared `fixture_rev` that the observed rows do not match is flagged `fixture_rev_mismatch`; more than one observed revision is `mixed_fixture_revisions`. Neither ever becomes a silent like-for-like claim.
+`fno doctor evals report --cohort-spec cohorts.json [--json]` folds each declared cohort's `ok`-status rows. It reports sample count, `pass_at_1`, `pass_k`, and a duration distribution. When a row carries `usage`, it folds the amount by source and unit. It reports a `review_evidence` verdict too: `observed` when every scored row carries review, `partial`, or `unobserved`. Missing evidence never reads as clean or zero-cost - `usage` is `None`, not `0`, when nothing reported it. A predeclared `fixture_rev` that the observed rows do not match is flagged `fixture_rev_mismatch`. More than one observed revision is `mixed_fixture_revisions`. Neither ever becomes a silent like-for-like claim.
 
-`promotion_criteria` scores exactly one candidate against one baseline and returns `recommended` plus the `reasons` blocking it when false: a missing cohort, a regression against baseline, an unmet `min_pass_at_1`, a fixture mismatch, or (when `require_review` is set) unobserved review evidence. This is a recommendation only - it never edits `config.routing.models`, `agents.profiles`, or any production lane order. Promotion stays a separate, reviewed act, exactly like `fno doctor evals graduate`.
+`promotion_criteria` scores exactly one candidate against one baseline. It returns `recommended` plus the `reasons` blocking it when false. A reason names a missing cohort, a regression against baseline, an unmet `min_pass_at_1`, a fixture mismatch, or unobserved review evidence when `require_review` is set. This is a recommendation only. It never edits `config.routing.models`, `agents.profiles`, or any production lane order. Promotion stays a separate, reviewed act, exactly like `fno doctor evals graduate`.
 
-`usage` and `review` are attached by whatever caller has that evidence (a real delivery's ledger/scoreboard row, folded in separately) - the eval runner itself never invents a review verdict or a spend number; its only success marker is the task's own mechanical grade.
+Whatever caller has that evidence attaches `usage` and `review` - a real delivery's ledger/scoreboard row, folded in separately. The eval runner itself never invents a review verdict or a spend number. Its only success marker is the task's own mechanical grade.
 
 ## Run cadence and demand
 
