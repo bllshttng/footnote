@@ -1176,6 +1176,7 @@ def summarize_promise_held(
     headlines = {
         "promise_unmet": "merged PR, unmet plan promise",
         "promise_unknown": "ship count unconfirmed, retryable read failure",
+        "reopen_held": "deliberate reopen postdates the merge",
     }
     # Grouped by the outcomes PRESENT, not by a hard-coded pair. A closed
     # enumeration is the same shape the `satisfied` property exists to kill:
@@ -1553,6 +1554,55 @@ def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
         if closed is not None and closed >= reopened:
             return False
     return True
+
+
+def _reopen_outranks_merge(node: dict, merged_at: object) -> bool:
+    """True when a deliberate reopen postdates the merge being closed on.
+    Merge-keyed twin of :func:`_reopen_outranks_child_closes`; full contract:
+    docs/architecture/backlog-graph-verb-contracts.md
+    """
+    from fno.graph.board import _parse_iso
+
+    reopened_raw = node.get("reopened_at")
+    if not isinstance(reopened_raw, str) or not reopened_raw.strip():
+        return False
+    reopened = _parse_iso(reopened_raw)
+    if reopened is None:
+        return True
+    merged = _parse_iso(merged_at) if isinstance(merged_at, str) else None
+    return merged is None or reopened > merged
+
+
+def _merge_postdates_reopen(
+    node: dict,
+    *,
+    skip_pr: Optional[int],
+    query: Callable[..., PrMergeState],
+    cwd: Optional[str] = None,
+) -> bool:
+    """True when a ref OTHER than ``skip_pr`` merged after the node's reopen.
+    Expiry half of :func:`_reopen_outranks_merge`; full contract:
+    docs/architecture/backlog-graph-verb-contracts.md
+    """
+    from fno.graph.board import _parse_iso
+
+    reopened_raw = node.get("reopened_at")
+    reopened = _parse_iso(reopened_raw) if isinstance(reopened_raw, str) else None
+    if reopened is None:
+        return False
+    for number, url in node_pr_refs(node):
+        if number == skip_pr:
+            continue
+        try:
+            state = query(number, repo=repo_slug_from_url(url), cwd=cwd)
+        except Exception:  # noqa: BLE001 - a read outage must not close on a guess
+            return False
+        if state.state != "MERGED" or not state.merged_at:
+            continue
+        merged = _parse_iso(state.merged_at)
+        if merged is not None and merged > reopened:
+            return True
+    return False
 
 
 def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:

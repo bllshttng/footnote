@@ -177,10 +177,15 @@ def test_1_5a_observed_a_contained_node_has_no_pr_to_close_it(world, merged_pr,
     disabled, so it keeps describing what 1.5 fixed instead of rotting.
     """
     import fno.graph.cli as gcli
+    import fno.graph._closures as closures
 
-    # Disable only the new cascade; everything else is the pre-change path.
+    # Disable the cascade on every leg (the mutator resolves it through the
+    # cli namespace, the stranded-heal sweep through _closures since the trio
+    # moved there); everything else is the pre-change path.
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(gcli, "_cascade_close_contained", lambda entries, node_id: [])
+        noop = lambda entries, node_id, merged_at=None: []  # noqa: E731
+        mp.setattr(gcli, "_cascade_close_contained", noop)
+        mp.setattr(closures, "_cascade_close_contained", noop)
         assert _reconcile().exit_code == 0
 
     _write, read = world
@@ -304,11 +309,16 @@ def test_cascade_never_aborts_the_close_it_rides_on(world, merged_pr, dispatches
     PR - strictly worse than the bug it fixes.
     """
     import fno.graph.cli as gcli
+    import fno.graph._closures as closures
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
+    # Every cascade leg must raise (the mutator resolves the cascade through
+    # the cli namespace, the stranded-heal sweep through _closures): the unit
+    # itself still closes, the children stay open.
     monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
+    monkeypatch.setattr(closures, "_cascade_close_contained", boom)
     assert _reconcile().exit_code == 0
 
     nodes = world[1]()
@@ -629,14 +639,16 @@ def test_sweep_calls_the_strandable_scan_once_not_once_per_entry():
     Counting calls rather than timing: a timing assertion would be flaky, and
     the defect is the call count, not the wall clock.
     """
-    import fno.graph.cli as gcli
+    import fno.graph._closures as closures
 
     entries = _world(Path("/tmp"))
     for e in entries:
         if e["id"] == UNIT:
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
 
-    real = gcli._strandable_contained_ids
+    # The sweep resolves the scan in the _closures namespace since the trio
+    # moved here from the over-budget graph/cli.py; patch it there.
+    real = closures._strandable_contained_ids
     calls = []
 
     def counted(es):
@@ -644,10 +656,10 @@ def test_sweep_calls_the_strandable_scan_once_not_once_per_entry():
         return real(es)
 
     try:
-        gcli._strandable_contained_ids = counted
-        gcli._sweep_close_stranded_contained(entries)
+        closures._strandable_contained_ids = counted
+        closures._sweep_close_stranded_contained(entries)
     finally:
-        gcli._strandable_contained_ids = real
+        closures._strandable_contained_ids = real
     assert len(calls) == 1, f"scanned {len(calls)}x for {len(entries)} entries"
 
 
@@ -780,7 +792,7 @@ def test_cascade_failure_reaches_the_json_payload_not_only_stderr(world, merged_
     """
     import fno.graph.cli as gcli
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
     monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
@@ -812,7 +824,7 @@ def test_dry_run_never_crashes_on_a_fallible_cascade(world, merged_pr, dispatche
     """
     import fno.graph.cli as gcli
 
-    def boom(entries, node_id):
+    def boom(entries, node_id, merged_at=None):
         raise RuntimeError("cascade exploded")
 
     monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
