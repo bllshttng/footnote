@@ -105,6 +105,11 @@ OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_p
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir Write allowed" \
   || fail "AC2: plans-dir Write rc=$RC out=$OUT"
 
+# NotebookEdit carries notebook_path, not file_path; the carveout must read it.
+OUT="$(run_guard "$(printf '{"tool_name":"NotebookEdit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"notebook_path":"%s","new_source":"x"}}' "$SID" "$TMP/repo" "$KGD_PLANS/book.ipynb")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir NotebookEdit allowed via notebook_path" \
+  || fail "AC2: plans-dir NotebookEdit rc=$RC out=$OUT"
+
 OUT="$(run_guard "$(bash_payload "echo x > $KGD_PLANS/plan.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir redirect allowed" \
   || fail "AC2: plans-dir redirect rc=$RC out=$OUT"

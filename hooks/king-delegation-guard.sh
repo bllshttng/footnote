@@ -89,7 +89,7 @@ except Exception:
     e = {}
 ti = e.get("tool_input") or {}
 print(e.get("tool_name") or "")
-print(ti.get("file_path") or "")
+print(ti.get("file_path") or ti.get("notebook_path") or "")
 print((ti.get("command") or "").replace("\n", " "))
 print(e.get("session_id") or "")
 print(e.get("transcript_path") or "")
