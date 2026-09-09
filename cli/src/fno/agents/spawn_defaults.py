@@ -1102,10 +1102,10 @@ def inject_spawn_defaults(
     slot_receipt: List[Tuple[str, str, str]] = []
     # (axis, value, rung, reason): a config-resolved axis this spawn did NOT get.
     suppressed: List[Tuple[str, str, str, str]] = []
+    # The slot walk's structured extras (refusal, fingerprint), empty when unset.
+    _slot_meta: dict = {}
     # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies, never bypasses.
-    enforced = bool(
-        getattr(getattr(settings, "routing", None), "enforce_inventory", False)
-    )
+    enforced = routing_enforcement_state(settings) == "enforced"
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:
             grid_node_entry = _grid_node(out[1:], env)
@@ -1139,7 +1139,6 @@ def inject_spawn_defaults(
                     protected_name = role.strip().lower()
             except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
                 protected_name = None
-            _slot_meta: dict = {}
             try:
                 from fno import route_resolve as _rr
 
@@ -1332,7 +1331,7 @@ def inject_spawn_defaults(
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         _emit_defaults_applied(
-            out, profile_verb, seed, _seam_axes_view(locals()), from_config, suppressed,
+            out, profile_verb, seed, locals(), from_config, suppressed,
         )
         return out
 
@@ -1896,71 +1895,63 @@ def inject_spawn_defaults(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
     _check_model_vendor_mismatch(out, err, env, model_source=model_source)
-    from fno.route_resolve import routing_fingerprint
-
     _emit_defaults_applied(
-        out, profile_verb, seed, _seam_axes_view(locals()),
+        out, profile_verb, seed, locals(),
         from_config, suppressed,
-        fingerprint=routing_fingerprint(settings),
+        fingerprint=_slot_meta.get("fingerprint", ""),
     )
     return out
-
-
-def _seam_axes_view(scope: dict) -> dict:
-    """Every config-resolved spawn axis as ``(value, rung)``, empties included."""
-    axes = {}
-    for axis, value_key, rung_key in (
-        ("provider", "cfg_harness", "provider_rung"),
-        ("model", "cfg_model", "model_rung"),
-        ("effort", "cfg_effort", "effort_rung"),
-        ("substrate", "cfg_substrate", "substrate_rung"),
-        ("permission_mode", "cfg_permission", "permission_rung"),
-        ("route", "cfg_route", "route_rung"),
-        ("account", "cfg_account", "account_rung"),
-        ("pane_group", "cfg_pane_group", "pane_group_rung"),
-    ):
-        axes[axis] = (scope.get(value_key) or "", scope.get(rung_key))
-    return axes
-
-
-def _journal_path() -> str:
-    """The agents journal: the FNO_EVENTS_PATH pin, else the state dir."""
-    import os
-
-    pin = os.environ.get("FNO_EVENTS_PATH")
-    if pin:
-        return pin
-    from fno import paths
-
-    return str(paths.state_dir() / "events.jsonl")
 
 
 def _emit_defaults_applied(
     out: Sequence[str],
     verb: Optional[str],
     seed: Optional[str],
-    resolved: dict,
+    scope: dict,
     applied: Sequence[Tuple[str, str, str]],
     suppressed: Sequence[Tuple[str, str, str, str]],
     fingerprint: str = "",
 ) -> None:
     """Journal the spawn_defaults_applied receipt through the route-slot verb.
 
-    Contract: docs/architecture/role-based-model-routing.md. The call never
-    raises; a dead journal never bricks a valid launch.
+    ``scope`` is the caller's locals(): every config-resolved spawn axis as
+    ``(value, rung)``, empties included. Contract:
+    docs/architecture/role-based-model-routing.md. The call never raises; a
+    dead journal never bricks a valid launch.
     """
     try:
+        import os
+
+        pin = os.environ.get("FNO_EVENTS_PATH")
+        if pin:
+            path = pin
+        else:
+            from fno import paths
+
+            path = str(paths.state_dir() / "events.jsonl")
+        axes = {}
+        for axis, value_key, rung_key in (
+            ("provider", "cfg_harness", "provider_rung"),
+            ("model", "cfg_model", "model_rung"),
+            ("effort", "cfg_effort", "effort_rung"),
+            ("substrate", "cfg_substrate", "substrate_rung"),
+            ("permission_mode", "cfg_permission", "permission_rung"),
+            ("route", "cfg_route", "route_rung"),
+            ("account", "cfg_account", "account_rung"),
+            ("pane_group", "cfg_pane_group", "pane_group_rung"),
+        ):
+            axes[axis] = (scope.get(value_key) or "", scope.get(rung_key))
         from fno.route_slot_client import route_slot_call
 
         route_slot_call({
             "op": "journal",
-            "path": _journal_path(),
+            "path": path,
             "event": {
                 "name": _flag_value(out[1:], "--name"),
                 "verb": verb,
                 "seed": seed,
                 "fingerprint": fingerprint,
-                "resolved": {axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
+                "resolved": {axis: {"value": v, "rung": r} for axis, (v, r) in axes.items()},
                 "applied": [list(entry) for entry in applied],
                 "suppressed": [list(entry) for entry in suppressed],
             },

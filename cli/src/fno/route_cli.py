@@ -362,7 +362,7 @@ def inventory_cmd(
             "prefer_harness": inv.prefer_harness,
             "models": rows,
             "slots": slots,
-            "fingerprint": _routing_fingerprint_safe(),
+            "fingerprint": next((s["fingerprint"] for s in slots if s.get("fingerprint")), ""),
             "policy": _routing_policy_safe(),
         }, indent=2))
     else:
@@ -383,15 +383,6 @@ def inventory_cmd(
         _echo_slots(slots)
     for line in refusals:
         typer.echo(f"refused: {line}", err=True)
-
-
-def _routing_fingerprint_safe() -> str:
-    from fno.route_resolve import routing_fingerprint
-
-    try:
-        return routing_fingerprint()
-    except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
-        return ""
 
 
 def _routing_policy_safe() -> dict:

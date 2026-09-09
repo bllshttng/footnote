@@ -12,6 +12,7 @@
 //! attribution owners); this module never reads state files or the network.
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const SLOT_LANE_FIELDS: [&str; 9] = [
@@ -975,7 +976,32 @@ fn states_leg(payload: &Value) -> Value {
 }
 
 /// The resolver core: payload in, `{status, candidate, chain}` out.
+/// The single owner of the config-fingerprint algorithm: sha256 over the
+/// declared rows, policy fields and slot table a decision consumed, truncated
+/// to 12 hex chars. Every consumer reads it from this response - the seam
+/// journals it, the public inventory surface prints it, and the audit compares
+/// receipts against it - so the algorithm cannot fork across the seam.
+fn payload_fingerprint(payload: &Value) -> String {
+    let facts = json!({
+        "rows": payload.get("declared_rows").cloned().unwrap_or(json!({})),
+        "policy": payload.get("policy").cloned().unwrap_or(json!({})),
+        "slots": payload.get("slot_by_verb").cloned().unwrap_or(json!({})),
+    });
+    let mut h = Sha256::new();
+    h.update(serde_json::to_string(&facts).unwrap_or_default());
+    let hex = format!("{:x}", h.finalize());
+    hex[..12].to_string()
+}
+
 pub fn resolve_slot_payload(payload: &Value) -> Value {
+    let mut out = resolve_slot_walk(payload);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("fingerprint".into(), json!(payload_fingerprint(payload)));
+    }
+    out
+}
+
+fn resolve_slot_walk(payload: &Value) -> Value {
     let mut chain: Vec<Value> = Vec::new();
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     if mode == "tier" {

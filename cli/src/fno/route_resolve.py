@@ -11,7 +11,6 @@ docs/architecture/role-based-model-routing.md.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 from typing import Any, Mapping, Optional, Sequence
 
 from fno.adapters.providers import benchmarks as bm
@@ -310,8 +309,10 @@ def resolve_slot(
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"], "unarmed"
     chain = [str(line) for line in (out.get("chain") or [])]
-    if meta is not None and isinstance(out.get("refusal_terminal"), dict):
-        meta["refusal"] = out["refusal_terminal"]
+    if meta is not None:
+        if isinstance(out.get("refusal_terminal"), dict):
+            meta["refusal"] = out["refusal_terminal"]
+        meta["fingerprint"] = str(out.get("fingerprint") or "")
     return out.get("candidate"), chain, str(out.get("verdict") or "unarmed")
 
 
@@ -320,21 +321,6 @@ def _routing_enforced(settings: object) -> bool:
         return bool(getattr(getattr(settings, "routing", None), "enforce_inventory", False))
     except Exception:  # noqa: BLE001 - an unreadable flag reads as off
         return False
-
-
-def routing_fingerprint(settings: object = None) -> str:
-    """The receipt answer to "was this the config that launched": declared
-    rows, policy fields and the slot table, no credential values."""
-    try:
-        payload = {
-            "rows": sorted(_declared_rows(settings).items()),
-            "policy": _routing_policy_payload(settings),
-            "slots": _slot_profiles_table(settings),
-        }
-        text = repr(payload)
-        return hashlib.sha256(text.encode()).hexdigest()[:12]
-    except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
-        return ""
 
 
 def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
@@ -652,6 +638,7 @@ def slot_states(
     for key in (
         "on_exhausted", "on_low", "on_unknown", "would_take", "routing",
         "work_kind", "operator_access", "policy_source", "skipped",
+        "fingerprint",
     ):
         if key in states:
             out[key] = states[key]
