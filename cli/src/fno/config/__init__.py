@@ -4346,6 +4346,13 @@ class KingBlock(BaseModel):
     wake_debounce_seconds: int = 900
     wake_backstop_seconds: int = 1800
     blocked_child_grace_minutes: int = 30
+    # Directive point 5, enforced mechanically by the king-delegation-guard
+    # hook: what a crowned court session may write. `refuse` (default) denies
+    # source authorship; `warn` prints the refusal on stderr and allows, so an
+    # install adopts the guard without a surprise refusal mid-reign; `off`
+    # silences it. An unknown value degrades to `refuse`, the deliberate
+    # default.
+    implementation_guard: str = "refuse"
     # The reign skill carries these defaults verbatim; the keys are the one
     # place an operator edits them.
     checkin_interval: str = "30m"
@@ -4363,6 +4370,18 @@ class KingBlock(BaseModel):
         if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
             return v.strip()
         return "30m"
+
+    @field_validator("implementation_guard", mode="before")
+    @classmethod
+    def _coerce_implementation_guard(cls, v: object) -> str:
+        """Degrade an unknown value to ``refuse``.
+
+        A typo must not silently disarm the guard (that would be `off` by
+        accident); the strict reading is the deliberate default.
+        """
+        if isinstance(v, str) and v.strip() in ("refuse", "warn", "off"):
+            return v.strip()
+        return "refuse"
 
     @field_validator("checkin_text", "goal_text", mode="before")
     @classmethod
