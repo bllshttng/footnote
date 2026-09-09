@@ -235,10 +235,11 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
 
 
 def test_component_verdict_binary_journey(tmp_path: Path) -> None:
-    """Journey: the real deployed-shape binary answers `component-verdict` and
-    its report proves convergence only when every component's post-effect
-    probe matches. Stale bytes on one component keep the fleet unconverged
-    and name the executable repair."""
+    """Journey: the real binary probes a bindir of deployed-shape executables
+    ITSELF (no Python probe in the loop) and proves convergence only when
+    every component's probe matches. Stale bytes keep the fleet unconverged
+    and name the executable repair; an unanswerable binary is Unknown with
+    the named instrument."""
     binary = os.environ.get("FNO_AGENTS_BIN")
     if not binary:
         pytest.skip(
@@ -248,38 +249,42 @@ def test_component_verdict_binary_journey(tmp_path: Path) -> None:
     import json as jsonlib
     import subprocess as subproc
 
-    def ask(request: dict) -> dict:
+    def ask(*args: str) -> dict:
         proc = subproc.run(
-            [binary, "component-verdict"],
-            input=jsonlib.dumps(request), capture_output=True, text=True, timeout=30,
+            [binary, "component-verdict", *args], capture_output=True, text=True, timeout=60,
         )
         assert proc.returncode == 0, proc.stderr
         return jsonlib.loads(proc.stdout)
 
-    stale_bin = str(tmp_path / "fno-agents-worker")
-    Path(stale_bin).write_text("#!/bin/sh\n", encoding="utf-8")
-    Path(stale_bin).chmod(0o755)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fresh_json = '{"crates_rev": "%s", "dirty": false}' % ("a" * 40)
+    stale_json = '{"crates_rev": "%s", "dirty": false}' % ("0" * 40)
 
-    fresh = ask({
-        "expected_rev": "a" * 40,
-        "components": [
-            {"component": "fno-agents", "executable": "/bin/true", "post_rev": "a" * 40},
-            {"component": "fno-agents-daemon", "executable": "/bin/true", "post_rev": "a" * 40},
-            {"component": "fno-agents-worker", "executable": stale_bin, "post_rev": "a" * 40},
-        ],
-    })
+    def deploy(name: str, payload: str) -> None:
+        p = bindir / name
+        p.write_text(f"#!/bin/sh\necho '{payload}'\n", encoding="utf-8")
+        p.chmod(0o755)
+
+    deploy("fno-agents", fresh_json)
+    deploy("fno-agents-daemon", fresh_json)
+    deploy("fno-agents-worker", fresh_json)
+    deploy("fno", fresh_json)
+
+    common = [
+        "--bindir", str(bindir),
+        "--expected", "a" * 40,
+        "--include-mux",
+        "--agents-dir", "/src/crates/fno-agents",
+    ]
+    fresh = ask(*common, "--python-rev", "a" * 40, "--python-expected", "a" * 40)
     assert fresh["converged"] is True
-    assert all(c["status"] == "fresh" for c in fresh["components"])
+    names = {c["component"] for c in fresh["components"]}
+    assert names == {"fno-agents", "fno-agents-daemon", "fno-agents-worker", "fno", "python-tool"}
 
-    stale = ask({
-        "expected_rev": "a" * 40,
-        "crates_agents_dir": "/src/crates/fno-agents",
-        "components": [
-            {"component": "fno-agents", "executable": "/bin/true", "post_rev": "a" * 40},
-            {"component": "fno-agents-daemon", "executable": "/bin/true", "post_rev": "a" * 40},
-            {"component": "fno-agents-worker", "executable": stale_bin, "post_rev": "0" * 40},
-        ],
-    })
+    # A stale worker keeps the fleet unconverged and names the repair.
+    deploy("fno-agents-worker", stale_json)
+    stale = ask(*common)
     assert stale["converged"] is False
     worker = [c for c in stale["components"] if c["component"] == "fno-agents-worker"][0]
     assert worker["status"] == "stale"
@@ -287,14 +292,9 @@ def test_component_verdict_binary_journey(tmp_path: Path) -> None:
 
     # An executable the probe cannot answer is Unknown with the named
     # instrument, never collapsed into fresh or missing (AC3-HP).
-    hung = ask({
-        "expected_rev": "a" * 40,
-        "components": [
-            {"component": "fno-agents-worker", "executable": stale_bin,
-             "instrument_error": "hung on `version --json` (>20s)"},
-        ],
-    })
-    assert hung["converged"] is False
-    hv = hung["components"][0]
-    assert hv["status"] == "unknown"
-    assert "hung" in (hv["detail"] or "")
+    deploy("fno-agents-worker", "not-json-at-all")
+    junk = ask(*common)
+    assert junk["converged"] is False
+    worker = [c for c in junk["components"] if c["component"] == "fno-agents-worker"][0]
+    assert worker["status"] == "unknown"
+    assert "unparseable" in (worker["detail"] or "")

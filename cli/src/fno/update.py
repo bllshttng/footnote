@@ -320,13 +320,16 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _bin_probe(binary: Path, *, timeout: float = 20.0) -> dict:
-    """One probe of ``<binary> version --json`` with its failure named.
+def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optional[str]:
+    """The clean crates/ subtree rev the installed binary self-reports, or None.
 
-    ``_installed_bin_crates_rev`` collapses five causes into one None so the
-    gate fails toward rebuild; this richer probe keeps the cause so the
-    convergence verdict can report Unknown with the named instrument
-    (AC3-HP) instead of a bare "stale".
+    Runs ``<binary> version --json`` (the build.rs embed) and returns its
+    ``crates_rev`` only when the binary answered cleanly AND the build is not
+    dirty. Returns None - which the gate treats as STALE, forcing a rebuild -
+    for every failure mode: a missing/hung/crashing binary (bounded by
+    ``timeout``), a non-zero exit, unparseable or non-dict JSON, a "unknown"
+    rev (non-git build), or a dirty tree. Fail toward rebuild, never toward a
+    false-fresh skip (the stale-marker gate's exact lie).
     """
     try:
         result = subprocess.run(
@@ -336,38 +339,23 @@ def _bin_probe(binary: Path, *, timeout: float = 20.0) -> dict:
             check=False,
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired:
-        return {"rev": None, "error": f"hung on `version --json` (>{timeout:g}s)"}
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"rev": None, "error": f"could not be executed ({exc})"}
+    except (OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
-        return {"rev": None, "error": f"exited {result.returncode} on `version --json`"}
+        return None
     stdout = getattr(result, "stdout", None)
     if not stdout:
-        return {"rev": None, "error": "emitted no `version --json` output"}
+        return None
     try:
         data = json.loads(stdout)
     except (ValueError, TypeError):
-        return {"rev": None, "error": "emitted unparseable `version --json` output"}
-    if not isinstance(data, dict):
-        return {"rev": None, "error": "emitted unexpected `version --json` output"}
-    if data.get("dirty") is True:
-        return {"rev": None, "error": "was built from a dirty crates/ tree"}
+        return None
+    if not isinstance(data, dict) or data.get("dirty") is True:
+        return None
     rev = data.get("crates_rev")
     if not isinstance(rev, str) or rev in ("", "unknown"):
-        return {"rev": None, "error": "carries no rev stamp (built outside a git checkout?)"}
-    return {"rev": rev, "error": None}
-
-
-def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optional[str]:
-    """The clean crates/ subtree rev the installed binary self-reports, or None.
-
-    Thin gate-facing wrapper over `_bin_probe`: every failure mode collapses
-    to None - which the gate treats as STALE, forcing a rebuild - so the gate
-    fails toward rebuild, never toward a false-fresh skip (the stale-marker
-    gate's exact lie).
-    """
-    return (_bin_probe(binary, timeout=timeout) or {}).get("rev")
+        return None
+    return rev
 
 
 def _no_rev_reason(binary: Optional[Path], install_root: Path, *, timeout: float = 20.0) -> str:
@@ -414,185 +402,82 @@ def _no_rev_reason(binary: Optional[Path], install_root: Path, *, timeout: float
 _MUX_COMPONENT = "fno"
 
 
-def _component_verdict(request: dict, binary: Path, *, timeout: float = 30.0) -> Optional[dict]:
-    """One transport call: request JSON on stdin, verdict JSON from stdout.
-
-    The classification policy is native (``fno-agents component-verdict``,
-    the native verb); this is the transport adapter. Returns None when the deployed
-    binary cannot answer (absent, pre-verdict build, non-zero exit,
-    unparseable). A None verdict is NOT converged: callers must never read it
-    as fresh.
-    """
-    try:
-        result = subprocess.run(
-            [str(binary), "component-verdict"],
-            input=json.dumps(request),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        _log.warning("component-verdict transport failed: %s", exc)
-        return None
-    if result.returncode != 0:
-        _log.warning(
-            "component-verdict exited %s: %s",
-            result.returncode,
-            (result.stderr or "").strip()[:200],
-        )
-        return None
-    try:
-        report = json.loads(result.stdout)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(report, dict) or not isinstance(report.get("components"), list):
-        return None
-    return report
-
-
-def _cargo_component_probes(
-    source: Path,
-    subtree: str,
-    bindir: Path,
-    *,
-    attempted: bool = False,
-) -> list[dict]:
-    """Probe the cargo components for a convergence verdict request.
-
-    One probe per deployed executable, independently (AC2-EDGE): the triad
-    from ``bindir`` and the mux front door when ``crates/fno`` exists in the
-    source. ``attempted`` marks a post-effect re-probe so the native decision
-    can classify Updated vs Fresh and Failed vs Stale.
-    """
-    names = list(zip(_triad_names(), _TRIAD_STEMS))
-    if (source.parent / "crates" / "fno").is_dir():
-        names.append((_MUX_COMPONENT, _MUX_COMPONENT))
-    probes: list[dict] = []
-    for name, component in names:
-        path = bindir / name
-        present = path.is_file()
-        probe: dict = {"component": component, "executable": str(path) if present else None}
-        result = _bin_probe(path) if present else {"rev": None, "error": None}
-        probe["pre_rev"] = result["rev"]
-        if result["error"]:
-            # A probe that cannot answer is Unknown with the named instrument
-            # (AC3-HP) - never a fresh skip, never a bare "missing".
-            probe["instrument_error"] = result["error"]
-        probe["effect_attempted"] = attempted
-        probes.append(probe)
-    return probes
-
-
-def _component_lines(report: Optional[dict]) -> list[str]:
-    """Render a verdict report as operator-facing one-liners.
-
-    Non-converged components lead with the repair command; Unknown keeps its
-    named instrument instead of collapsing into fresh or missing (AC3-HP).
-    """
-    if report is None:
-        return [
-            "fno doctor update: component verdict unavailable"
-            " (the deployed fno-agents could not answer); treating as NOT converged"
-        ]
-    lines: list[str] = []
-    for c in report.get("components", []):
-        name, status = c.get("component"), c.get("status")
-        if status in ("fresh", "updated"):
-            lines.append(f"fno doctor update: component {name}: {status}")
-            continue
-        rev = c.get("observed_rev")
-        exp = c.get("expected_rev")
-        rev_text = "no revision reported" if not rev else f"rev {str(rev)[:12]}"
-        exp_text = "unknown expected rev" if not exp else f"expected {str(exp)[:12]}"
-        line = f"fno doctor update: component {name}: {status} ({rev_text}, {exp_text})"
-        if c.get("detail"):
-            line += f"; {c['detail']}"
-        if c.get("repair"):
-            line += f"; repair: {c['repair']}"
-        lines.append(line)
-    return lines
-
-
-def _probe_and_classify(
+def _component_verdict(
     source: Path,
     subtree: str,
     bindir: Path,
     verdict_bin: Path,
     *,
     attempted: bool = False,
+    python_tool: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Probe every cargo component now and run the native convergence verdict.
-
-    Returns the verdict report dict, or None when the deployed binary cannot
-    answer (callers treat None as NOT converged).
+    """One transport call to the native convergence decision (fno-agents
+    component-verdict): the BINARY probes every component in bindir itself
+    and classifies. Returns the report dict, or None when it cannot answer -
+    never read as fresh.
     """
-    request = {
-        "expected_rev": subtree,
-        "crates_agents_dir": str(source.parent / "crates" / "fno-agents"),
-        "crates_mux_dir": str(source.parent / "crates" / "fno"),
-        "components": _cargo_component_probes(source, subtree, bindir, attempted=attempted),
-    }
-    return _component_verdict(request, verdict_bin)
-
-
-def _front_door_python_script() -> Optional[str]:
-    """The Python script the cargo front door would exec, from the door's OWN
-    resolver (`fno version --json` -> `python_script`). None when no front
-    door is deployed, the deployed door predates the field, or the resolver
-    could not answer - a guessed uv environment is never reported as fact.
-    """
-    mux = _cargo_installed_mux() or shutil.which("fno")
-    if not mux:
-        return None
+    cmd = [
+        str(verdict_bin), "component-verdict",
+        "--bindir", str(bindir),
+        "--expected", subtree,
+        "--agents-dir", str(source.parent / "crates" / "fno-agents"),
+    ]
+    if (source.parent / "crates" / "fno").is_dir():
+        cmd.append("--include-mux")
+    if attempted:
+        cmd.append("--attempted")
+    if python_tool:
+        cmd += ["--python-rev", python_tool.get("rev") or "-"]
+        if python_tool.get("expected"):
+            cmd += ["--python-expected", python_tool["expected"]]
+        if python_tool.get("evidence"):
+            cmd += ["--python-evidence", python_tool["evidence"]]
     try:
-        result = subprocess.run(
-            [str(mux), "version", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=20.0,
-        )
-    except (OSError, subprocess.SubprocessError):
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60.0)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning("component-verdict transport failed: %s", exc)
         return None
     if result.returncode != 0:
+        _log.warning(
+            "component-verdict exited %s: %s",
+            result.returncode, (result.stderr or "").strip()[:200],
+        )
         return None
     try:
-        data = json.loads(result.stdout or "")
+        report = json.loads(result.stdout)
     except (ValueError, TypeError):
         return None
-    script = data.get("python_script") if isinstance(data, dict) else None
-    return script if isinstance(script, str) and script else None
+    return report if isinstance(report, dict) and isinstance(report.get("components"), list) else None
 
 
-def _python_tool_probe(
-    source: Path,
-    *,
-    installed_rev: Optional[str] = None,
-    contradicting_evidence: Optional[str] = None,
-) -> dict:
-    """Build the python-tool component probe for the convergence verdict.
+def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update") -> list[str]:
+    """Render a verdict report as operator-facing one-liners. Unknown keeps its
+    named instrument; non-fresh rows carry the repair command."""
+    if report is None:
+        return [
+            f"{prefix}: component verdict unavailable"
+            " (the deployed fno-agents could not answer); treating as NOT converged"
+        ]
+    lines: list[str] = []
+    for c in report.get("components", []):
+        if c.get("status") in ("fresh", "updated"):
+            continue
+        lines.append(_component_line(c, prefix))
+    return lines
 
-    The deployment verified is the one the front door would actually exec
-    (its own resolver), never the venv the running interpreter guesses at;
-    the running interpreter is named alongside it so a mismatch between the
-    two is visible in the receipt rather than silently read as convergence
-    (AC2-HP).
-    """
-    script = _front_door_python_script()
-    probe: dict = {
-        "component": "python-tool",
-        "executable": script or sys.executable,
-        "post_rev": installed_rev,
-        "expected_rev": _source_rev(source),
-    }
-    if script is None:
-        probe["instrument_error"] = (
-            "the front door resolved no Python script; verify the uv tool venv manually"
-        )
-    if contradicting_evidence:
-        probe["contradicting_evidence"] = contradicting_evidence
-    return probe
+
+def _component_line(c: dict, prefix: str) -> str:
+    name, status = c.get("component"), c.get("status")
+    rev = c.get("observed_rev")
+    exp = c.get("expected_rev")
+    rev_text = "no revision reported" if not rev else f"rev {str(rev)[:12]}"
+    exp_text = "unknown expected rev" if not exp else f"expected {str(exp)[:12]}"
+    line = f"{prefix}: component {name}: {status} ({rev_text}, {exp_text})"
+    if c.get("detail"):
+        line += f"; {c['detail']}"
+    if c.get("repair"):
+        line += f"; repair: {c['repair']}"
+    return line
 
 
 def _triad_same_build(bindir: Path, subtree: str) -> bool:
@@ -973,11 +858,28 @@ def update_readiness(
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
     # The two Python deployments a receipt must name: the script the cargo
-    # front door would exec (its own resolver) and the interpreter running
-    # this check. A mismatch means fno and fno-py resolve different
-    # deployments - the 2026-08-15 skew shape - and the receipt says so
-    # instead of declaring the reachable venv sufficient (AC2-HP).
-    front_script = _front_door_python_script()
+    # front door would exec (its own resolver, via `fno version --json`
+    # python_script) and the interpreter running this check. A mismatch means
+    # fno and fno-py resolve different deployments - the 2026-08-15 skew
+    # shape - and the receipt says so instead of declaring the reachable venv
+    # sufficient (AC2-HP).
+    front_script: Optional[str] = None
+    _mux = _cargo_installed_mux() or shutil.which("fno")
+    if _mux:
+        try:
+            _r = subprocess.run(
+                [str(_mux), "version", "--json"],
+                capture_output=True, text=True, check=False, timeout=20.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            _r = None
+        if _r is not None and _r.returncode == 0:
+            try:
+                _d = json.loads(_r.stdout or "")
+            except (ValueError, TypeError):
+                _d = None
+            _s = _d.get("python_script") if isinstance(_d, dict) else None
+            front_script = _s if isinstance(_s, str) and _s else None
     running = sys.executable or None
     same: Optional[bool] = None
     if front_script and running:
@@ -1239,9 +1141,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         # The verdict decides "fresh", not the triad gate above: a repair that
         # failed or left stale bytes must never read as full freshness
-        # (AC1-HP). Re-probe every cargo component and let the native decision
-        # classify.
-        report = _probe_and_classify(
+        # (AC1-HP). The binary re-probes every cargo component and classifies.
+        report = _component_verdict(
             source, subtree, installed_bin.parent, installed_bin, attempted=True
         )
         converged = bool(report and report.get("converged"))
@@ -1255,13 +1156,6 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         _report_daemon_drift()
         return "fresh" if converged else "partial"
 
-    if shutil.which("cargo") is None:
-        typer.echo(
-            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
-            err=True,
-        )
-        return "skipped-no-cargo"
-
     # Derive the install root from the detected binary so the refresh lands in the
     # exact same location that was tested. Binary lives at <root>/bin/<name>, so
     # root = binary.parent.parent. For the first-install case (no binary), fall back
@@ -1271,6 +1165,30 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         install_root = installed_bin.parent.parent
     else:
         install_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+
+    def _render_component_evidence() -> None:
+        """Name each non-converged component with its repair command on a path
+        that did not converge (failed or skipped refresh): the Python update
+        still proceeds, and the receipt says exactly which Rust components the
+        operator must repair by hand."""
+        if subtree is None:
+            return
+        report = _component_verdict(
+            source,
+            subtree,
+            install_root / "bin",
+            _cargo_installed_bin() or install_root / "bin" / _triad_names()[0],
+        )
+        for line in _component_lines(report):
+            typer.echo(line, err=True)
+
+    if shutil.which("cargo") is None:
+        typer.echo(
+            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
+            err=True,
+        )
+        _render_component_evidence()
+        return "skipped-no-cargo"
 
     cmd = ["cargo", "install", "--path", str(crate_dir), "--bins", "--root", str(install_root)]
 
@@ -1290,6 +1208,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
+        _render_component_evidence()
         return "failed"
     if result.returncode != 0:
         typer.echo(
@@ -1297,6 +1216,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
+        _render_component_evidence()
         return "failed"
 
     # Post-deploy verify: interrogate the binary we just deployed. cargo can exit
@@ -1345,7 +1265,9 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     if not verdict_bin.is_file():
         verdict_bin = _cargo_installed_bin() or verdict_bin
     post_report = (
-        _probe_and_classify(source, subtree, install_root / "bin", verdict_bin, attempted=True)
+        _component_verdict(
+            source, subtree, install_root / "bin", verdict_bin, attempted=True
+        )
         if subtree is not None and verdict_bin.is_file()
         else None
     )

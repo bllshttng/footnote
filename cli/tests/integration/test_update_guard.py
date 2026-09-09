@@ -533,3 +533,46 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
     assert result.exception is None
     # execvp was reached (the real update_command ran to completion on this path).
     assert execvp_calls, "execvp must be reached via the real update_command delegation"
+
+
+def test_component_verdict_transport_builds_the_native_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transport hands the binary a bindir + expected rev, includes the mux
+    only when the source carries crates/fno, and forwards the python-tool
+    evidence when given."""
+    import types
+
+    import fno.update as update_mod
+
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    (source.parent / "crates" / "fno").mkdir(parents=True)
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    verdict_bin = bindir / "fno-agents"
+    captured: dict = {}
+
+    def _fake_run(cmd, *a, **kw):
+        captured["cmd"] = list(cmd)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout='{"converged": true, "components": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
+    report = update_mod._component_verdict(
+        source, "a" * 40, bindir, verdict_bin,
+        python_tool={"rev": "cafe", "expected": "beef", "evidence": "2 .py differ"},
+    )
+    cmd = captured["cmd"]
+    assert "--bindir" in cmd and str(bindir) in cmd
+    assert "--expected" in cmd and "a" * 40 in cmd
+    assert "--include-mux" in cmd
+    assert "--attempted" not in cmd
+    assert "--python-rev" in cmd and "cafe" in cmd
+    assert "--python-expected" in cmd and "beef" in cmd
+    assert "--python-evidence" in cmd and "2 .py differ" in cmd
+    assert report == {"converged": True, "components": []}

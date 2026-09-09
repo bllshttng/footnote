@@ -10,6 +10,9 @@
 //! the expected revision proves a component.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 pub const PYTHON_TOOL: &str = "python-tool";
 pub const MUX_FRONT_DOOR: &str = "fno";
@@ -42,6 +45,10 @@ pub struct ComponentProbe {
     /// Why the post-effect probe could not answer (named instrument, AC3-HP).
     #[serde(default)]
     pub instrument_error: Option<String>,
+    /// Positive evidence that contradicts a matching revision (the installed
+    /// bytes differ while a marker reads fresh). Stale wins over the rev.
+    #[serde(default)]
+    pub contradicting_evidence: Option<String>,
     #[serde(default)]
     pub effect_attempted: bool,
     #[serde(default)]
@@ -114,6 +121,11 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
         v.detail = Some(err.clone());
         return v;
     }
+    if let Some(ev) = &probe.contradicting_evidence {
+        v.status = Status::Stale;
+        v.detail = Some(ev.clone());
+        return v;
+    }
     v.repair = repair_command(&probe.component, req);
     let attempted = probe.effect_attempted;
     let deployed = match &probe.executable {
@@ -180,28 +192,270 @@ pub fn verdict(req: &VerdictRequest) -> VerdictReport {
     }
 }
 
-/// `fno-agents component-verdict`: read one JSON request on stdin, print the
-/// verdict JSON on stdout. Exit 0 whenever a verdict was computed - a
-/// not-converged fleet is data, not an error; exit 2 on malformed input.
+/// One bounded `version --json` probe of a deployed executable. Returns
+/// (rev, python_script, instrument_error): the error names the instrument so
+/// an unanswerable probe lands at the classifier as Unknown (never collapsed
+/// into fresh or missing).
+fn probe_binary(
+    path: &std::path::Path,
+    timeout: Duration,
+) -> (Option<String>, Option<String>, Option<String>) {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    if !path.is_file() {
+        return (None, None, None);
+    }
+    let mut child = match Command::new(path)
+        .args(["version", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return (None, None, Some(format!("could not be executed ({e})"))),
+    };
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    return (
+                        None,
+                        None,
+                        Some(format!("hung on `version --json` (>{:?})", timeout)),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return (None, None, Some(format!("could not be executed ({e})"))),
+        }
+    };
+    if !status.map_or(false, |s| s.success()) {
+        return (
+            None,
+            None,
+            Some(format!(
+                "exited {} on `version --json`",
+                status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)
+            )),
+        );
+    }
+    let mut out = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut out);
+    }
+    if out.trim().is_empty() {
+        return (
+            None,
+            None,
+            Some("emitted no `version --json` output".to_string()),
+        );
+    }
+    let data: serde_json::Value = match serde_json::from_str(&out) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                None,
+                None,
+                Some("emitted unparseable `version --json` output".to_string()),
+            )
+        }
+    };
+    if !data.is_object() {
+        return (
+            None,
+            None,
+            Some("emitted unexpected `version --json` output".to_string()),
+        );
+    }
+    if data.get("dirty").and_then(|d| d.as_bool()) == Some(true) {
+        return (
+            None,
+            None,
+            Some("was built from a dirty crates/ tree".to_string()),
+        );
+    }
+    let rev = data
+        .get("crates_rev")
+        .and_then(|r| r.as_str())
+        .filter(|r| !r.is_empty() && *r != "unknown")
+        .map(|r| r.to_string());
+    if rev.is_none() {
+        return (
+            None,
+            None,
+            Some("carries no rev stamp (built outside a git checkout?)".to_string()),
+        );
+    }
+    let script = data
+        .get("python_script")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    (rev, script, None)
+}
+
+struct ProbeArgs {
+    bindir: PathBuf,
+    expected: String,
+    attempted: bool,
+    include_mux: bool,
+    agents_dir: Option<String>,
+    mux_dir: Option<String>,
+    python_expected: Option<String>,
+    python_rev: Option<String>,
+    python_evidence: Option<String>,
+}
+
+fn parse_probe_args(args: &[String]) -> Result<ProbeArgs, String> {
+    let mut p = ProbeArgs {
+        bindir: PathBuf::new(),
+        expected: String::new(),
+        attempted: false,
+        include_mux: false,
+        agents_dir: None,
+        mux_dir: None,
+        python_expected: None,
+        python_rev: None,
+        python_evidence: None,
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| -> Result<String, String> {
+            it.next()
+                .ok_or_else(|| format!("{name} needs a value"))
+                .cloned()
+        };
+        match a.as_str() {
+            "--attempted" => p.attempted = true,
+            "--include-mux" => p.include_mux = true,
+            "--bindir" => p.bindir = PathBuf::from(value("--bindir")?),
+            "--expected" => p.expected = value("--expected")?,
+            "--agents-dir" => p.agents_dir = Some(value("--agents-dir")?),
+            "--mux-dir" => p.mux_dir = Some(value("--mux-dir")?),
+            "--python-expected" => p.python_expected = Some(value("--python-expected")?),
+            "--python-rev" => {
+                let v = value("--python-rev")?;
+                p.python_rev = Some(v).filter(|v| v != "-");
+            }
+            "--python-evidence" => p.python_evidence = Some(value("--python-evidence")?),
+            other => return Err(format!("unknown flag: {other}")),
+        }
+    }
+    if p.bindir.as_os_str().is_empty() {
+        return Err("--bindir is required".to_string());
+    }
+    if p.expected.is_empty() {
+        return Err("--expected is required".to_string());
+    }
+    Ok(p)
+}
+
+/// Probe the cargo components in `bindir` (plus the mux front door and the
+/// python-tool row when requested) and classify. Converged only when every
+/// row proves Fresh or Updated from its own probe.
+fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
+    let probe_timeout = Duration::from_secs(20);
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    let mut components: Vec<ComponentProbe> = Vec::new();
+    let mut python_exec: Option<String> = None;
+    for (name, stem) in [
+        (format!("fno-agents{exe}"), AGENTS_CLIENT),
+        (format!("fno-agents-daemon{exe}"), AGENTS_DAEMON),
+        (format!("fno-agents-worker{exe}"), AGENTS_WORKER),
+    ] {
+        let path = p.bindir.join(&name);
+        let present = path.is_file();
+        let (rev, _script, err) = if present {
+            probe_binary(&path, probe_timeout)
+        } else {
+            (None, None, None)
+        };
+        components.push(ComponentProbe {
+            component: stem.to_string(),
+            expected_rev: None,
+            executable: if present {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+            pre_rev: None,
+            post_rev: rev,
+            instrument_error: err,
+            contradicting_evidence: None,
+            effect_attempted: p.attempted,
+            effect_ok: None,
+        });
+    }
+    if p.include_mux {
+        let path = p.bindir.join(format!("fno{exe}"));
+        let present = path.is_file();
+        let (rev, script, err) = if present {
+            probe_binary(&path, probe_timeout)
+        } else {
+            (None, None, None)
+        };
+        python_exec = script;
+        components.push(ComponentProbe {
+            component: MUX_FRONT_DOOR.to_string(),
+            expected_rev: None,
+            executable: if present {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+            pre_rev: None,
+            post_rev: rev,
+            instrument_error: err,
+            contradicting_evidence: None,
+            effect_attempted: p.attempted,
+            effect_ok: None,
+        });
+    }
+    if let Some(py_rev) = p.python_rev.clone() {
+        components.push(ComponentProbe {
+            component: PYTHON_TOOL.to_string(),
+            expected_rev: p.python_expected.clone(),
+            executable: python_exec.or(Some("<unresolved python>".to_string())),
+            pre_rev: None,
+            post_rev: Some(py_rev),
+            instrument_error: None,
+            contradicting_evidence: p.python_evidence.clone(),
+            effect_attempted: p.attempted,
+            effect_ok: None,
+        });
+    }
+    let req = VerdictRequest {
+        expected_rev: p.expected.clone(),
+        crates_agents_dir: p.agents_dir.clone(),
+        crates_mux_dir: p.mux_dir.clone(),
+        components,
+    };
+    verdict(&req)
+}
+
+/// `fno-agents component-verdict`: probe + classify + print. Exit 0 whenever a
+/// verdict was computed - a not-converged fleet is data, not an error; exit 2
+/// on malformed args.
 pub fn run_component_verdict(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("usage: fno-agents component-verdict < request.json");
+        println!(
+            "usage: fno-agents component-verdict --bindir <dir> --expected <rev>\n\
+             [--attempted] [--include-mux] [--agents-dir <dir>] [--mux-dir <dir>]\n\
+             [--python-expected <rev>] [--python-rev <rev|->] [--python-evidence <text>]"
+        );
         return 0;
     }
-    let mut input = String::new();
-    use std::io::Read;
-    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-        eprintln!("fno-agents component-verdict: cannot read stdin: {e}");
-        return 2;
-    }
-    let req: VerdictRequest = match serde_json::from_str(&input) {
-        Ok(r) => r,
+    let p = match parse_probe_args(args) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("fno-agents component-verdict: malformed request JSON: {e}");
+            eprintln!("fno-agents component-verdict: {e}");
             return 2;
         }
     };
-    match serde_json::to_string(&verdict(&req)) {
+    match serde_json::to_string(&verdict_from_probe(&p)) {
         Ok(s) => {
             println!("{s}");
             0
@@ -234,6 +488,7 @@ mod tests {
             pre_rev: None,
             post_rev: post_rev.map(|s| s.to_string()),
             instrument_error: None,
+            contradicting_evidence: None,
             effect_attempted: false,
             effect_ok: None,
         }
@@ -342,6 +597,18 @@ mod tests {
     }
 
     #[test]
+    fn contradicting_evidence_beats_a_matching_revision() {
+        // The marker reads fresh but the installed bytes differ: Stale wins
+        // over the rev match, and the evidence is carried as the detail.
+        let mut p = probe(PYTHON_TOOL, Some("abc123"));
+        p.expected_rev = Some("abc123".to_string());
+        p.contradicting_evidence = Some("3 .py file(s) on disk differ from source".to_string());
+        let v = verdict(&req(vec![p])).components.remove(0);
+        assert_eq!(v.status, Status::Stale);
+        assert!(v.detail.as_deref().unwrap().contains("differ"));
+    }
+
+    #[test]
     fn request_json_round_trips_through_the_verb_contract() {
         let body = serde_json::json!({
             "expected_rev": "abc123",
@@ -359,5 +626,136 @@ mod tests {
         let out = serde_json::to_string(&report).unwrap();
         assert!(out.contains("\"status\":\"fresh\""));
         assert!(out.contains("\"status\":\"unknown\""));
+    }
+
+    // ---- probe mode (POSIX: the fixtures are sh scripts) ----
+
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    fn version_script(rev: &str, extra: &str) -> String {
+        format!("#!/bin/sh\necho '{{\"crates_rev\": \"{rev}\", \"dirty\": false{extra}}}'\n")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_mode_classifies_a_converged_bindir() {
+        let dir = std::env::temp_dir().join(format!("fno-cu-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [
+            "fno-agents",
+            "fno-agents-daemon",
+            "fno-agents-worker",
+            "fno",
+        ] {
+            write_script(&dir, n, &version_script("aabbcc", ""));
+        }
+        let p = parse_probe_args(&[
+            "--bindir".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "--expected".to_string(),
+            "aabbcc".to_string(),
+            "--include-mux".to_string(),
+            "--python-rev".to_string(),
+            "-".to_string(),
+        ])
+        .unwrap();
+        let r = verdict_from_probe(&p);
+        assert_eq!(r.components.len(), 4);
+        assert!(r.converged, "{:?}", r.components);
+        let mux = r
+            .components
+            .iter()
+            .find(|c| c.component == MUX_FRONT_DOOR)
+            .unwrap();
+        assert_eq!(mux.status, Status::Fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_mode_stale_worker_and_garbage_sibling_never_converge() {
+        let dir = std::env::temp_dir().join(format!("fno-cu-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "fno-agents", &version_script("aabbcc", ""));
+        write_script(&dir, "fno-agents-daemon", &version_script("aabbcc", ""));
+        write_script(&dir, "fno-agents-worker", &version_script("000000", ""));
+        // The worker rev is stale; the garbage bin cannot answer at all.
+        let p = parse_probe_args(&[
+            "--bindir".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "--expected".to_string(),
+            "aabbcc".to_string(),
+            "--attempted".to_string(),
+            "--agents-dir".to_string(),
+            "/src/crates/fno-agents".to_string(),
+        ])
+        .unwrap();
+        let r = verdict_from_probe(&p);
+        assert!(!r.converged);
+        let worker = &r.components[2];
+        assert_eq!(worker.status, Status::Failed);
+        assert!(worker
+            .repair
+            .as_deref()
+            .unwrap()
+            .starts_with("cargo install --path /src/crates/fno-agents"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_mode_unanswerable_binary_is_unknown_with_named_instrument() {
+        let dir = std::env::temp_dir().join(format!("fno-cu-junk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "fno-agents", "#!/bin/sh\necho not-json-at-all\n");
+        write_script(&dir, "fno-agents-daemon", "#!/bin/sh\nexit 3\n");
+        write_script(&dir, "fno-agents-worker", &version_script("aabbcc", ""));
+        let p = parse_probe_args(&[
+            "--bindir".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "--expected".to_string(),
+            "aabbcc".to_string(),
+        ])
+        .unwrap();
+        let r = verdict_from_probe(&p);
+        assert!(!r.converged);
+        let client = &r.components[0];
+        assert_eq!(client.status, Status::Unknown);
+        assert!(client
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("unparseable `version --json`"));
+        let daemon = &r.components[1];
+        assert_eq!(daemon.status, Status::Unknown);
+        assert!(daemon.detail.as_deref().unwrap().contains("exited 3"));
+        assert_eq!(r.components[2].status, Status::Fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_mode_requires_bindir_and_expected() {
+        assert!(parse_probe_args(&[]).is_err());
+        assert!(parse_probe_args(&["--bindir".to_string(), "/tmp".to_string()]).is_err());
+        assert!(parse_probe_args(&["--wat".to_string()]).is_err());
+        assert!(parse_probe_args(&[
+            "--bindir".to_string(),
+            "/tmp".to_string(),
+            "--expected".to_string(),
+            "r".to_string()
+        ])
+        .is_ok());
     }
 }

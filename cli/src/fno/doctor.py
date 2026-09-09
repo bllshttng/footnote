@@ -642,37 +642,32 @@ def _component_convergence(
     from fno import update as _update
 
     cargo_bin = _cargo_bin_path()
-    components: list[dict[str, Any]] = _update._cargo_component_probes(
-        src, subtree, cargo_bin.parent if cargo_bin else Path.home() / ".cargo" / "bin"
+    report = _update._component_verdict(
+        src,
+        subtree,
+        cargo_bin.parent if cargo_bin else Path.home() / ".cargo" / "bin",
+        Path(verdict_bin),
+        python_tool={
+            "rev": marker,
+            "expected": _source_rev(src),
+            "evidence": (
+                f"{content_drift} .py file(s) on disk differ from source"
+                if content_drift
+                else None
+            ),
+        },
     )
-    contradicting = (
-        f"{content_drift} .py file(s) on disk differ from source"
-        if content_drift
-        else None
-    )
-    components.append(
-        _update._python_tool_probe(
-            src, installed_rev=marker, contradicting_evidence=contradicting
-        )
-    )
-    request = {
-        "expected_rev": subtree,
-        "crates_agents_dir": str(src.parent / "crates" / "fno-agents"),
-        "crates_mux_dir": str(src.parent / "crates" / "fno"),
-        "components": components,
-    }
-    report = _update._component_verdict(request, Path(verdict_bin))
     if report and isinstance(report.get("components"), list):
         return report["components"]
     # The deployed binary could not answer the verdict: Unknown rows with the
     # named instrument, never a silent collapse into fresh.
     return [
         {
-            "component": c.get("component"),
+            "component": c,
             "status": "unknown",
             "detail": "the deployed fno-agents could not answer the convergence verdict",
         }
-        for c in components
+        for c in ("python-tool", "fno", "fno-agents", "fno-agents-daemon", "fno-agents-worker")
     ]
 
 
@@ -2302,22 +2297,15 @@ def _emit_human(
     # its evidence and its executable repair command. Unknown keeps the named
     # instrument - it is never collapsed into fresh or missing (AC3-HP).
     components = result.get("components") or []
-    non_fresh = [c for c in components if c.get("status") != "fresh"]
+    non_fresh = [c for c in components if c.get("status") not in ("fresh", "updated")]
     if components and not non_fresh:
         names = ", ".join(str(c.get("component")) for c in components)
         out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
-    for c in non_fresh:
-        name, status = c.get("component"), c.get("status")
-        rev = c.get("observed_rev")
-        exp = c.get("expected_rev")
-        rev_text = "no revision reported" if not rev else f"rev {str(rev)[:12]}"
-        exp_text = "unknown expected rev" if not exp else f"expected {str(exp)[:12]}"
-        line = f"fno doctor: component {name}: {status} ({rev_text}, {exp_text})"
-        if c.get("detail"):
-            line += f"; {c['detail']}"
-        if c.get("repair"):
-            line += f"; repair: {c['repair']}"
-        out(line)
+    else:
+        from fno import update as _update
+
+        for line in _update._component_lines({"components": non_fresh}, prefix="fno doctor"):
+            out(line)
 
     daemon_drift = result.get("daemon_drift")
     if daemon_drift:

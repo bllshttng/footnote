@@ -47,7 +47,7 @@ def _converged_verdict_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         update,
         "_component_verdict",
-        lambda req, binary, **kw: {"converged": True, "components": []},
+        lambda *a, **kw: {"converged": True, "components": []},
     )
 
 
@@ -1881,7 +1881,6 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": "e" * 40, "error": None})
 
     result = update._refresh_rust_bins(source, force=True)
     assert result == "refreshed"
@@ -2855,14 +2854,7 @@ def test_fresh_path_failed_mux_repair_is_partial(tmp_path: Path, monkeypatch: py
     bindir = _fresh_triad_env(tmp_path, monkeypatch, subtree)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *a, **kw: False)
-
-    def fake_bin_probe(binary, **kw):
-        if Path(str(binary)).name == "fno":
-            return {"rev": None, "error": None}
-        return {"rev": subtree, "error": None}
-
-    monkeypatch.setattr(update, "_bin_probe", fake_bin_probe)
-    monkeypatch.setattr(update, "_component_verdict", lambda req, b, **kw: {
+    monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: {
         "converged": False,
         "components": [
             {"component": "fno", "status": "failed", "observed_rev": None,
@@ -2883,14 +2875,13 @@ def test_component_verdict_transport_failure_is_never_fresh(
     subtree = "a" * 40
     _fresh_triad_env(tmp_path, monkeypatch, subtree)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
-    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": subtree, "error": None})
-    monkeypatch.setattr(update, "_component_verdict", lambda req, b, **kw: None)
+    monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: None)
     assert update._refresh_rust_bins(tmp_path / "cli") == "partial"
 
 
 def test_component_lines_name_repair_and_unknown_instrument() -> None:
     """AC3-HP at the render layer: Failed names its repair command, Unknown
-    keeps the named instrument, Fresh renders compact."""
+    keeps the named instrument, fresh rows render nothing."""
     report = {"components": [
         {"component": "fno", "status": "failed", "observed_rev": None,
          "expected_rev": "a" * 40, "repair": "cargo install --path /x --bins",
@@ -2902,30 +2893,4 @@ def test_component_lines_name_repair_and_unknown_instrument() -> None:
     lines = update._component_lines(report)
     assert any("repair: cargo install --path /x --bins" in line for line in lines), lines
     assert any("hung on `version --json`" in line for line in lines), lines
-    assert sum("component fno-agents: fresh" in line for line in lines) == 1
-
-
-def test_component_verdict_request_carries_every_component_independently(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-EDGE: one probe per deployed executable, independently, and the
-    request names both crate dirs."""
-    source = tmp_path / "cli"
-    source.mkdir()
-    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
-    (source.parent / "crates" / "fno").mkdir(parents=True)
-    bindir = tmp_path / "cargo" / "bin"
-    bindir.mkdir(parents=True)
-    for n in update._triad_names():
-        (bindir / n).write_text("x")
-    (bindir / "fno").write_text("x")
-    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": "r1", "error": None})
-    captured: dict = {}
-    monkeypatch.setattr(
-        update, "_component_verdict", lambda req, b, **kw: captured.update(req) or {}
-    )
-    update._probe_and_classify(source, "subtreerev", bindir, bindir / "fno-agents")
-    assert set(captured) >= {"expected_rev", "crates_agents_dir", "crates_mux_dir", "components"}
-    names = {c["component"] for c in captured["components"]}
-    assert names == {"fno-agents", "fno-agents-daemon", "fno-agents-worker", "fno"}
-    assert all(c["executable"] for c in captured["components"])
+    assert not any("fno-agents: fresh" in line for line in lines)
