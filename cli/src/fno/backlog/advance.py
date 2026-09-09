@@ -55,6 +55,15 @@ from typing import Any, Literal, NamedTuple, Optional
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name, slug_component
+from fno.agents.spawn_gate import (
+    EXIT_KING_SHARE,
+    EXIT_LOAD_REFUSED,
+    EXIT_NO_WAIT,
+    EXIT_PROVIDER_CAP,
+    EXIT_QUEUE_TIMEOUT,
+    EXIT_RAM_REFUSED,
+    EXIT_REGISTRY_SCHEMA,
+)
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -215,7 +224,22 @@ class SpawnAlreadyRunning(RuntimeError):
 
 
 class SpawnError(RuntimeError):
-    """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable."""
+    """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable.
+
+    A gate refusal (exit 75-81) carries ``exit_code`` and the gate's own
+    refusal sentence in ``detail``: :func:`gate_refusal` reads them to route
+    the verdict to a machine-scoped skip instead of a node failure."""
+
+    def __init__(
+        self,
+        message: str,
+        exit_code: Optional[int] = None,
+        detail: str = "",
+    ):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.detail = detail
+        self.retry_at: Optional[float] = None
 
 
 class SpawnQueueRefused(SpawnError):
@@ -223,8 +247,62 @@ class SpawnQueueRefused(SpawnError):
     and, when a reset is known, ``retry_at``."""
 
     def __init__(self, message: str, retry_at: Optional[float] = None):
-        super().__init__(message)
+        super().__init__(message, exit_code=EXIT_PROVIDER_CAP)
         self.retry_at = retry_at
+
+
+#: spawn-gate exit -> machine verdict. 75-80 are capacity conditions true for
+#: every caller equally; 81 is a registry no spawn can pass. Imported by name,
+#: never a numeric range: a rename must break loudly.
+_GATE_REFUSAL_REASONS = {
+    EXIT_QUEUE_TIMEOUT: "capacity-refused",
+    EXIT_NO_WAIT: "capacity-refused",
+    EXIT_RAM_REFUSED: "capacity-refused",
+    EXIT_PROVIDER_CAP: "capacity-refused",
+    EXIT_LOAD_REFUSED: "capacity-refused",
+    EXIT_KING_SHARE: "capacity-refused",
+    EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+}
+
+
+@dataclass(frozen=True)
+class GateRefusal:
+    """A machine-scoped spawn refusal: raised by the gate before any
+    node-specific work began, so it is evidence about the machine, never
+    about the node."""
+
+    reason: str  # "capacity-refused" | "gate-unavailable"
+    exit_code: int
+    detail: str
+    retry_at: Optional[float] = None
+
+
+def _gate_refusal_detail(stderr: str) -> str:
+    """The gate's own refusal sentence: the LAST ``spawn-gate:`` line on
+    stderr, falling back to the head of stderr. The gate prints warnings
+    before its verdict, so the last line is the reason and the first may name
+    an unrelated condition."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    gate_lines = [ln for ln in lines if ln.startswith("spawn-gate:")]
+    if gate_lines:
+        return gate_lines[-1]
+    return (stderr or "").strip()[:200]
+
+
+def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
+    """Classify a spawn failure: a :class:`GateRefusal` when its exit code
+    names a machine-scoped gate condition, None when it is a node fault and
+    the caller keeps its ``failed`` verdict."""
+    code = getattr(exc, "exit_code", None)
+    reason = _GATE_REFUSAL_REASONS.get(code) if isinstance(code, int) else None
+    if reason is None:
+        return None
+    return GateRefusal(
+        reason=reason,
+        exit_code=code,
+        detail=getattr(exc, "detail", "") or str(exc),
+        retry_at=getattr(exc, "retry_at", None),
+    )
 
 
 def _slot_queue_retry_at(stdout: str) -> Optional[float]:
@@ -1510,12 +1588,16 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
-        if proc.returncode == 78:
-            # Typed capacity refusal: persist a defer; hand retry_at to the skip.
-            raise SpawnQueueRefused(
-                f"slot queue refused: {(stderr or proc.stdout or '').strip()[:200]}",
+        if proc.returncode == EXIT_PROVIDER_CAP:
+            # Typed capacity refusal: retry_at rides the exception to the skip.
+            gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
+            exc = SpawnQueueRefused(
+                f"fno agents spawn exited {EXIT_PROVIDER_CAP} (slot queue refused): "
+                f"{gate_detail}",
                 retry_at=_slot_queue_retry_at(proc.stdout or ""),
             )
+            exc.detail = gate_detail
+            raise exc
         # The --node door's family-2 guard dedups (a peer door won the node
         # handover, or our released reservation was re-taken mid-launch) by
         # refusing with already-running. That is the benign skip the caller's
@@ -1527,9 +1609,16 @@ def _spawn_worker(
             and "verdict=already-running" in stderr
         ):
             raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
+        # Name the code's meaning beside the bare number and carry the gate's
+        # own sentence as detail, so the consumer's error line does not lead
+        # with an unrelated warning.
+        gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
+        meaning = _GATE_REFUSAL_REASONS.get(proc.returncode)
+        suffix = f" ({meaning})" if meaning else ""
         raise SpawnError(
-            f"fno agents spawn exited {proc.returncode}: "
-            f"{(stderr or proc.stdout or '').strip()[:200]}"
+            f"fno agents spawn exited {proc.returncode}{suffix}: {gate_detail}",
+            exit_code=proc.returncode,
+            detail=gate_detail,
         )
     # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
     # spawn lands a DETACHED thread and returns a compact JSON receipt whose
@@ -3199,6 +3288,7 @@ def advance(
         detail: Optional[str] = None,
         provider: Optional[str] = None,
         retry_at: Optional[float] = None,
+        exit_code: Optional[int] = None,
     ) -> AdvanceResult:
         data: dict = {"reason": reason, "rank": rank}
         if closed_node_id:
@@ -3209,6 +3299,8 @@ def advance(
             data["provider"] = provider
         if retry_at is not None:
             data["retry_at"] = retry_at
+        if exit_code is not None:
+            data["exit_code"] = exit_code
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -3381,25 +3473,20 @@ def advance(
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
-    except SpawnQueueRefused as exc:
-        # Every lane exhausted: persist the defer (backlog owner), skip on the horizon.
+    except SpawnError as exc:
+        # A machine-scoped gate refusal is a skip that leaves the row ready -
+        # never a defer (a lane-wide condition written onto a row as node
+        # state) and never a strike.
         _safe_release(dispatch_key, holder, dispatch_root)
-        reset = int(exc.retry_at) if exc.retry_at else "unknown"
-        proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id,
-             "--reason", f"slot-queue: every configured lane exhausted; retry_at={reset}"],
-            cwd=node_cwd or None,
-            capture_output=True,
-            text=True,
-        )
+        refusal = gate_refusal(exc)
+        if refusal is None:
+            return failed(node_id, str(exc))
         return skip(
-            "slot-queue-deferred",
+            refusal.reason,
             node_id=node_id,
-            retry_at=exc.retry_at,
-            detail=(
-                f"deferred={'yes' if proc.returncode == 0 else 'no'}"
-                f" retry_at={exc.retry_at or '-'}"
-            ),
+            detail=refusal.detail,
+            retry_at=refusal.retry_at,
+            exit_code=refusal.exit_code,
         )
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3667,8 +3754,17 @@ def _converge_one(
             data["rank"] = rank
         return data
 
-    def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
+    def skip(
+        reason: str,
+        detail: Optional[str] = None,
+        retry_at: Optional[float] = None,
+        exit_code: Optional[int] = None,
+    ) -> AdvanceResult:
         data = _tag({"reason": reason, "node_id": node_id})
+        if retry_at is not None:
+            data["retry_at"] = retry_at
+        if exit_code is not None:
+            data["exit_code"] = exit_code
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -3737,6 +3833,18 @@ def _converge_one(
             )
         except SpawnAlreadyRunning:
             return skip("already-claimed")
+        except SpawnError as exc:
+            # A machine-scoped gate refusal is "not now" (the row stays ready,
+            # no strike); a node fault stays failed.
+            refusal = gate_refusal(exc)
+            if refusal is None:
+                return failed(str(exc))
+            return skip(
+                refusal.reason,
+                detail=refusal.detail,
+                retry_at=refusal.retry_at,
+                exit_code=refusal.exit_code,
+            )
         except Exception as exc:  # noqa: BLE001
             return failed(str(exc))
 
@@ -4215,7 +4323,11 @@ def advance_epic(
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
     total = 0
-    for child in children:
+    #: The first machine-scoped refusal ends the pass: the refusing condition
+    #: is identical for every remaining child, so attempting them only
+    #: manufactures one refusal per child.
+    _MACHINE_SCOPED = ("capacity-refused", "gate-unavailable")
+    for idx, child in enumerate(children):
         if max_dispatch is not None and total >= max_dispatch:
             break  # overall cap reached; remaining ready children wait for a drain/re-run
         # A project-less child cannot be capped, mapped, or launched - skip it with
@@ -4265,6 +4377,23 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
+        if res.decision == "skipped" and res.reason in _MACHINE_SCOPED:
+            # Name every child the pass did NOT try, so the journal shows what
+            # was skipped for the machine rather than implying it was considered.
+            for remaining in children[idx + 1:]:
+                _emit(
+                    EVENT_SKIPPED,
+                    {"reason": res.reason, "node_id": remaining["id"],
+                     "mission": canon, "rank": rank, "attempted": False},
+                    ev_path,
+                )
+                results.append(
+                    AdvanceResult(
+                        "skipped", EVENT_SKIPPED,
+                        reason=res.reason, node_id=remaining["id"],
+                    )
+                )
+            break
 
     return AdvanceEpicResult(
         canon, activated=True,
