@@ -343,6 +343,17 @@ pub fn retire_interval_snapshot(cell: &Arc<RetireIntervalCell>) -> Duration {
     )
 }
 
+/// Boot-time seed for the interval cell: one config read at daemon start so
+/// the first guard window already honors the configured cadence instead of
+/// waiting out the default; the sweep body keeps the cell fresh off-loop
+/// afterward.
+pub fn seed_retire_interval_cell(grace_cwd: &std::path::Path) -> Arc<RetireIntervalCell> {
+    let grace = crate::agents_config::retire_grace_secs(grace_cwd);
+    Arc::new(Mutex::new(Some(Duration::from_secs(
+        crate::agents_config::retire_interval_s(grace_cwd, grace),
+    ))))
+}
+
 /// The daemon idle tick's retirement sweep: classify every row, retire the
 /// work-done-and-quiet ones (stop the held process first), prune their
 /// clean-and-merged worktrees, and write the receipt every removal needs to
@@ -870,6 +881,24 @@ mod tests {
         });
         std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retirement_sweep_seed_honors_the_configured_cadence() {
+        // Boot seeds the cell with the CONFIGURED interval, so the first
+        // window after a daemon start waits the configured time, not the
+        // default.
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_AGENTS_RETIRE_INTERVAL_SECS", "45");
+        let (dir, _home) = retirement_sweep_tmp_home("seed");
+        let cell = crate::gc::seed_retire_interval_cell(&dir);
+        let grace = crate::agents_config::retire_grace_secs(&dir);
+        let expected = Duration::from_secs(crate::agents_config::retire_interval_s(&dir, grace));
+        std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
+        assert_eq!(retire_interval_snapshot(&cell), expected);
+        assert_eq!(retire_interval_snapshot(&cell).as_secs(), 45);
     }
 
     // --- the orphan process sweep ---

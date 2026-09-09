@@ -2240,8 +2240,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
-    let retire_interval_next: Arc<crate::gc::RetireIntervalCell> =
-        Arc::new(std::sync::Mutex::new(None));
+    let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as the sweeps beside
     // it rather than running inline in the select arm.

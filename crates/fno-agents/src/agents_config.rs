@@ -366,9 +366,11 @@ pub fn retire_interval_s(cwd: &Path, grace_secs: u64) -> u64 {
         })
         .unwrap_or(DEFAULT_RETIRE_INTERVAL_SECS)
     };
-    if configured < MIN_RETIRE_INTERVAL_SECS {
-        return DEFAULT_RETIRE_INTERVAL_SECS;
-    }
+    let configured = if configured < MIN_RETIRE_INTERVAL_SECS {
+        DEFAULT_RETIRE_INTERVAL_SECS
+    } else {
+        configured
+    };
     configured.min((grace_secs / 3).max(MIN_RETIRE_INTERVAL_SECS))
 }
 
@@ -1102,6 +1104,18 @@ mod tests {
         // A row must retire within one interval of becoming eligible: the
         // default interval is a strict fraction of the default grace.
         assert!(DEFAULT_RETIRE_INTERVAL_SECS * 3 <= DEFAULT_RETIRE_GRACE_SECS);
+    }
+
+    #[test]
+    fn retirement_sweep_interval_below_floor_still_clamped_by_grace() {
+        // The below-floor substitution feeds the clamp, never bypasses it:
+        // a 30s grace bounds the interval at 10s even when the configured
+        // value resolves to the default.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("retire-interval-zero-short-grace", "schema_version = 1\n");
+        assert_eq!(retire_interval_s(&cwd, 30), 10);
     }
 
     #[test]
