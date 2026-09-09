@@ -2627,32 +2627,36 @@ event_types:
     description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
     sources: [daemon, test]
     data:
-      required: [expired_claims, plan_locks, agent_locks, pr_status_cache, totals, applied, dry_run, skip_reason]
+      required: [fields, families, totals, skip_reason]
       properties:
-        expired_claims: &state_reap_family_counts
+        fields:
+          type: array
+          minItems: 5
+          maxItems: 5
+          prefixItems:
+            - {type: string, const: deleted}
+            - {type: string, const: would_delete}
+            - {type: string, const: kept}
+            - {type: string, const: bytes}
+            - {type: string, const: oldest_age_s}
+        families:
           type: object
-          required: [scanned, deleted, bytes, kept]
+          required: [expired_claims, plan_locks, agent_locks, pr_status_cache]
           properties:
-            scanned: {type: integer}
-            deleted: {type: integer}
-            bytes: {type: integer}
-            kept: {type: integer}
-        plan_locks: *state_reap_family_counts
-        agent_locks: *state_reap_family_counts
-        pr_status_cache: *state_reap_family_counts
-        totals:
-          type: object
-          required: [scanned, deleted, would_delete, bytes, kept]
-          properties:
-            scanned: {type: integer}
-            deleted: {type: integer}
-            would_delete: {type: integer}
-            bytes: {type: integer}
-            kept: {type: integer}
-        applied:
-          type: boolean
-        dry_run:
-          type: boolean
+            expired_claims: &state_reap_counts
+              type: array
+              minItems: 5
+              maxItems: 5
+              prefixItems:
+                - {type: integer}
+                - {type: integer}
+                - {type: integer}
+                - {type: integer}
+                - {type: [integer, "null"]}
+            plan_locks: *state_reap_counts
+            agent_locks: *state_reap_counts
+            pr_status_cache: *state_reap_counts
+        totals: *state_reap_counts
         skip_reason:
           type: [string, "null"]
 

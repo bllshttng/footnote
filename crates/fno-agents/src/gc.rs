@@ -645,12 +645,35 @@ pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
         })
 }
 
-fn state_reap_family_counts(family: &gc_sweep::StateReapFamilySummary) -> serde_json::Value {
+const STATE_REAP_FIELDS: [&str; 5] = ["deleted", "would_delete", "kept", "bytes", "oldest_age_s"];
+
+fn state_reap_family_tuple(family: &gc_sweep::StateReapFamilySummary) -> serde_json::Value {
+    serde_json::json!([
+        family.deleted,
+        family.would_delete,
+        family.kept.len(),
+        family.bytes,
+        family.oldest_age_s,
+    ])
+}
+
+fn state_reap_event_payload(summary: &gc_sweep::StateFilesReapSummary) -> serde_json::Value {
     serde_json::json!({
-        "scanned": family.scanned,
-        "deleted": family.deleted,
-        "bytes": family.bytes,
-        "kept": family.kept.len(),
+        "fields": STATE_REAP_FIELDS,
+        "families": {
+            "expired_claims": state_reap_family_tuple(&summary.expired_claims),
+            "plan_locks": state_reap_family_tuple(&summary.plan_locks),
+            "agent_locks": state_reap_family_tuple(&summary.agent_locks),
+            "pr_status_cache": state_reap_family_tuple(&summary.pr_status_cache),
+        },
+        "totals": [
+            summary.totals.deleted,
+            summary.totals.would_delete,
+            summary.totals.kept,
+            summary.totals.bytes,
+            summary.totals.oldest_age_s,
+        ],
+        "skip_reason": summary.skip_reason,
     })
 }
 
@@ -663,25 +686,7 @@ pub fn state_file_sweep(
 ) -> gc_sweep::StateFilesReapSummary {
     let summary =
         gc_sweep::reap_state_files(home, crate::agents_config::state_reap_config(cwd), true);
-    let _ = emitter.emit(
-        "state_reap",
-        &serde_json::json!({
-            "expired_claims": state_reap_family_counts(&summary.expired_claims),
-            "plan_locks": state_reap_family_counts(&summary.plan_locks),
-            "agent_locks": state_reap_family_counts(&summary.agent_locks),
-            "pr_status_cache": state_reap_family_counts(&summary.pr_status_cache),
-            "totals": {
-                "scanned": summary.totals.scanned,
-                "deleted": summary.totals.deleted,
-                "would_delete": summary.totals.would_delete,
-                "bytes": summary.totals.bytes,
-                "kept": summary.totals.kept,
-            },
-            "applied": summary.applied,
-            "dry_run": summary.dry_run,
-            "skip_reason": summary.skip_reason,
-        }),
-    );
+    let _ = emitter.emit("state_reap", &state_reap_event_payload(&summary));
     summary
 }
 
@@ -984,31 +989,69 @@ mod tests {
         assert_eq!(lines.len(), 2, "each periodic pass must emit one event");
         let event = &lines[0];
         assert_eq!(event["type"], "state_reap");
+        assert_ne!(event["type"], "event_payload_too_large");
         assert_eq!(event["source"], "test");
         let data = &event["data"];
+        assert_eq!(
+            data["fields"],
+            serde_json::json!(["deleted", "would_delete", "kept", "bytes", "oldest_age_s"])
+        );
         for family in [
             "expired_claims",
             "plan_locks",
             "agent_locks",
             "pr_status_cache",
         ] {
-            assert!(data[family].is_object(), "missing {family}: {data}");
-            for count in ["scanned", "deleted", "bytes", "kept"] {
-                assert!(
-                    data[family][count].is_number(),
-                    "missing {family}.{count}: {data}"
-                );
-            }
+            assert_eq!(
+                data["families"][family].as_array().map(Vec::len),
+                Some(5),
+                "missing compact {family} tuple: {data}"
+            );
         }
-        assert_eq!(data["expired_claims"]["deleted"], 1);
-        assert_eq!(data["totals"]["deleted"], 1);
-        assert_eq!(data["applied"], true);
-        assert_eq!(data["dry_run"], false);
+        assert_eq!(data["families"]["expired_claims"][0], 1);
+        assert_eq!(data["families"]["expired_claims"][1], 0);
+        assert_eq!(data["families"]["expired_claims"][2], 0);
+        assert_eq!(data["families"]["expired_claims"][3], 5);
+        assert!(data["families"]["expired_claims"][4].is_number());
+        assert_eq!(data["totals"][0], 1);
+        assert_eq!(data["totals"][1], 0);
+        assert_eq!(data["totals"][2], 0);
+        assert_eq!(data["totals"][3], 5);
+        assert!(data["totals"][4].is_number());
         assert!(data["skip_reason"].is_null());
         assert_eq!(lines[1]["type"], "state_reap");
-        assert_eq!(lines[1]["data"]["totals"]["scanned"], 0);
-        assert_eq!(lines[1]["data"]["totals"]["deleted"], 0);
+        assert_eq!(
+            lines[1]["data"]["totals"],
+            serde_json::json!([0, 0, 0, 0, null])
+        );
         assert!(lines[1]["data"]["skip_reason"].is_null());
+
+        let mut live = gc_sweep::StateFilesReapSummary::default();
+        live.expired_claims.deleted = 6_594;
+        live.expired_claims.would_delete = 2_393;
+        live.expired_claims.kept = vec![
+            gc_sweep::StateReapKept {
+                path: String::new(),
+                reason: String::new(),
+            };
+            27
+        ];
+        live.expired_claims.bytes = 9_880_000;
+        live.expired_claims.oldest_age_s = Some(8_631_360);
+        live.plan_locks.deleted = 2_393;
+        live.agent_locks.deleted = 4_344;
+        live.pr_status_cache.deleted = 123;
+        live.totals.deleted = 13_454;
+        live.totals.would_delete = 2_393;
+        live.totals.kept = 27;
+        live.totals.bytes = 9_880_000;
+        live.totals.oldest_age_s = Some(8_631_360);
+        let payload = state_reap_event_payload(&live);
+        let payload_len = serde_json::to_vec(&payload).unwrap().len();
+        assert!(
+            payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES,
+            "live-sized state_reap payload is {payload_len}B: {payload}"
+        );
     }
 
     #[test]
@@ -1031,9 +1074,26 @@ mod tests {
         let raw = std::fs::read_to_string(home.events_jsonl()).unwrap();
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "state_reap");
-        assert_eq!(event["data"]["totals"]["deleted"], 0);
-        assert_eq!(event["data"]["applied"], false);
-        assert_eq!(event["data"]["dry_run"], false);
+        assert_ne!(event["type"], "event_payload_too_large");
+        assert_eq!(
+            event["data"]["fields"],
+            serde_json::json!(["deleted", "would_delete", "kept", "bytes", "oldest_age_s"])
+        );
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert_eq!(
+                event["data"]["families"][family],
+                serde_json::json!([0, 0, 0, 0, null])
+            );
+        }
+        assert_eq!(
+            event["data"]["totals"],
+            serde_json::json!([0, 0, 0, 0, null])
+        );
         assert_eq!(event["data"]["skip_reason"], "disabled");
     }
 
