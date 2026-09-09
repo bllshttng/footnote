@@ -340,8 +340,7 @@ def _component_verdict(
     attempted: bool = False, include_mux: Optional[bool] = None,
     python_tool: Optional[dict] = None,
 ) -> Optional[dict]:
-    """One call to the native verdict; the binary probes and classifies.
-    None when it cannot answer - never read as fresh."""
+    """One call to the native verdict; None when it cannot answer - never fresh."""
     cmd = [
         str(verdict_bin), "component-verdict",
         "--bindir", str(bindir), "--expected", subtree,
