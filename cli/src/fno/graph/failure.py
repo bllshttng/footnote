@@ -171,9 +171,8 @@ def _classify(raw: object) -> Optional[_Ev]:
 
 def _window_to_reset(node_id: str, events: Iterable[object]) -> list[tuple[object, Optional[_Ev]]]:
     """The ONE streak window both readers walk: raw events for ``node_id``
-    newest -> oldest, stopping at the first reset boundary. advance_failed
-    and unrelated events ride through; the streak and its cause therefore
-    cannot diverge on where the window starts. ``events`` is file order."""
+    newest -> oldest to the first reset; advance_failed and unrelated events
+    ride through. The streak and its cause cannot diverge on where it starts."""
     out: list[tuple[object, Optional[_Ev]]] = []
     for raw in reversed(list(events)):
         ev = _classify(raw)

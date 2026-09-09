@@ -37,8 +37,8 @@ def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
 
 def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
     """``(path, mtime_ns, size)`` per existing candidate; OSError contributes
-    nothing. Locations are stated directly - never ``_candidate_paths`` (it
-    migrates) - canonical comes from the ``.git`` pointer, no subprocess."""
+    nothing. Locations stated directly - never ``_candidate_paths`` (it
+    migrates); canonical from the ``.git`` pointer, no subprocess."""
     from fno.config_io import _global_settings_path
 
     env_config = os.environ.get("FNO_CONFIG")
