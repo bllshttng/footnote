@@ -157,12 +157,21 @@ def test_authorized_target_init_journey(clean_machine):
 
     # 3. Authorized target init: a declared denominator, no plan, no remote.
     init = _run_fno(repo, home, "do", "target", "init", "--input", node, "--deliverables", "1")
-    assert init.returncode == 0, init.stderr
+    assert init.returncode == 0, f"init rc={init.returncode}\n{init.stdout}\n{init.stderr}"
 
     # 4. The manifest readback: written under the ISOLATED state root, naming
     #    this node AND the claim it acquired for it - the matching receipt.
-    manifests = list(home.glob(".fno/spaces/*/target-state.md"))
-    assert manifests, f"no session manifest under {home}/.fno/spaces"
+    #    Two candidate roots: this fixture scrubs FNO_SPACES_DIR so the manifest
+    #    lands under the isolated HOME, but the shared conftest's autouse
+    #    sandbox re-pins it at tmp/spaces and which one wins depends on fixture
+    #    ordering. The node-matching manifest is the assertion, not the path.
+    manifests = list(home.glob(".fno/spaces/*/target-state.md")) + list(
+        home.parent.glob("spaces/*/target-state.md")
+    )
+    assert manifests, (
+        f"no session manifest under {home}/.fno/spaces or {home.parent}/spaces\n"
+        f"{init.stdout}\n{init.stderr}"
+    )
     matching = [m for m in manifests if node in m.read_text()]
     assert matching, [m.name for m in manifests]
     manifest_text = matching[0].read_text()

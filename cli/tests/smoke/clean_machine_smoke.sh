@@ -8,9 +8,9 @@
 #   1. binary-complete (US6, AC6-UI): the `fno` front door and all three agent
 #      binaries on PATH.
 #   2. the ADVERTISED ENTRYPOINT (x-538e): the first verb runs through `fno`,
-#      not fno-py - `mux ls` proves the native mux, and a `--version` run
-#      self-provisions the wheel via uv (FNO_BOOTSTRAP_WHEEL) then forwards to
-#      fno-py. The remaining verbs run through that same front door.
+#      not fno-py - `mux ls --json` proves the native mux, and `--version`
+#      forwards to the ADJACENT fno-py (verified via its console-script
+#      shebang), the packaged-complete path a wheel install actually takes.
 #   3. internalized/folded verbs run from in-package code (US1/US2): each
 #      invocation must NOT 127 / "script not found" / traceback. A `--help`
 #      probe must exit 0 (proves the in-package module shipped + imports); a
@@ -94,27 +94,23 @@ for b in fno fno-py fno-agents fno-agents-daemon fno-agents-worker; do
 done
 
 # --- class 2: the advertised entrypoint routes (x-538e) ---
-# `mux ls` is native Rust: it answers with no Python and no provisioning, so a
-# miss here means the front door itself is broken, not the Python side.
-run_capture "$FNO" mux ls
-if [ "$RC" -eq 0 ]; then
-  pass "mux" "fno mux ls answers natively (rc=0)"
+# `mux ls --json` is native Rust: it answers with no Python and no
+# provisioning, and an empty session list is exactly `[]` - a miss here means
+# the front door itself is broken, not the Python side.
+run_capture "$FNO" mux ls --json
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qF '[]'; then
+  pass "mux" "fno mux ls --json answers natively (rc=0, empty list)"
 else
   miss "mux" "rc=$RC out: $(printf '%s' "$OUT" | head -1)"
 fi
 
-# The Python forwarding: the first `fno <verb>` self-provisions THIS wheel via
-# uv (FNO_BOOTSTRAP_WHEEL, the local wheel - by-name PyPI is the launch gate)
-# into an ISOLATED uv tool dir, then execs fno-py. No 127, no traceback, and
-# the version answers. uv tool install resolves the wheel's Python deps from
-# PyPI, so like the cargo/fno.sh channel smokes this needs a networked runner.
-command -v uv >/dev/null 2>&1 || { echo "FAIL[env] uv not on PATH (the front-door forwarding leg provisions via uv)"; exit 1; }
-export UV_TOOL_DIR="$BASE_TMP/uv-tools" UV_TOOL_BIN_DIR="$BASE_TMP/uv-bin" \
-       XDG_CACHE_HOME="$BASE_TMP/cache" FNO_BOOTSTRAP_WHEEL="$WHEEL"
-mkdir -p "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" "$XDG_CACHE_HOME"
+# The Python forwarding: the front door verifies the ADJACENT fno-py (the
+# console script's shebang names this venv's python) and execs it - no uv, no
+# second copy of the wheel, no network. A 127 here would mean the sibling
+# resolution arm is broken; a traceback, a shipped module missing.
 run_capture "$FNO" --version
 if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qE 'fno[[:space:]]+[0-9]+\.[0-9]+'; then
-  pass "frontdoor" "fno --version self-provisioned and forwarded (rc=0)"
+  pass "frontdoor" "fno --version verified and forwarded to the adjacent CLI (rc=0)"
 else
   miss "frontdoor" "rc=$RC out: $(printf '%s' "$OUT" | tail -1)"
 fi

@@ -166,7 +166,7 @@ class Fno < Formula
   end
 
   test do
-    assert_match "fno", shell_output("#{bin}/fno mux ls")
+    assert_match "[]", shell_output("#{bin}/fno mux ls --json")
     assert_match "fno", shell_output("#{bin}/fno-py --version")
     %w[fno fno-py fno-agents fno-agents-daemon fno-agents-worker].each do |b|
       assert_predicate bin/b, :executable?, "#{b} missing from the keg bin"

@@ -96,9 +96,10 @@ class Fno < Formula
   end
 
   test do
-    # The front door runs from the keg bin: `mux ls` is native (no Python
-    # needed), so it proves the Rust binary itself is executable here.
-    assert_match "fno", shell_output("#{bin}/fno mux ls")
+    # The front door runs from the keg bin: `mux ls --json` is native (no
+    # Python needed), and an empty session list is exactly `[]` - a stable
+    # marker on a clean runner where `mux ls` would print "no sessions".
+    assert_match "[]", shell_output("#{bin}/fno mux ls --json")
 
     # The Python component answers beside it.
     assert_match "fno", shell_output("#{bin}/fno-py --version")
