@@ -89,7 +89,15 @@ def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(fingerprint)
 
 
-def _settings_key() -> tuple:
+def _settings_key() -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    str,
+    tuple[tuple[str, int, int], ...],
+]:
     """The declaration the settings resolution reads from the process, plus
     a content fingerprint of the settings candidates.
 
