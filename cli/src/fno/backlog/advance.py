@@ -1408,7 +1408,7 @@ def _spawn_worker(
         cmd += ["--provider", vendor]
     elif grid_lane_route:
         # The row's route owns vendor AND model as one fact; an explicit
-        # dispatch-time `vendor` pin outranks it and is never replaced.
+        # dispatch-time vendor pin outranks it and is never replaced.
         cmd += ["--route", grid_lane_route]
     if grid_lane_account and resolved.get("harness") == "claude":
         # The capacity pick read THIS account's quota; claude-only at the CLI.
@@ -2881,7 +2881,7 @@ def _join_node(
             # x-571f shape: an explicit model rides as a spawn flag.
             *(("--model", lane_m or model) if (lane_m or model) else ()),
             # The grid's route rides beside the model it belongs to; a row
-            # without one (claude-canonical-*) adds nothing.
+            # without one adds nothing.
             *(("--route", lane_r) if lane_r else ()),
             # The capacity pick read the account's quota, so the joiner runs
             # under it; the thread substrate is claude-only here already.

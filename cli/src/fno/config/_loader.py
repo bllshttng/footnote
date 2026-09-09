@@ -89,7 +89,6 @@ def _settings_key() -> _SettingsKey:
     )
 
 
-#: Declaration (five env/root strings) + the stat fingerprint tuple.
 _SettingsKey = tuple[
     Optional[str], Optional[str], Optional[str], Optional[str], Optional[str],
     str, tuple[tuple[str, int, int], ...],
