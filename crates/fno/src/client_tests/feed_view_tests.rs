@@ -1,13 +1,15 @@
 //! The feed panel's client-side tests (x-4433, x-f089): render order, the
-//! hover marker, the click mapping, and the deep-link contract. A joined row
-//! resolves exactly what `agent_hit` yields for that sideline row; an
-//! unjoined row with a session id attaches it on portal 0; a row with no
-//! session id is not selectable. The panel is chrome: the click resolver and
-//! the painter must invert each other exactly.
+//! hover marker, the click mapping, the focus mode, and the provenance view.
+//! One `Reach` resolves a row, and the footer and the action both read it, so
+//! a joined row yields exactly what `agent_hit` yields for that sideline row,
+//! an unjoined row with a session id attaches on portal 0, and a row with no
+//! session id offers nothing. The click resolver and the painter must invert
+//! each other exactly.
 
 use super::tests::{two_pane_view, view_with_agents};
 use super::*;
-use crate::client::feed_view::{feed_hit, feed_panel_lines, feed_row_item, FeedOverlay};
+use crate::client::feed_detail::{self, destination, Destination};
+use crate::client::feed_view::{feed_panel_lines, feed_row_item, FeedOverlay};
 use crate::proto::Reach;
 
 const W: usize = 40;
@@ -22,6 +24,28 @@ fn feed_item(node: Option<&str>, sid: Option<&str>) -> crate::feed_overlay::Feed
         harness: None,
         title: "PR 1395".into(),
         r#ref: Some("1395".into()),
+        actor: None,
+        model: None,
+        effort: None,
+        phase: None,
+        detail: None,
+    }
+}
+
+fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
+    crate::feed_overlay::FeedItem {
+        ts: "2026-09-06T10:00:00Z".into(),
+        kind: "session_reaped".into(),
+        node: None,
+        session_id: Some(sid.into()),
+        harness: Some("claude".into()),
+        title: "t-d145 removed by reap".into(),
+        r#ref: None,
+        actor: None,
+        model: None,
+        effort: None,
+        phase: None,
+        detail: Some(resume.into()),
     }
 }
 
@@ -33,6 +57,8 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
         inflight: false,
         want: false,
         gen: 0,
+        focused: false,
+        hpan: 0,
     }
 }
 
@@ -146,7 +172,8 @@ fn degraded_footer_renders_the_typed_reason() {
 fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
     // The cwd basename is the node id: the join the sideline itself uses.
     let v = view_with_rows(vec![joined_row("worker-01", Some("x-9223"), Some(7))]);
-    let joined = feed_hit(&v, &feed_item(Some("x-9223"), Some("s-ghost"))).unwrap();
+    let item = feed_item(Some("x-9223"), Some("s-ghost"));
+    let joined = feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).unwrap();
     let expected = {
         let r = &v.layout.agents[0];
         agent_hit(r, v.layout.active_squad)
@@ -161,7 +188,8 @@ fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
 #[test]
 fn hit_on_an_unjoined_row_attaches_its_session() {
     let v = view_with_rows(vec![]);
-    let hit = feed_hit(&v, &feed_item(Some("x-nope"), Some("s-ghost"))).unwrap();
+    let item = feed_item(Some("x-nope"), Some("s-ghost"));
+    let hit = feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).unwrap();
     assert!(matches!(hit, ChromeHit::Cmds(c)
     if c == vec![Command::AttachAgent {
         id: "s-ghost".into(),
@@ -172,7 +200,8 @@ fn hit_on_an_unjoined_row_attaches_its_session() {
 #[test]
 fn hit_on_a_row_without_session_id_is_none() {
     let v = view_with_rows(vec![]);
-    assert!(feed_hit(&v, &feed_item(Some("x-nope"), None)).is_none());
+    let item = feed_item(Some("x-nope"), None);
+    assert!(feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).is_none());
 }
 
 #[test]
@@ -210,10 +239,10 @@ fn click_resolver_inverts_the_painter() {
 }
 
 #[test]
-fn a_click_on_a_feed_row_deep_links_it() {
+fn a_click_on_a_feed_row_opens_that_rows_provenance() {
     // The full client path: feed open, click in the panel's item rows at the
-    // geometry the painter draws, hit = that row's deep link (the unjoined
-    // attach, since the two-pane view has no agents).
+    // geometry the painter draws, hit = that row's provenance view. The deep
+    // link moved to that view's own action; a click inspects, never attaches.
     let mut v = view_with_rows(vec![]);
     v.feed = Some(overlay(vec![
         feed_item(Some("x-a"), Some("s-1")),
@@ -234,7 +263,13 @@ fn a_click_on_a_feed_row_deep_links_it() {
         lines[1]
     );
     let hit = v.chrome_hit(1, col).unwrap();
-    assert!(matches!(hit, ChromeHit::Cmds(c)
+    assert!(
+        matches!(&hit, ChromeHit::OpenFeedDetail(item) if item.session_id.as_deref() == Some("s-3")),
+        "the click names the event the top row painted"
+    );
+    // And THAT view's action is the deep link the click used to fire.
+    v.feed_detail_of = Some(feed_item(Some("x-c"), Some("s-3")));
+    assert!(matches!(v.feed_detail_hit(), Some(ChromeHit::Cmds(c))
     if c == vec![Command::AttachAgent {
         id: "s-3".into(),
         placement: PanePlacement { portal: Some(0), ..Default::default() },
@@ -369,4 +404,262 @@ fn a_double_width_glyph_claims_two_cells() {
         spacer.flags & cell_flags::WIDE_SPACER != 0,
         "the wide glyph reserves both cells"
     );
+}
+
+// (AC4) The narrowed invariant, both halves. An unfocused panel takes no
+// keys, so the header says how to focus and the marker does not move; a
+// focused panel takes the arrows and says so.
+#[test]
+fn the_header_names_the_input_state_the_panel_is_in() {
+    let unfocused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+    let lines = feed_panel_lines(&unfocused, W, ROWS, 0);
+    assert!(
+        lines[0].contains("E focus"),
+        "unfocused header: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("details"),
+        "unfocused header: {}",
+        lines[0]
+    );
+
+    let mut focused = overlay(vec![feed_item(Some("x-a"), Some("s-1"))]);
+    focused.focused = true;
+    let lines = feed_panel_lines(&focused, W, ROWS, 0);
+    assert!(lines[0].contains("FOCUSED"), "focused header: {}", lines[0]);
+    assert!(lines[0].contains("esc release"));
+
+    // The focus key is advertised nowhere else, so it survives every width
+    // the border can be dragged to rather than being clipped off the end.
+    for w in 30..90usize {
+        assert!(
+            feed_view::header_line(false, w).contains("E focus"),
+            "the focus key vanished at width {w}"
+        );
+        assert!(
+            unicode_width::UnicodeWidthStr::width(feed_view::header_line(false, w)) <= w || w < 32,
+            "header overflows at width {w}"
+        );
+    }
+}
+
+// (AC4-EDGE) Esc releases the keyboard and leaves the panel open, so the very
+// next byte reaches the pane again.
+#[test]
+fn esc_releases_the_keyboard_without_closing_the_panel() {
+    let mut v = view_with_rows(vec![]);
+    v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
+    v.feed.as_mut().unwrap().focused = true;
+    assert!(crate::client::feed_view::release(&mut v));
+    assert!(v.feed.is_some(), "the panel stays open");
+    assert!(!v.feed.as_ref().unwrap().focused);
+    // Releasing twice is a no-op, never a close.
+    assert!(!crate::client::feed_view::release(&mut v));
+    assert!(v.feed.is_some());
+}
+
+// The pan moves the TITLE only, in display columns, and never splits a wide
+// glyph: the stamp, kind and node stay anchored so a panned row is still the
+// row that was selected.
+#[test]
+fn a_pan_moves_the_title_by_display_columns() {
+    assert_eq!(feed_view::pan_by("abcdef", 0), "abcdef");
+    assert_eq!(feed_view::pan_by("abcdef", 2), "cdef");
+    // A two-column glyph straddling the cut is dropped whole, never halved.
+    assert_eq!(feed_view::pan_by("漢字ab", 1), "字ab");
+    assert_eq!(feed_view::pan_by("abc", 99), "");
+    assert_eq!(
+        feed_view::widest_title(&[feed_item(None, None), reaped_item("s", "r")]),
+        "t-d145 removed by reap".len()
+    );
+}
+
+// (AC5-HP) A removal reads as a normal outcome carrying its recovery line,
+// never as a bare attach the server refuses.
+#[test]
+fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
+    use crate::client::feed_detail;
+    let item = reaped_item(
+        "00847995-e0db-47c2-ab5b-24468ba1a4f5",
+        "resume: claude --resume x",
+    );
+    let d = destination(&[], &item);
+    let fields = feed_detail::detail_fields(&item, &d);
+    let pane = fields.iter().find(|(l, _)| *l == "pane").unwrap();
+    assert!(
+        pane.1.starts_with(feed_detail::NOT_APPLICABLE),
+        "pane read {}",
+        pane.1
+    );
+    assert!(pane.1.contains("removed"));
+    let lines = feed_detail::detail_lines(&item, &d);
+    assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
+    assert!(feed_detail::detail_footer(&d).contains("resume line"));
+
+    let mut v = view_with_rows(vec![]);
+    v.feed_detail_of = Some(item);
+    // Enter hands the line over; it never attaches a session that is gone.
+    assert!(matches!(
+        v.feed_detail_hit(),
+        Some(ChromeHit::Notice(msg)) if msg == "resume: claude --resume x"
+    ));
+}
+
+// (AC5-EDGE) Pane ids allocate from zero, so pane 0 is a real seat. The join
+// is on the exact session id, never the row name a later worker can reuse.
+#[test]
+fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
+    use crate::client::feed_detail;
+    let mut row = joined_row("some-other-name", None, Some(0));
+    row.harness_session_id = Some("s-9".into());
+    row.portal = Some(0);
+    row.spawned_by_session = Some("s-parent".into());
+    row.crown_scope = Some("e-0001".into());
+    row.crown_level = Some(1);
+
+    let item = feed_item(Some("x-a"), Some("s-9"));
+    let rows = [row];
+    let d = destination(&rows, &item);
+    assert!(
+        matches!(d, Destination::Exact(_)),
+        "joined on the session id"
+    );
+    let fields = feed_detail::detail_fields(&item, &d);
+    let by = |label: &str| {
+        fields
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(by("pane"), "pane 0 · portal 0");
+    assert_eq!(by("parent"), "s-parent");
+    assert_eq!(by("king"), "L1 e-0001");
+    assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
+
+    // A row whose session id does not match is NOT this event's session,
+    // however its name reads: parent and king stay unrecorded, and the pane
+    // says whose seat it actually is.
+    let other = feed_item(Some("some-other-name"), Some("s-someone-else"));
+    let other_dest = destination(&rows, &other);
+    assert!(matches!(other_dest, Destination::NameOnly(_)));
+    let other_fields = feed_detail::detail_fields(&other, &other_dest);
+    let by_other = |label: &str| {
+        other_fields
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
+    assert_eq!(by_other("king"), feed_detail::NOT_RECORDED);
+    assert!(by_other("pane").contains("the node's current worker"));
+}
+
+// The panel drags narrower than any prose fits, and the caller clips from the
+// end. The key must survive that clip: it is the only place it is advertised.
+#[test]
+fn the_header_keeps_its_key_at_every_draggable_width() {
+    use crate::client::feed_view::header_line;
+    for w in 0..=80usize {
+        let unfocused = header_line(false, w);
+        assert!(
+            unfocused.starts_with(" E focus")
+                || unicode_width::UnicodeWidthStr::width(unfocused) <= w,
+            "w={w} picked {unfocused:?}"
+        );
+        let focused = header_line(true, w);
+        assert!(
+            focused.starts_with(" esc release")
+                || unicode_width::UnicodeWidthStr::width(focused) <= w,
+            "w={w} picked {focused:?}"
+        );
+    }
+    // Below every prose spelling, the fallback leads with the key, so an
+    // 8-column clip still reads "E focus" rather than a truncated label.
+    assert_eq!(header_line(false, 8), " E focus");
+    assert!(header_line(true, 8).starts_with(" esc"));
+}
+
+// An absent field says WHICH silence it is. A blank cell would teach nothing
+// and would read as broken UI when the defect is upstream.
+#[test]
+fn an_absent_field_names_its_own_kind_of_silence() {
+    use crate::client::feed_detail;
+    let mut item = feed_item(Some("x-a"), None);
+    item.kind = "node_created".into();
+    item.harness = None;
+    let fields = feed_detail::detail_fields(&item, &destination(&[], &item));
+    let by = |label: &str| {
+        fields
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    // A graph field was never run by a session, so its lane is inapplicable.
+    assert!(by("model").starts_with(feed_detail::NOT_APPLICABLE));
+    assert!(by("pane").starts_with(feed_detail::NOT_APPLICABLE));
+    // A mechanism acted, so there is no session to attach to - and that is a
+    // different statement from "we never wrote one down".
+    let mut acted = feed_item(None, None);
+    acted.kind = "decision_recorded".into();
+    acted.actor = Some("fno agents stale-escalate".into());
+    let fields = feed_detail::detail_fields(&acted, &destination(&[], &acted));
+    let sid = fields.iter().find(|(l, _)| *l == "session-id").unwrap();
+    assert!(
+        sid.1.contains("acted by fno agents stale-escalate"),
+        "{}",
+        sid.1
+    );
+    // A completed node that RAN carries the last do/ship session, so its
+    // lane was recorded somewhere and simply is not on this row. Calling it
+    // inapplicable would contradict the session the same view attaches to.
+    let mut ended = feed_item(Some("x-a"), Some("s-last"));
+    ended.kind = "node_ended".into();
+    ended.harness = Some("claude".into());
+    let fields = feed_detail::detail_fields(&ended, &destination(&[], &ended));
+    let model = fields.iter().find(|(l, _)| *l == "model").unwrap();
+    assert_eq!(model.1, feed_detail::NOT_RECORDED, "{}", model.1);
+    // Lineage is measured to be unrecorded on almost every row: say so.
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, feed_detail::NOT_RECORDED);
+}
+
+// The whole render path, not just the line builder: open the provenance view
+// on a real View and read the COMPOSED frame. A field that never reaches the
+// screen is the defect this view exists to prevent, so the assertion is on
+// painted text.
+#[test]
+fn the_composed_frame_paints_every_field_and_its_action() {
+    let mut v = view_with_rows(vec![]);
+    v.term = (44, 120);
+    v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
+    let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    item.harness = Some("claude".into());
+    item.model = Some("glm-5.3-flash".into());
+    v.feed_detail_of = Some(item);
+
+    let text = crate::vt::frame_text(&v.compose());
+    for label in [
+        "harness",
+        "timestamp",
+        "model",
+        "effort",
+        "node",
+        "session-id",
+        "pane",
+        "parent",
+        "king",
+    ] {
+        assert!(text.contains(label), "the frame never painted {label}");
+    }
+    // The values that ARE recorded, and the honest silence for the ones that
+    // are not - never a blank cell.
+    assert!(text.contains("glm-5.3-flash"));
+    assert!(text.contains("x-9223"));
+    assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
+    // The action is named before it is pressed.
+    assert!(text.contains("attach on portal 0"), "footer missing");
 }
