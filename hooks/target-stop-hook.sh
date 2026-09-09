@@ -173,6 +173,13 @@ resolve_agents_bin() {
 BIN=""
 TARGET_RESOLVE_BROKEN=0
 TARGET_NO_MATCH=0
+# Set ONLY when no manifest file exists at all (the "else" branch below), never
+# when one exists but names a foreign session/harness: a resident manifest
+# already has an owner to scan its own distress, and scanning here too would
+# invoke the binary against a stop this session does not own (x-3567's T6/T13
+# regression: a foreign-transcript or foreign-harness stop must never touch
+# the binary).
+PRE_MANIFEST_NO_FILE=0
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     RESIDENT_SESSION_ID=$(sed -n 's/^fno_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
         | head -1 | tr -d '[:space:]' || true)
@@ -231,6 +238,7 @@ else
             TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             TARGET_NO_MATCH=1
+            PRE_MANIFEST_NO_FILE=1
         elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
             TARGET_RESOLVE_BROKEN=1
         fi
@@ -390,7 +398,11 @@ if [[ ! -f "$STATE_FILE" ]]; then
             # carries a <help> tag nobody would otherwise read: loop-check is
             # never invoked on this path, so scan for it directly. Side
             # effect only, never a verdict; no transcript, nothing to read.
-            if [[ -n "$HOOK_TRANSCRIPT_PATH" && -n "$BIN" ]]; then
+            # Gated on PRE_MANIFEST_NO_FILE, not the broader TARGET_NO_MATCH:
+            # a resident manifest that simply names a foreign session already
+            # has its own owner to scan its own distress, and must never see
+            # the binary invoked against a stop it does not own.
+            if [[ "$PRE_MANIFEST_NO_FILE" -eq 1 && -n "$HOOK_TRANSCRIPT_PATH" && -n "$BIN" ]]; then
                 DISTRESS_SCAN_ARGS=(distress-scan --transcript "$HOOK_TRANSCRIPT_PATH" \
                     --run "${RESOLVE_HARNESS_ID:-$HOOK_HARNESS_ID}" --cwd "$PWD")
                 [[ -n "$HOOK_HARNESS" ]] && DISTRESS_SCAN_ARGS+=(--harness "$HOOK_HARNESS")
