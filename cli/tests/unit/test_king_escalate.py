@@ -227,6 +227,32 @@ def test_ac4_hp_an_unknown_session_falls_through_quietly(tmp_path: Path, monkeyp
 
     _prepare_court(monkeypatch, tmp_path, [])
     assert resolve_presiding_king("no-such-session") is None
+
+
+def test_ac4_hp_a_uuid_session_id_matches_case_insensitively(tmp_path: Path, monkeypatch) -> None:
+    """A UUID-family id differing only in case is still the caller's own row
+    (harness_identity.session_identity_key's own contract) - a raw string
+    comparison here would silently read every such call as uncrowned."""
+    from fno.king.escalate import resolve_presiding_king
+
+    stored = "aaaa1111-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    _prepare_court(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "l2-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="x-epic",
+                harness_session_id=stored,
+            ),
+            _entry("l1-king", status="busy", crown_level=1, crown_scope="fno"),
+        ],
+    )
+    presiding = resolve_presiding_king(stored.upper())
+    assert presiding is not None
+    assert presiding["holder"] == "l1-king"
     assert resolve_presiding_king(None) is None
 
 

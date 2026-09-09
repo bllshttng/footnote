@@ -149,9 +149,16 @@ def resolve_presiding_king(session_id: "str | None") -> "dict | None":
         from fno.agents.court import find_presiding_crown, gather_court
         from fno.agents.crown import _graph_index
         from fno.agents.registry import load_registry
+        from fno.harness_identity import session_identity_key
 
+        needle = session_identity_key(session_id)
         own = next(
-            (r for r in load_registry() if getattr(r, "harness_session_id", None) == session_id),
+            (
+                r
+                for r in load_registry()
+                if getattr(r, "harness_session_id", None)
+                and session_identity_key(r.harness_session_id) == needle
+            ),
             None,
         )
         if own is None or own.crown_level is None or not own.crown_scope:
