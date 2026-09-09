@@ -158,6 +158,8 @@ Envelope shape for all loop-runtime events:
 | `loop_check` | hook | every stop-hook fire |
 | `termination` | hook | session allows exit (TerminationReason) |
 | `loop_check_watch_idle` | hook | a `<watching>` Claude session idles non-terminally on a verified async wait (CI pending / bot review outstanding); the fire returns `allow` with `termination_reason: null` and extends the claim lease, so the session parks until its harness-tracked watcher fires instead of re-blocking every tick. Claude-only: a `FNO_DRIVER_LIB` loop-run child exits on allow, and codex/gemini have no self-wake on background-task exit (their daemon-consumer waker ships separately), so both keep today's block behavior. |
+
+The lease is what makes the idle safe, so a session that cannot take one never idles. When the node is already claimed, `fno do target init` writes no `target_claim_key`. The manifest is write-once, so that session can NEVER renew, and its `<watching>` tag is refused on every stop. The refusal says so, and it drops the arm-and-tag hint. A message that prescribes the ritual it just refused sent one session to arm three watchers and idle none. Read that refusal as "spend each wake on real work", never as a transient failure to retry.
 | `loop_check_gh_error` | hook | gh read fails during `done()` |
 | `loop_advisory_mode` | hook | advisory-mode session |
 | `loop_check_binary_missing` | hook | `fno-agents` binary not found |
