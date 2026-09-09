@@ -34,6 +34,23 @@ def _isolate_triad_install_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update, "_triad_install_dirs", lambda: [])
 
 
+@pytest.fixture(autouse=True)
+def _converged_verdict_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freshness now requires a converged native verdict.
+
+    Every ``_refresh_rust_bins`` path ends in a ``_component_verdict`` call
+    whose classification shells the deployed fno-agents binary. Gate tests here
+    stub revs and mock effects only, so the transport is stubbed converged BY
+    DEFAULT; tests that assert the verdict behavior itself (transport failure,
+    partial outcomes, component lines) override this stub explicitly.
+    """
+    monkeypatch.setattr(
+        update,
+        "_component_verdict",
+        lambda req, binary, **kw: {"converged": True, "components": []},
+    )
+
+
 def _write_pyproject(directory: Path, name: str = "fno") -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "pyproject.toml").write_text(
@@ -1843,6 +1860,7 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
     marker_file = tmp_path / "installed-rust-rev"
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     fake_cargo_home = tmp_path / "cargo-home"
+    (fake_cargo_home / "bin").mkdir(parents=True)
     monkeypatch.setenv("CARGO_HOME", str(fake_cargo_home))
     state = {"built": False}
     post_bin = fake_cargo_home / "bin" / "fno-agents"
@@ -1857,9 +1875,13 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
         recorded_cmds.append(list(cmd))
         if cmd and cmd[0] == "cargo":
             state["built"] = True
+            # The deploy must LAND the binary - the post-effect
+            # convergence verdict probes the file on disk.
+            post_bin.write_text("x", encoding="utf-8")
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
+    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": "e" * 40, "error": None})
 
     result = update._refresh_rust_bins(source, force=True)
     assert result == "refreshed"
@@ -2800,3 +2822,110 @@ def test_update_proceeds_to_exec_once_when_claim_free(monkeypatch, tmp_path):
     assert exec_calls[0][0] == "/bin/sh"
     assert len(rust_calls) == 1
     assert rust_calls[0][1].get("dry_run") is False
+
+
+# ---------------------------------------------------------------------------
+# Deployed-component convergence verdict (transport + rendering)
+# ---------------------------------------------------------------------------
+
+
+def _fresh_triad_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subtree: str) -> Path:
+    """A fresh-triad fresh-path fixture: full triad on disk, revs matching."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    for n in update._triad_names():
+        (bindir / n).write_text("x")
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: bindir / "fno-agents")
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
+    return bindir
+
+
+def test_fresh_path_failed_mux_repair_is_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC1-HP: a fresh triad whose mux repair lands nothing reports the mux
+    component failed with an executable repair command; the outcome is partial,
+    never fresh."""
+    subtree = "a" * 40
+    mux_dir = tmp_path / "crates" / "fno"
+    mux_dir.mkdir(parents=True)
+    bindir = _fresh_triad_env(tmp_path, monkeypatch, subtree)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "_install_mux_front_door", lambda *a, **kw: False)
+
+    def fake_bin_probe(binary, **kw):
+        if Path(str(binary)).name == "fno":
+            return {"rev": None, "error": None}
+        return {"rev": subtree, "error": None}
+
+    monkeypatch.setattr(update, "_bin_probe", fake_bin_probe)
+    monkeypatch.setattr(update, "_component_verdict", lambda req, b, **kw: {
+        "converged": False,
+        "components": [
+            {"component": "fno", "status": "failed", "observed_rev": None,
+             "expected_rev": subtree, "executable": None,
+             "repair": f"cargo install --path {mux_dir} --bins",
+             "detail": "deploy attempted but no executable landed"},
+        ],
+    })
+    result = update._refresh_rust_bins(tmp_path / "cli")
+    assert result == "partial"
+
+
+def test_component_verdict_transport_failure_is_never_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployed binary that cannot answer the verdict is NOT convergence:
+    the fresh path downgrades to partial and the transport failure is named."""
+    subtree = "a" * 40
+    _fresh_triad_env(tmp_path, monkeypatch, subtree)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": subtree, "error": None})
+    monkeypatch.setattr(update, "_component_verdict", lambda req, b, **kw: None)
+    assert update._refresh_rust_bins(tmp_path / "cli") == "partial"
+
+
+def test_component_lines_name_repair_and_unknown_instrument() -> None:
+    """AC3-HP at the render layer: Failed names its repair command, Unknown
+    keeps the named instrument, Fresh renders compact."""
+    report = {"components": [
+        {"component": "fno", "status": "failed", "observed_rev": None,
+         "expected_rev": "a" * 40, "repair": "cargo install --path /x --bins",
+         "detail": "deploy attempted but no executable landed"},
+        {"component": "fno-agents-worker", "status": "unknown", "observed_rev": None,
+         "expected_rev": "a" * 40, "detail": "hung on `version --json` (>20s)"},
+        {"component": "fno-agents", "status": "fresh"},
+    ]}
+    lines = update._component_lines(report)
+    assert any("repair: cargo install --path /x --bins" in line for line in lines), lines
+    assert any("hung on `version --json`" in line for line in lines), lines
+    assert sum("component fno-agents: fresh" in line for line in lines) == 1
+
+
+def test_component_verdict_request_carries_every_component_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-EDGE: one probe per deployed executable, independently, and the
+    request names both crate dirs."""
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    (source.parent / "crates" / "fno").mkdir(parents=True)
+    bindir = tmp_path / "cargo" / "bin"
+    bindir.mkdir(parents=True)
+    for n in update._triad_names():
+        (bindir / n).write_text("x")
+    (bindir / "fno").write_text("x")
+    monkeypatch.setattr(update, "_bin_probe", lambda b, **kw: {"rev": "r1", "error": None})
+    captured: dict = {}
+    monkeypatch.setattr(
+        update, "_component_verdict", lambda req, b, **kw: captured.update(req) or {}
+    )
+    update._probe_and_classify(source, "subtreerev", bindir, bindir / "fno-agents")
+    assert set(captured) >= {"expected_rev", "crates_agents_dir", "crates_mux_dir", "components"}
+    names = {c["component"] for c in captured["components"]}
+    assert names == {"fno-agents", "fno-agents-daemon", "fno-agents-worker", "fno"}
+    assert all(c["executable"] for c in captured["components"])
