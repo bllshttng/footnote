@@ -1923,6 +1923,15 @@ impl Drop for BoundedLock {
 // Atomic publish: backup, write
 // ---------------------------------------------------------------------------
 
+/// Backups live in a `backups/` sibling of the graph file, never beside it:
+/// a rotation family at the state-root top level is exactly what
+/// docs/state-root-inventory.md forbids (x-a469).
+fn backup_dir(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?.join("backups");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// Copy the current file to a timestamped backup, prune to
 /// GRAPH_BACKUP_KEEP, and return the backup path (store._create_backup).
 /// None when the file does not yet exist or the copy failed (warned, never
@@ -1931,26 +1940,19 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
-    let backup = path.with_file_name(format!(
-        "{}.bak.{}",
-        path.file_name()?.to_string_lossy(),
-        backup_stamp()
-    ));
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let dir = backup_dir(path)?;
+    let backup = dir.join(format!("{}.bak.{}", name, backup_stamp()));
     if std::fs::copy(path, &backup).is_err() {
         return None;
     }
-    let mut existing: Vec<PathBuf> = std::fs::read_dir(path.parent()?)
+    let prefix = format!("{}.bak.", name);
+    let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
-                .map(|n| {
-                    let n = n.to_string_lossy();
-                    n.starts_with(&format!(
-                        "{}.bak.",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    ))
-                })
+                .map(|n| n.to_string_lossy().starts_with(&prefix))
                 .unwrap_or(false)
         })
         .collect();
@@ -2257,15 +2259,18 @@ pub fn read_defaulted_opts(
         }
         Ok(RawRead::Corrupt(reason)) => {
             if backup_on_corrupt {
-                let backup = path.with_file_name(format!(
-                    "{}.bak",
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                ));
                 // path.with_suffix(".json.bak") in Python; the file-name form
-                // keeps "graph.json" -> "graph.json.bak" for the same effect.
-                let _ = std::fs::copy(path, &backup);
+                // keeps "graph.json" -> "graph.json.bak" for the same effect,
+                // inside backups/ rather than at the state root (x-a469).
+                if let Some(dir) = backup_dir(path) {
+                    let backup = dir.join(format!(
+                        "{}.bak",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    ));
+                    let _ = std::fs::copy(path, &backup);
+                }
             }
             Err(StoreError::Corrupt(reason))
         }

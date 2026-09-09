@@ -194,11 +194,13 @@ def _state_file_collisions(path: Path) -> list[str]:
             # default row rather than be refused and then overwritten anyway.
             gc.GRAPH_ARCHIVE_JSON,
             gc.LEDGER_JSON,
-            # the corruption-recovery backup, and the
+            # the corruption-recovery backup (the pre-relocation sibling and
+            # the backups/ copy current keepers write), and the
             # flock whose inode an os.replace would swap out from under the
             # mutation mutex
             Path(str(gc.GRAPH_JSON) + ".bak"),
             Path(str(gc.GRAPH_JSON) + ".lock"),
+            Path(gc.GRAPH_JSON.parent / "backups" / (Path(gc.GRAPH_JSON).name + ".bak")),
         ):
             if resolved == Path(state_path).resolve():
                 hits.append(str(state_path))
