@@ -1,5 +1,4 @@
-"""Watchdog-verdict lookup for blocked_child (x-3ecf). Registered via
-import from cli.py, matching transcript_reads.py."""
+"""Watchdog-verdict lookup for blocked_child (x-3ecf); registered like transcript_reads.py."""
 
 from __future__ import annotations
 

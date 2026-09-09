@@ -593,8 +593,7 @@ def escalate_cmd(
         "NoProgress", "--reason", "-R", help="The terminal reason that triggered this."
     ),
 ) -> None:
-    """Tell the presiding crown, or the operator when nothing outranks this
-    king, that it stopped with work pending (x-3ecf AC4-HP)."""
+    """Escalate to the presiding crown or operator with work pending (x-3ecf AC4-HP)."""
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate, mail_presiding_king, resolve_presiding_king
     from fno.king.state import reign_state
@@ -626,9 +625,10 @@ def escalate_cmd(
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)
         raise typer.Exit(1) from exc
-    mailed = presiding is not None and mail_presiding_king(presiding["holder"], ids, reason)
-    target = f"king:{presiding['holder']}" if mailed else f"operator:{qid}"
-    note = f", mailed presiding king {presiding['holder']}" if mailed else ""
+    holder = presiding["holder"] if presiding is not None else None
+    mailed = holder is not None and mail_presiding_king(holder, ids, reason)
+    target = f"king:{holder}" if mailed else f"operator:{qid}"
+    note = f", mailed presiding king {holder}" if mailed else ""
     typer.echo(f"king: {outcome}{note} {qid}", err=True)
     typer.echo(target)
 
