@@ -228,11 +228,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # 7. AC2-EDGE: an uncrowned session's doc carries no King block at all.
+# Assert a positive marker too (crown: none), not absence alone - an absence
+# also fires if crown classification or auto-block generation never ran.
 # ---------------------------------------------------------------------------
-if ! grep -q "## King:" "$DOC"; then
+if grep -q "crown: none" "$DOC" && ! grep -q "## King:" "$DOC"; then
   pass "uncrowned doc carries no King block (AC2-EDGE)"
 else
-  fail "uncrowned doc unexpectedly carries a King block"
+  fail "uncrowned doc unexpectedly carries a King block, or the auto block never ran"
 fi
 
 # ---------------------------------------------------------------------------
@@ -315,6 +317,34 @@ if grep -q "x-aaaa \[ready\] a" "$PORTFOLIO_DOC" && grep -q "x-bbbb \[in_progres
   pass "portfolio crown (comma-joined scope): both epics' children appear"
 else
   fail "portfolio crown: missing children from one or both epics"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. A king hand-writes ONLY the two crown headings (the shape context-nudge.sh
+# now tells a king to write on a FIRST compaction, when the doc - and its
+# headings 1/2 - do not exist yet). The hook must bind each by heading text,
+# not by ordinal position, so both survive the fire that follows.
+# ---------------------------------------------------------------------------
+HANDWRITTEN_DOC="$TMP/handwritten-canon.md"
+cat > "$HANDWRITTEN_DOC" <<'DOC'
+## Gaps and open thinking (session)
+<!-- fno:session -->
+Unsure whether the blocked_child queue drains fairly under contention.
+<!-- /fno:session -->
+
+## Workarounds in force (session)
+<!-- fno:session -->
+Routing around the stale-epic-status cache by re-querying every 5s.
+<!-- /fno:session -->
+DOC
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$HANDWRITTEN_DOC" \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "Unsure whether the blocked_child queue drains fairly" "$HANDWRITTEN_DOC" \
+  && grep -q "Routing around the stale-epic-status cache" "$HANDWRITTEN_DOC" \
+  && grep -q "_Merge order and the reason for it" "$HANDWRITTEN_DOC"; then
+  pass "hand-written crown-only headings bind by label, not ordinal position"
+else
+  fail "hand-written crown headings lost or misplaced by the refire"
 fi
 
 echo

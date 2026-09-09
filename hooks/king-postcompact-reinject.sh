@@ -81,11 +81,20 @@ Crown: level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami
 
 $(sed '/^<!--/d' "$BRIEF")"
 
-# This crown's own FAQ, appended after the static brief: bounded (the verb
-# caps entries) and degrade-safe (silence on a missing directory, an
-# unreadable one, or no entry for this scope - never a failed hook).
+# This crown's own FAQ, appended after the static brief: bounded on both axes
+# (the verb caps entry COUNT; FAQ_MAX_BYTES below caps the aggregate payload,
+# since one detailed entry - or several - can still outgrow context on their
+# own) and degrade-safe (silence on a missing directory, an unreadable one, or
+# no entry for this scope - never a failed hook).
+FAQ_MAX_BYTES=4000
 if [[ -n "$CROWN_SCOPE" ]]; then
     FAQ_ENTRIES="$(fno agents king faq list --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+    FAQ_BYTES="$(printf '%s' "$FAQ_ENTRIES" | wc -c | tr -d ' ')"
+    if [[ "$FAQ_BYTES" -gt "$FAQ_MAX_BYTES" ]]; then
+        FAQ_ENTRIES="$(printf '%s' "$FAQ_ENTRIES" | head -c "$FAQ_MAX_BYTES")
+
+_(truncated at ${FAQ_MAX_BYTES}B; \`fno agents king faq list --scope \"${CROWN_SCOPE}\"\` has the rest)_"
+    fi
     if [[ -n "$(printf '%s' "$FAQ_ENTRIES" | tr -d '[:space:]')" ]]; then
         CONTEXT="$CONTEXT
 

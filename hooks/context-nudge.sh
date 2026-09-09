@@ -358,6 +358,22 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         _rollup=""
         [[ "$PEER_KINGS" =~ ^[0-9]+$ && "$PEER_KINGS" -gt 0 ]] && _rollup=" ${PEER_KINGS} peer king(s) also in flight."
         [[ "$KING_ABOVE" =~ ^[0-9]+$ && "$KING_ABOVE" -gt 0 ]] && _rollup="${_rollup} A king above holds your scope."
+        # On a FIRST compaction the canon doc does not exist yet - PreCompact
+        # creates it, and PreCompact cannot run a model to ask the king
+        # anything - so telling the king to "fill" headings that are not on
+        # disk yet is a no-op. Give the exact path and the literal heading
+        # text instead: precompact-canon-doc.sh binds a session block to the
+        # "## <heading>" line just above its marker, not to file position, so
+        # writing (or appending) just these two headings works whether the
+        # doc already exists or not.
+        CANON_DOC=""
+        if command -v fno >/dev/null 2>&1; then
+            CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+        fi
+        _king_doc_ask="fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
+        if [[ -n "$CANON_DOC" ]]; then
+            _king_doc_ask="write (or append) this into ${CANON_DOC} yourself before you compact, even if that file does not exist yet - the hook binds each block by its heading text, not by file position, so this survives regardless: '## Gaps and open thinking (session)' then a line '<!-- fno:session -->', then your own text, then '<!-- /fno:session -->'; repeat the same shape with heading '## Workarounds in force (session)'. Nothing else knows what only you hold."
+        fi
         # A crown SURVIVES a compact, so this percentage is not a handoff trigger
         # for a king; it is a compact trigger. The nudge says that plainly rather
         # than pointing a king at the more expensive of the two moves. Handoff is a
@@ -370,7 +386,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # says everything the king needs. The event above still records the stored
         # level: that is a snapshot for whoever migrates the rows, and no session
         # acts on it.
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to COMPACT AND KEEP RULING. ${_compact_ask} The PreCompact hook writes your crown, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold. Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to COMPACT AND KEEP RULING. ${_compact_ask} The PreCompact hook writes your crown, scope, nodes under purview, and live workers into the canon doc automatically; before you compact, ${_king_doc_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"

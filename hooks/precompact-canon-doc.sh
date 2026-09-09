@@ -290,6 +290,9 @@ if crowned:
         "",
         nodes,
         "",
+        # `workers` is spawned_by_session, not crown-scope-filtered: a
+        # successor omits a predecessor workers list, and unrelated-territory
+        # workers of this session leak in. Follow-up under x-5226.
         "## King: live workers in scope (auto)",
         workers,
     ]
@@ -305,13 +308,17 @@ PY
 # otherwise erase the judgment right when post-compact context needs it).
 # ---------------------------------------------------------------------------
 _session_block() {
-  # $1 = ordinal (1 or 2), $2 = default instruction text.
-  local ord="$1" default="$2" preserved=""
+  # $1 = heading label substring, $2 = default instruction text. Matched by
+  # the "## <label>" heading immediately above each marker, not by ordinal
+  # position: a king who hand-writes only the two crown headings on a first
+  # compaction (the doc did not exist yet to hold headings 1/2) still binds
+  # correctly, instead of silently landing in the wrong slot.
+  local label="$1" default="$2" preserved=""
   if [[ -f "$DOC_PATH" ]]; then
-    preserved="$(awk -v n="$ord" '
-      BEGIN { c=0 }
-      /<!-- fno:session -->/ { c++; if (c==n) { grab=1; next } }
-      grab && /<!-- \/fno:session -->/ { grab=0 }
+    preserved="$(awk -v label="$label" '
+      /^## / { heading = $0; next }
+      /<!-- fno:session -->/ { grab = (index(heading, label) > 0); next }
+      grab && /<!-- \/fno:session -->/ { grab=0; next }
       grab { print }
     ' "$DOC_PATH" 2>/dev/null)"
   fi
@@ -330,12 +337,12 @@ DEFAULT_WORKAROUNDS="_Workarounds in force only this crown is running. Nothing e
 # Capture the preserved-or-defaulted session blocks BEFORE opening the doc for
 # write. The assembly below redirects to $DOC_PATH, which truncates it on open;
 # reading inside that block would see an empty file and always default.
-SB1="$(_session_block 1 "$DEFAULT_MERGE")"
-SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
+SB1="$(_session_block "Merge order and why" "$DEFAULT_MERGE")"
+SB2="$(_session_block "Open decisions awaiting the operator" "$DEFAULT_DECISIONS")"
 SB3="" SB4=""
 if [[ "$IS_CROWNED" == "1" ]]; then
-  SB3="$(_session_block 3 "$DEFAULT_GAPS")"
-  SB4="$(_session_block 4 "$DEFAULT_WORKAROUNDS")"
+  SB3="$(_session_block "Gaps and open thinking" "$DEFAULT_GAPS")"
+  SB4="$(_session_block "Workarounds in force" "$DEFAULT_WORKAROUNDS")"
 fi
 
 # A doc the session wrote by hand carries none of the markers above, so the

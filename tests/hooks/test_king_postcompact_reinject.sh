@@ -133,9 +133,20 @@ RC=$?
 : > "$KING_FAQ_FIXTURE"
 OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
 RC=$?
-[[ $RC -eq 0 ]] && ! echo "$OUT" | grep -q "This crown's FAQ" \
+# Positive marker required alongside the absence: a regression to empty
+# output would also pass "no FAQ heading", so require the base brief too.
+[[ $RC -eq 0 ]] && echo "$OUT" | grep -q "level 1 over fno" && ! echo "$OUT" | grep -q "This crown's FAQ" \
   && pass "crowned with empty FAQ fixture: no FAQ heading added" \
   || fail "crowned+empty-FAQ rc=$RC payload=$OUT"
+
+# 7c. An oversized FAQ payload is truncated to the byte budget, never
+#     reinjected whole - one detailed entry can already outgrow context.
+python3 -c "print('Q: big?\nA: ' + ('x' * 6000) + '\n---')" > "$KING_FAQ_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | grep -q "truncated at" \
+  && pass "oversized FAQ payload is truncated to the byte budget" \
+  || fail "oversized-FAQ rc=$RC payload=${OUT:0:200}"
 
 # 7. Byte budget: the brief is paid on every compaction of every king.
 BRIEF_BYTES="$(wc -c < "$BRIEF" 2>/dev/null | tr -d ' ')"
