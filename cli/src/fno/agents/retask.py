@@ -654,13 +654,6 @@ def run_retask(
         effort=effort,
         env=env,
     )
-    if entry.substrate == "thread":
-        session, pane_id = resolve_thread_viewport(entry)
-        pane = str(pane_id)
-    else:
-        mux = entry.mux or {}
-        session = str(mux.get("session"))
-        pane = str(mux.get("pane_id"))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]
@@ -823,6 +816,12 @@ def run_retask(
         )
 
     try:
+        if entry.substrate == "thread":
+            resolved_session, resolved_pane_id = resolve_thread_viewport(entry)
+            session, pane = resolved_session, str(resolved_pane_id)
+        else:
+            mux = entry.mux or {}
+            session, pane = str(mux.get("session")), str(mux.get("pane_id"))
         return execute_retask(
             entry,
             target,
