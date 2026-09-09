@@ -90,6 +90,81 @@ def test_load_snapshot_marks_unreadable_load(monkeypatch):
     assert snapshot.spawn_load_status == "unavailable"
 
 
+def test_load_gate_decision_admits_quietly_under_trigger(monkeypatch):
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(50.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    assert spawn_gate.load_gate_decision(8.0) is None
+
+
+def test_load_gate_decision_disabled_is_quiet():
+    assert spawn_gate.load_gate_decision(0.0) is None
+
+
+def test_load_gate_decision_refuses_on_the_backstop(monkeypatch):
+    """309 on 12 cpus crosses the hard backstop (20 x 12) before attribution."""
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    reason, message, event = spawn_gate.load_gate_decision(
+        8.0, hard_max_load_per_cpu=20.0
+    )
+
+    assert reason == "load_backstop" and reason in spawn_gate._LOAD_REFUSAL_REASONS
+    assert "refusing" in message
+    assert event["load_1m"] == pytest.approx(309.0)
+
+
+def test_load_gate_decision_refuses_when_the_fleet_holds_the_box(monkeypatch):
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
+
+    reason, message, event = spawn_gate.load_gate_decision(8.0)
+
+    assert reason == "fleet_cpu_share"
+    assert "fleet holds" in message
+    assert event["share"] == pytest.approx(0.75)
+
+
+def test_load_gate_decision_refuses_when_attribution_is_unreadable(monkeypatch):
+    """Fail closed: an unknown share is not evidence of headroom."""
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: None)
+
+    reason, _message, _event = spawn_gate.load_gate_decision(8.0)
+
+    assert reason == "load_attribution_unavailable"
+
+
+def test_load_gate_decision_admits_a_box_the_fleet_does_not_own(monkeypatch):
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.79, 12.0))
+
+    reason, message, event = spawn_gate.load_gate_decision(8.0)
+
+    assert reason == "admit_external_load"
+    assert reason not in spawn_gate._LOAD_REFUSAL_REASONS
+    assert "admitting" in message
+    assert event == {}
+
+
+def test_check_load_ceiling_refuses_over_the_shared_decision(monkeypatch, capsys):
+    """The gate keeps refusing through the same decision the preview reads:
+    one implementation, two consumers, no threshold table to drift."""
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
+
+    with pytest.raises(SystemExit) as exc:
+        spawn_gate._check_load_ceiling(8.0)
+
+    assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+    assert "fleet holds" in capsys.readouterr().err
+
+
 ALIVE = os.getpid()  # a pid that is definitely alive (this test process)
 
 
@@ -1010,6 +1085,26 @@ class TestRunGate:
             "1 live row(s) were minted without a provider stamp "
             "(harness=claude, origin=spawn)"
         ) in capsys.readouterr().err
+
+    def test_operator_origin_unstamped_row_is_silent(self, monkeypatch, capsys):
+        """Only the operator shape goes quiet: a hand-started session can
+        never carry a spawn-time provider stamp, and warning about it on every
+        gate read rode stderr ahead of real refusals. Adopted and unknown
+        origins keep the warning."""
+        row = AgentEntry(
+            name="operator-live",
+            harness="claude",
+            provider=None,
+            origin="operator",
+            cwd="/tmp",
+            log_path="/tmp/log",
+            pid=101,
+            pid_start_time=1001,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        assert spawn_gate.provider_live_count("zai") == 0
+        assert "without a provider stamp" not in capsys.readouterr().err
 
     def test_missing_claim_provider_warns_and_skips(
         self, tmp_path, monkeypatch, capsys

@@ -3285,11 +3285,12 @@ def advance(
                              node_id=node_id, detail=detail, exit_code=exit_code)
 
     def failed(node_id: str, error: str) -> AdvanceResult:
-        data = {"node_id": node_id, "error": error[:200], "rank": rank}
+        data = {"node_id": node_id, "error": error[:400], "rank": rank}
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        _tick(0, "spawn-failed", f"node={node_id} error={error[:120]}")
+        # Tail this too: the error ends at the refusal, so must the window.
+        _tick(0, "spawn-failed", f"node={node_id} error={error[-140:]}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -3737,7 +3738,7 @@ def _converge_one(
                              node_id=node_id, detail=detail, exit_code=exit_code)
 
     def failed(error: str) -> AdvanceResult:
-        _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:200]}), ev_path)
+        _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:400]}), ev_path)
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )

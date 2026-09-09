@@ -391,6 +391,46 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
 
+def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
+    """The recorded error for a failed dispatch must contain the
+    refusal. Head-capture of a stderr whose head is advisory recorded the
+    warning and cut the refusal; the budgets made it permanent. Every assert
+    below fails against the old error[:200]/error[:120] capture."""
+    refusal = (
+        "spawn-gate: 1-min load 284.3 is over the max_load_per_cpu trigger "
+        + "n" * 280
+        + " refusing to spawn"
+    )
+
+    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
+        raise adv.SpawnError(f"fno agents spawn exited 79: {refusal}")
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", boom)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == NODE["id"]
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
+    recorded = evs[0]["data"]["error"]
+    assert "refusing to spawn" in recorded
+    assert len(recorded) >= 300
+    ticks = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
+    ]
+    failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
+    assert failed_ticks
+    detail = failed_ticks[-1]["data"].get("detail") or ""
+    # The composed tick row keeps 200 chars total; the error is tail-truncated
+    # to match, so the window ENDS at the refusal instead of opening on the
+    # advisory. 140 chars of the error's tail survive the prefix budgets.
+    assert refusal[-140:] in detail
+    assert "refusing to spawn" in detail
+
+
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     """A name-collision (peer beat us) -> already-claimed, reservation released."""
     def collide(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
