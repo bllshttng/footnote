@@ -3110,19 +3110,21 @@ def _observe_node_claim(
     if emit:
         from fno.agents import events as agent_events
 
-        agent_events.emit(
-            EVENT_CLAIM_OBSERVED,
-            node_id=node_id,
-            claim_verdict=verdict,
-            claim_state=claim_state,
-            holder=holder,
-            truth_status=truth,
-            action=action,
-            # Session witness basis, only when the classifier reported one.
-            **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
-            **({"worker": worker} if worker else {}),
-            **({"block_reason": block_reason} if block_reason else {}),
-        )
+        event_data: dict[str, Any] = {
+            "node_id": node_id,
+            "claim_verdict": verdict,
+            "claim_state": claim_state,
+            "holder": holder,
+            "truth_status": truth,
+            "action": action,
+        }
+        if info.get("session_basis"):
+            event_data["session_basis"] = info["session_basis"]
+        if worker:
+            event_data["worker"] = worker
+        if block_reason:
+            event_data["block_reason"] = block_reason
+        agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
         message = (
             f"dispatch {action} for {node_id}: node claim is {claim_state}, "
