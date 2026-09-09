@@ -49,9 +49,8 @@ def load_rows(
     Rows with no ``variant`` key read as baseline. ``None`` folds every round.
     ``since`` applies after the filter: the last N rows *of that variant*.
     """
-    rows = [r for _, r in _history.iter_rows_tolerant(history_path)]
-    if variant is not None:
-        rows = [r for r in rows if (r.get("variant") or "baseline") == variant]
+    rows = [r for _, r in _history.iter_rows_tolerant(history_path)
+            if variant is None or (r.get("variant") or "baseline") == variant]
     if since is not None and since >= 0:
         rows = rows[-since:]
     return rows
@@ -150,9 +149,7 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     return candidates
 
 
-def compare_variants(
-    rows: list[dict[str, object]], variant: str
-) -> dict[str, Any]:
+def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:
     """Score *variant* against baseline, per task. Rows come from variant=None.
 
     A task the variant skipped lands in missing_in_variant. Each *_rev is the
@@ -179,12 +176,10 @@ def compare_variants(
         b_p1 = sum(1 for r in b if r.get("pass") is True) / len(b)
         v_p1 = sum(1 for r in v if r.get("pass") is True) / len(v)
         delta = v_p1 - b_p1
-        tasks[tid] = {
-            "baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
-            "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
-            "delta": round(delta, 4),
-            "verdict": "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged",
-        }
+        verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged"
+        tasks[tid] = {"baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
+                      "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
+                      "delta": round(delta, 4), "verdict": verdict}
 
     def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
         revs = [r["bank_rev"] for r in rs if isinstance(r.get("bank_rev"), str)]

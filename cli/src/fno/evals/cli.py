@@ -80,11 +80,8 @@ def run_command(
     if not VARIANT_RE.match(variant):
         typer.echo(f"Error: --variant must be 'baseline' or 'v<N>', got '{variant}'", err=True)
         raise typer.Exit(code=1)
-    if variant == "baseline" and ref is not None:
-        typer.echo("Error: --ref needs a non-baseline --variant (baseline is the fixture ref)", err=True)
-        raise typer.Exit(code=1)
-    if variant != "baseline" and ref is None:
-        typer.echo(f"Error: --ref is required with --variant {variant}", err=True)
+    if (variant == "baseline") != (ref is None):
+        typer.echo("Error: --variant v<N> and --ref REF must be used together", err=True)
         raise typer.Exit(code=1)
 
     bank_dir = _resolve_bank_dir(bank)
@@ -184,9 +181,10 @@ def report_command(
                     f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
                     f"delta={t['delta']:+.2f}  {t['verdict']}"
                 )
-            for label, missing in (("baseline", cmp["missing_in_baseline"]), (cmp["variant"], cmp["missing_in_variant"])):
-                if missing:
-                    typer.echo(f"  missing in {label}: {', '.join(missing)}")
+            for label, miss in (("baseline", cmp["missing_in_baseline"]),
+                                (cmp["variant"], cmp["missing_in_variant"])):
+                if miss:
+                    typer.echo(f"  missing in {label}: {', '.join(miss)}")
             typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
         raise typer.Exit(code=0)
 
