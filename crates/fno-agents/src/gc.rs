@@ -645,6 +645,46 @@ pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
         })
 }
 
+fn state_reap_family_counts(family: &gc_sweep::StateReapFamilySummary) -> serde_json::Value {
+    serde_json::json!({
+        "scanned": family.scanned,
+        "deleted": family.deleted,
+        "bytes": family.bytes,
+        "kept": family.kept.len(),
+    })
+}
+
+/// Apply the configured expendable-state retention policy and record one
+/// bounded outcome event, including quiet and disabled passes.
+pub fn state_file_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    cwd: &std::path::Path,
+) -> gc_sweep::StateFilesReapSummary {
+    let summary =
+        gc_sweep::reap_state_files(home, crate::agents_config::state_reap_config(cwd), true);
+    let _ = emitter.emit(
+        "state_reap",
+        &serde_json::json!({
+            "expired_claims": state_reap_family_counts(&summary.expired_claims),
+            "plan_locks": state_reap_family_counts(&summary.plan_locks),
+            "agent_locks": state_reap_family_counts(&summary.agent_locks),
+            "pr_status_cache": state_reap_family_counts(&summary.pr_status_cache),
+            "totals": {
+                "scanned": summary.totals.scanned,
+                "deleted": summary.totals.deleted,
+                "would_delete": summary.totals.would_delete,
+                "bytes": summary.totals.bytes,
+                "kept": summary.totals.kept,
+            },
+            "applied": summary.applied,
+            "dry_run": summary.dry_run,
+            "skip_reason": summary.skip_reason,
+        }),
+    );
+    summary
+}
+
 /// The idle tick's two sweeps no registry row accounts for. `gc_sweep` retires
 /// ROWS; a child whose parent died is reparented to init and nothing owned it
 /// at all, and the latch's record dir is keyed by argv, so a roster whose
@@ -693,6 +733,7 @@ pub fn maybe_retirement_sweep(
         let emitter = EventEmitter::new(events, "daemon");
         let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
+        let _ = state_file_sweep(&home, &emitter, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // Hand back the NEXT window's interval, resolved off-loop: the tick
@@ -899,6 +940,101 @@ mod tests {
         std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
         assert_eq!(retire_interval_snapshot(&cell), expected);
         assert_eq!(retire_interval_snapshot(&cell).as_secs(), 45);
+    }
+
+    #[test]
+    fn state_reap_event_reports_counts() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(root.path().join("agents"));
+        home.ensure_root().unwrap();
+        let cwd = root.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(
+            cwd.join(".fno/config.toml"),
+            "[agents.state_reap]\n\
+             enabled = true\n\
+             locks_retain_days = 1\n\
+             expired_claims_retain_days = 1\n\
+             pr_status_cache_retain_days = 1\n",
+        )
+        .unwrap();
+        let claim = root.path().join("claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&claim)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let summary = state_file_sweep(&home, &emitter, &cwd);
+
+        assert_eq!(summary.expired_claims.deleted, 1);
+        assert!(!claim.exists());
+        let quiet = state_file_sweep(&home, &emitter, &cwd);
+        assert_eq!(quiet.totals.scanned, 0);
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "each periodic pass must emit one event");
+        let event = &lines[0];
+        assert_eq!(event["type"], "state_reap");
+        assert_eq!(event["source"], "test");
+        let data = &event["data"];
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert!(data[family].is_object(), "missing {family}: {data}");
+            for count in ["scanned", "deleted", "bytes", "kept"] {
+                assert!(
+                    data[family][count].is_number(),
+                    "missing {family}.{count}: {data}"
+                );
+            }
+        }
+        assert_eq!(data["expired_claims"]["deleted"], 1);
+        assert_eq!(data["totals"]["deleted"], 1);
+        assert_eq!(data["applied"], true);
+        assert_eq!(data["dry_run"], false);
+        assert!(data["skip_reason"].is_null());
+        assert_eq!(lines[1]["type"], "state_reap");
+        assert_eq!(lines[1]["data"]["totals"]["scanned"], 0);
+        assert_eq!(lines[1]["data"]["totals"]["deleted"], 0);
+        assert!(lines[1]["data"]["skip_reason"].is_null());
+    }
+
+    #[test]
+    fn state_reap_event_reports_disabled_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(root.path().join("agents"));
+        home.ensure_root().unwrap();
+        let cwd = root.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(
+            cwd.join(".fno/config.toml"),
+            "[agents.state_reap]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let summary = state_file_sweep(&home, &emitter, &cwd);
+
+        assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
+        let raw = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["type"], "state_reap");
+        assert_eq!(event["data"]["totals"]["deleted"], 0);
+        assert_eq!(event["data"]["applied"], false);
+        assert_eq!(event["data"]["dry_run"], false);
+        assert_eq!(event["data"]["skip_reason"], "disabled");
     }
 
     // --- the orphan process sweep ---

@@ -128,18 +128,6 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
-    /// Expired-claim filenames deleted after the 30-day retention window.
-    pub expired_claims_deleted: Vec<String>,
-    /// `(expired-claim filename, reason)` for entries the age reaper kept.
-    pub expired_claims_kept: Vec<(String, String)>,
-    /// PR-status JSON filenames deleted after the 14-day retention window.
-    pub pr_status_deleted: Vec<String>,
-    /// `(PR-status filename, reason)` for entries the age reaper kept.
-    pub pr_status_kept: Vec<(String, String)>,
-    /// Lock paths deleted after age, size, flock, and inode checks all passed.
-    pub stale_locks_deleted: Vec<String>,
-    /// `(lock path, reason)` for every old lock the safe reaper retained.
-    pub stale_locks_kept: Vec<(String, String)>,
 }
 
 /// One state file selected for deletion by the shared age policy.
@@ -194,71 +182,6 @@ pub struct StateFilesReapSummary {
     pub applied: bool,
     pub dry_run: bool,
     pub skip_reason: Option<String>,
-}
-
-fn legacy_filename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
-}
-
-fn copy_state_reap_into_gc(state_reap: &StateFilesReapSummary, summary: &mut GcSummary) {
-    summary.expired_claims_deleted.extend(
-        state_reap
-            .expired_claims
-            .deleted_entries
-            .iter()
-            .map(|entry| legacy_filename(&entry.path)),
-    );
-    summary.pr_status_deleted.extend(
-        state_reap
-            .pr_status_cache
-            .deleted_entries
-            .iter()
-            .filter(|entry| entry.path.ends_with(".json"))
-            .map(|entry| legacy_filename(&entry.path)),
-    );
-    summary.expired_claims_kept.extend(
-        state_reap
-            .expired_claims
-            .kept
-            .iter()
-            .filter(|entry| entry.reason != "within retention window")
-            .map(|entry| (legacy_filename(&entry.path), entry.reason.clone())),
-    );
-    summary.pr_status_kept.extend(
-        state_reap
-            .pr_status_cache
-            .kept
-            .iter()
-            .filter(|entry| {
-                entry.path.ends_with(".json") && entry.reason != "within retention window"
-            })
-            .map(|entry| (legacy_filename(&entry.path), entry.reason.clone())),
-    );
-    for family in [
-        &state_reap.plan_locks,
-        &state_reap.agent_locks,
-        &state_reap.pr_status_cache,
-    ] {
-        summary.stale_locks_deleted.extend(
-            family
-                .deleted_entries
-                .iter()
-                .filter(|entry| entry.path.ends_with(".lock"))
-                .map(|entry| entry.path.clone()),
-        );
-        summary.stale_locks_kept.extend(
-            family
-                .kept
-                .iter()
-                .filter(|entry| {
-                    entry.path.ends_with(".lock") && entry.reason != "within retention window"
-                })
-                .map(|entry| (entry.path.clone(), entry.reason.clone())),
-        );
-    }
 }
 
 impl Default for StateFilesReapSummary {
@@ -927,12 +850,6 @@ pub(crate) fn run(
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
-    let state_reap = reap_state_files(
-        home,
-        crate::agents_config::StateReapConfig::default(),
-        !dry_run,
-    );
-    copy_state_reap_into_gc(&state_reap, &mut summary);
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -2185,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_stale_state_removes_only_expired_claims_past_thirty_days() {
+    fn row_sweep_does_not_reap_state_files() {
         let (base, home) = stale_state_home("claims");
         let expired = base.join("claims/.expired");
         std::fs::create_dir_all(&expired).unwrap();
@@ -2208,11 +2125,10 @@ mod tests {
 
         let summary = run_empty_registry_sweep(&home, false);
 
-        assert!(!old.exists());
+        assert!(old.exists());
         assert!(fresh.exists());
         assert!(future.exists(), "future mtimes saturate to age zero");
-        assert_eq!(summary.expired_claims_deleted, vec!["old-claim"]);
-        assert!(summary.expired_claims_kept.is_empty());
+        assert_eq!(summary, GcSummary::default());
         std::fs::remove_dir_all(&base).ok();
     }
 

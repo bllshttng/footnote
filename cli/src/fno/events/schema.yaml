@@ -2623,6 +2623,39 @@ event_types:
           type: string
           description: "The sweep that confirmed this removal, such as roster-reap."
 
+  - name: state_reap
+    description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
+    sources: [daemon, test]
+    data:
+      required: [expired_claims, plan_locks, agent_locks, pr_status_cache, totals, applied, dry_run, skip_reason]
+      properties:
+        expired_claims: &state_reap_family_counts
+          type: object
+          required: [scanned, deleted, bytes, kept]
+          properties:
+            scanned: {type: integer}
+            deleted: {type: integer}
+            bytes: {type: integer}
+            kept: {type: integer}
+        plan_locks: *state_reap_family_counts
+        agent_locks: *state_reap_family_counts
+        pr_status_cache: *state_reap_family_counts
+        totals:
+          type: object
+          required: [scanned, deleted, would_delete, bytes, kept]
+          properties:
+            scanned: {type: integer}
+            deleted: {type: integer}
+            would_delete: {type: integer}
+            bytes: {type: integer}
+            kept: {type: integer}
+        applied:
+          type: boolean
+        dry_run:
+          type: boolean
+        skip_reason:
+          type: [string, "null"]
+
   - name: worktree_sweep
     description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
