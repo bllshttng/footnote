@@ -9,7 +9,9 @@
 //!
 //! - `NOT RECORDED` - the source lacks the fact. Nothing to read.
 //! - `NOT APPLICABLE` - positive evidence the concept does not apply here; a
-//!   graph-derived row was never run by a session, so it has no model.
+//!   row that records no session was never run by one, so it has no model.
+//!   The ROW decides that, never its kind: a `node_ended` on a node that ran
+//!   carries the last do or ship session, so its blank lane is NOT RECORDED.
 //! - a named live state - `not in the live roster`, `no seat`, `removed`.
 //!
 //! A blank cell reads as broken UI when the real defect is upstream, which is
@@ -120,7 +122,7 @@ fn pane_value(item: &FeedItem, dest: &Destination<'_>) -> String {
         Destination::NameOnly(a) => format!("{} · the node's current worker", seat(a)),
         Destination::SessionOnly(_) => "not in the live roster".to_string(),
         Destination::None if no_session(item) => {
-            format!("{NOT_APPLICABLE} - a graph field, not a session")
+            format!("{NOT_APPLICABLE} - no session ran it")
         }
         Destination::None => NOT_RECORDED.to_string(),
     }

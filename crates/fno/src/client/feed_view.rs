@@ -154,6 +154,7 @@ pub(crate) fn feed_row_item(
 /// A clipped header is how the focus key stayed undiscoverable: the panel
 /// drags to any width, and at the 40-column default the full sentence does
 /// not fit.
+///
 /// The last spelling in each list leads with the KEY. The panel drags
 /// narrower than any prose fits, and the caller pads and clips from the end,
 /// so a label-first fallback loses the only place the key is advertised.

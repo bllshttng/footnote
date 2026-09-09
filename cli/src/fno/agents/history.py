@@ -17,6 +17,7 @@ question if the table has since moved.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -82,7 +83,9 @@ RECEIPT_HANDLE_KEYS = ("harness_session_id", "short_id", "row_name")
 LIVE_HANDLE_KEYS = ("harness_session_id", "short_id", "name")
 
 
-def _answers(get, keys: tuple[str, ...], needle: str) -> bool:
+def _answers(
+    get: Callable[[str], object], keys: tuple[str, ...], needle: str
+) -> bool:
     """True when ``get`` returns ``needle`` for any of ``keys``.
 
     Compared case-insensitively. An empty field never matches an empty
