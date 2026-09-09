@@ -837,41 +837,6 @@ def test_read_rust_marker_returns_none_for_whitespace_only(
     assert update._read_rust_marker() is None
 
 
-def test_write_rust_marker_atomic(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    marker = tmp_path / "state" / "installed-rust-rev"
-    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker)
-    assert update._write_rust_marker("deadbeef") is True
-    assert marker.read_text(encoding="utf-8").strip() == "deadbeef"
-    leftovers = list(marker.parent.glob("*.tmp"))
-    assert leftovers == []
-
-
-def test_write_rust_marker_silent_on_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a dir")
-    monkeypatch.setattr(update, "_RUST_MARKER_FILE", blocker / "child" / "installed-rust-rev")
-    assert update._write_rust_marker("abc") is False  # must not raise
-
-
-def test_write_rust_marker_cleans_temp_on_replace_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    marker = tmp_path / "state" / "installed-rust-rev"
-    monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker)
-
-    def _boom(src, dst):  # noqa: ANN001
-        raise OSError("simulated")
-
-    monkeypatch.setattr(update.os, "replace", _boom)
-    assert update._write_rust_marker("abc") is False  # must not raise
-    assert not marker.exists()
-    leftovers = list(marker.parent.glob("*.tmp"))
-    assert leftovers == []
-
 
 # --- _cargo_installed_bin ---
 
@@ -969,8 +934,8 @@ def test_refresh_rust_bins_gating_outcomes(
 def test_ac1_hp_refresh_rust_bins_refreshed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """AC1-HP: stale marker + binary present + cargo on PATH -> returns 'refreshed',
-    cargo cmd is correct, marker file updated to subtree rev."""
+    """AC1-HP: binary present + cargo on PATH -> returns 'refreshed' and the
+    cargo command is correct."""
     source = tmp_path / "cli"
     source.mkdir()
     crate_dir = source.parent / "crates" / "fno-agents"
@@ -1018,8 +983,6 @@ def test_ac1_hp_refresh_rust_bins_refreshed(
     # parent.parent == tmp_path.parent; use the actual value from the function.
     assert cmd[root_idx + 1] == str(fake_bin.parent.parent)
 
-    # Marker updated
-    assert marker_file.read_text(encoding="utf-8").strip() == subtree_rev
 
 
 def test_ac1_err_stale_daemon_forces_rebuild(
@@ -1320,48 +1283,6 @@ def test_refresh_rust_bins_fresh_marker_stale_mux_reinstalls(
     ]
     assert mux_installs, "a present-but-stale mux must be reinstalled on the fresh path"
 
-
-# --- legacy marker-write failure is a SUCCESSFUL refresh (post-deploy verify passed) ---
-
-def test_refresh_rust_bins_marker_write_failure_still_refreshed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
-) -> None:
-    """Cargo succeeds and post-deploy verify passes, but the LEGACY marker write
-    fails -> 'refreshed' (the bins are repaired; no verdict reads the marker).
-    Reporting 'refreshed-no-marker' would make `fno doctor --fix` exit 1 on a
-    successful repair."""
-    source = tmp_path / "cli"
-    source.mkdir()
-    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a dir")
-    monkeypatch.setattr(
-        update, "_RUST_MARKER_FILE", blocker / "child" / "installed-rust-rev"
-    )
-
-    fake_bin = tmp_path / "fake-fno-agents"
-    fake_bin.write_text("x")
-    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
-    monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "b" * 40)
-    _stale_gate_verdict(monkeypatch)
-    monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
-    state = {"built": False}
-
-    def _fake_run(cmd, **kw):
-        if cmd and cmd[0] == "cargo":
-            state["built"] = True
-        return types.SimpleNamespace(returncode=0 if cmd and cmd[0] == "cargo" else 1)
-
-    monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: ("b" * 40) if state["built"] else None,
-    )
-
-    result = update._refresh_rust_bins(source)
-    assert result == "refreshed"
-    captured = capsys.readouterr()
-    assert "marker" in captured.err
 
 
 def test_refresh_rust_bins_force_no_rev_returns_no_marker(
@@ -1920,7 +1841,7 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
 def test_ac1_fr_failed_preserves_marker_retry_updates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1-FR: after 'failed', old marker content is intact; rc-0 retry updates it."""
+    """AC1-FR: after 'failed', a rc-0 retry converges the triad to refreshed."""
     source = tmp_path / "cli"
     source.mkdir()
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -1949,7 +1870,6 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
     monkeypatch.setattr(update.subprocess, "run", _fail_run)
     result1 = update._refresh_rust_bins(source)
     assert result1 == "failed"
-    assert marker_file.read_text(encoding="utf-8").strip() == old_rev
 
     # Second call: cargo succeeds
     def _ok_run(cmd, **kwargs):
@@ -1960,7 +1880,6 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
     monkeypatch.setattr(update.subprocess, "run", _ok_run)
     result2 = update._refresh_rust_bins(source)
     assert result2 == "refreshed"
-    assert marker_file.read_text(encoding="utf-8").strip() == new_rev
 
 
 # ---------------------------------------------------------------------------
@@ -2178,7 +2097,7 @@ def test_sync_triad_cleans_temp_on_replace_failure(
 ) -> None:
     """A copy2 that wrote the temp followed by a failing os.replace must not leave
     the .tmp orphaned in the destination dir (filesystem hygiene, matches the
-    atomic-write cleanup in _write_rust_marker)."""
+    atomic-write cleanup used by the installer marker write)."""
     names = update._triad_names()
     cargo = tmp_path / "cargo" / "bin"
     cargo.mkdir(parents=True)

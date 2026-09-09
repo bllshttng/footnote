@@ -167,9 +167,6 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     _cargo_stub(fakebin / "cargo", cargo_log, cargo_home, crates_rev, head_rev)
     _uv_stub(fakebin / "uv", uv_log, tmp_path)
 
-    rust_marker = home / ".fno" / "installed-rust-rev"
-    rust_marker.write_text("0" * 40 + "\n", encoding="utf-8")  # stale
-
     git_bin = Path(shutil.which("git") or "/usr/bin/git").parent
     env = {
         "PATH": f"{fakebin}:{git_bin}:/usr/bin:/bin",
@@ -200,10 +197,6 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     )
     assert "refreshing rust bins" in result.stdout, result.stdout
     assert f"rust bins refreshed (rev {crates_rev[:12]})" in result.stdout, result.stdout
-
-    # Marker converged to the crates subtree rev, NOT HEAD: the trailing
-    # python-only commit must not be recorded as the rust rev.
-    assert rust_marker.read_text(encoding="utf-8").strip() == crates_rev
 
     # Stub cargo got the pinned-root install command, exactly once.
     cargo_lines = cargo_log.read_text(encoding="utf-8").strip().splitlines()

@@ -282,31 +282,6 @@ def _read_rust_marker() -> Optional[str]:
         return None
 
 
-def _write_rust_marker(rev: str) -> bool:
-    """Atomically record ``rev`` to the rust-marker file. Best-effort; never raises.
-
-    Mirrors ``_write_installed_rev``: temp file + ``os.replace`` so a concurrent
-    reader never sees a torn or empty value. Cleans up the temp on replace failure.
-    Returns True when the marker landed, False on OSError, so callers can
-    distinguish refreshed-with-marker from refreshed-without (ab-703f2ed2).
-    """
-    target = _RUST_MARKER_FILE
-    tmp = None
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.parent / f".installed-rust-rev.{os.getpid()}.tmp"
-        tmp.write_text(f"{rev}\n", encoding="utf-8")
-        os.replace(tmp, target)
-        return True
-    except OSError:
-        if tmp is not None and tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        return False
-
-
 def _cargo_installed_bin() -> Optional[Path]:
     """Return the path to the cargo-installed fno-agents binary, or None if absent.
 
@@ -794,15 +769,11 @@ def update_readiness(
                 [str(_mux), "version", "--json"],
                 capture_output=True, text=True, check=False, timeout=20.0,
             )
-        except (OSError, subprocess.SubprocessError):
-            _r = None
-        if _r is not None and _r.returncode == 0:
-            try:
-                _d = json.loads(_r.stdout or "")
-            except (ValueError, TypeError):
-                _d = None
+            _d = json.loads(_r.stdout or "") if _r.returncode == 0 else None
             _s = _d.get("python_script") if isinstance(_d, dict) else None
             front_script = _s if isinstance(_s, str) and _s else None
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            front_script = None
     running = sys.executable or None
     same: Optional[bool] = None
     if front_script and running:
@@ -1174,24 +1145,11 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
 
     outcome: RefreshOutcome
     if subtree is None:
-        # force=True with an undeterminable rev: bins rebuilt but no marker
-        # breadcrumb written (no verdict reads it, so this is cosmetic).
+        # force=True with an undeterminable rev: bins rebuilt but no rev to record.
         typer.echo("fno doctor update: rust bins refreshed (marker not written: rev undeterminable)")
         outcome = "refreshed-no-marker"
-    elif _write_rust_marker(subtree):
-        typer.echo(f"fno doctor update: rust bins refreshed (rev {subtree[:12]})")
-        outcome = "refreshed"
     else:
-        # Marker write failed, but the deploy already passed post-deploy verify
-        # above - the bins ARE repaired, and no verdict reads the legacy marker.
-        # So this is a SUCCESSFUL refresh, not `refreshed-no-marker` (which
-        # `fno doctor --fix` treats as a failed repair and exits 1). Warn about the
-        # cosmetic breadcrumb, return success.
-        typer.echo(
-            "fno doctor update: note: rust bins refreshed; the legacy marker write failed"
-            f" (harmless, no verdict reads it; check {_RUST_MARKER_FILE.parent} permissions)",
-            err=True,
-        )
+        typer.echo(f"fno doctor update: rust bins refreshed (rev {subtree[:12]})")
         outcome = "refreshed"
 
     # Unproven components make the outcome partial, never full freshness.
