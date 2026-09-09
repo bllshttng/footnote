@@ -424,10 +424,11 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
     assert failed_ticks
     detail = failed_ticks[-1]["data"].get("detail") or ""
-    # The composed tick row keeps 200 chars total; after the 32-char prefix and
-    # the 28-char exit note, 140 chars of refusal fit - up from 120, and now
-    # the refusal itself instead of 120 chars of advisory.
-    assert refusal[:140] in detail
+    # The composed tick row keeps 200 chars total; the error is tail-truncated
+    # to match, so the window ENDS at the refusal instead of opening on the
+    # advisory. 140 chars of the error's tail survive the prefix budgets.
+    assert refusal[-140:] in detail
+    assert "refusing to spawn" in detail
 
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):

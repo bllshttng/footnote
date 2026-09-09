@@ -125,7 +125,12 @@ def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
         from fno.agents.spawn_gate import load_gate_decision
         from fno.config import load_settings
 
-        return load_gate_decision(float(load_settings().agents.max_load_per_cpu))
+        agents = load_settings().agents
+        return load_gate_decision(
+            float(agents.max_load_per_cpu),
+            float(agents.max_fleet_cpu_share),
+            float(agents.hard_max_load_per_cpu),
+        )
     except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
         return None
 
