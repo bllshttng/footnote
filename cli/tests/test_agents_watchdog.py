@@ -3426,6 +3426,50 @@ def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
     assert "sandbox" in v.basis.lower()
 
 
+def test_sandbox_verdict_carries_the_rows_agent(monkeypatch):
+    """The verdict rides the row's own agent, so a reader of v.agent resolves
+    the codex transcript store, never the claude default."""
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [
+        Row("cccc3333-0018", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0018": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert v.agent == "codex"
+
+
+def test_sandbox_basis_carries_the_bounded_help_tag(monkeypatch):
+    """The evidence in the basis is the matched help tag, never the whole
+    transcript slice it was found in."""
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    long_tail = (
+        '<help reason="Codex sandbox blocks Git writes" '
+        'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+        'Operation not permitted">'
+    )
+    rows = [
+        Row("cccc3333-0019", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {"cccc3333-0019": _facts(long_tail + " " + "padding " * 400)},
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert long_tail in v.basis
+    assert "padding" not in v.basis
+
+
 def test_codex_sandbox_denial_in_user_text_is_not_reaped(monkeypatch):
     monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
     rows = [

@@ -560,6 +560,11 @@ _CODE_PAYLOAD_PREFIXES = frozenset(
 
 def _is_codex_code_payload(args: Sequence[str]) -> bool:
     """Recognize a bounded code workflow seed at the spawn seam."""
+    # A --node dispatch is a backlog work dispatch, so it is a code payload
+    # however its message is later spelled; the prefix scan below would miss
+    # a mint site that passes a bare node id positionally.
+    if _spawn_flag_value(list(args), "--node"):
+        return True
     tokens = list(args[1:])
     for index, token in enumerate(tokens):
         if token == "--message" and index + 1 < len(tokens):

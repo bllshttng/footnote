@@ -797,7 +797,7 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
         return None
     if re.search(r"(?<![\w.])\.git[/\\]", evidence) is None:
         return None
-    return text
+    return tag.group(0)
 
 
 def _sandbox_blocked_verdict(
@@ -813,40 +813,36 @@ def _sandbox_blocked_verdict(
     if evidence is None:
         return None
     if not row.node:
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
-            "sandbox denial held: node identity unreadable; no reap", "none",
+        return _verdict(
+            row, LEAVE, "sandbox denial held: node identity unreadable; no reap", "none",
         )
     try:
         claim = claim_for(row.node)
     except Exception as exc:  # noqa: BLE001 - unreadable claims never authorize reap
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
-            f"sandbox denial held: claim unreadable ({exc}); no reap", "none",
+        return _verdict(
+            row, LEAVE, f"sandbox denial held: claim unreadable ({exc}); no reap", "none",
         )
     if claim.get("state") != "free":
         state = claim.get("state") or "unknown"
         holder = claim.get("holder") or "unknown"
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
+        return _verdict(
+            row, LEAVE,
             f"sandbox denial held: node claim {state} ({holder}); no reap", "none",
         )
     commit_count = _branch_commit_count(row.cwd)
     if commit_count is None:
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
-            "sandbox denial held: branch commit count unreadable; no reap", "none",
+        return _verdict(
+            row, LEAVE, "sandbox denial held: branch commit count unreadable; no reap",
+            "none",
         )
     if commit_count:
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
+        return _verdict(
+            row, LEAVE,
             f"sandbox denial held: branch carries {commit_count} commit(s); no reap",
             "none",
         )
-    return Verdict(
-        row.row_id,
-        row.name,
-        row.state,
+    return _verdict(
+        row,
         SANDBOX_BLOCKED,
         f"Codex sandbox blocked Git writes: {evidence}; node claim free; branch commits=0",
         "reap",

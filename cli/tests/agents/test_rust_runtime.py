@@ -264,6 +264,36 @@ def test_codex_code_spawn_refuses_when_git_grant_is_unresolved(
     assert called == []
 
 
+def test_codex_node_dispatch_refuses_without_a_verb_prefixed_payload(
+    monkeypatch, tmp_path
+) -> None:
+    """A --node dispatch is a code payload even when no token carries a
+    /target-family prefix, so the grant refusal still holds."""
+    from fno.cli import app
+
+    called: list[list[str]] = []
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+            "--node",
+            "x-f370",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert called == []
+
+
 def test_codex_code_payload_after_provider_fence_is_checked() -> None:
     assert rr._is_codex_code_payload(
         ["spawn", "--", "$fno:target x-f370"]
