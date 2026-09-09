@@ -74,7 +74,7 @@ class Fno < Formula
   def install
     # Build the venv from the python@3.13 dependency (never the host python,
     # which may be older on a clean machine).
-    system Formula["python@3.13"].opt_bin/"python3.13", "-m", "venv", libexec
+    system formula_opt_bin("python@3.13")/"python3.13", "-m", "venv", libexec
 
     # The wheel is a FILE in buildpath (url's :nounzip - an unpacked wheel dir is
     # not pip-installable), so pip-install the wheel file directly. pip resolves
