@@ -867,6 +867,7 @@ pub(crate) fn run(
             }
         }
         if let Err(refusal) = stage_session_retirement(
+            home,
             e,
             ledger.as_deref(),
             dry_run,
@@ -1023,18 +1024,24 @@ pub(crate) fn run(
 }
 
 /// The SESSION half of one retirement, shared by the scheduled sweep and the
-/// merge trigger so exactly one sequence exists: confirm the stop, apply the
-/// native ACTIVE-SURFACE removal, stage the resumable receipt carrying both
-/// as typed effects.
+/// merge trigger so exactly one sequence exists: build and PERSIST the
+/// resumable receipt first, then confirm the stop, then apply the native
+/// ACTIVE-SURFACE removal, appending each typed effect as it lands
+/// (x-5aef task 1.1). Preserve-before-effects: a crash after an effect has
+/// run leaves a receipt on disk naming it, instead of a removal nothing
+/// recorded.
 ///
 /// The stop refusal keeps the row for retry, and so does a `failed` or `kept`
 /// (unverified) native outcome: a retirement applies only when every
-/// applicable effect positively confirmed (or measured not-applicable).
+/// applicable effect positively confirmed (or measured not-applicable). A
+/// refusal path still rewrites the receipt it staged, so the on-disk record
+/// carries the effect that refused.
 /// DRY-RUN stops nothing and applies nothing - a rehearsal that killed the
 /// worker it rehearsed retiring would be the destructive run wearing a dry
 /// flag - but it still stages the receipt, so the rehearsal reports the same
 /// holds the real run would.
 pub(crate) fn stage_session_retirement(
+    home: &AgentsHome,
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
     dry_run: bool,
@@ -1042,35 +1049,82 @@ pub(crate) fn stage_session_retirement(
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
 ) -> Result<(), RetireRefusal> {
-    let stopped = if dry_run { true } else { stop_confirmed(e) };
+    let ledger = ledger_rows
+        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
+    // The record precedes the effects: a receipt that cannot be built or
+    // persisted refuses BEFORE the harness is touched, so no effect ever
+    // fires without its recovery record already on disk (AC3-EDGE).
+    let mut receipt = match build_reap_receipt(e, ledger) {
+        Ok(receipt) => receipt,
+        Err(reason) => return Err(RetireRefusal::NoReceipt(reason)),
+    };
+    if dry_run {
+        receipts.insert(e.name.clone(), receipt);
+        return Ok(());
+    }
+    if let Err(err) = write_reap_receipt(home, &receipt) {
+        return Err(RetireRefusal::NoReceipt(format!(
+            "receipt did not persist: {err}"
+        )));
+    }
+    // Effect 1: the confirmed stop of the held process.
+    let stopped = stop_confirmed(e);
+    receipt
+        .effects
+        .push(crate::gc_native::stop_outcome_effect(stopped));
     if !stopped {
+        let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
             "the stop did not confirm; row kept for retry".into(),
         ));
     }
-    // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
-    // codex's session index, cursor-agent's worker servers - through the
-    // same cascade `rm` walks, typed outcome recorded.
-    let mut effects: Vec<EffectRecord> = Vec::new();
-    if !dry_run {
-        let outcome = surface_removal(e);
-        let applied = outcome.satisfies_applied();
-        effects.push(outcome.effect_record("active-surface"));
-        if !applied {
-            return Err(RetireRefusal::NativeRemoval(
-                "the native active-surface removal did not confirm".into(),
-            ));
-        }
+    // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent
+    // list, codex's session index, cursor-agent's worker servers - through
+    // the same cascade `rm` walks, typed outcome recorded.
+    let outcome = surface_removal(e);
+    let applied = outcome.satisfies_applied();
+    receipt
+        .effects
+        .push(outcome.effect_record("active-surface"));
+    if !applied {
+        let _ = write_reap_receipt(home, &receipt);
+        return Err(RetireRefusal::NativeRemoval(
+            "the native active-surface removal did not confirm".into(),
+        ));
     }
-    let ledger = ledger_rows
-        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
-    match build_reap_receipt(e, ledger) {
-        Ok(mut receipt) => {
-            receipt.effects = effects;
-            receipts.insert(e.name.clone(), receipt);
-            Ok(())
-        }
-        Err(reason) => Err(RetireRefusal::NoReceipt(reason)),
+    // Effect 3: the resumability evidence, measured off the receipt itself.
+    receipt.effects.push(resume_evidence_effect(&receipt));
+    let _ = write_reap_receipt(home, &receipt);
+    receipts.insert(e.name.clone(), receipt);
+    Ok(())
+}
+
+/// The resume-evidence op, measured off the staged receipt: the resume
+/// tokens are present AND at least one located transcript exists on disk.
+/// A `failed` outcome does not hold the row (the session is already
+/// stopped); it marks the receipt unverifiable so the gate refuses it
+/// rather than certifying a retirement nothing can recover (AC6-EDGE).
+fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
+    let transcript_exists = receipt.native_locator.as_ref().is_some_and(|loc| {
+        loc.get("transcripts")
+            .and_then(Value::as_array)
+            .is_some_and(|paths| {
+                paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|p| std::path::Path::new(p).exists())
+            })
+    });
+    let confirmed = !receipt.resume_argv.is_empty() && transcript_exists;
+    EffectRecord {
+        op: "resume-evidence".into(),
+        outcome: if confirmed {
+            "confirmed-removed".into()
+        } else {
+            "failed".into()
+        },
+        detail: None,
+        at: crate::daemon::now_rfc3339_like(),
     }
 }
 

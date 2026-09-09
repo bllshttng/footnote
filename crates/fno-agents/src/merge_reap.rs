@@ -399,6 +399,7 @@ fn run_request(
     };
     for entry in &rows {
         match crate::gc_sweep::stage_session_retirement(
+            home,
             entry,
             ledger,
             false,
@@ -1115,15 +1116,24 @@ mod tests {
             !receipt.resume_argv.is_empty(),
             "the receipt must carry the resume form: {receipt:?}"
         );
-        let effects: Vec<&str> = receipt
+        let effects: std::collections::BTreeMap<String, String> = receipt
             .effects
             .iter()
-            .map(|effect| effect.outcome.as_str())
+            .map(|effect| (effect.op.clone(), effect.outcome.clone()))
             .collect();
         assert_eq!(
-            effects,
-            vec!["confirmed-removed"],
+            effects.get("native-stop").map(String::as_str),
+            Some("confirmed-removed"),
+            "the confirmed stop must be named: {receipt:?}"
+        );
+        assert_eq!(
+            effects.get("active-surface").map(String::as_str),
+            Some("confirmed-removed"),
             "the native active-surface outcome must be named: {receipt:?}"
+        );
+        assert!(
+            effects.contains_key("resume-evidence"),
+            "the resumability evidence op must be present: {receipt:?}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
