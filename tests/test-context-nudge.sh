@@ -148,6 +148,22 @@ write_registry_without_self() {
   }]}' > "$SBX/.fno/agents/registry.json"
 }
 
+write_registry_with_unlinked_child() {
+  jq -n '{schema_version: 13, agents: [
+    {
+      name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
+      status:"live", short_id:"king-test-session-id",
+      harness_session_id:"king-test-session-id",
+      crown_level:1, crown_scope:"x-test-epic", crown_grantor:"human"
+    },
+    {
+      name:"unlinked-worker", harness:"claude", cwd:"/tmp", log_path:"/tmp/u",
+      status:"live", short_id:"unlinked", spawned_by_session:null,
+      crown_level:null, crown_scope:null
+    }
+  ]}' > "$SBX/.fno/agents/registry.json"
+}
+
 # A transcript with one assistant usage line: input_tokens sets the pct against
 # the 1M window (claude-sonnet-4-6). 500000 -> 50%, 300000 -> 30%.
 write_transcript() {  # write_transcript <path> <input_tokens> [model]
@@ -256,6 +272,17 @@ assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as court'
 assert_contains "AC14: names resolution 2 (spawn the heir)" "$OUT" 'fno agents spawn -k'
 assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
 events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || bad "AC14: no king_orphan_block event"
+
+# === AC31: unlinked-only workers make ownership unknown, never zero ==========
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_with_unlinked_child
+write_transcript "$SBX/low.jsonl" 300000
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "AC31: unlinked-only population blocks" "$OUT" '"decision":"block"'
+assert_contains "AC31: reports zero linked workers" "$OUT" 'Linked count: 0'
+assert_contains "AC31: names unlinked worker" "$OUT" 'unlinked-worker'
+assert_contains "AC31: reports ownership unknown" "$OUT" 'ownership unknown'
+write_registry yes yes
 
 # === AC15: a carveout carrying the scope suppresses the orphan block ==========
 rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
