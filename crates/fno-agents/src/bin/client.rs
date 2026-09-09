@@ -36,6 +36,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "codex-loaded-threads",
     "component-verdict",
     "court-orphans",
+    "court-fold",
     "detect",
     "digest",
     "drive",
@@ -361,6 +362,14 @@ async fn run(args: Vec<String>) -> i32 {
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
     if verb == "court-orphans" {
         return fno_agents::loop_reign::run_court_orphans(&args[1..]);
+    }
+    // `court-fold` (x-52d2): the crown scope fold for `fno agents court
+    // --nodes` and the local board's court section, daemon-free like
+    // court-orphans; the workers column rides the same native claim verdicts
+    // `claim sweep` uses, so a fold and the claims surface cannot disagree
+    // about who holds a node.
+    if verb == "court-fold" {
+        return fno_agents::court_fold::run_court_fold(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);

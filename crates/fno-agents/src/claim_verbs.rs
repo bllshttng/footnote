@@ -425,6 +425,7 @@ pub(crate) fn default_session_witness() -> (
         let answer = session_liveness_answer(rec, &index, &memo);
         *last_answer.borrow_mut() = Some(match &answer {
             crate::claims::SessionLiveness::Live(basis) => *basis,
+            crate::claims::SessionLiveness::Absent => crate::claims::basis::SESSION_ABSENT,
             crate::claims::SessionLiveness::Unresolved => "unresolved",
         });
         answer
@@ -475,6 +476,7 @@ fn session_liveness_answer(
 /// 2026-09-07), so a pid requirement here would make every handover claim
 /// unresolvable and hand its verdict back to the dispatcher.
 struct SessionRegistryIndex {
+    known: bool,
     by_session: std::collections::HashMap<String, (u32, u64)>,
     by_name: std::collections::HashMap<String, String>,
 }
@@ -487,7 +489,9 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
-    if let Ok(registry) = crate::state::load_registry(&path) {
+    let registry = crate::state::load_registry(&path);
+    let known = registry.is_ok();
+    if let Ok(registry) = registry {
         for e in &registry.entries {
             let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) else {
                 continue;
@@ -510,6 +514,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         }
     }
     *cache = Some(SessionRegistryIndex {
+        known,
         by_session,
         by_name,
     });
@@ -521,32 +526,54 @@ fn session_liveness_answer_uncached(
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
 ) -> crate::claims::SessionLiveness {
     load_session_registry_index(index);
-    if let Some(&(pid, start)) = index
-        .borrow()
-        .as_ref()
-        .and_then(|i| i.by_session.get(session))
-    {
-        if crate::daemon::pid_is_ours(pid, Some(start)) {
-            return crate::claims::SessionLiveness::Live(
-                crate::claims::basis::REGISTRY_SESSION_LIVE,
-            );
-        }
+    let (registry_known, registry_live) = {
+        let borrowed = index.borrow();
+        let registry = borrowed
+            .as_ref()
+            .expect("session registry index initialized");
+        let live = registry
+            .by_session
+            .get(session)
+            .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)));
+        (registry.known, live)
+    };
+    if registry_live {
+        return session_liveness_from_observations(registry_known, true, None);
     }
     // The row is missing or its pid is stale (a resume leaves rows behind) -
     // the transcript still answers. Reachability is the liveness reading;
     // "waiting" or "stalled" names a wedged session, never a dead one.
-    if let Some(probe) = crate::truth_probe::family1_truth_probe(session) {
-        if probe.reachability.as_deref() == Some("reachable") {
-            return crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE);
-        }
+    let probe = crate::truth_probe::family1_truth_probe(session);
+    session_liveness_from_observations(
+        registry_known,
+        false,
+        probe
+            .as_ref()
+            .and_then(|probe| probe.reachability.as_deref()),
+    )
+}
+
+fn session_liveness_from_observations(
+    registry_known: bool,
+    registry_live: bool,
+    reachability: Option<&str>,
+) -> crate::claims::SessionLiveness {
+    if registry_live {
+        return crate::claims::SessionLiveness::Live(crate::claims::basis::REGISTRY_SESSION_LIVE);
     }
-    crate::claims::SessionLiveness::Unresolved
+    match reachability {
+        Some("reachable") => {
+            crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
+        }
+        Some("unreachable") if registry_known => crate::claims::SessionLiveness::Absent,
+        _ => crate::claims::SessionLiveness::Unresolved,
+    }
 }
 
 /// Pure(ish) core of `claim sweep`: build the pinned verdict object from a
 /// complete record set. `claim_sweep_payload` keeps the old single-directory
 /// test seam; the command path supplies the both-root set from `claims::list`.
-fn claim_sweep_payload_from_records(
+pub(crate) fn claim_sweep_payload_from_records(
     records: &[crate::claims::ClaimRecord],
     prefix: Option<&str>,
     keys: &[String],
@@ -643,6 +670,14 @@ fn claim_sweep_payload(dir: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_session_absent_requires_a_readable_registry() {
+        assert!(matches!(
+            session_liveness_from_observations(false, false, Some("unreachable")),
+            crate::claims::SessionLiveness::Unresolved
+        ));
+    }
 
     // ---- claim sweep (x-54fa) --------------------------------------------
 

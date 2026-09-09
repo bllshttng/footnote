@@ -1085,17 +1085,17 @@ def status(
     Only ``node:`` keys, because only they have a fleet to cross-check
     against. Every other key renders exactly as before.
 
-    Callers parsing the JSON keep reading ``state``; the roster fields are
-    additive and only appear when the cross-check applies.
+    Callers parsing the JSON keep reading ``state``; roster fields are additive and only appear when the cross-check applies.
 
-    ``--no-roster`` exists for one shape of caller: a hot path that reads only
-    the claim record. ``hooks/claim-heartbeat.sh`` runs on tool calls and reads
+    ``--no-roster`` exists for one shape of caller: a hot path that reads only the
+    claim record. ``hooks/claim-heartbeat.sh`` runs on tool calls and reads
     ``.holder`` alone, and the cross-check's whole cost lands on exactly the
     branch it hits when a claim has lapsed. Paying a harness subprocess there to
-    compute a field it discards would tax every tool call to answer a question
-    it never asked.
+    compute a field it discards would tax every tool call to answer a question it never asked.
     """
+    key = _normalize_status_key(key)
     info = _claims_core.claim_status(key=key, root=_node_aware_root(key))
+    _refuse_unknown_status_key(key, info)
     node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
@@ -1930,6 +1930,21 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
 
 
 __all__ = ["cli"]
+
+
+def _normalize_status_key(key: str) -> str:
+    from fno.graph._constants import is_wellformed_node_id
+
+    return f"node:{key}" if is_wellformed_node_id(key) else key
+
+
+def _refuse_unknown_status_key(key: str, info: Mapping) -> None:
+    if ":" in key or info.get("state") != ClaimState.FREE.value:
+        return
+    typer.echo(
+        f"claim key must include a recognized prefix; no claim exists for {key!r}", err=True
+    )
+    raise typer.Exit(2)
 
 
 def _owned_registry_effort(harness: str, session_id: str) -> "str | None":

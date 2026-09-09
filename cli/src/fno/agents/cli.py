@@ -949,30 +949,11 @@ def cmd_crown(
     print(json.dumps(receipt))
 
 
-@agents_app.command("court", hidden=True)
-def cmd_court(
-    json_output: bool = typer.Option(
-        False, "--json", "-J", help="Emit JSON instead of the table."
-    ),
-) -> None:
-    """The whole court: every live crown, its scope, its holder, its grantor,
-    and whether the registry and the graph agree - the read that answers "did
-    the coronations work" without trusting the absence of a disagreement.
+# The court command moved to fno.agents.court (file budget); the
+# composition stays on the agents app here.
+from fno.agents.court import register_court_command  # noqa: E402
 
-    Exit 0 always: this is a read, and a caller gates on the JSON keys
-    (``agree``, ``summary.disagreements``, ``summary.unknowns``, and
-    ``conflicts``), not the process status.
-
-    ``conflicts`` belongs in that list and is not derivable from the counts.
-    Two live rows holding one territory are each individually corroborated by
-    the graph, so both report ``agree: true`` and the summary reads zero
-    disagreements while the fleet has two kings over one scope. A caller that
-    gates on the counts alone reads that as a healthy court, which is the
-    precise failure this command exists to end.
-    """
-    from fno.agents.court import render_court
-
-    print(render_court(json_output))
+register_court_command(agents_app)
 
 
 # Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
@@ -3240,11 +3221,8 @@ def cmd_discovered_json(
 def cmd_registry_json() -> None:
     """Internal: emit registry rows DAEMON-FREE.
 
-    Hooks (context-nudge.sh) need the stored crown + spawn-edge fields
-    without the live-status enrichment that ``fno agents list`` lazy-starts the
-    daemon for. Output is ``{"agents": [...]}`` with name / session ids /
-    status / crown fields / spawned_by_session per row - a file read via
-    load_registry, no daemon, so a Stop hook never stalls on a daemon start.
+    Hooks need stored crown, spawn-edge, and origin fields without live-status
+    enrichment. Output is ``{"agents": [...]}`` via a daemon-free registry read.
     """
     import json as _json
 
@@ -3259,6 +3237,7 @@ def cmd_registry_json() -> None:
             "crown_level": e.crown_level,
             "crown_scope": e.crown_scope,
             "spawned_by_session": e.spawned_by_session,
+            "origin": e.origin,
         }
         for e in load_registry()
     ]

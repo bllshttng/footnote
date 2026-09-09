@@ -363,6 +363,41 @@ pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
     Vec::new()
 }
 
+/// The config dir a removal must address for this row, `None` meaning the
+/// ambient root. A union row's measured account outranks the historical
+/// launch account; the latter is used only when the snapshot has no row.
+pub fn removal_config_dir(
+    snapshot: &ClaudeAgentsSnapshot,
+    short_id: &str,
+    launch_account: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let account = match snapshot.find(short_id) {
+        Some(row) => match &row.account {
+            Some(account) => account.clone(),
+            None => return Ok(None),
+        },
+        None => match launch_account {
+            Some(account) => account.to_string(),
+            None => return Ok(None),
+        },
+    };
+    isolated_account_dirs()
+        .into_iter()
+        .find(|(id, _)| id == &account)
+        .map(|(_, dir)| Some(dir))
+        .ok_or_else(|| format!("claude account root '{account}' is not configured"))
+}
+
+/// Resolve the account root for a legacy short-id-only removal call.
+pub fn removal_config_dir_for_short_id(
+    short_id: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if isolated_account_dirs().is_empty() {
+        return Ok(None);
+    }
+    removal_config_dir(&read_all_agents_union(), short_id, None)
+}
+
 /// Parse `[[providers.records]]` / `[[accounts.records]]` entries carrying an
 /// isolated `config_dir`, as `(account_id, dir)` with `~/` expanded. Malformed
 /// records are skipped, never a panic.
@@ -1006,5 +1041,125 @@ mod tests {
         };
         assert_eq!(rows[0].pid, Some(65340));
         assert_eq!(rows[1].pid, None);
+    }
+
+    fn alternate_account_env_lock() -> &'static std::sync::Mutex<()> {
+        crate::claims::test_env_lock()
+    }
+
+    fn with_alt_account_config(test: impl FnOnce(PathBuf)) {
+        let _guard = alternate_account_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "fno-removal-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[[accounts.records]]\nid = \"alt\"\nconfig_dir = \"{}\"\n",
+                root.join("claude-alt").display()
+            ),
+        )
+        .unwrap();
+        let previous = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", root.join("settings.toml"));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test(root.join("claude-alt"));
+        }));
+        match previous {
+            Some(value) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        std::fs::remove_dir_all(root).ok();
+        drop(_guard);
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn removal_config_dir_uses_measured_isolated_row_root() {
+        with_alt_account_config(|alt_dir| {
+            let mut row = ClaudeAgentRow::new("aaaa1111", Some("done"));
+            row.account = Some("alt".to_string());
+            let snapshot = ClaudeAgentsSnapshot::known(vec![row]);
+            assert_eq!(
+                removal_config_dir(&snapshot, "aaaa1111", None),
+                Ok(Some(alt_dir))
+            );
+        });
+    }
+
+    #[test]
+    fn removal_config_dir_uses_ambient_root_for_missing_row_without_record() {
+        with_alt_account_config(|_| {
+            let snapshot = ClaudeAgentsSnapshot::known(Vec::new());
+            assert_eq!(removal_config_dir(&snapshot, "bbbb2222", None), Ok(None));
+        });
+    }
+
+    #[test]
+    fn removal_config_dir_prefers_measured_ambient_root_over_launch_record() {
+        with_alt_account_config(|_| {
+            let snapshot =
+                ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new("cccc3333", Some("done"))]);
+            assert_eq!(
+                removal_config_dir(&snapshot, "cccc3333", Some("alt")),
+                Ok(None)
+            );
+        });
+    }
+
+    #[test]
+    fn removal_config_dir_refuses_an_unmapped_measured_account() {
+        with_alt_account_config(|_| {
+            let mut row = ClaudeAgentRow::new("dddd4444", Some("done"));
+            row.account = Some("missing".to_string());
+            let snapshot = ClaudeAgentsSnapshot::known(vec![row]);
+            let got = format!("{:?}", removal_config_dir(&snapshot, "dddd4444", None));
+            assert!(
+                got.starts_with("Err("),
+                "an unmapped measured account must refuse, got {got}"
+            );
+        });
+    }
+
+    #[test]
+    fn alternate_account_tests_share_the_crate_environment_lock() {
+        let shared = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let attempt = alternate_account_env_lock().try_lock();
+        assert!(matches!(attempt, Err(std::sync::TryLockError::WouldBlock)));
+        drop(shared);
+    }
+
+    #[test]
+    fn alternate_account_tests_restore_environment_after_panic() {
+        let previous = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        let result = std::panic::catch_unwind(|| {
+            with_alt_account_config(|_| panic!("injected assertion failure"));
+        });
+        let observed = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        if observed != previous {
+            if let Some(path) = &observed {
+                if let Some(root) = std::path::Path::new(path).parent() {
+                    std::fs::remove_dir_all(root).ok();
+                }
+            }
+            match &previous {
+                Some(value) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value),
+                None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+            }
+        }
+        assert!(result.is_err(), "the injected panic did not run");
+        assert_eq!(observed, previous, "the helper leaked its environment");
     }
 }

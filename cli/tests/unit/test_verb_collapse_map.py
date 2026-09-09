@@ -131,9 +131,11 @@ def test_map_covers_current_surface_once():
     # 580 -> 583. x-9e1e allocates `agents king faq add` and `agents king
     # faq list`, the king FAQ recipe-becomes-verb: 583 -> 585. Main
     # independently allocates `agents distress-verdicts`, the king board's
-    # watchdog-verdict lookup (hidden verb): 585 -> 586. Counted from the
-    # merged file, never taken from either side: 586.
-    assert len(mapped) == 586, (
+    # watchdog-verdict lookup (hidden verb): 585 -> 586. The court scope
+    # fold allocates `agents court-fold`, the native read `fno agents
+    # court -n` relays to (hidden verb): 586 -> 587. Counted from the
+    # merged file, never taken from either side: 587.
+    assert len(mapped) == 587, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
