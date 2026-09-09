@@ -1537,7 +1537,7 @@ use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
-use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal, WATCH_SLACK_MS};
+use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -17874,15 +17874,30 @@ git_bounded();";
     #[test]
     fn watch_idle_window_defaults_clamps_and_slacks() {
         // Default (no tag timeout): 30m + 12m slack.
-        assert_eq!(watch_window_ms(None), 30 * 60_000 + WATCH_SLACK_MS);
+        assert_eq!(
+            watch_window_ms(None),
+            30 * 60_000 + watch_lease::WATCH_SLACK_MS
+        );
         // Honored within range.
-        assert_eq!(watch_window_ms(Some("30m")), 30 * 60_000 + WATCH_SLACK_MS);
+        assert_eq!(
+            watch_window_ms(Some("30m")),
+            30 * 60_000 + watch_lease::WATCH_SLACK_MS
+        );
         // Below the 5m floor clamps up.
-        assert_eq!(watch_window_ms(Some("1m")), 5 * 60_000 + WATCH_SLACK_MS);
+        assert_eq!(
+            watch_window_ms(Some("1m")),
+            5 * 60_000 + watch_lease::WATCH_SLACK_MS
+        );
         // Above the 2h ceiling clamps down.
-        assert_eq!(watch_window_ms(Some("5h")), 2 * 3_600_000 + WATCH_SLACK_MS);
+        assert_eq!(
+            watch_window_ms(Some("5h")),
+            2 * 3_600_000 + watch_lease::WATCH_SLACK_MS
+        );
         // Garbage falls back to the default.
-        assert_eq!(watch_window_ms(Some("soon")), 30 * 60_000 + WATCH_SLACK_MS);
+        assert_eq!(
+            watch_window_ms(Some("soon")),
+            30 * 60_000 + watch_lease::WATCH_SLACK_MS
+        );
     }
 
     #[test]
