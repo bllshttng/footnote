@@ -349,8 +349,7 @@ def _component_verdict(
     None when it cannot answer - never read as fresh."""
     cmd = [
         str(verdict_bin), "component-verdict",
-        "--bindir", str(bindir),
-        "--expected", subtree,
+        "--bindir", str(bindir), "--expected", subtree,
         "--agents-dir", str(source.parent / "crates" / "fno-agents"),
     ]
     if include_mux or (include_mux is None and (source.parent / "crates" / "fno").is_dir()):
@@ -359,10 +358,9 @@ def _component_verdict(
         cmd.append("--attempted")
     if python_tool:
         cmd += ["--python-rev", python_tool.get("rev") or "-"]
-        if python_tool.get("expected"):
-            cmd += ["--python-expected", python_tool["expected"]]
-        if python_tool.get("evidence"):
-            cmd += ["--python-evidence", python_tool["evidence"]]
+        for flag, key in (("--python-expected", "expected"), ("--python-evidence", "evidence")):
+            if python_tool.get(key):
+                cmd += [flag, python_tool[key]]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60.0)
     except (OSError, subprocess.SubprocessError) as exc:
