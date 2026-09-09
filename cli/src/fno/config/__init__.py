@@ -63,6 +63,7 @@ from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
 from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
+from fno.config._graph import GraphBlock
 # The keyed settings loader lives in fno.config._loader (this file is over the
 # size budget and shrink-only); re-exported under the names every caller and
 # test already imports.
@@ -4213,6 +4214,7 @@ class ConfigBlock(BaseModel):
     plans_filename: str = "%Y%m%d-{slug}-{node}.md"
     branch: BranchBlock = Field(default_factory=BranchBlock)
     paths: PathsBlock = Field(default_factory=PathsBlock)
+    graph: GraphBlock = Field(default_factory=GraphBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     inbox: InboxBlock = Field(default_factory=InboxBlock)
@@ -4227,8 +4229,7 @@ class ConfigBlock(BaseModel):
     preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
-    # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
-    # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs)
+    # Repo-wide ship-gate probes enforced by the Rust loop-check gate.
     # alongside a plan's own `done_probes`; it refuses DonePRGreen unless both
     # pass. A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so
     # the source must stay a gitignored, operator-authored file: a tracked

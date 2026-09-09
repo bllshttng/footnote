@@ -30,6 +30,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
 | `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `paths.spaces_dir` | str (optional) | _(none)_ | never | Override path to the per-repo spaces root. |
+| `graph.commit_mode` | typing.Literal['rows', 'whole'] | `rows` | advanced | Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows). |
 | `obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
