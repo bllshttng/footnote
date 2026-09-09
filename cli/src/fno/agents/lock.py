@@ -256,6 +256,10 @@ def hold_agent_lock(
             fcntl.flock(fh, fcntl.LOCK_UN)
             fh.close()
             fh = None
+            if time.monotonic() >= deadline:
+                raise AgentLockTimeout(
+                    name=name, timeout=timeout, holder=_read_holder(lock_file)
+                )
 
         # Stamp the holder now that the flock is ours. A zero-byte lock is
         # unfalsifiable by inspection, which is how a live 30s wait read to

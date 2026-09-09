@@ -67,6 +67,8 @@ def plan_doc_lock(path: Path, timeout: float = 2.0) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             fd = -1
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"plan_doc_lock: {lock_path} busy > {timeout}s")
         try:
             yield
         finally:

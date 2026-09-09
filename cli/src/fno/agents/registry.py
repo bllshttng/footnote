@@ -1160,6 +1160,11 @@ def _hold_registry_lock(
                 same_inode = False
             if not same_inode:
                 fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+                if timeout is not None and time.monotonic() >= deadline:
+                    raise RegistryLockTimeout(
+                        f"registry lock timeout after {timeout:g}s at {lock_file}"
+                    )
                 continue
             try:
                 yield

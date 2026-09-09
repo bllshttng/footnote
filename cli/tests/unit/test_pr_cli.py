@@ -13,7 +13,9 @@ import hashlib
 import re
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -64,6 +66,45 @@ def test_plan_doc_lock_revalidates_inode_after_path_replacement(
 
     with locking.plan_doc_lock(plan, timeout=1):
         _assert_locked(real_flock, lock_path)
+
+
+def test_plan_doc_lock_replacement_loop_honors_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.plan import locking
+
+    locks_dir = tmp_path / "locks"
+    plan = tmp_path / "plan.md"
+    digest = hashlib.sha1(str(plan.resolve()).encode()).hexdigest()
+    lock_path = locks_dir / f"plan-{digest}.lock"
+    locks_dir.mkdir()
+    lock_path.touch()
+    monkeypatch.setattr(locking.paths, "locks_dir", lambda: locks_dir)
+    real_flock = locking.fcntl.flock
+    attempts = 0
+
+    def replace_each_time(handle, operation):
+        nonlocal attempts
+        if operation & fcntl.LOCK_EX:
+            attempts += 1
+            if attempts > 2:
+                raise AssertionError("inode replacement loop ignored timeout")
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    ticks = iter([0.0, 2.0])
+    monkeypatch.setattr(locking.fcntl, "flock", replace_each_time)
+    monkeypatch.setattr(
+        locking,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None),
+    )
+
+    with pytest.raises(TimeoutError, match=r"plan_doc_lock: .* busy > 1s"):
+        with locking.plan_doc_lock(plan, timeout=1):
+            pass
+    assert attempts == 1
 
 
 def test_graphql_quota_lock_revalidates_inode_after_path_replacement(

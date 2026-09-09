@@ -14,6 +14,7 @@ import json
 import multiprocessing as mp
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,6 +94,44 @@ def test_registry_lock_revalidates_inode_after_path_replacement(
         with lock_path.open("a") as contender:
             with pytest.raises(BlockingIOError):
                 real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_registry_lock_replacement_loop_honors_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import registry
+
+    registry_path = tmp_path / "registry.json"
+    lock_path = registry._registry_lock_path(registry_path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    real_flock = registry.fcntl.flock
+    attempts = 0
+
+    def replace_each_time(handle, operation):
+        nonlocal attempts
+        if operation & fcntl.LOCK_EX:
+            attempts += 1
+            if attempts > 2:
+                raise AssertionError("inode replacement loop ignored timeout")
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    ticks = iter([0.0, 2.0])
+    monkeypatch.setattr(registry.fcntl, "flock", replace_each_time)
+    monkeypatch.setattr(
+        registry,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None),
+    )
+
+    with pytest.raises(
+        registry.RegistryLockTimeout, match=r"registry lock timeout after 1s"
+    ):
+        with registry._hold_registry_lock(registry_path, timeout=1):
+            pass
+    assert attempts == 1
 
 
 # ---------------------------------------------------------------------------
