@@ -84,7 +84,7 @@ Five live duals below, plus one retirement recorded where it landed (the watchdo
 
 **The receipt handle readers.** Dual, disposition dual-logic, port owed, not in this PR. Rust leg `crates/fno-agents/src/resume_receipt.rs:37-41`, Python leg `cli/src/fno/agents/history.py` (`_receipt_answers`). Both answer "which reap receipt does this handle name", and after 2026-09-08 both hold the same three-key rule: `harness_session_id`, `short_id`, `row_name`, compared case-insensitively. Before that the Python leg matched one key of the three, so `fno agents history t-d145-agy-thread-glm` reported no receipt while `fno agents resume` found it. The port direction is Python history into the Rust reader, once history's other two legs (live registry, ledger) have a native door to read through.
 
-No parity guard is being written for it, deliberately. Writing one is the trigger to port instead, and a guard here would buy the second leg tenure it has not earned. The row is the record until the port lands.
+No parity guard is being written for it, deliberately. Writing one is the trigger to port instead. A guard here buys the second leg tenure it has not earned. The row is the record until the port lands.
 
 Nothing else in the tree is a confirmed dual implementation today.
 
