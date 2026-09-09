@@ -180,10 +180,7 @@ def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> b
     try:
         proc = subprocess.run(
             [fno_bin, "agents", "mail", "send", holder, message],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
+            capture_output=True, timeout=15, check=False,
         )
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
