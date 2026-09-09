@@ -9430,22 +9430,48 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    from fno.backlog.single_flight import (
+        FlightGate,
+        FlightHeld,
+        acquire_flight,
+        advance_flight_key,
+        report_held,
+    )
+
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        _run_advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
+        # One in flight per mission (x-ef2c): the drain arm fires on a fixed
+        # interval, and a converge slower than the interval used to stack a
+        # second copy of itself on top, each copy making the store slower for
+        # the rest. A held tick is correct behavior: the work is in progress,
+        # not lost. --stop is a control action, not a converge, and never
+        # queues behind the very drain it is stopping.
+        flight = (
+            None
+            if stop
+            else acquire_flight(advance_flight_key(epic), scope=f"advance --epic {epic}")
         )
+        if isinstance(flight, FlightHeld):
+            report_held(flight, "backlog advance", json_out=json_out)
+            return
+        try:
+            _run_advance_epic(
+                epic,
+                stop=stop,
+                max_dispatch=max_dispatch,
+                json_out=json_out,
+                verbose=verbose,
+                model=model,
+                provider=provider,
+                continuation=continuation,
+            )
+        finally:
+            if isinstance(flight, FlightGate):
+                flight.release()
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
@@ -9468,6 +9494,14 @@ def cmd_advance(
             closed_project = _cn.get("project") if _cn else None
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
+
+    # One in flight for the board advance (x-ef2c), the same latch as the epic
+    # path: the merge event, a groom leg and a manual run all fire this verb,
+    # and nothing used to stop two of them from running at once.
+    flight = acquire_flight(advance_flight_key(None), scope="advance")
+    if isinstance(flight, FlightHeld):
+        report_held(flight, "backlog advance", json_out=json_out)
+        return
 
     try:
         result = _advance(
@@ -9503,6 +9537,8 @@ def cmd_advance(
         # and exit 0.
         typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
         return
+    finally:
+        flight.release()
     if json_out:
         typer.echo(
             json.dumps(
@@ -9643,6 +9679,67 @@ def cmd_reconcile(
     to it (no archiving). This fires on every throttled auto-reconcile,
     including the SessionStart hook - not just a manual invocation.
     """
+    # --node + --pr-number together is refused rather than silently
+    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
+    # PR's trailer claims, unconditional on --node, but the scan/close scope
+    # would then collapse to the single --node id - leaving newly-bound
+    # sibling claims stamped with a live PR ref but never closed until some
+    # later, unrelated sweep happens to revisit them (round-6/7 review,
+    # flagged twice with no caller ever exercising this combination). Loud
+    # refusal beats a latent gap a future caller could silently trip. A
+    # refusal fires before the gate below: a bad invocation is refused even
+    # while another reconcile holds the scope.
+    if node is not None and pr_number is not None:
+        raise typer.BadParameter(
+            "--node and --pr-number are mutually exclusive: --pr-number "
+            "already scopes the scan to every node its own trailer claims, "
+            "which --node cannot narrow without silently stranding the "
+            "other claimed nodes stamped-but-unclosed. Run them separately."
+        )
+
+    from fno.backlog.single_flight import (
+        FlightHeld,
+        acquire_flight,
+        reconcile_flight_key,
+        report_held,
+    )
+
+    # One in flight per scope (x-ef2c): SessionStart hooks, merge paths, groom
+    # legs and manual runs all fire this verb, and a sweep slower than the
+    # arms' interval used to stack copies of itself until the store slowed
+    # every one of them further. A held sweep is correct behavior, not an
+    # error: the in-flight pass owns the work. --dry-run mutates nothing and
+    # is never gated.
+    if dry_run:
+        _reconcile_once(
+            dry_run=dry_run, node=node, json_out=json_out,
+            pr_number=pr_number, repo=repo,
+        )
+        return
+    flight = acquire_flight(
+        reconcile_flight_key(node=node, pr_number=pr_number),
+        scope="reconcile",
+    )
+    if isinstance(flight, FlightHeld):
+        report_held(flight, "backlog reconcile", json_out=json_out)
+        return
+    try:
+        _reconcile_once(
+            dry_run=dry_run, node=node, json_out=json_out,
+            pr_number=pr_number, repo=repo,
+        )
+    finally:
+        flight.release()
+
+
+def _reconcile_once(
+    dry_run: bool,
+    node: Optional[str],
+    json_out: bool,
+    pr_number: Optional[int],
+    repo: Optional[str],
+) -> None:
+    """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9658,22 +9755,6 @@ def cmd_reconcile(
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
-
-    # --node + --pr-number together is refused rather than silently
-    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
-    # PR's trailer claims, unconditional on --node, but the scan/close scope
-    # would then collapse to the single --node id - leaving newly-bound
-    # sibling claims stamped with a live PR ref but never closed until some
-    # later, unrelated sweep happens to revisit them (round-6/7 review,
-    # flagged twice with no caller ever exercising this combination). Loud
-    # refusal beats a latent gap a future caller could silently trip.
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the

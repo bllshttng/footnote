@@ -446,7 +446,19 @@ class Ritual:
                 sync_obj = obj.get("sync_catchup") or {}
                 sync_outcome = sync_obj.get("outcome") if isinstance(sync_obj, dict) else None
                 closure_refused = obj.get("closure_refused")
-                if held:
+                if obj.get("held"):
+                    # A held sweep (one-in-flight gate): another reconcile was
+                    # still running, so this one stood down without scanning.
+                    # The merged nodes close on that pass or the next; DEFERRED
+                    # keeps the work visibly owed rather than reading as the
+                    # no-drift fall-through below.
+                    self._emit(
+                        "reconcile",
+                        _DEFERRED,
+                        "held, a sweep was already in flight "
+                        f"(requests={obj.get('requests')}, holder={obj.get('holder')})",
+                    )
+                elif held:
                     # Held open, not clean: the PR merged but the promise gate
                     # did not clear the close (x-40be). status=ok detail=closed=0
                     # covered "held seven nodes open"; deferred keeps the work

@@ -1012,6 +1012,16 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
                 f"{closure_refused}",
                 file=sys.stderr,
             )
+        if obj.get("held"):
+            # The one-in-flight gate: a sweep was already running, so this one
+            # stood down without scanning. Named, never silent - the merged
+            # nodes stay open until a later sweep revisits them.
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} held "
+                f"(a sweep is already in flight, requests={obj.get('requests')}); "
+                "a later sweep closes the merged nodes",
+                file=sys.stderr,
+            )
         # `closed` = what the scan closed this run; `closure_bound`/`claims`
         # = the trailer's bindings. The url match backfills a PR whose nodes
         # the trailer never named.
