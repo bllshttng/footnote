@@ -1,15 +1,12 @@
-"""One in flight per backlog arm scope.
+"""One in flight per backlog arm scope (advance, reconcile).
 
-Measured 2026-09-09 at load 458 against a gate of 120: three concurrent
-`backlog advance --epic` from three different parents and three concurrent
-`backlog reconcile` trees, the oldest twelve minutes. A run slower than the
-arms' fixed interval stacked the next fire on top of itself, and each copy
-made the store slower for the rest. The latch lives inside the commands, so
-every parent is covered: daemon drains, merge paths, groom legs, SessionStart
-hooks, orphans. A second invocation for an in-flight scope is HELD, not run:
-it reports `held` with a request count and exits 0 - a skipped tick is
-correct behavior when the previous tick is still running. The instrument is
-a claim, the same store `fno agents claim status` reads.
+A run slower than the arms' fixed interval stacked the next fire on top of
+itself, each copy making the store slower for the rest. The latch lives
+inside the commands, so every parent is covered: daemon drains, merge paths,
+groom legs, SessionStart hooks, orphans. A second invocation for an in-flight
+scope reports `held` and exits 0: a skipped tick is correct behavior when the
+previous tick is still running. The instrument is a claim, the same store
+`fno agents claim status` reads.
 """
 
 from __future__ import annotations
@@ -20,35 +17,31 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 import typer
 
 from fno.claims import ClaimHeldByOther, acquire_claim, claim_status, force_release_claim, release_claim
 from fno.claims.io import claim_path, claims_dir, claims_root_for, encode_key, read_claim_file
 
-# Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder,
-# and a run that outlives it degrades to the pre-gate behavior.
+# Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
 FLIGHT_TTL_MS = 30 * 60 * 1000
-
-_ADVANCE_PREFIX = "flight:backlog-advance"
-_RECONCILE_PREFIX = "flight:backlog-reconcile"
 
 
 def advance_flight_key(epic: Optional[str]) -> str:
     """An epic converge and a board advance are different work; same-scope
     copies are the stacking this deletes."""
-    return f"{_ADVANCE_PREFIX}:epic:{epic}" if epic else _ADVANCE_PREFIX
+    return f"flight:backlog-advance:epic:{epic}" if epic else "flight:backlog-advance"
 
 
 def reconcile_flight_key(*, node: Optional[str], pr_number: Optional[int]) -> str:
-    """A full sweep owns the graph; a `--pr-number`/`--node` pass owns one
-    PR's closure and never queues behind an unrelated sweep."""
+    """A full sweep owns the graph; a --pr-number/--node pass owns one PR's
+    closure and never queues behind an unrelated sweep."""
     if node:
-        return f"{_RECONCILE_PREFIX}:node:{node}"
+        return f"flight:backlog-reconcile:node:{node}"
     if pr_number is not None:
-        return f"{_RECONCILE_PREFIX}:pr:{pr_number}"
-    return _RECONCILE_PREFIX
+        return f"flight:backlog-reconcile:pr:{pr_number}"
+    return "flight:backlog-reconcile"
 
 
 @dataclass
@@ -62,8 +55,7 @@ class FlightGate:
         try:
             release_claim(self.key, self.holder, root=claims_root_for(self.key))
         except Exception:
-            # The TTL plus the pid probe retire it; never mask the work's outcome.
-            pass
+            pass  # the TTL plus the pid probe retire it; never mask the work's outcome
 
 
 @dataclass
@@ -75,19 +67,17 @@ class FlightHeld:
     held_for_s: int
     requests: int
 
-    def payload(self) -> dict[str, Any]:
+    def payload(self) -> dict[str, object]:
         return {"held": True, "requests": self.requests, "holder": self.holder, "held_for_s": self.held_for_s}
 
 
 def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
-    """Take the one-in-flight gate, or report it held. The holder string is
-    unique per invocation: an identical holder reads as an idempotent
-    re-acquire and would let a second copy straight through."""
-    reason = f"backlog single-flight: {scope}"
+    """Take the gate, or report it held. The holder is unique per invocation:
+    an identical holder reads as an idempotent re-acquire."""
     root = claims_root_for(key)
     holder = f"single-flight:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     try:
-        acquire_claim(key, holder, reason=reason, ttl_ms=FLIGHT_TTL_MS, root=root)
+        acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
         return FlightGate(key=key, holder=holder)
     except ClaimHeldByOther:
         pass
@@ -96,7 +86,7 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
         # acquirer may win the dropped claim, and then this one reports held.
         force_release_claim(key, "single-flight holder process is gone", root=root)
         try:
-            acquire_claim(key, holder, reason=reason, ttl_ms=FLIGHT_TTL_MS, root=root)
+            acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
             return FlightGate(key=key, holder=holder)
         except ClaimHeldByOther:
             pass
@@ -111,9 +101,8 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
 
 
 def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | None:
-    """Fail open: a gate that cannot run (sandboxed state root, contention
-    exhausted) returns None and the caller proceeds ungated. The verbs this
-    guards promise "always exits 0"; the protection must never traceback."""
+    """Fail open: a gate that cannot run returns None and the caller proceeds
+    ungated. The verbs this guards promise "always exits 0"."""
     try:
         return acquire_flight(key, scope=scope)
     except Exception as exc:  # noqa: BLE001 - fail open, never break the verb
@@ -122,10 +111,9 @@ def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | No
 
 
 def _holder_process_is_dead(key: str) -> bool:
-    """Probe the holder pid directly. The claims layer reads a holder live
-    through its session transcript - right for a node claim, wrong for a gate
-    on a subprocess: here the holder pid IS the holder. Unreadable probes
-    alive; the TTL retires it."""
+    """Probe the holder pid directly: the claims layer reads a holder live
+    through its session transcript, right for a node claim, wrong for a gate
+    on a subprocess. Unreadable probes alive; the TTL retires it."""
     try:
         claim = read_claim_file(claim_path(key, root=claims_root_for(key)))
     except Exception:
@@ -143,9 +131,8 @@ def _holder_process_is_dead(key: str) -> bool:
 
 
 def _count_held_request(key: str) -> int:
-    """Append one held request and return the scope's running count - the
-    cross-process counterpart of the reap arm's `requests=N`. The read-back
-    can over-count by one; report-only. A lost write returns 0."""
+    """Append one held request and return the running count (report-only;
+    the read-back can over-count by one; a lost write returns 0)."""
     try:
         path = claims_dir(claims_root_for(key)) / f"{encode_key(key)}.held-requests"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,27 +161,21 @@ def report_held(held: FlightHeld, verb: str, *, json_out: bool, extra: Optional[
 
 @contextlib.contextmanager
 def advance_flight_scope(epic: Optional[str], *, json_out: bool) -> Iterator[bool]:
-    """Gate one advance invocation. Yields False (already reported held) when
-    the scope is in flight; the caller returns without doing work. `--stop`
-    never enters here: deactivating a mission is a control action, not a
-    converge, and never queues behind its own drain."""
-    with _flight_scope(advance_flight_key(epic), f"advance --epic {epic}" if epic else "advance",
-                       "backlog advance", json_out,
-                       extra=None if epic else {"decision": "held"}) as ok:
+    """Gate one advance invocation; yields False (held, already reported) and
+    the caller returns. --stop never enters: a control action is not a
+    converge and never queues behind its own drain. The board held receipt
+    carries decision=held, so the documented --json shape survives."""
+    extra = None if epic else {"decision": "held"}
+    scope = "advance --epic" if epic else "advance"
+    with _flight_scope(advance_flight_key(epic), scope, "backlog advance", json_out, extra) as ok:
         yield ok
 
 
-def reconcile_gate(
-    *,
-    dry_run: bool,
-    node: Optional[str],
-    json_out: bool,
-    pr_number: Optional[int],
-    once: Callable[[], None],
-) -> None:
-    """`cmd_reconcile`'s entry: the mutual-exclusion refusal, the dry-run
-    bypass (--dry-run mutates nothing and stays readable mid-sweep), then the
-    one-in-flight gate around one reconcile pass."""
+def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_number: Optional[int],
+                   once: Callable[[], None]) -> None:
+    """cmd_reconcile's entry: the mutual-exclusion refusal (a bad invocation
+    is refused even while the scope is held), the dry-run bypass (--dry-run
+    mutates nothing and stays readable mid-sweep), then the gate."""
     if node is not None and pr_number is not None:
         raise typer.BadParameter(
             "--node and --pr-number are mutually exclusive: --pr-number "
@@ -205,17 +186,15 @@ def reconcile_gate(
     if dry_run:
         once()
         return
-    with _flight_scope(
-        reconcile_flight_key(node=node, pr_number=pr_number), "reconcile", "backlog reconcile", json_out
-    ) as ok:
+    with _flight_scope(reconcile_flight_key(node=node, pr_number=pr_number), "reconcile",
+                       "backlog reconcile", json_out, None) as ok:
         if ok:
             once()
 
 
 @contextlib.contextmanager
-def _flight_scope(
-    key: str, scope: str, verb: str, json_out: bool, extra: Optional[dict] = None
-) -> Iterator[bool]:
+def _flight_scope(key: str, scope: str, verb: str, json_out: bool,
+                  extra: Optional[dict]) -> Iterator[bool]:
     flight = acquire_flight_open(key, scope=scope)
     try:
         if isinstance(flight, FlightHeld):

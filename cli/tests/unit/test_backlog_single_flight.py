@@ -84,7 +84,7 @@ def test_second_epic_advance_reports_held(iso, monkeypatch):
 
     ran = []
     monkeypatch.setattr(
-        "fno.graph.cli._run_advance_epic",
+        "fno.backlog.advance.run_advance_epic",
         lambda *a, **k: ran.append(a),
     )
 
@@ -241,7 +241,7 @@ def test_epic_stop_bypasses_the_gate(iso, monkeypatch):
     acquire_claim(advance_flight_key("x-epic-a"), "a-converge", ttl_ms=600_000)
     ran = []
     monkeypatch.setattr(
-        "fno.graph.cli._run_advance_epic",
+        "fno.backlog.advance.run_advance_epic",
         lambda *a, **k: ran.append(k),
     )
     result = runner.invoke(app, ["backlog", "advance", "--epic", "x-epic-a", "--stop"])

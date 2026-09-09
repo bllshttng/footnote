@@ -4382,3 +4382,81 @@ def _converge_skip_unmapped(
         "skipped", EVENT_SKIPPED, reason="unmapped-project",
         node_id=child["id"], detail=detail,
     )
+
+
+def run_advance_epic(
+    epic: str,
+    *,
+    stop: bool,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+    continuation: bool = False,
+) -> None:
+    """Run the epic advance and render its receipt.
+
+    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
+    merge-advance path (a dispatch decision is never an error), an operator naming
+    a bad node to --epic wants a clear failure. Everything else exits 0.
+
+    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
+    inactive mission).
+    """
+    import typer
+
+    try:
+        result = advance_epic(
+            epic,
+            stop=stop,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+            continuation=continuation,
+        )
+    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
+        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
+        raise typer.Exit(code=0)
+
+    if json_out:
+        typer.echo(
+            json.dumps(
+                {
+                    "epic_id": result.epic_id,
+                    "error": result.error,
+                    "activated": result.activated,
+                    "deactivated": result.deactivated,
+                    "all_done": result.all_done,
+                    "dispatched": list(result.dispatched),
+                    "children": [
+                        {"node_id": r.node_id, "decision": r.decision,
+                         "reason": r.reason, "short_id": r.short_id,
+                         "substrate": r.substrate}
+                        for r in result.child_results
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        if result.error:
+            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
+        elif result.deactivated:
+            reason = "complete" if result.all_done else "stopped"
+            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+        else:
+            n = len(result.dispatched)
+            skips = [r for r in result.child_results if r.decision == "skipped"]
+            fails = [r for r in result.child_results if r.decision == "failed"]
+            typer.echo(
+                f"epic {result.epic_id}: dispatched {n}"
+                + (f", skipped {len(skips)}" if skips else "")
+                + (f", failed {len(fails)}" if fails else "")
+            )
+
+    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
+    # loud receipt, not a verb error.
+    if result.error in ("no-such-node", "not-a-container"):
+        raise typer.Exit(code=1)
