@@ -84,6 +84,7 @@ def test_declared_rows_read_the_real_loader_models(tmp_path, monkeypatch):
         "account": "zai",
         "band": "medium",
         "effort": "",
+        "operator_view": "",
     }
 
 
