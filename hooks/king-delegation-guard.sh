@@ -138,11 +138,12 @@ if [[ -z "$CROWN_LEVEL" && -z "$CROWN_SCOPE" ]]; then
 fi
 
 # ── 4. Shape: the reign manifest is the declaration (rides from birth). ──────
-# Same manifest every king arm resolves; a missing manifest or a foreign
-# session id means no court is declared here, so the guard stays silent.
-REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" \
-    --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)"
+# Same manifest every king arm resolves; the CLI default resolves the
+# canonical space root (never a checkout's .fno, which only a legacy layout
+# has), and the registry row - not file presence - proves authority. A missing
+# manifest or a foreign session id means no court is declared here, so the
+# guard stays silent.
+REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -z "$REIGN_MANIFEST" || ! -f "$REIGN_MANIFEST" ]]; then
     _approve
 fi
@@ -192,39 +193,95 @@ case "$TOOL" in
     _block
     ;;
   Bash)
-    # Floor of shell write operators (redirect, tee, sponge, cp/mv/install/
-    # truncate, dd of=, in-place sed/perl, ed/ex); each bound target must land
-    # inside the plans dir. A verb with no redirect binds nothing and allows.
+    # Floor of shell write operators, tokenized the way the shell sees them:
+    # redirects (> >> 2> &> >& >| >! and their attached forms), tee/sponge/
+    # truncate operands (ALL of them: tee writes every FILE), cp/mv/install
+    # destinations, dd of=, in-place sed/perl files, ed/ex files. Every bound
+    # target must land inside the plans dir (or under /dev/, which writes no
+    # source). A verb with no redirect binds nothing and allows.
     WRITTEN="$(printf '%s' "$COMMAND" | python3 -c '
-import re, sys
+import re, shlex, sys
 cmd = sys.stdin.read().strip()
-paths = []
-nosep = r"[^\s;|&<>]*"
-# redirects: > >> 2> &> >& >| >! then the target path
-for m in re.finditer(r"(?:[>]{1,2}|&[>]|[>]&|[>][|]|[>]!)\s*(" + nosep + r")", cmd):
-    paths.append(m.group(1))
-# tee / sponge / truncate with the target as the (last) argument
-for verb in ("tee", "sponge", "truncate"):
-    for m in re.finditer(r"(?:^|[^\w])" + verb + r"\s+(?:-[^\s]+\s+)*(" + nosep + r")", cmd):
-        paths.append(m.group(1))
-# cp / mv / install: target is the final argument of the clause
-for m in re.finditer(r"(?:^|[^\w])(?:cp|mv|install)\s+[^;|&]+?[\s]+(" + nosep + r")(?:[;|&]|$)", cmd):
-    paths.append(m.group(1))
-# dd of=path
-for m in re.finditer(r"(?:^|[^\w])dd\s+[^;|&]*?of=(" + nosep + r")", cmd):
-    paths.append(m.group(1))
-# in-place editors: -i / -pi / --in-place bound to a path in the same clause
-for m in re.finditer(r"(?:^|[^\w])(?:sed|perl)\s+[^;|&]*?(?:-[a-zA-Z]*i|--in-place)\s+(?:-e\s+\S+\s+)*(" + nosep + r")", cmd):
-    paths.append(m.group(1))
-for m in re.finditer(r"(?:^|[^\w])(?:ed|ex)\s+(" + nosep + r")", cmd):
-    paths.append(m.group(1))
-for p in paths:
-    if p:
-        print(p)
+try:
+    tokens = shlex.split(cmd)
+except ValueError:
+    sys.exit(0)  # malformed shell never executes; there is no write to judge
+BOUND = {";", "|", "&&", "||", "&"}
+VERBS = {"tee", "sponge", "truncate", "cp", "mv", "install", "dd", "sed", "perl", "ed", "ex"}
+fd_dup = re.compile(r"[&\d]+")
+redir_start = re.compile(r"\d*&?>")  # anchored: quoted "a > b" is a word, not an operator
+inplace = re.compile(r"--in-place|-[a-zA-Z]*i[a-zA-Z.]*")
+def is_opt(t):
+    return bool(t) and t.startswith("-")
+targets = []
+state = {"verb": None, "pool": [], "nxt": False, "val": False}
+def flush():
+    if state["verb"] is None:
+        return
+    pool = state["pool"]
+    files = [t for t in pool if t and not is_opt(t)]
+    v = state["verb"]
+    if v in ("tee", "sponge", "truncate", "ed", "ex"):
+        targets.extend(files)
+    elif v in ("cp", "mv", "install"):
+        if files:
+            targets.append(files[-1])
+    elif v == "dd":
+        targets.extend(t[3:] for t in pool if t.startswith("of="))
+    elif v in ("sed", "perl"):
+        if any(inplace.fullmatch(t) for t in pool if is_opt(t)) and files:
+            targets.append(files[-1])
+def out_redirect(tok):
+    """Classify a token that contains a > redirect. Returns (kind, target):
+    kind nxt (bare operator, target is the next token), tgt, or none."""
+    rest = re.sub(r"^\d*", "", tok)
+    if rest.startswith("&>"):
+        return ("nxt", None) if rest == "&>" else ("tgt", rest[2:])
+    if rest == ">&":
+        return ("nxt", None)
+    body = rest.lstrip("&").lstrip(">")
+    if rest.lstrip("&") in (">", ">>", ">|", ">!", ">", ">>"):
+        return ("nxt", None)
+    if body and not fd_dup.fullmatch(body):
+        return ("tgt", body)
+    return ("none", None)
+for tok in tokens:
+    if tok in BOUND:
+        flush()
+        state = {"verb": None, "pool": [], "nxt": False, "val": False}
+        continue
+    if state["nxt"]:
+        state["nxt"] = False
+        if tok not in BOUND and ">" not in tok and not fd_dup.fullmatch(tok):
+            targets.append(tok)
+        continue
+    if redir_start.match(tok):
+        kind, tgt = out_redirect(tok)
+        if kind == "nxt":
+            state["nxt"] = True
+        elif kind == "tgt":
+            targets.append(tgt)
+        continue
+    if state["val"]:
+        state["val"] = False
+        continue
+    if state["verb"] is None:
+        if tok in VERBS:
+            state["verb"] = tok
+            state["pool"] = []
+        continue
+    state["pool"].append(tok)
+    if tok in ("-e", "-f", "-i"):
+        state["val"] = True  # sed/perl -e expr; macOS sed -i (empty backup suffix)
+flush()
+sys.stdout.write("\n".join(t for t in targets if t))
 ' 2>/dev/null)"
     ALLOW=1
     while IFS= read -r p; do
         [[ -n "$p" ]] || continue
+        case "$p" in
+          /dev|/dev/*) continue ;;  # writes no source: null, tty, fd dups
+        esac
         if ! in_plans_dir "$p"; then
             ALLOW=0
             break

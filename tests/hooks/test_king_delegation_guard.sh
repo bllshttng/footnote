@@ -34,6 +34,7 @@ cat > "$TMP/bin/fno" <<'STUB'
 if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
   cat "$KGD_REG_FIXTURE"
 elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "manifest-path" ]; then
+  printf '%s\n' "$*" >> "$KGD_MANIFEST_ARGS"
   if [ -n "$KGD_MANIFEST" ] && [ -f "$KGD_MANIFEST" ]; then
     echo "$KGD_MANIFEST"
   else
@@ -52,8 +53,10 @@ export PATH="$TMP/bin:$PATH"
 export KGD_REG_FIXTURE="$TMP/registry.json"
 export KGD_KNOB="$TMP/knob.txt"
 export KGD_PLANS="$TMP/plans"
+export KGD_MANIFEST_ARGS="$TMP/manifest-args.log"
 mkdir -p "$KGD_PLANS"
 : > "$KGD_KNOB"
+: > "$KGD_MANIFEST_ARGS"
 
 SID="sess-king"
 SRC_FILE="$TMP/repo/src/main.py"
@@ -177,11 +180,44 @@ OUT="$(run_guard "$(bash_payload "fno agents mail send hi --to-self")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: mail verb allowed" \
   || fail "Bash floor: mail verb rc=$RC out=$OUT"
 
+# tee writes EVERY FILE operand; a first-operand-only floor reads a plan path
+# and approves while the second operand overwrites source.
+OUT="$(run_guard "$(bash_payload "echo x | tee $KGD_PLANS/plan.md $TMP/repo/src/evil.py")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "Bash floor: tee with a second source target denied" \
+  || fail "Bash floor: tee rc=$RC out=${OUT:0:300}"
+
+# Quoting survives the floor: a legal plan write with quotes and spaces allows.
+OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/quoted plan.md\"")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: quoted plans-dir redirect allowed" \
+  || fail "Bash floor: quoted redirect rc=$RC out=$OUT"
+
+# Delegation with a thrown-away stderr is the guard's own remedy; /dev writes
+# no source.
+OUT="$(run_guard "$(bash_payload "fno agents spawn --node x-9 --substrate bg 2>/dev/null")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: spawn with 2>/dev/null allowed" \
+  || fail "Bash floor: spawn devnull rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "Bash floor: in-place sed on source denied" \
+  || fail "Bash floor: sed -i rc=$RC out=${OUT:0:300}"
+
 # Positive control on the harness itself: the stub fno must be reachable and
 # the crown read live, else every "allow" above is a silent stub failure.
 command -v fno >/dev/null 2>&1 \
   && pass "positive control: stubbed fno on PATH" \
   || fail "positive control: stubbed fno missing"
+
+# The manifest resolves through the CLI's canonical space root: the hook must
+# NOT override --state-root with the checkout's .fno, which only a legacy
+# layout has (on the documented default the override resolves nothing and the
+# guard silently no-ops).
+if grep -q -- "--state-root" "$KGD_MANIFEST_ARGS"; then
+  fail "manifest-path called with a --state-root override: $(cat "$KGD_MANIFEST_ARGS")"
+else
+  pass "manifest-path resolves the CLI default (no --state-root override)"
+fi
 
 echo ""
 echo "king-delegation-guard: $PASS passed, $FAIL failed"
