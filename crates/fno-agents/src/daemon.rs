@@ -1167,8 +1167,8 @@ enum WorktreeGate {
     Unanswerable(String),
 }
 
-/// (x-f55c) What actually happened to a prune attempt, so a caller can branch
-/// on the outcome instead of recording intent as fact. `Removed` carries the
+/// What actually happened to a prune attempt, so a caller can branch on
+/// the outcome instead of recording intent as fact. `Removed` carries the
 /// worktree path; `Kept` carries the reason already built by the gate or the
 /// removal attempt (the blocked gate, the unanswerable probe, or the failed
 /// `git worktree remove`), formatted exactly as `receipt()` prints it below.

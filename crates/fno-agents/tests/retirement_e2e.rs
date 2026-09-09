@@ -226,7 +226,7 @@ fn ac2_edge_a_v1_receipt_reads_with_v2_fields_absent_not_invented() {
     assert!(receipt.effects.is_empty());
 }
 
-// --- native recovery after a wrapper failure (x-f55c task 1.4) --------------
+// --- native recovery after a wrapper failure --------------------------------
 
 #[test]
 fn wrapper_failure_recovery_names_harness_session_cwd_and_native_argv() {
@@ -346,7 +346,7 @@ fn ac_x_d2ba_the_build_pin_agrees_across_one_cargo_build() {
     // `CARGO_BIN_EXE_*` names the bins THIS test run just built, not what a
     // machine has deployed - agreement across one cargo build is still
     // worth pinning, but it is a narrower claim than the deployed cohort
-    // below (x-f55c task 1.5).
+    // below.
     let client = build_pin(env!("CARGO_BIN_EXE_fno-agents"));
     let daemon = build_pin(env!("CARGO_BIN_EXE_fno-agents-daemon"));
     let worker = build_pin(env!("CARGO_BIN_EXE_fno-agents-worker"));
@@ -369,7 +369,7 @@ fn ac_x_d2ba_the_build_pin_agrees_across_one_cargo_build() {
 /// The DEPLOYED cohort, not the just-built one: resolve `fno-agents`,
 /// `fno-agents-daemon` and `fno-agents-worker` on `PATH` and compare their
 /// build pins. This is what `reap --verify` actually audits against on a
-/// live machine (x-f55c task 1.5). When none of the three resolves, an
+/// live machine. When none of the three resolves, an
 /// explicit assertion names that absence rather than a silent early
 /// return; a resolved binary predating the `build` field fails loudly too -
 /// `fno doctor update` deploys the current one.

@@ -258,7 +258,7 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
 /// A clean-and-merged worktree the callback could not remove reads as a
 /// prune ATTEMPT, not a prune SUCCESS: `Kept` never populates `pruned`, and
 /// `None` (no linked worktree) reads as its own reason. Neither ever
-/// duplicates into the other bucket (x-f55c task 1.1).
+/// duplicates into the other bucket.
 #[test]
 fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
     let home = tmp_home("gc-prune-outcome");
@@ -311,8 +311,7 @@ fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
 }
 
 /// A shared worktree cwd: one row retires, the other is still live on it -
-/// the tree survives and the retiring row names the row still holding it
-/// (x-f55c task 1.2).
+/// the tree survives and the retiring row names the row still holding it.
 #[test]
 fn a_shared_worktree_survives_while_the_other_row_is_live() {
     let home = tmp_home("gc-shared-tree-one-live");
@@ -374,7 +373,7 @@ fn a_shared_worktree_survives_while_the_other_row_is_live() {
 }
 
 /// Two rows sharing a worktree cwd both retire in the same pass: the tree
-/// goes exactly once, and `kept_shared_tree` names nobody (x-f55c task 1.2).
+/// goes exactly once, and `kept_shared_tree` names nobody.
 #[test]
 fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
     let home = tmp_home("gc-shared-tree-both-retire");
@@ -430,7 +429,7 @@ fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
 
 /// A parent row named as `spawned_by_session` by a live child is never
 /// retired, and no active-surface removal ever reaches it: `surface_removal`
-/// panics if the sweep calls it (x-f55c task 1.3).
+/// panics if the sweep calls it.
 #[test]
 fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
     let home = tmp_home("gc-lineage-live-child");
@@ -473,8 +472,8 @@ fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
     assert!(reg.entries.iter().any(|e| e.name == "row-parent"));
 }
 
-/// Once the child row is gone, the same parent retires normally (x-f55c
-/// task 1.3, second half of the acceptance pair).
+/// Once the child row is gone, the same parent retires normally - the
+/// second half of the same acceptance pair.
 #[test]
 fn a_parent_retires_once_its_descendant_is_gone() {
     let home = tmp_home("gc-lineage-child-gone");

@@ -55,8 +55,8 @@ pub struct GcSummary {
     /// `(row id, reason)`: the sweep asked `prune_tree` to remove a
     /// clean-and-merged tree and the attempt did not confirm removal - the
     /// gate refused, the probe could not answer, or `git worktree remove`
-    /// itself failed. A row here never also appears in `pruned` (x-f55c: the
-    /// callback's own answer decides the bucket, not the order that asked).
+    /// itself failed. A row here never also appears in `pruned` - the
+    /// callback's own answer decides the bucket, not the order that asked.
     pub prune_failed: Vec<(String, String)>,
     /// `(row id, holder)`: a retiring row's cwd is still occupied by
     /// `holder`, a live registry row not retiring this pass - the tree
@@ -826,13 +826,18 @@ pub(crate) fn run(
             }
             continue;
         }
-        // x-f55c task 1.3: a parent whose descendant is still live is never
-        // retired - the lineage field says who spawned whom, and this is
-        // the only site that consults it. Runs before staging so no
-        // active-surface removal ever touches a row a live child names.
+        // A parent whose descendant is still live is never retired - the
+        // lineage field says who spawned whom, and this is the only site
+        // that consults it. Runs before staging so no active-surface
+        // removal ever touches a row a live child names.
         if !sid.is_empty() {
+            let sid_lower = sid.to_ascii_lowercase();
             if let Some(child) = registry.entries.iter().find(|other| {
-                other.name != e.name && other.spawned_by_session.as_deref() == Some(sid)
+                other.name != e.name
+                    && other
+                        .spawned_by_session
+                        .as_deref()
+                        .is_some_and(|s| s.trim().to_ascii_lowercase() == sid_lower)
             }) {
                 summary.kept_live_descendants.push((id, row_handle(child)));
                 continue;
@@ -931,11 +936,11 @@ pub(crate) fn run(
         );
     }
 
-    // x-f55c task 2: a cwd another live row still occupies is never pruned
-    // out from under it, and two rows retiring on the SAME cwd this pass
-    // still prune it exactly once - `owns_worktree` above answers only
-    // "does THIS row's own cwd look like a linked worktree", nothing about
-    // who else sits there.
+    // A cwd another live row still occupies is never pruned out from under
+    // it, and two rows retiring on the SAME cwd this pass still prune it
+    // exactly once - `owns_worktree` above answers only "does THIS row's
+    // own cwd look like a linked worktree", nothing about who else sits
+    // there.
     let mut prune_by_cwd: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for (name, order) in to_retire.iter() {
@@ -949,10 +954,15 @@ pub(crate) fn run(
         }
     }
     for (cwd, names) in prune_by_cwd {
+        // `min_by_key` over `registry.entries` (unordered) rather than
+        // `find`: with two or more live occupants, the reported holder name
+        // must be deterministic across runs, not whichever the vec order
+        // happens to surface first.
         let occupant = registry
             .entries
             .iter()
-            .find(|e| e.cwd == cwd && !to_retire.contains_key(&e.name));
+            .filter(|e| e.cwd == cwd && !to_retire.contains_key(&e.name))
+            .min_by_key(|e| &e.name);
         if let Some(occupant) = occupant {
             let holder = row_handle(occupant);
             for name in names {
@@ -1206,7 +1216,7 @@ pub(crate) fn commit_retirements(
                     // merge check + `git worktree remove`; the branch
                     // survives). The callback's own answer decides the
                     // bucket - the order that asked for a prune is not proof
-                    // one happened (x-f55c).
+                    // one happened.
                     match prune_tree(e) {
                         Some(crate::daemon::PruneOutcome::Removed(path)) => {
                             report.pruned.push((order.id.clone(), path))

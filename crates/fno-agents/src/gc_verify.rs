@@ -238,7 +238,7 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
     if report.verified.is_empty() && report.problems.is_empty() {
         // Every in-window receipt read here was written by another build:
         // name it and the remedy, since this string is the only thing an
-        // operator reads when the window is red (x-f55c task 1.5).
+        // operator reads when the window is red.
         let remedy = if skipped_builds.is_empty() {
             String::new()
         } else {
@@ -346,9 +346,8 @@ mod tests {
             "{:?}",
             report.problems
         );
-        // x-f55c task 1.5: the window's own reason names the writer build
-        // and the remedy - the only thing an operator reads when this is
-        // red.
+        // The window's own reason names the writer build and the remedy -
+        // the only thing an operator reads when this is red.
         assert!(
             report.problems[0].reason.contains("fno-agents 0.0.1"),
             "{:?}",

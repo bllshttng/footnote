@@ -22,9 +22,9 @@ pub(crate) fn maybe_hint_preserved_session(home: &AgentsHome, name: &str) -> boo
     }
 }
 
-/// Build the preserved-record hint text without printing it (x-f55c task
-/// 1.4): a test can read what a wrapper-failure recovery actually says,
-/// rather than only the bool `maybe_hint_preserved_session` prints from.
+/// Build the preserved-record hint text without printing it: a test can
+/// read what a wrapper-failure recovery actually says, rather than only
+/// the bool `maybe_hint_preserved_session` prints from.
 /// `None` when no receipt matches `name` - nothing to print.
 pub fn resume_hint(home: &AgentsHome, name: &str) -> Option<String> {
     let dir = home.root().join("reap-receipts");
