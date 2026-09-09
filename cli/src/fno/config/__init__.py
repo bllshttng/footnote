@@ -4329,13 +4329,12 @@ KING_GOAL_TEXT = (
 
 
 class KingBlock(BaseModel):
-    """The king loop (nested under 'config.king'). Field-by-field detail
-    (what each key arms, the derived wake sizing, the grace window) is in
-    registry.py's Meta text, surfaced verbatim by `fno config schema`.
+    """The king loop (config.king). Field detail is in registry.py's Meta
+    text, surfaced by `fno config schema`.
 
-    ``RunAtLoad`` is false for the pr-watcher LaunchAgent by design (the
-    operator loads it by hand), so a machine that never ran ``launchctl load``
-    has no waker at all. Turning ``wake_enabled`` on does not change that.
+    ``RunAtLoad`` is false for the pr-watcher LaunchAgent by design, so a
+    machine that never ran ``launchctl load`` has no waker; ``wake_enabled``
+    does not change that.
     """
 
     model_config = ConfigDict(extra="ignore")
