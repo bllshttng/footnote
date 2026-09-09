@@ -567,6 +567,13 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
         for row in live_rows:
             if row.provider:
                 continue
+            if (row.origin or "unknown") != "spawn":
+                # Only spawn-minted rows can carry a spawn-time provider
+                # stamp, so only their absence is a defect this gate can name.
+                # Operator hand-starts and adopted rows are born unstamped;
+                # warning about them on every gate read taught nobody anything
+                # and rode stderr ahead of real refusals.
+                continue
             shape = (row.harness or "unknown", row.origin or "unknown")
             unattributed[shape] = unattributed.get(shape, 0) + 1
         for (harness, origin), count in sorted(unattributed.items()):
@@ -1332,6 +1339,106 @@ def _prefetch_fleet_reading(
     return _fleet_cpu_reading()
 
 
+_LOAD_REFUSAL_REASONS = frozenset(
+    {"load_backstop", "load_attribution_unavailable", "fleet_cpu_share"}
+)
+
+
+def load_gate_decision(
+    max_load_per_cpu: float,
+    hard_max_load_per_cpu: float = 40.0,
+    max_fleet_cpu_share: float = 0.5,
+    prefetched: object = _NOT_PREFETCHED,
+) -> Optional[tuple[str, str, dict]]:
+    """What the load gate would decide, as one (reason, message, event) triple.
+
+    ``None`` admits quietly (the check is disabled or the load is under the
+    trigger). A reason in ``_LOAD_REFUSAL_REASONS`` refuses; any other reason
+    admits with ``message`` as the explanation. ``_check_load_ceiling`` and
+    the ``--explain`` preview share this one implementation, so a dry run
+    answers the same question the real spawn will - the preview once reported
+    pass on a box the gate was refusing, 2.4x over trigger.
+    """
+    snapshot = _load_snapshot(max_load_per_cpu)
+    if snapshot.spawn_load_status == "disabled":
+        return None
+    if snapshot.spawn_load_status == "unavailable":
+        # OSError: unreadable. AttributeError: the platform has no getloadavg
+        # at all (the Rust gate cfg-guards the same case).
+        return ("skip_unreadable", "could not read load average; skipping the load check", {})
+    load1 = snapshot.load_1m
+    cpus = snapshot.load_cpu_count
+    trigger = snapshot.load_ceiling
+    assert load1 is not None  # "within"/"exceeded" always carry a reading
+    if load1 <= trigger:
+        return None
+
+    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
+        return (
+            "load_backstop",
+            f"1-min load {load1:.1f} exceeds the absolute machine "
+            f"backstop hard_max_load_per_cpu {hard_max_load_per_cpu:g} x {cpus} "
+            f"cpus = {hard_max_load_per_cpu * cpus:.1f}; refusing to spawn "
+            f"whoever caused it (--force to bypass)",
+            {
+                "load_1m": load1,
+                "cpus": cpus,
+                "hard_max_load_per_cpu": hard_max_load_per_cpu,
+                "threshold": hard_max_load_per_cpu * cpus,
+            },
+        )
+
+    # run_gate prefetches this outside the gate mutex; a direct caller (and
+    # every unit test) still gets the read on demand.
+    reading = (
+        _fleet_cpu_reading()
+        if prefetched is _NOT_PREFETCHED
+        else cast("Optional[tuple[float, float]]", prefetched)
+    )
+    if reading is None:
+        # The attribution read just failed, so run_gate's evidence probe would
+        # fail the same way one sample later. Nothing to add.
+        return (
+            "load_attribution_unavailable",
+            f"1-min load {load1:.1f} is over the "
+            f"max_load_per_cpu trigger {max_load_per_cpu:g} x {cpus} cpus = "
+            f"{trigger:.1f} and fleet CPU attribution unavailable; refusing to "
+            f"spawn (--force to bypass)",
+            {
+                "load_1m": load1,
+                "cpus": cpus,
+                "max_load_per_cpu": max_load_per_cpu,
+                "threshold": trigger,
+            },
+        )
+
+    fleet, capacity = reading
+    share = fleet / capacity
+    if share > max_fleet_cpu_share:
+        return (
+            "fleet_cpu_share",
+            f"the fleet holds {fleet:.2f}/{capacity:.2f} cores "
+            f"({share * 100:.1f}% of capacity), over the "
+            f"max_fleet_cpu_share ceiling {max_fleet_cpu_share * 100:.1f}%; "
+            f"refusing to spawn (--force to bypass)",
+            {
+                "fleet_cores": fleet,
+                "capacity_cores": capacity,
+                "share": share,
+                "max_fleet_cpu_share": max_fleet_cpu_share,
+            },
+        )
+
+    return (
+        "admit_external_load",
+        f"1-min load {load1:.1f} is high but only "
+        f"{fleet:.2f}/{capacity:.2f} cores ({share * 100:.1f}%) are attributed "
+        f"to the fleet, so the load is not attributed to the fleet; admitting "
+        f"the spawn",
+        {},
+    )
+
+
 def _check_load_ceiling(
     max_load_per_cpu: float,
     max_fleet_cpu_share: float = 0.5,
@@ -1368,89 +1475,29 @@ def _check_load_ceiling(
     <= 0`` disables, unreadable LOAD skips (fail open, the platform may have
     no getloadavg at all). Unreadable ATTRIBUTION refuses (fail closed): an
     unknown share is not evidence of headroom.
+
+    The decision itself lives in :func:`load_gate_decision`, shared with the
+    ``--explain`` preview so the two surfaces cannot drift.
     """
-    snapshot = _load_snapshot(max_load_per_cpu)
-    if snapshot.spawn_load_status == "disabled":
-        return
-    if snapshot.spawn_load_status == "unavailable":
-        # OSError: unreadable. AttributeError: the platform has no getloadavg
-        # at all (the Rust gate cfg-guards the same case).
-        _warn("spawn-gate: could not read load average; skipping the load check")
-        return
-    load1 = snapshot.load_1m
-    cpus = snapshot.load_cpu_count
-    trigger = snapshot.load_ceiling
-    assert load1 is not None  # "within"/"exceeded" always carry a reading
-    if load1 <= trigger:
-        return
-
-    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
-        _warn(
-            f"spawn-gate: 1-min load {load1:.1f} exceeds the absolute machine "
-            f"backstop hard_max_load_per_cpu {hard_max_load_per_cpu:g} x {cpus} "
-            f"cpus = {hard_max_load_per_cpu * cpus:.1f}; refusing to spawn "
-            f"whoever caused it (--force to bypass)"
-        )
-        _refuse(
-            EXIT_LOAD_REFUSED,
-            reason="load_backstop",
-            load_1m=load1,
-            cpus=cpus,
-            hard_max_load_per_cpu=hard_max_load_per_cpu,
-            threshold=hard_max_load_per_cpu * cpus,
-        )
-
-    # run_gate prefetches this outside the gate mutex; a direct caller (and
-    # every unit test) still gets the read on demand.
-    reading = (
-        _fleet_cpu_reading()
-        if prefetched is _NOT_PREFETCHED
-        else cast("Optional[tuple[float, float]]", prefetched)
+    decision = load_gate_decision(
+        max_load_per_cpu,
+        hard_max_load_per_cpu,
+        max_fleet_cpu_share,
+        prefetched,
     )
-    if reading is None:
-        _warn(
-            f"spawn-gate: 1-min load {load1:.1f} is over the "
-            f"max_load_per_cpu trigger {max_load_per_cpu:g} x {cpus} cpus = "
-            f"{trigger:.1f} and fleet CPU attribution unavailable; refusing to "
-            f"spawn (--force to bypass)"
-        )
-        # The attribution read just failed, so run_gate's evidence probe would
-        # fail the same way one sample later. Nothing to add.
-        _refuse_load_cause_stated(
-            reason="load_attribution_unavailable",
-            load_1m=load1,
-            cpus=cpus,
-            max_load_per_cpu=max_load_per_cpu,
-            threshold=trigger,
-        )
-
-    fleet, capacity = reading
-    share = fleet / capacity
-    if share > max_fleet_cpu_share:
-        _warn(
-            f"spawn-gate: the fleet holds {fleet:.2f}/{capacity:.2f} cores "
-            f"({share * 100:.1f}% of capacity), over the "
-            f"max_fleet_cpu_share ceiling {max_fleet_cpu_share * 100:.1f}%; "
-            f"refusing to spawn (--force to bypass)"
-        )
-        # This refusal already names the sample it decided on, so run_gate must
-        # not append a SECOND, independently taken attribution beside it: two
-        # samples seconds apart disagree, and a refusal printing numbers it did
-        # not decide on is the whole defect x-7c0f removed.
-        _refuse_load_cause_stated(
-            reason="fleet_cpu_share",
-            fleet_cores=fleet,
-            capacity_cores=capacity,
-            share=share,
-            max_fleet_cpu_share=max_fleet_cpu_share,
-        )
-
-    _warn(
-        f"spawn-gate: 1-min load {load1:.1f} is high but only "
-        f"{fleet:.2f}/{capacity:.2f} cores ({share * 100:.1f}%) are attributed "
-        f"to the fleet, so the load is not attributed to the fleet; admitting "
-        f"the spawn"
-    )
+    if decision is None:
+        return
+    reason, message, event = decision
+    _warn(f"spawn-gate: {message}")
+    if reason not in _LOAD_REFUSAL_REASONS:
+        return
+    if reason == "load_backstop":
+        # This refusal does not name the sample it decided on, so run_gate
+        # appends a footprint cause line taken from a second sample (the
+        # backstop); the attribution-named branches must not (x-7c0f).
+        _refuse(EXIT_LOAD_REFUSED, reason=reason, **event)
+    else:
+        _refuse_load_cause_stated(reason=reason, **event)
 
 
 def _king_share(cap: int, crowned: set[str], caller: str) -> int:

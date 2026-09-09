@@ -272,26 +272,59 @@ def _machine_gates() -> list[Gate]:
             )
 
     try:
-        import os
-
-        load1 = os.getloadavg()[0]
-        cpus = os.cpu_count() or 1
-        trigger = per_cpu * cpus
-        out.append(
-            Gate(
-                "load-trigger",
-                f"{load1:.1f}",
-                f"{trigger:.1f} ({per_cpu:g} x {cpus} cpu)",
-                # Over the trigger the gate does NOT refuse; it asks footprint
-                # whose CPU this is. Calling that "refuse" here would be a
-                # second instrument disagreeing with the first (x-7c0f).
-                "over trigger; attribution decides" if load1 > trigger else "pass",
-                key="agents.max_load_per_cpu",
-            )
+        from fno.agents.spawn_gate import (
+            _LOAD_REFUSAL_REASONS,
+            _load_snapshot,
+            load_gate_decision,
         )
+
+        snapshot = _load_snapshot(per_cpu)
+        decision = load_gate_decision(per_cpu)
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
+    else:
+        if snapshot.spawn_load_status == "unavailable":
+            out.append(
+                _unreadable(
+                    "load-trigger",
+                    RuntimeError("load average unreadable"),
+                    key="agents.max_load_per_cpu",
+                )
+            )
+        else:
+            refusing = decision is not None and decision[0] in _LOAD_REFUSAL_REASONS
+            out.append(
+                Gate(
+                    "load-trigger",
+                    "-" if snapshot.load_1m is None else f"{snapshot.load_1m:.1f}",
+                    f"{snapshot.load_ceiling:.1f} ({per_cpu:g} x {snapshot.load_cpu_count} cpu)",
+                    # Same decision function the real gate runs, so the dry
+                    # run cannot pass a box the spawn would refuse.
+                    "refuse" if refusing else "pass",
+                    key="agents.max_load_per_cpu",
+                    note=None if decision is None else decision[1],
+                )
+            )
     return out
+
+
+def _load_gate_stop_reason() -> Optional[str]:
+    """``"load-refused"`` when the spawn's load gate would refuse, else None.
+
+    Reads the SAME ``load_gate_decision`` the real gate runs, so a preview
+    cannot promise a dispatch on a box the spawn would refuse - the surface
+    that once sent a king looking at the wrong symptom.
+    """
+    try:
+        from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS, load_gate_decision
+        from fno.config import load_settings
+
+        decision = load_gate_decision(float(load_settings().agents.max_load_per_cpu))
+    except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
+        return None
+    if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
+        return "load-refused"
+    return None
 
 
 def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
@@ -647,6 +680,12 @@ def build_lane_fill_report(
             reasons_by_id[child["id"]] = "max-dispatch"
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
+
+    # The spawn's load gate refuses machine-wide, so a preview that left stop
+    # empty would promise a dispatch the real spawn refuses (the dry run once
+    # passed every gate at load 255/120 while the arm died on exit 79).
+    if stop is None:
+        stop = _load_gate_stop_reason()
 
     ordered_names = [
         "no-project",

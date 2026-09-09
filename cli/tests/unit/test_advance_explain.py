@@ -197,3 +197,58 @@ def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
     # dropped it, never claim it was never a candidate.
     asked = build_lane_fill_report(epic="x-epic", max_dispatch=1, node_id="x-b")["asked"]
     assert asked["dropped_by"] == "max-dispatch"
+
+
+def test_load_gate_row_reports_refuse_from_the_shared_decision(monkeypatch):
+    """x-5e6f: the load row renders the gate's own verdict with its numbers.
+    The old "over trigger; attribution decides" text never predicted an exit
+    79, and a king was sent looking at the wrong symptom because of it."""
+    from types import SimpleNamespace
+
+    from fno.agents import spawn_gate
+    from fno.backlog import explain
+
+    monkeypatch.setattr(
+        spawn_gate,
+        "load_gate_decision",
+        lambda *a, **k: (
+            "fleet_cpu_share",
+            "the fleet holds 96.20/12.00 cores; refusing to spawn (--force to bypass)",
+            {"share": 8.017},
+        ),
+    )
+    monkeypatch.setattr(
+        spawn_gate,
+        "_load_snapshot",
+        lambda per_cpu: SimpleNamespace(
+            spawn_load_status="exceeded",
+            load_1m=255.3,
+            load_cpu_count=12,
+            load_ceiling=per_cpu * 12,
+            max_load_per_cpu=per_cpu,
+        ),
+    )
+    row = {g.name: g for g in explain._machine_gates()}["load-trigger"]
+    assert row.verdict == "refuse"
+    assert "refusing to spawn" in (row.note or "")
+
+
+def test_preview_stops_when_the_load_gate_would_refuse(monkeypatch):
+    """x-5e6f: the dry run passed every gate at load 255/120 while the real
+    spawn exited 79. The preview now reads the gate's own decision."""
+    _lane_fill_world(monkeypatch, [_ready_node("x-win")])
+    from fno.agents import spawn_gate
+    from fno.backlog.explain import build_lane_fill_report
+
+    monkeypatch.setattr(
+        spawn_gate,
+        "load_gate_decision",
+        lambda *a, **k: (
+            "fleet_cpu_share",
+            "the fleet holds 9.00/12.00 cores; refusing to spawn",
+            {"share": 0.75},
+        ),
+    )
+    report = build_lane_fill_report(epic="x-epic")
+    assert report["selection"]["stop"] == "load-refused"
+    assert report["decision"]["would_dispatch"] == ["x-win"]
