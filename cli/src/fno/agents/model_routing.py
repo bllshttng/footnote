@@ -1137,11 +1137,33 @@ def load_sandbox_write_policy(path: str) -> dict[str, object]:
 # field name, which killed every fresh interactive routed worker on turn one.
 FOREIGN_ENDPOINT_DENY_TOOLS = ("Artifact",)
 
+ANTHROPIC_API_HOST = "api.anthropic.com"
+
+
+def _base_url_host(base_url: str) -> str:
+    """The lowercased host of ``base_url``, or "" when there is none.
+
+    A bare authority like ``api.anthropic.com/v1`` carries no scheme, and
+    urlsplit reads the whole thing as a path, so give it one first.
+    """
+    from urllib.parse import urlsplit
+
+    base = base_url.strip()
+    if not base:
+        return ""
+    if "//" not in base:
+        base = "//" + base
+    return (urlsplit(base).hostname or "").lower()
+
 
 def _foreign_endpoint_tool_denies(env: Mapping[str, str]) -> list[str]:
-    """Tool denies this route needs, empty for Anthropic's own endpoint."""
-    base = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
-    if not base or "api.anthropic.com" in base:
+    """Tool denies this route needs, empty for Anthropic's own endpoint.
+
+    The host is parsed and matched whole. A substring test would clear
+    ``api.anthropic.com.proxy.example`` and refuse ``API.ANTHROPIC.COM``.
+    """
+    host = _base_url_host(str(env.get("ANTHROPIC_BASE_URL") or ""))
+    if not host or host == ANTHROPIC_API_HOST:
         return []
     return list(FOREIGN_ENDPOINT_DENY_TOOLS)
 

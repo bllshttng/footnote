@@ -44,7 +44,12 @@ def test_settings_writer_widens_to_full_payload(tmp_path, monkeypatch):
     from fno.agents.model_routing import _write_settings_env_file
 
     plain = Path(_write_settings_env_file(dict(ROUTE_ENV)))
-    assert json.loads(plain.read_text()) == {"env": ROUTE_ENV}
+    # ROUTE_ENV points at z.ai, so the payload also carries the Artifact deny
+    # every non-Anthropic endpoint gets. The parity under test is the env block.
+    assert json.loads(plain.read_text()) == {
+        "env": ROUTE_ENV,
+        "permissions": {"deny": ["Artifact"]},
+    }
     # Content addressing is over the whole payload: the identical call still
     # collapses to one file...
     assert Path(_write_settings_env_file(dict(ROUTE_ENV))) == plain

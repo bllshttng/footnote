@@ -1283,3 +1283,26 @@ def test_anthropic_route_settings_keep_artifact(tmp_path, monkeypatch):
     path = materialize_route_settings(env)
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     assert "permissions" not in payload
+
+
+@pytest.mark.parametrize(
+    "base_url,denied",
+    [
+        ("https://api.anthropic.com", False),
+        ("https://api.anthropic.com/v1", False),
+        ("HTTPS://API.ANTHROPIC.COM", False),
+        ("api.anthropic.com", False),
+        ("https://api.anthropic.com:443", False),
+        # A host that merely STARTS with Anthropic's is somebody else's.
+        ("https://api.anthropic.com.proxy.example", True),
+        ("https://evil.example/api.anthropic.com", True),
+        ("https://api.z.ai/api/anthropic", True),
+        ("", False),
+    ],
+)
+def test_deny_matches_the_whole_host(base_url, denied):
+    """The endpoint test parses the host. A substring test got both ends wrong."""
+    from fno.agents.model_routing import _foreign_endpoint_tool_denies
+
+    got = _foreign_endpoint_tool_denies({"ANTHROPIC_BASE_URL": base_url})
+    assert bool(got) is denied
