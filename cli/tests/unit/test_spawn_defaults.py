@@ -267,7 +267,7 @@ def test_grid_route_rides_beside_the_model_it_belongs_to(monkeypatch):
     --harness/--model, so the gate sees the vendor the grid picked."""
     _declare_inventory(monkeypatch, [
         {"name": "zai-flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
-         "band": "high", "route": "zai/glm-5.3-flash[1m]"},
+         "band": "high", "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
     ])
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node",
@@ -275,13 +275,36 @@ def test_grid_route_rides_beside_the_model_it_belongs_to(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok"},
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}},
     )
     result = _inject(["spawn", "--name", "w", "--node", "x-route1", "hi"])
     assert "--route" in result
     assert result[result.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    assert "--account" in result
+    assert result[result.index("--account") + 1] == "zai-main"
     assert result[result.index("--model") + 1] == "glm-5.3-flash[1m]"
     assert result[result.index("--harness") + 1] == "claude"
+
+
+def test_grid_account_skips_on_a_non_claude_grid_harness(monkeypatch):
+    """The grid's account is claude-bound at the spawn CLI: a codex row
+    carrying one warns and skips instead of silently dropping the pin."""
+    _declare_inventory(monkeypatch, [
+        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol",
+         "band": "high", "account": "zai-main"},
+    ])
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"codex": "ok"},
+    )
+    err = io.StringIO()
+    result = _inject(["spawn", "--name", "w", "--node", "x-acct1", "hi"], err=err)
+    assert "--account" not in result
+    assert "account skipped" in err.getvalue()
 
 
 def test_grid_routeless_row_injects_no_route(monkeypatch):

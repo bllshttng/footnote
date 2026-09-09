@@ -3000,8 +3000,8 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
     )
     node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
-    harness, model, route, reason = adv._grid_lane_for(node, model=None, provider=None)
-    assert (harness, model, route, reason) == ("claude", "glm-5.3-flash", None, None)
+    harness, model, route, account, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, route, account, reason) == ("claude", "glm-5.3-flash", None, None, None)
     assert seen["verb"] == "target"
     assert seen["role"] is None  # plan_path set -> execution tier
 
@@ -3009,8 +3009,8 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
     monkeypatch.setattr(
         route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
     )
-    harness, model, route, reason = adv._grid_lane_for(node, model=None, provider=None)
-    assert (harness, model, route) == (None, None, None)
+    harness, model, route, account, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, route, account) == (None, None, None, None)
     assert reason == "slot=exhausted queue"
 
 
@@ -3020,7 +3020,7 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
     from fno import route_resolve
 
     candidate = {"harness": "claude", "model": "glm-5.3-flash[1m]",
-                 "route": "zai/glm-5.3-flash[1m]"}
+                 "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"}
     monkeypatch.setattr(
         route_resolve, "resolve_slot",
         lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"]),
@@ -3032,7 +3032,7 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
     )
     got = adv._grid_lane_for({"difficulty": "high", "priority": "p1"}, model=None, provider=None)
-    assert got == ("claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None)
+    assert got == ("claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", "zai-main", None)
 
 
 def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
@@ -3049,7 +3049,7 @@ def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
     monkeypatch.setattr(
         adv, "_grid_lane_for",
         lambda node, *, model, provider: (
-            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None
+            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", "zai-main", None
         ),
     )
     adv._spawn_worker(
@@ -3058,8 +3058,36 @@ def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
     cmd = captured["cmd"]
     assert "--route" in cmd
     assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    assert "--account" in cmd
+    assert cmd[cmd.index("--account") + 1] == "zai-main"
     i = cmd.index("--model")
     assert cmd[i + 1] == "glm-5.3-flash[1m]"
+
+
+def test_spawn_worker_preresolved_grid_route_survives_a_pinned_harness(monkeypatch):
+    """P1 (review): dispatch_lanes resolves the grid BEFORE placement and
+    passes a non-None harness, which skips the internal consult - the
+    caller-supplied route and account must still reach the argv."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-route3"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    def _must_not_consult(node, *, model, provider):
+        raise AssertionError("grid consulted again under a pinned harness")
+
+    monkeypatch.setattr(adv, "_grid_lane_for", _must_not_consult)
+    adv._spawn_worker(
+        "x-route3", None, "route-slug", harness="claude",
+        grid_route="zai/glm-5.3-flash[1m]", grid_account="zai-main",
+        node={"difficulty": "high", "priority": "p1"},
+    )
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    assert cmd[cmd.index("--account") + 1] == "zai-main"
 
 
 def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
@@ -3075,7 +3103,7 @@ def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
     monkeypatch.setattr(
         adv, "_grid_lane_for",
         lambda node, *, model, provider: (
-            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None
+            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None, None
         ),
     )
     adv._spawn_worker(
@@ -3085,3 +3113,21 @@ def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
     cmd = captured["cmd"]
     assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "zai"
     assert "--route" not in cmd
+
+
+def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
+    """The grid's account is claude-bound at the spawn CLI: a codex-harness
+    pick skips the flag with a note instead of refusing the dispatch."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-route4"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "x-route4", None, "route-slug", harness="codex", grid_account="zai-main",
+        node={"difficulty": "high", "priority": "p1"},
+    )
+    cmd = captured["cmd"]
+    assert "--account" not in cmd

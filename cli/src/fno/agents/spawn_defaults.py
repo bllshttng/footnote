@@ -1321,6 +1321,22 @@ def inject_spawn_defaults(
         ):
             inject += ["--route", grid_candidate["route"]]
             from_config.append(("route", grid_candidate["route"], "difficulty-grid"))
+        # The capacity pick read the row account's quota, so the worker runs
+        # under it. Accounts are claude-only at the spawn CLI: another grid
+        # harness warns and skips, never silently drops the pin.
+        if grid_candidate.get("account") and not _flag_present(out[1:], "--account"):
+            if grid_candidate["harness"] == "claude":
+                inject += ["--account", grid_candidate["account"]]
+                from_config.append(
+                    ("account", grid_candidate["account"], "difficulty-grid")
+                )
+            else:
+                print(
+                    f"fno agents spawn: account skipped (accounts are "
+                    f"claude-only, grid harness {grid_candidate['harness']!r}); "
+                    f"{grid_candidate['account']!r} ignored",
+                    file=err,
+                )
         _resolved["v"] = grid_candidate["harness"]
 
     # Lazy resolved-target HARNESS for the substrate/permission compatibility
