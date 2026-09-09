@@ -165,7 +165,7 @@ class TestReviewAttestationFindingRecord:
 
 
 # ---------------------------------------------------------------------------
-# x-c6fe: the machine-scoped skip vocabulary
+# The machine-scoped skip vocabulary
 # ---------------------------------------------------------------------------
 
 

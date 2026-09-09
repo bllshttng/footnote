@@ -240,7 +240,7 @@ def test_fire_pending_reconcile_noop_without_sentinel(iso, tmp_path, monkeypatch
     assert calls == []
 
 
-# ---- x-c6fe: a machine-scoped gate refusal is a skip, not a node fault ----
+# ---- a machine-scoped gate refusal is a skip, not a node fault ----
 
 
 def test_reconcile_capacity_refusal_skips_with_gate_detail(iso, tmp_path, monkeypatch):

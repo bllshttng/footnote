@@ -2205,10 +2205,10 @@ mod tests {
 
     #[test]
     fn parked_defer_reason_names_the_last_failure() {
-        // x-c6fe AC8-UI: `auto-failure: 3 consecutive failed drains` named the
-        // drain and never the cause, so a capacity casualty read like five
-        // broken nodes. The reason carries the last failure detail beside the
-        // count; the `auto-failure:` sentinel prefix is unchanged so
+        // `auto-failure: 3 consecutive failed drains` named the drain and
+        // never the cause, so a capacity casualty read like five broken
+        // nodes. The reason carries the last failure detail beside the count;
+        // the `auto-failure:` sentinel prefix is unchanged so
         // graph/failure.py's startswith matching keeps working.
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();

@@ -253,7 +253,7 @@ def test_mission_active_field_set(iso, tmp_path, monkeypatch):
 
 
 def test_gate_refusal_stops_the_pass_and_names_untried_children(iso, tmp_path, monkeypatch):
-    """x-c6fe AC4-EDGE: a machine-scoped gate refusal is true for every child
+    """AC4-EDGE: a machine-scoped gate refusal is true for every child
     equally, so the pass attempts exactly one spawn; the untried children
     record capacity-refused with attempted:false, never a failed verdict."""
     _epic_graph(tmp_path, monkeypatch)

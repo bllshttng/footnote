@@ -407,7 +407,7 @@ def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-c6fe: a capacity refusal is a fact about the machine, not a node fault
+# A capacity refusal is a fact about the machine, not a node fault
 # ---------------------------------------------------------------------------
 
 _GATE_LINE = "spawn-gate: refusing: load 348.26 against trigger 120.0"
