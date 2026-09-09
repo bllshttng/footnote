@@ -60,7 +60,6 @@ cli.add_typer(_triage_cli, name="triage")
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
 # `fno agents mail` (cross-project messaging).
-#
 # `inbox` was a SECOND registration of this same app, so all nine of its
 # subcommands were duplicates and the surface paid for them twice. It is gone;
 # `fno.tombstones` keeps the name reachable as a signpost.
@@ -3941,7 +3940,6 @@ def cmd_update(
             # inside <owner>", a false completion note on work that never
             # shipped. It also keeps `parent` and `contained_in` from
             # disagreeing, which is what produced that false note.
-            #
             # Deliberately keyed on moving away from THE OWNER, not on any
             # re-parent: a contained node moved between two nodes that both sit
             # under its delivery unit is still contained.
@@ -4197,7 +4195,6 @@ def _starvation_receipts(
             # down a rung), so a node already ON the rung would fall through to
             # `selection_guards`, get None (it is gated on a persisted `ready`),
             # and be dropped by the `continue` - reporting nothing at all.
-            #
             # `idea` is the COMMON case for a linked decompose scaffold, since
             # recomputation persists that rung directly; without this arm a
             # backlog of nothing but undesigned children prints a bare `null`
@@ -4600,12 +4597,10 @@ def cmd_next(
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
                 # and routing alone gave only the first.
-                #
                 # ROUTE the root, or the lock lands in the cwd-default tree
                 # while every reader of a `node:` key resolves the global root
                 # through `claims_root_for`, so the node still reads `free`.
                 # `_read_node_claim` names the same trap from the other side.
-                #
                 # TTL, or the lock is visible and still not honored. Selection
                 # runs in a process that exits as soon as it prints the node,
                 # so a pid-liveness claim is dead on arrival: it reads `stale`,
@@ -6921,14 +6916,12 @@ def cmd_remove(
 
 
 # -- defer / undefer --
-#
 # ``defer`` records a first-class pause on a backlog node via dedicated
 # ``deferred_at`` + ``deferred_reason`` fields. The cascade derives
 # ``status: deferred`` from those fields so the node disappears from the
 # default ``ready`` / ``next`` candidate sets and from triage proposals,
 # but resurfaces with ``--include-deferred``. Reversal is via ``undefer``
 # (idempotent: clearing already-clear state warns but exits 0).
-#
 # Predates the ``completed_at: "deferred:<ts>"`` workaround; ``recompute_statuses``
 # auto-migrates the prefix to the new schema, so callers should never see
 # the old shape after one mutation.
@@ -7039,7 +7032,6 @@ def cmd_defer(
 
 
 # -- queue / unqueue / queued --
-#
 # ``queue`` is the user-facing triage marker for "I'm pulling this off
 # the backlog and intend to work on it next" (e.g. "tomorrow I'm going
 # to queue x, y, z"). Orthogonal to ``status``: a queued node still has
@@ -7047,7 +7039,6 @@ def cmd_defer(
 # kanban renderer reads ``queued_at`` separately and promotes the card
 # into the Now column (between ``claimed`` and the priority-driven
 # promotion rule).
-#
 # Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
 
@@ -8926,7 +8917,6 @@ def _canonical_post_close(
 
 
 # -- reopen --
-#
 # The inverse of `done`, and a deliberate inversion of its gate: `done` refuses
 # when no referenced PR is merged, `reopen` refuses when one IS. Both gates ask
 # the same question of the same evidence and disagree only about which answer
@@ -9095,7 +9085,6 @@ def cmd_reopen(
         return
 
     # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
-    #
     # Through `resolve_merge_evidence`, the SAME resolver `cmd_done` uses, and
     # over ALL refs rather than the primary. That is what makes this the same
     # gate inverted rather than a similar-looking one: a node can close on a
@@ -9802,7 +9791,6 @@ def _reconcile_once(
             # fno do pr merge, the bare sweep) only ever reach this with an
             # already-merged PR; this guards a direct manual
             # `--pr-number` invocation against the same premature bind.
-            #
             # Only worth refusing (and reporting) when the body actually
             # names a trailer: a state-read blip on a PR with NO trailer
             # at all has nothing to bind either way, and the node this
@@ -12423,7 +12411,6 @@ def cmd_unarchive(
         raise typer.Exit(code=1)
 
     # TWO locked passes, and the split is the whole safety argument.
-    #
     # `archive` writes the archive inside its mutator because archive-FIRST is
     # safe for it: a crash leaves a duplicate. Inverting the verb inverts the
     # safe order, and the mutator cannot express it - `locked_mutate_graph`
@@ -12432,7 +12419,6 @@ def cmd_unarchive(
     # and a crash between them loses the node from both files. That is the one
     # outcome neither verb may produce, and doing it there quietly guaranteed
     # the ordering the comment claimed to prevent.
-    #
     # So: pass 1 adds the row to the working graph and persists it. Pass 2 takes
     # the lock again, re-reads the archive fresh (never a list read before the
     # first write, which a concurrent `archive --apply` could have grown), and
@@ -13569,7 +13555,6 @@ def _exec_liveness(state: str) -> str:
 
 
 # -- task 4.2: the external-backend verb classification -----------------------
-#
 # Every registered backlog verb is classified exactly ONCE, here, against the
 # LIVE registry (never a frozen count): tracker-owned verbs wrap their
 # registered callback with the shared external refusal BEFORE any graph
