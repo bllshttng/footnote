@@ -3023,7 +3023,7 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
                  "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"}
     monkeypatch.setattr(
         route_resolve, "resolve_slot",
-        lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"]),
+        lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"], "armed"),
     )
     monkeypatch.setattr(
         route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
