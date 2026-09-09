@@ -59,7 +59,9 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
-from fno.config._king import KING_CHECKIN_TEXT, KING_GOAL_TEXT, KingBlock
+from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
+from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
+from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 # The keyed settings loader lives in fno.config._loader (this file is over the
 # size budget and shrink-only); re-exported under the names every caller and
