@@ -193,14 +193,19 @@ def find_presiding_crown(
     return None
 
 
-def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
+def gather_court(
+    rows: Optional[list] = None, *, entries: Optional[list[dict]] = None
+) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
     ``rows`` overrides the live registry read for callers that already hold
-    it (tests). An unreadable REGISTRY nulls ``crowns`` and every summary
-    count rather than reporting an empty court: a caller gating on
-    ``summary.disagreements == 0`` must not read a healthy fleet from a read
-    that saw nothing.
+    it (tests). ``entries`` overrides the graph read for callers that already
+    hold it (the ``--nodes`` fold and the HTML court section): building the
+    id index from them skips ``_graph_index`` entirely, so one read serves
+    agreement and fold together. An unreadable REGISTRY nulls ``crowns`` and
+    every summary count rather than reporting an empty court: a caller
+    gating on ``summary.disagreements == 0`` must not read a healthy fleet
+    from a read that saw nothing.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
@@ -224,7 +229,14 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
     # One graph parse for every rung; ``None`` (unreadable) is not "nothing here".
-    by_id = _graph_index()
+    if entries is None:
+        by_id = _graph_index()
+    else:
+        by_id = {
+            entry["id"]: entry
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
+        }
     entries: list[dict[str, Any]] = []
     held_scopes: list[str] = []
     for row in live_rows:
@@ -286,6 +298,97 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             "splits": splits,
         },
     }
+
+
+def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
+    """Fold each crown's scope nodes onto its row as ``scope_nodes``, in place.
+
+    Pure over rows the caller already read: no file access, no subprocess, no
+    second graph read. The resolver is injected from the crown row's own
+    ``level``/``scope`` because ``gather_court`` already adjudicated that
+    scope (``agree``) - re-validating inside ``compile_scope_ids`` would buy
+    nothing and re-read the graph (measured 9.5-13.4 s through the keeper).
+
+    ``scope_nodes`` is ``{"status": "ok", "total", "counts", "nodes",
+    "omitted"}`` or ``{"status": "unresolved", "reason"}``. ``omitted`` is
+    always present on an ok fold: a crown whose active list is empty must
+    read as "N nodes, none active", never as "nothing here".
+    """
+    from fno.claims.core import live_worker
+    from fno.graph.statuses import ACTIVE_STATUSES
+    from fno.king.scope import compile_scope_ids
+
+    if not crowns:
+        return
+    by_id = {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
+    }
+    # Counts render in lifecycle order; a status outside the vocabulary keeps
+    # its place at the end rather than vanishing from the line.
+    count_order = [
+        "in_progress", "in_review", "ready", "blocked", "design",
+        "idea", "deferred", "done", "superseded",
+    ]
+    for crown in crowns:
+        scope = crown.get("scope")
+        level = crown.get("level")
+        if not (isinstance(scope, str) and scope.strip()) or level is None:
+            crown["scope_nodes"] = {
+                "status": "unresolved",
+                "reason": "the row carries no scope or no crown level",
+            }
+            continue
+        try:
+            ids = compile_scope_ids(
+                scope, entries, resolve=lambda _m, level=level, scope=scope: (level, scope)
+            )
+        except (ValueError, KeyError) as exc:
+            crown["scope_nodes"] = {"status": "unresolved", "reason": str(exc)}
+            continue
+        members = [by_id[i] for i in sorted(ids) if i in by_id]
+        counts: dict[str, int] = {}
+        for entry in members:
+            status = str(entry.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        rows = []
+        for entry in members:
+            if entry.get("status") not in ACTIVE_STATUSES:
+                continue
+            sessions: list[str] = []
+            for raw in entry.get("sessions") or []:
+                sid = raw.get("session_id") if isinstance(raw, dict) else raw
+                if sid and sid not in sessions:
+                    sessions.append(sid)
+            for raw in (
+                [entry.get("session_id")]
+                + list(entry.get("cost_sessions") or [])
+                + [entry.get("locked_by_harness_session")]
+            ):
+                if raw and raw not in sessions:
+                    sessions.append(raw)
+            rows.append(
+                {
+                    "id": entry.get("id"),
+                    "slug": entry.get("slug") or "",
+                    "status": str(entry.get("status") or ""),
+                    "worker": live_worker(str(entry["id"])),
+                    "pr_number": entry.get("pr_number"),
+                    "sessions": sessions,
+                }
+            )
+        ordered = {k: counts[k] for k in count_order if k in counts}
+        ordered.update(
+            {k: counts[k] for k in sorted(counts) if k not in ordered}
+        )
+        crown["scope_nodes"] = {
+            "status": "ok",
+            "total": len(members),
+            "counts": ordered,
+            "nodes": rows,
+            "omitted": len(members) - len(rows),
+        }
 
 
 def crowned_sessions(rows: list) -> set[str]:

@@ -1018,3 +1018,250 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     after = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
     assert after["held"] == 1
     assert adopted in spawn_gate.census().crowned_sessions
+
+
+# --- the scope fold (x-52d2): one readout joining crowns to scope nodes
+
+
+def test_entries_seam_skips_the_second_graph_read(tmp_path: Path, monkeypatch) -> None:
+    """AC4-HP: entries handed in build the id index, ``_graph_index`` is never
+    called, and the court still reads as readable."""
+    import fno.agents.court as court_mod
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+    )
+    monkeypatch.setattr(
+        court_mod,
+        "_graph_index",
+        lambda: (_ for _ in ()).throw(AssertionError("second graph read")),
+    )
+
+    court = gather_court(
+        entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}]
+    )
+
+    assert court["graph_readable"] is True
+    assert court["crowns"][0]["agree"] is True
+
+
+def test_without_entries_the_read_and_unreadable_contract_are_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC4-EDGE: the default path answers exactly as before the seam - a
+    readable graph agrees, an unreadable one stays None with a reason."""
+    from fno.agents.court import gather_court
+    from fno.tracker import metadata
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    assert gather_court()["graph_readable"] is True
+    assert gather_court()["crowns"][0]["agree"] is True
+
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")),
+    )
+    court = gather_court()
+    assert court["graph_readable"] is False
+    assert court["crowns"][0]["agree"] is None
+
+
+def test_fold_counts_whole_scope_and_lists_active_rows_only() -> None:
+    """AC3-HP: counts cover every scope member, ``nodes`` only ACTIVE_STATUSES
+    rows, and ``omitted`` is stated, never implied."""
+    from fno.agents.court import fold_scope_nodes
+    from fno.graph.statuses import ACTIVE_STATUSES
+
+    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
+    entries = [
+        {"id": "e-1", "type": "epic", "status": "ready"},
+        {"id": "x-1", "parent": "e-1", "status": "in_progress"},
+        {"id": "x-2", "parent": "e-1", "status": "in_review"},
+        {"id": "x-3", "parent": "e-1", "status": "done"},
+        {"id": "x-4", "parent": "e-1", "status": "idea"},
+    ]
+
+    fold_scope_nodes(crowns, entries)
+
+    sn = crowns[0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert sn["total"] == 5
+    assert sum(sn["counts"].values()) == sn["total"]
+    assert set(sn["counts"]) == {"ready", "in_progress", "in_review", "done", "idea"}
+    assert [r["id"] for r in sn["nodes"]] == ["e-1", "x-1", "x-2"]
+    assert all(r["status"] in ACTIVE_STATUSES for r in sn["nodes"])
+    assert sn["omitted"] == sn["total"] - len(sn["nodes"]) == 2
+
+
+def test_fold_of_a_project_rung_needs_no_epic_containment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC3-PROJ: a rung-1 crown folds to every node whose canonical project
+    matches; a node under no epic is still in the scope."""
+    from fno.agents.court import fold_scope_nodes
+
+    _prepare(monkeypatch, tmp_path, [])
+    crowns = [{"holder": "king", "level": 1, "scope": "alpha"}]
+    entries = [
+        {"id": "a-1", "project": "alpha", "status": "in_progress"},
+        {"id": "a-2", "project": "alpha", "status": "done"},
+        {"id": "b-1", "project": "beta", "status": "in_progress"},
+    ]
+
+    fold_scope_nodes(crowns, entries)
+
+    sn = crowns[0]["scope_nodes"]
+    assert sn["status"] == "ok"
+    assert sn["total"] == 2
+    assert [r["id"] for r in sn["nodes"]] == ["a-1"]
+    assert sn["omitted"] == 1
+
+
+def test_an_uncompilable_scope_reads_unresolved_never_an_empty_table() -> None:
+    """AC3-UNRESOLVED: a scope naming no epic in the graph states why it could
+    not fold; ``nodes`` is absent rather than an empty list that reads as
+    "nothing here"."""
+    from fno.agents.court import fold_scope_nodes
+
+    crowns = [{"holder": "king", "level": 2, "scope": "ghost"}]
+
+    fold_scope_nodes(crowns, [{"id": "e-1", "type": "epic", "status": "ready"}])
+
+    sn = crowns[0]["scope_nodes"]
+    assert sn["status"] == "unresolved"
+    assert "ghost" in sn["reason"]
+    assert "nodes" not in sn
+
+
+def test_a_half_crown_folds_unresolved_with_a_reason() -> None:
+    """A scope-less or level-less crown rules no territory; the fold says so
+    per row instead of crashing or printing an empty table."""
+    from fno.agents.court import fold_scope_nodes
+
+    crowns = [
+        {"holder": "half", "level": None, "scope": "alpha"},
+        {"holder": "scopeless", "level": 1, "scope": ""},
+    ]
+
+    fold_scope_nodes(crowns, [{"id": "a-1", "project": "alpha", "status": "ready"}])
+
+    for crown in crowns:
+        assert crown["scope_nodes"]["status"] == "unresolved"
+        assert crown["scope_nodes"]["reason"]
+
+
+def test_a_manifest_only_crown_folds_like_any_other() -> None:
+    """A manifest-only crown carries scope and level, so its scope folds too -
+    the operator's question covers crowns whose row is gone."""
+    from fno.agents.court import fold_scope_nodes
+
+    crowns = [
+        {
+            "holder": "gone-king",
+            "level": 2,
+            "scope": "e-1",
+            "status": "manifest-only",
+        }
+    ]
+    entries = [
+        {"id": "e-1", "type": "epic", "status": "ready"},
+        {"id": "x-1", "parent": "e-1", "status": "in_progress"},
+    ]
+
+    fold_scope_nodes(crowns, entries)
+
+    sn = crowns[0]["scope_nodes"]
+    assert sn == {
+        "status": "ok",
+        "total": 2,
+        "counts": {"in_progress": 1, "ready": 1},
+        "nodes": [
+            {
+                "id": "e-1",
+                "slug": "",
+                "status": "ready",
+                "worker": None,
+                "pr_number": None,
+                "sessions": [],
+            },
+            {
+                "id": "x-1",
+                "slug": "",
+                "status": "in_progress",
+                "worker": None,
+                "pr_number": None,
+                "sessions": [],
+            },
+        ],
+        "omitted": 0,
+    }
+
+
+def test_session_ids_union_once_in_field_order() -> None:
+    """AC3-SESSIONS: sessions[].session_id, then session_id, cost_sessions and
+    locked_by_harness_session - each id once, first occurrence wins."""
+    from fno.agents.court import fold_scope_nodes
+
+    crowns = [{"holder": "king", "level": 1, "scope": "alpha"}]
+    entries = [
+        {
+            "id": "a-1",
+            "project": "alpha",
+            "status": "in_progress",
+            "sessions": [{"session_id": "s1"}, {"session_id": "s2"}],
+            "session_id": "s3",
+            "cost_sessions": ["s4", "s2"],
+            "locked_by_harness_session": "s5",
+        }
+    ]
+
+    fold_scope_nodes(crowns, entries)
+
+    assert crowns[0]["scope_nodes"]["nodes"][0]["sessions"] == [
+        "s1", "s2", "s3", "s4", "s5",
+    ]
+
+
+def test_fold_runs_over_the_whole_court_in_under_half_a_second_and_reads_no_graph(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC3-PERF: the fold is bounded by the entries in hand - zero graph reads
+    (a second read costs 9-13 s through the keeper) and under 0.5 s on the
+    2,394-row graph this node measured."""
+    import time
+
+    import fno.agents.court as court_mod
+    from fno.agents.court import fold_scope_nodes
+
+    _prepare(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        court_mod,
+        "_graph_index",
+        lambda: (_ for _ in ()).throw(AssertionError("fold read the graph")),
+    )
+    crowns = [
+        {"holder": "k1", "level": 2, "scope": "e-1"},
+        {"holder": "k2", "level": 1, "scope": "alpha"},
+    ]
+    entries = [{"id": f"n-{i}", "status": "done"} for i in range(2394)]
+    entries += [
+        {"id": "e-1", "type": "epic", "status": "in_progress"},
+        {"id": "a-1", "project": "alpha", "status": "ready", "pr_number": 7},
+    ]
+
+    start = time.monotonic()
+    fold_scope_nodes(crowns, entries)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5
+    assert crowns[0]["scope_nodes"]["nodes"][0]["id"] == "e-1"
+    assert crowns[1]["scope_nodes"]["nodes"][0]["pr_number"] == 7
