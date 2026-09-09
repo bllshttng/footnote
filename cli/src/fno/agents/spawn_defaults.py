@@ -1311,6 +1311,16 @@ def inject_spawn_defaults(
             inject += ["--effort", grid_candidate["effort"]]
             from_config.append(("effort", grid_candidate["effort"], "difficulty-grid"))
             has_effort = True
+        # The row's route rides beside the model it belongs to, so the spawn
+        # gate sees the vendor the grid picked instead of inferring one from a
+        # bare --model. A route or vendor pinned on argv is never overwritten.
+        if (
+            grid_candidate.get("route")
+            and not explicit_route
+            and not explicit_vendor_present
+        ):
+            inject += ["--route", grid_candidate["route"]]
+            from_config.append(("route", grid_candidate["route"], "difficulty-grid"))
         _resolved["v"] = grid_candidate["harness"]
 
     # Lazy resolved-target HARNESS for the substrate/permission compatibility

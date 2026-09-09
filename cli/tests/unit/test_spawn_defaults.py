@@ -262,6 +262,47 @@ def test_grid_effort_yields_to_explicit_effort_flag(monkeypatch):
     assert "--model" in result and "gpt-5.6-sol" in result
 
 
+def test_grid_route_rides_beside_the_model_it_belongs_to(monkeypatch):
+    """AC1-HP (x-b545): the grid candidate's route injects --route next to
+    --harness/--model, so the gate sees the vendor the grid picked."""
+    _declare_inventory(monkeypatch, [
+        {"name": "zai-flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
+         "band": "high", "route": "zai/glm-5.3-flash[1m]"},
+    ])
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "ok"},
+    )
+    result = _inject(["spawn", "--name", "w", "--node", "x-route1", "hi"])
+    assert "--route" in result
+    assert result[result.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    assert result[result.index("--model") + 1] == "glm-5.3-flash[1m]"
+    assert result[result.index("--harness") + 1] == "claude"
+
+
+def test_grid_routeless_row_injects_no_route(monkeypatch):
+    """AC4-EDGE (x-b545): a routeless row (claude-canonical-*) produces argv
+    unchanged from today - no lane selector."""
+    _declare_inventory(monkeypatch, [
+        {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+    ])
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "ok"},
+    )
+    result = _inject(["spawn", "--name", "w", "--node", "x-route2", "hi"])
+    assert "--route" not in result
+    assert "--model" in result and "claude-opus-5" in result
+
+
 def test_inert_grid_says_why_in_the_receipt(monkeypatch):
     """AC4-EDGE at the seam: no declared inventory -> the receipt carries
     grid=no-inventory-declared instead of silence."""

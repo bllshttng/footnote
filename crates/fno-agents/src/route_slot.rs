@@ -550,6 +550,17 @@ fn grid_leg(payload: &Value, rung_base: &str, chain: &mut Vec<Value>) -> Value {
         let mut out = Map::new();
         out.insert("harness".into(), json!(row.harness));
         out.insert("model".into(), json!(row.model));
+        // Same shape as the lane leg's candidate (pick): route and account are
+        // facts the declared row already carries; a grid candidate born without
+        // them sends a vendorless argv to the spawn gate.
+        let route = row_value(&row.raw, "route");
+        let account = row_value(&row.raw, "account");
+        if !route.is_empty() {
+            out.insert("route".into(), json!(route));
+        }
+        if !account.is_empty() {
+            out.insert("account".into(), json!(account));
+        }
         let mut effort = row.effort.clone();
         if !effort.is_empty() {
             let valid = effort_ok
@@ -1527,6 +1538,40 @@ mod tests {
         assert!(chain
             .iter()
             .any(|l| l == "grid candidate claude/sonnet capacity=ok window=w"));
+    }
+
+    #[test]
+    fn grid_candidate_carries_the_rows_route_and_account() {
+        // AC2-HP: a routed row's candidate carries route and account, the
+        // fields the lane leg always emitted and the grid leg dropped.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "high", "priority": "p2"},
+            "inventory": {"declared": true, "objective": "cheapest-that-clears",
+                          "rows": [
+                {"name": "flash", "harness": "claude", "model": "glm", "band": "high",
+                 "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+                {"name": "bare", "harness": "claude", "model": "sonnet", "band": "low"},
+            ]},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["harness"], "claude");
+        assert_eq!(out["candidate"]["model"], "glm");
+        assert_eq!(out["candidate"]["route"], "zai/glm-5.3-flash[1m]");
+        assert_eq!(out["candidate"]["account"], "zai-main");
+        // AC2/AC4-EDGE: a routeless winner emits neither key, byte-identical
+        // to the pre-port shape for every anthropic row.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "high", "priority": "p3"},
+            "inventory": {"declared": true, "objective": "cheapest-that-clears",
+                          "rows": [
+                {"name": "flash", "harness": "claude", "model": "glm", "band": "high",
+                 "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+                {"name": "bare", "harness": "claude", "model": "sonnet", "band": "low"},
+            ]},
+        })));
+        assert_eq!(out["candidate"]["model"], "sonnet");
+        assert!(out["candidate"].get("route").is_none());
+        assert!(out["candidate"].get("account").is_none());
     }
 
     #[test]

@@ -3000,8 +3000,8 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
     )
     node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
-    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
-    assert (harness, model, reason) == ("claude", "glm-5.3-flash", None)
+    harness, model, route, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, route, reason) == ("claude", "glm-5.3-flash", None, None)
     assert seen["verb"] == "target"
     assert seen["role"] is None  # plan_path set -> execution tier
 
@@ -3009,6 +3009,79 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
     monkeypatch.setattr(
         route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
     )
-    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
-    assert (harness, model) == (None, None)
+    harness, model, route, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, route) == (None, None, None)
     assert reason == "slot=exhausted queue"
+
+
+def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
+    """AC2-HP (x-b545): the route the grid leg emits survives the seam. The
+    single monkeypatchable answer carries vendor AND model as one fact."""
+    from fno import route_resolve
+
+    candidate = {"harness": "claude", "model": "glm-5.3-flash[1m]",
+                 "route": "zai/glm-5.3-flash[1m]"}
+    monkeypatch.setattr(
+        route_resolve, "resolve_slot",
+        lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"]),
+    )
+    monkeypatch.setattr(
+        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
+    )
+    monkeypatch.setattr(
+        route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
+    )
+    got = adv._grid_lane_for({"difficulty": "high", "priority": "p1"}, model=None, provider=None)
+    assert got == ("claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None)
+
+
+def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
+    """AC1-HP (x-b545): the grid's route rides the spawn argv beside the model
+    it belongs to, so the gate sees the vendor instead of inferring one from a
+    bare --model."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-route1"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda node, *, model, provider: (
+            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None
+        ),
+    )
+    adv._spawn_worker(
+        "x-route1", None, "route-slug", node={"difficulty": "high", "priority": "p1"}
+    )
+    cmd = captured["cmd"]
+    assert "--route" in cmd
+    assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    i = cmd.index("--model")
+    assert cmd[i + 1] == "glm-5.3-flash[1m]"
+
+
+def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
+    """AC3-EDGE (x-b545): a dispatch-time vendor pin outranks the grid's route;
+    the grid's is not injected."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-route2"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda node, *, model, provider: (
+            "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None
+        ),
+    )
+    adv._spawn_worker(
+        "x-route2", None, "route-slug", vendor="zai",
+        node={"difficulty": "high", "priority": "p1"},
+    )
+    cmd = captured["cmd"]
+    assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "zai"
+    assert "--route" not in cmd
