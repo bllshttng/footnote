@@ -50,6 +50,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, node)| json!({"id": id, "node": node}))
             .collect();
+        let triples = |rows: &Vec<(String, String, String)>| -> Vec<Value> {
+            rows.iter()
+                .map(|(id, a, b)| json!({"id": id, "detail_a": a, "detail_b": b}))
+                .collect()
+        };
         let settled: Vec<Value> = summary
             .settled_do_rows
             .iter()
@@ -68,6 +73,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_crowned": summary.kept_crowned,
                 "kept_not_spawn": pair(&summary.kept_not_spawn),
                 "kept_no_provenance": summary.kept_no_provenance,
+                "kept_node_conflict": triples(&summary.kept_node_conflict),
+                "kept_pr_contradicts": triples(&summary.kept_pr_contradicts),
                 "kept_open_work": open_work,
                 "kept_open_do_row": open_do,
                 "kept_active": active,
@@ -121,7 +128,18 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (not a spawn row: {why})\n"));
     }
     for id in &summary.kept_no_provenance {
-        out.push_str(&format!("  kept {id} (no provenance: named in no node)\n"));
+        out.push_str(&format!(
+            "  kept {id} ({}\\n",
+            crate::gc::KeepReason::NoProvenance.as_str()
+        ));
+    }
+    for (id, a, b) in &summary.kept_node_conflict {
+        out.push_str(&format!("  kept {id} (sources disagree: {a} vs {b})\n"));
+    }
+    for (id, node, detail) in &summary.kept_pr_contradicts {
+        out.push_str(&format!(
+            "  kept {id} (pr state contradicts: {node} {detail})\n"
+        ));
     }
     for (id, node, status) in &summary.kept_open_work {
         out.push_str(&format!("  kept {id} (open work: {node} {status})\n"));
@@ -239,6 +257,8 @@ mod tests {
             "kept_crowned",
             "kept_not_spawn",
             "kept_no_provenance",
+            "kept_node_conflict",
+            "kept_pr_contradicts",
             "kept_open_work",
             "kept_open_do_row",
             "kept_active",

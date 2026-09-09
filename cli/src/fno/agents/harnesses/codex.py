@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from fno.agents.dispatch_errors import DispatchAskError
 from fno.agents.harnesses.base import ReachabilityProbeError
 
 
@@ -937,20 +938,14 @@ def remove_session_index_entry(
 ) -> bool:
     """Drop ``session_id``'s line(s) from codex's session index.
 
-    Record-only teardown: the rollout/transcript files under
-    ``~/.codex/sessions/`` are never touched. Returns True if the index
-    changed, False if the id was already absent (idempotent success --
-    a manually-cleaned index must not fail ``fno agents rm``).
+    Record-only teardown: the rollout files are never touched. True if
+    the index changed, False if already absent (idempotent success).
 
-    Matching is on the parsed ``id`` FIELD, not substring containment.
-    The index also carries a free-text ``thread_name``, so a substring
-    match would delete an unrelated session whose name merely quotes
-    this uuid. :func:`load_known_session_ids` can afford its schema-
-    agnostic regex because a false positive there only over-reports
-    liveness; here it would destroy the wrong record.
-
-    A line that does not parse, or that carries no matching ``id``, is
-    always kept: this never removes what it does not understand.
+    Matching is on the parsed ``id`` FIELD, never substring: the index
+    also carries a free-text ``thread_name`` whose substring match would
+    delete an unrelated session quoting this uuid. Unparseable lines and
+    non-matching ids are always kept: this never removes what it does
+    not understand.
 
     The rewrite is atomic (temp file in the same directory + ``os.replace``,
     preserving the original mode), so a concurrent codex append can never
@@ -998,3 +993,92 @@ def remove_session_index_entry(
         tmp.unlink(missing_ok=True)
         raise
     return True
+def capture_session_index_entries(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> list:
+    """Return the raw index lines whose parsed ``id`` equals ``session_id``.
+
+    Rollback half of the removal contract: snapshot BEFORE teardown,
+    re-append when the registry write declines. Parse discipline matches
+    the removal: the ``id`` field, never substring. Unreadable index
+    raises, so the caller refuses before touching any store.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return []
+    path = session_index_path or default_session_index_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(row, dict) and row.get("id") == session_id:
+            out.append(line)
+    return out
+
+
+def restore_session_index_entries(
+    lines: list, *, session_index_path: Optional[Path] = None
+) -> None:
+    """Re-append previously captured index lines (atomic rewrite).
+
+    Called when the registry write declined after teardown, so the
+    refusal's "nothing was removed" stays true of every store. Raises
+    on a failed restore: a half-removal never reads as a clean one.
+    """
+    if not lines:
+        return
+    path = session_index_path or default_session_index_path()
+    try:
+        current = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        current = []
+    merged = current + [line for line in lines if line not in current]
+    tmp = path.with_name(f"{path.name}.fno-restore.{os.getpid()}.tmp")
+    try:
+        tmp.write_text("".join(merged), encoding="utf-8")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def capture_for_rm_rollback(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> list:
+    """Snapshot the index lines a teardown will drop, or refuse (exit 1)."""
+    try:
+        return capture_session_index_entries(
+            session_id, session_index_path=session_index_path
+        )
+    except OSError as exc:
+        raise DispatchAskError(
+            f"could not snapshot the codex session index for rollback: {exc}",
+            exit_code=1,
+        ) from exc
+
+
+def teardown_session_index(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> Optional[tuple]:
+    """Drop the index record: None on success, else (message, exit_code)."""
+    try:
+        removed = remove_session_index_entry(
+            session_id, session_index_path=session_index_path
+        )
+    except ValueError as exc:
+        return (str(exc), 12)
+    except OSError as exc:
+        return (f"codex session index rewrite failed: {exc}", 1)
+    print(
+        f"torn down: codex session index entry {session_id}"
+        if removed
+        else f"already gone: codex session index entry {session_id}",
+        flush=True,
+    )
+    return None

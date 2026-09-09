@@ -41,6 +41,12 @@ use crate::state;
 /// would reap every codex worker on the machine.
 #[derive(Default)]
 pub struct HarnessStoreIndex {
+    /// Opt OUT of walking the config-declared account roots (the
+    /// `isolated_account_dirs` union) beside the ambient store. Production
+    /// leaves this false (the union is the point); the `with_roots` test
+    /// seam sets it true so a unit test never inherits the developer's real
+    /// account roots.
+    skip_account_union: bool,
     /// Resolved store roots; `None` until the first lookup resolves them from
     /// `$HOME` (or forever, for an index built `with_roots` in tests).
     claude_root: Option<std::path::PathBuf>,
@@ -64,6 +70,7 @@ impl HarnessStoreIndex {
         HarnessStoreIndex {
             claude_root: Some(claude_root),
             codex_root: Some(codex_root),
+            skip_account_union: true,
             ..Default::default()
         }
     }
@@ -87,26 +94,66 @@ impl HarnessStoreIndex {
         })
     }
 
+    /// Every claude transcript root this machine sees: the ambient
+    /// `~/.claude/projects` tree, then each config-declared account's
+    /// `projects` dir. A row on an isolated account writes its transcripts
+    /// into THAT account's store, so a single-root walk would call the
+    /// session GONE - death evidence from an absence, the wrong-root
+    /// absence the reaper must never buy.
+    fn claude_roots(&self) -> Vec<std::path::PathBuf> {
+        let mut roots: Vec<std::path::PathBuf> = self.root("claude").into_iter().collect();
+        if !self.skip_account_union {
+            for (_, dir) in crate::claude_roster::isolated_account_dirs() {
+                let projects = dir.join("projects");
+                if !roots.contains(&projects) {
+                    roots.push(projects);
+                }
+            }
+        }
+        roots
+    }
+
     /// Every transcript candidate this row's harness store holds for its
     /// session id. Empty vector = the session is GONE from its own store.
-    pub(crate) fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
+    pub fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
         let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty())?;
         let harness = e.harness_name();
-        let root = match harness {
-            "claude" | "codex" => self.root(harness)?,
+        match harness {
             // Unknown/unsupported harness (gemini, opencode, ...): no store
             // this reaper can read. Answer None, never another harness's store.
+            "claude" | "codex" => {}
             _ => return None,
-        };
-        let cached_empty = match harness {
+        }
+        if match harness {
             "claude" => self.claude.is_none(),
             _ => self.codex.is_none(),
-        };
-        if cached_empty {
+        } {
             // First lookup for this harness: one walk, ~100 files per walk,
             // cached for the sweep (an unreadable store caches as Err, so it
             // stays fail-closed for every later row instead of re-walking).
-            let indexed = index_tree(&root, 0);
+            // A MISSING root is not unreadable: an account with no sessions
+            // yet (or no alt accounts at all) is an empty store, never a
+            // torn read, so a missing dir contributes zero files.
+            let indexed = (|| -> Result<Vec<(String, std::path::PathBuf)>, ()> {
+                let roots: Vec<_> = match harness {
+                    "claude" => self.claude_roots(),
+                    _ => self.root("codex").into_iter().collect(),
+                };
+                let mut files = Vec::new();
+                for (i, root) in roots.iter().enumerate() {
+                    if !root.is_dir() {
+                        // The ambient store missing is a torn read (claude
+                        // always creates it); an account store missing is an
+                        // account with no sessions yet.
+                        if i == 0 {
+                            return Err(());
+                        }
+                        continue;
+                    }
+                    files.extend(index_tree(root, 0)?);
+                }
+                Ok(files)
+            })();
             let parked = match harness {
                 "claude" => &mut self.claude,
                 _ => &mut self.codex,

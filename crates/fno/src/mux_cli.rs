@@ -2027,6 +2027,7 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
     if complete_empty {
         evidence.mark_complete_attach_set();
     }
+    crate::squad_cascade::fold_receipt_leg(&mut evidence, &registry_path);
     evidence
 }
 
@@ -2124,10 +2125,9 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
     }
 
-    let evidence = member_evidence();
+    let evidence = crate::squad_cascade::fold_cascade_verdicts(member_evidence());
     let (tabs, live_cwds, answered_names, unreachable) = live_tabs();
-    let answered = answered_names.len();
-    let scope = sweep_scope(answered, &unreachable);
+    let scope = sweep_scope(answered_names.len(), &unreachable);
     // (x-688b) `--dead-only` ALONE skips the tab fold (store-only scope), but
     // the combined `--tabs-only --dead-only` scope runs BOTH halves - the
     // sweep modal's "both" queues exactly that pair, and gating tabs on bare
@@ -2264,7 +2264,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // (v71) After a real store pass, every answering session re-reads the
     // file just written, so the next persist cannot undo the pass.
     let reload = prune_sync::reload_live_sessions(scope.sweep_store && !dry_run, &answered_names);
-    let probed = answered + unreachable.len();
+    let probed = answered_names.len() + unreachable.len();
     if json {
         prune_sync::render_prune_json(
             &removed,
@@ -2326,7 +2326,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             members_kept_unknown,
             include_named,
             &tab_outcome,
-            answered,
+            answered_names.len(),
             probed,
             &unreachable,
             &reload,

@@ -1015,7 +1015,21 @@ pub(crate) fn cascade_harness_session_result_with(
 }
 
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
-    let mut child = std::process::Command::new("claude")
+    run_claude_rm_in(None, short_id)
+}
+
+/// `claude rm` against ONE account root. `None` is the ambient root; the
+/// dir pins `CLAUDE_CONFIG_DIR` so an isolated account's row is removed in
+/// the store that actually holds it.
+pub(crate) fn run_claude_rm_in(
+    config_dir: Option<&std::path::Path>,
+    short_id: &str,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("claude");
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let mut child = command
         .args(["rm", short_id])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1424,7 +1438,12 @@ impl RemovalAuditContext {
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
-pub(crate) fn now_epoch_secs() -> i64 {
+pub(crate) use crate::row_truth::{
+    apply_title_changes, batched_row_probes, fold_positive_death, row_truth_handle,
+    row_truth_handles, served_fresh_liveness, title_changes,
+};
+
+pub fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1574,120 +1593,6 @@ pub(crate) fn restore_unaccounted_row(
     }
 }
 
-/// The one POSITIVE death proof the sweep holds itself: a recorded pid whose
-/// start time no longer matches provably ended. Folded into the answer type
-/// so the reapers read one vocabulary; the ladder never answers `Dead` from
-/// absence.
-pub(crate) fn fold_positive_death(
-    e: &state::RegistryEntry,
-) -> Option<crate::client_verbs::RowLiveness> {
-    e.pid
-        .map(|p| !pid_is_ours(p, e.pid_start_time))
-        .unwrap_or(false)
-        .then_some(crate::client_verbs::RowLiveness::Dead)
-}
-
-/// The claude-uuid candidate handles for the sweep's ONE truth batch: the
-/// ladder never launches a serial per-row `fno agents truth` subprocess
-/// inside the sweep - N rows would otherwise hold the GC worker for roughly
-/// N probe timeouts. Every row qualifies, not only stamped ones: the
-/// ladder's `is_live` vote (x-91f3) reads the truth rung for unstamped rows
-/// too, and a stamped-only batch leaves the transcript - the one marker a
-/// pid-less, unstamped claude row can carry - permanently silent for that
-/// vote. An empty candidate set spends nothing.
-pub(crate) fn row_truth_handles(entries: &[state::RegistryEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|e| {
-            e.claude_session_uuid
-                .as_deref()
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
-                .map(String::from)
-        })
-        .collect()
-}
-
-/// The batch over [`row_truth_handles`] as the reconcile sweep runs it,
-/// returning the FULL probes, not a lowered state string: one batch feeds
-/// both the liveness ladder and the title detector, and a second subprocess
-/// for titles would be the same cold start paid twice per sweep.
-pub(crate) fn batched_row_probes(
-    entries: &[state::RegistryEntry],
-    truth_tail_probes: &dyn Fn(
-        &[String],
-    )
-        -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
-) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe> {
-    let handles = row_truth_handles(entries);
-    if handles.is_empty() {
-        return std::collections::HashMap::new();
-    }
-    truth_tail_probes(&handles)
-}
-
-/// The title diff the sweep's `agent_renamed` emits are built from:
-/// one entry per row whose last-seen `harness_title` differs from the batch's
-/// reading. The tuple is `(name, harness_session_id, from, to)` - the event
-/// payload's shape, with `from` `None` on first observation. Rows without a
-/// harness session id are skipped: the event names identity, and an
-/// identity-less rename has no addressee. The row's
-/// `name` is never written from any of this: the label is fno's, the title
-/// is the harness's.
-pub(crate) fn title_changes(
-    entries: &[state::RegistryEntry],
-    titles: &std::collections::HashMap<String, Option<String>>,
-) -> Vec<(String, Option<String>, Option<String>, String)> {
-    entries
-        .iter()
-        .filter_map(|e| {
-            let uuid = e.claude_session_uuid.as_deref()?;
-            let sid = e.harness_session_id.clone().filter(|s| !s.is_empty())?;
-            let new_title = titles.get(uuid)?.clone()?;
-            let from = e.harness_title.clone();
-            if from.as_deref() == Some(new_title.as_str()) {
-                return None;
-            }
-            Some((e.name.clone(), Some(sid), from, new_title))
-        })
-        .collect()
-}
-
-/// Apply the batch's title readings to the registry under the
-/// caller's lock. Keyed by identity read off the snapshot
-/// the batch planned from, so a row replaced under the same label between
-/// snapshot and locked write cannot receive the first row's title. The
-/// stored value is the DIFF BASELINE the next sweep compares against; every
-/// reader is served the probe's fresh reading with this as fallback.
-pub(crate) fn apply_title_changes(
-    r: &mut state::Registry,
-    entries: &[state::RegistryEntry],
-    titles: &std::collections::HashMap<String, Option<String>>,
-) {
-    for (uuid, new_title) in titles {
-        let Some(new_title) = new_title else {
-            continue;
-        };
-        let Some(e0) = entries
-            .iter()
-            .find(|e| e.claude_session_uuid.as_deref() == Some(uuid.as_str()))
-        else {
-            continue;
-        };
-        let (harness, sid) = state::registry_write_key(e0);
-        let keyed = sid
-            .as_deref()
-            .and_then(|sid| r.find_by_session_mut(&harness, sid));
-        let target = match keyed {
-            Some(e) => Some(e),
-            None => r.find_mut(&e0.name),
-        };
-        if let Some(e) = target {
-            e.harness_title = Some(new_title.clone());
-        }
-    }
-}
-
 /// The shared liveness ladder as production runs it (x-5d96): the reader
 /// extracted from `claude_resume_argv_with_truth`, now called by the reaper
 /// instead of a per-caller derivation. The sessions-dir index and the truth
@@ -1697,31 +1602,17 @@ pub(crate) fn apply_title_changes(
 /// lives in the developer's real `~/.claude`.
 pub(crate) fn live_liveness_prober(
     truth: std::collections::HashMap<String, String>,
+    sockets: std::collections::HashMap<String, String>,
+    codex_index: Option<Vec<(String, u64)>>,
 ) -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
-    let home = crate::claude_ask::ClaudeHome::from_env();
-    let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
-        std::cell::RefCell::new(None);
-    let codex: std::cell::RefCell<Option<Option<Vec<(String, u64)>>>> =
-        std::cell::RefCell::new(None);
     move |e: &state::RegistryEntry| {
         if let Some(dead) = fold_positive_death(e) {
             return dead;
         }
-        let mut built = index.borrow_mut();
-        if built.is_none() {
-            *built = Some(crate::client_verbs::sessions_socket_index(&home));
-        }
-        let mut codex_built = codex.borrow_mut();
-        if codex_built.is_none() {
-            // ONE store walk per closure (one sweep), however many codex rows
-            // probe - the same once-per-sweep shape the socket index above
-            // keeps. `None` reads as the rung going silent (fail closed).
-            *codex_built = Some(crate::client_verbs::codex_rollout_index(None));
-        }
         crate::client_verbs::row_liveness_with_indexed(
             e,
-            built.as_ref().expect("just built"),
-            codex_built.as_ref().and_then(|c| c.as_deref()),
+            &sockets,
+            codex_index.as_deref(),
             |uuid: &str| truth.get(uuid).cloned(),
         )
     }
@@ -3250,6 +3141,7 @@ fn build_claude_stream_entry(
     pid: u32,
     pid_start_time: Option<u64>,
     log_path: PathBuf,
+    node: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     // Ambient parent edge (x-132c), captured for shape parity with the other
@@ -3261,7 +3153,9 @@ fn build_claude_stream_entry(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     RegistryEntry {
-        node: None,
+        // The node this spawn was FOR, from the spawn request - never the
+        // daemon's ambient env, which names the daemon-starting session.
+        node: node.filter(|v| !v.is_empty()).map(str::to_string),
         // Stream-json adoption is gated on host_mode plus mode, not on a
         // substrate, and it is not one of the three names - this row's
         // lifecycle belongs to chat/switchboard/ask, so the axis stays
@@ -3656,6 +3550,7 @@ async fn spawn_claude_stream_lane(
         worker_pid,
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
+        req.params.get("node").and_then(Value::as_str),
     );
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
@@ -3703,7 +3598,14 @@ async fn spawn_claude_stream_lane(
     claim_guard.disarm();
     let _ = ctx.emitter.emit(
         "agent_spawned",
-        &json!({"name": name, "provider": "claude", "short_id": short_id, "lane": "stream", "session_uuid": uuid}),
+        &json!({
+            "name": name,
+            "provider": "claude",
+            "short_id": short_id,
+            "lane": "stream",
+            "session_uuid": uuid,
+            "node": req.params.get("node").and_then(Value::as_str),
+        }),
     );
 
     Response::ok(
@@ -3911,6 +3813,7 @@ async fn spawn_codex_thread_lane(
             "lane": "thread",
             "substrate": "thread",
             "cwd": cwd.to_string_lossy(),
+            "node": node,
         }),
     );
     Response::ok(
@@ -5903,9 +5806,15 @@ where
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
                     // The SERVED liveness pair, written only by the
-                    // sweep: a reader trusts it while the stamp is young and
-                    // reads its age honestly when it is not.
-                    "liveness": e.liveness,
+                    // sweep: the word is served only while its stamp is
+                    // young (the same two-sweep-budget window the mux-side
+                    // reader applies); an older word is withheld rather
+                    // than republished as current, and the stamp stays so
+                    // every reader can show its age.
+                    "liveness": served_fresh_liveness(
+                        e.liveness.as_deref(),
+                        e.liveness_measured_at.as_deref(),
+                    ),
                     "liveness_measured_at": e.liveness_measured_at,
                     // The harness's own title for the session, served
                     // from the probe's fresh reading; a probe that ANSWERED
@@ -6948,7 +6857,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
     handle_rm_with(
         ctx,
         req,
-        &crate::claude_roster::read_all_agents,
+        &crate::claude_roster::read_all_agents_union,
         &run_claude_rm,
         &run_mux_pane_kill,
         &run_mux_pane_probe,
@@ -7445,7 +7354,8 @@ where
         // to persist anything and is Exited. Before the actor rewrite this arm
         // always returned None, so a permanently dead thread read Live forever.
         if is_codex_thread_entry(entry) {
-            let new_status = if thread_hosted(entry) {
+            let hosted = thread_hosted(entry);
+            let new_status = if hosted {
                 None
             } else if rollout_exists(entry) {
                 out.updated.push(entry.name.clone());
@@ -7457,12 +7367,17 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
-                // Hosted = the actor answers for it: alive. A rollout means
-                // resumable, not running; nothing on disk is gone. `None`
-                // (hosted) keeps the previous measurement standing.
-                new_liveness: match new_status {
-                    Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
-                    _ => None,
+                // Hosted = the actor answers for it: a positive running
+                // marker, so the measurement is served fresh instead of
+                // keeping a stale stored word standing. A rollout means
+                // resumable, not running; nothing on disk is gone.
+                new_liveness: if hosted {
+                    Some("alive")
+                } else {
+                    match new_status {
+                        Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
+                        _ => None,
+                    }
                 },
             });
             continue;
@@ -7484,6 +7399,12 @@ where
         // against it. `bg_live` asks the roster before we declare death; a
         // genuinely finished ask is absent from it and still reaps to Exited.
         if entry.is_one_shot_ask() {
+            // Ask the ladder once, up front: an Alive answer is a positive
+            // running marker and is served as `alive` below. Behind the old
+            // Unknown-only orphan test the answer was discarded for every
+            // healthy row, so the served word kept a stale stored value
+            // standing forever (measured: 0 of 35 claude rows read alive).
+            let measured = liveness(entry);
             let new_status = if is_non_terminal(entry.status) && !bg_live(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Exited)
@@ -7492,7 +7413,7 @@ where
                 AgentStatus::Live | AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Busy
             ) && roster_readable
                 && bg_live(entry)
-                && liveness(entry) == RowLiveness::Unknown
+                && measured == RowLiveness::Unknown
             {
                 // x-5d96: a roster entry used to hold a claude row `live`
                 // forever. Roster presence is weak evidence - a dead
@@ -7525,10 +7446,14 @@ where
                 // The ask arm's evidence, not a guess: a bg-live roster hit
                 // with a silent ladder never positively answers, so it reads
                 // unmeasured, never dead; a finished ask is gone.
-                new_liveness: match new_status {
-                    Some(AgentStatus::Exited) => Some("dead"),
-                    Some(AgentStatus::Orphaned) => Some("unmeasured"),
-                    _ => None,
+                new_liveness: if measured == RowLiveness::Alive {
+                    Some("alive")
+                } else {
+                    match new_status {
+                        Some(AgentStatus::Exited) => Some("dead"),
+                        Some(AgentStatus::Orphaned) => Some("unmeasured"),
+                        _ => None,
+                    }
                 },
             });
             continue;
@@ -8644,7 +8569,15 @@ fn run_reconcile_sweep(
     // the title is the harness's - and the emit rides the successful write,
     // so a failed write never announces a rename it did not persist.
     let renames = title_changes(&entries, &titles);
-    let prober = live_liveness_prober(truth);
+    // The shared reads are built HERE, before the clock: the socket index
+    // and the codex rollout index serve every probed row, and their lazy
+    // first build was charged to the sweep budget (measured: the sessions
+    // walk alone exceeded the whole 5s window, so every later row deferred).
+    let prober = live_liveness_prober(
+        truth,
+        crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
+        crate::client_verbs::codex_rollout_index(None),
+    );
     // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
     // probe loop's 5s window was why 79 rows went unprobed every sweep
@@ -13658,6 +13591,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             4242,
             None,
             PathBuf::from("/tmp/log.jsonl"),
+            None,
         );
         assert!(
             entry_holds_session(&row, "sess-uuid-9"),
@@ -13674,6 +13608,19 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             row.account_record_id.as_deref(),
             crate::state::launch_account_from_env().as_deref()
         );
+        // The node rides the spawn REQUEST, never ambient env: a named node
+        // stamps, an unnamed one stays unknown.
+        let bound = build_claude_stream_entry(
+            "peer",
+            "ab12cd34",
+            std::path::Path::new("/work"),
+            "sess-uuid-9",
+            4242,
+            None,
+            PathBuf::from("/tmp/log.jsonl"),
+            Some("x-cafe"),
+        );
+        assert_eq!(bound.node.as_deref(), Some("x-cafe"));
     }
 
     /// A stub family-1 probe answer for the tests that only pin the state.
@@ -15684,6 +15631,7 @@ done
             4242,
             Some(99),
             PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
+            None,
         );
         assert_eq!(e.harness_name(), "claude");
         assert_eq!(
