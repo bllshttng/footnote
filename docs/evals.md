@@ -41,12 +41,38 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 
 | Command | What it does |
 |---|---|
-| `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). |
-| `fno doctor evals report [--since N] [--graduate] [--json]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. |
+| `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF] [--lane NAME] [--cohort ID]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). `--lane NAME --cohort ID` qualifies a model lane (see Lanes). |
+| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
 
 Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/evals-history.jsonl` (override via `config.paths.evals_history`).
+
+## Variants
+
+The bank scores whether the pipeline passes. The variant axis scores whether a CHANGE improved it, which is the question anyone tuning a skill prompt or a config default actually has.
+
+A variant is a **git ref of this repository**. Every prompt, skill, and project config fno controls is a tracked file. So "the pipeline with change Y" is "this repo at ref Y". `fno doctor evals run --variant v1 --ref my-branch` checks the disposable worktree out at `my-branch` instead of the fixture ref. The diff lives in git. The history row stores the resolved sha in `bank_rev`. Run `git diff <baseline_rev> <variant_rev>` to see the change a score move belongs to. Global config under `~/.fno` is not part of a variant. A config experiment commits to the ref or it is not a variant.
+
+- **Names.** A variant is named exactly `baseline` or `v<N>` (`v1`, `v2`, ...). Anything else is refused before the run starts, on both the runner and the CLI. `--ref` without a non-baseline `--variant`, or the reverse, is also refused. Each history row carries a `variant` column naming its round.
+- **Every variant runs every case.** Comparability needs the shared denominator. A variant that skipped a task lands in the compare view's `missing in vN` list. It cannot silently shrink the scored set.
+- **The default report is baseline-only.** A failing `v1` never drags the baseline pass rate down. It never fires the regression alarm in doctor and triage health. Rows written before the variant axis carry no `variant` key and read as baseline.
+- **Compare.** `fno doctor evals report --compare v1` prints one line per task: baseline p@1 (n), the variant's p@1 (n), the delta, and a verdict. The verdict is `improved`, `regressed`, or `unchanged`. Then come the missing-task lists and the `git diff` line. `--json` emits the same as a dict.
+
+## Lanes
+
+A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account). `agents.profiles.*.lanes` already references these same rows. This is never a second model/effort enum. An unknown lane name refuses and lists the declared lanes. A lane that config never declared cannot be requested.
+
+`fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider`, since a lane is a complete coordinate. Every history row from the run records:
+
+- `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
+- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: read back once, right after the worker spawns, never re-derived. When the agent registry still holds a lookupable row for the spawned worker, these fields carry its answer.
+- `lane_status`: `ok`, `substituted`, `unavailable`, `not-applicable`, or `unverified`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`. The default spawn (`--substrate headless`) never leaves a lookupable registry row. Claude's one-shot path never writes one, and codex tears its own down on success. A run that succeeded with no row left to check reads `unverified`, distinct from `unavailable`. The run is real. Only its identity stays unconfirmed.
+- `experiment_id`: the `--cohort` id, a join key for a future comparison.
+
+Treat `unverified` as "probably ran as requested but not independently checked", not as a failure. Only `ok` and `substituted` carry a checked identity today.
+
+A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score. Folding these rows into a cohort comparison (reliability, duration, cost, review evidence per cohort, a promotion recommendation) is not yet built. For now, read the raw history rows for a `--cohort` id directly to compare lanes.
 
 ## Run cadence and demand
 

@@ -196,6 +196,28 @@ fn run(args: &[OsString]) -> BootResult<()> {
         }
     }
 
+    // A packaged front door forwards to its OWN Python CLI first: the keg, the
+    // pip/uv venv bin, and the wheel's scripts dir all ship `fno` and `fno-py`
+    // side by side, and that adjacent CLI is the complete install. Probing it
+    // before the uv tool dir keeps a Homebrew (or pip) user off the uv path -
+    // otherwise `fno <verb>` downloads uv and installs a SECOND copy of the
+    // wheel, and fails outright offline (x-538e review P2). Verified like any
+    // other target: the sibling's shebang names the interpreter whose metadata
+    // answers the identity probe. An instrument failure falls through to the
+    // uv arm below; a verifiable stranger is refused on the first pass, same
+    // as everywhere else.
+    if let Ok(exe) = env::current_exe() {
+        if let Some((sibling, python)) = resolve_via_sibling(&exe) {
+            if is_executable(&sibling) {
+                match verify_ours_within_python(&sibling, &python, VERIFY_ATTEMPTS, VERIFY_POLL) {
+                    Ok(()) => return Err(record_and_exec(&sibling, args)),
+                    Err(e) if e.stable => return Err(e),
+                    Err(_) => {} // instrument: fall through to the uv tool dir arm
+                }
+            }
+        }
+    }
+
     // Already provisioned by another channel (`uv tool install fno`, or a
     // pip install that uv can see) but no sentinel yet - adopt it without a
     // redundant reinstall (AC4-EDGE). Still verify before trusting it (AC3).
@@ -661,6 +683,31 @@ fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> BootResult<
         thread::sleep(poll);
         last = verify_ours(path);
     }
+    last.map_err(|mut e| {
+        let waited = poll.as_millis() * u128::from(attempts);
+        e.msg = format!("{} (still failing after re-asking for {waited}ms)", e.msg);
+        e
+    })
+}
+
+/// [`verify_ours_within`] for the packaged-sibling target, whose interpreter
+/// comes from the console script's shebang rather than a sibling `python`.
+fn verify_ours_within_python(
+    path: &Path,
+    python: &Path,
+    attempts: u32,
+    poll: Duration,
+) -> BootResult<()> {
+    let mut last = verify_ours_with_python(path, python);
+    for _ in 0..attempts {
+        match &last {
+            Ok(()) => return last,
+            Err(e) if e.stable => return last,
+            Err(_) => {}
+        }
+        thread::sleep(poll);
+        last = verify_ours_with_python(path, python);
+    }
     // Say what was waited for, the way [`install_verified_within`] does. This is
     // the message the post-install arm writes into the failure stamp and replays
     // for the whole cooldown, so "it was re-asked for 3s" is the difference
@@ -1006,9 +1053,56 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
 
 /// The Python script this front door would exec, resolved by THIS door's own
 /// resolver - not a guessed uv environment. `fno version --json` reports it so
-/// update/doctor verify the deployment the user actually executes.
+/// update/doctor verify the deployment the user actually executes. Mirrors the
+/// forwarding priority in [`run`]: the packaged sibling wins when one exists,
+/// and the uv tool dir answers otherwise.
 pub fn resolved_python_script() -> Option<PathBuf> {
-    resolve_via_uv_tool_dir()
+    env::current_exe()
+        .ok()
+        .and_then(|exe| resolve_via_sibling(&exe).map(|(sibling, _)| sibling))
+        .or_else(resolve_via_uv_tool_dir)
+}
+
+/// Resolve the Python CLI packaged BESIDE this binary: a complete install
+/// ships `fno` and `fno-py` in one bin dir (the Homebrew keg bin, a pip/uv
+/// venv bin, the release wheel's scripts dir). Returns `(sibling, python)`:
+/// the adjacent `fno-py` and the interpreter its shebang names - the console
+/// script is generated with the absolute venv python, so that one path is the
+/// interpreter whose metadata can answer the identity probe. `None` when no
+/// adjacent `fno-py` is executable or its interpreter is unreadable; the
+/// caller then falls through to the uv tool dir. `exe` is a parameter so the
+/// resolution is testable; production passes [`std::env::current_exe`].
+fn resolve_via_sibling(exe: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = exe.parent()?;
+    let sibling = dir.join("fno-py");
+    if !is_executable(&sibling) {
+        return None;
+    }
+    let python = shebang_interpreter(&sibling)?;
+    Some((sibling, python))
+}
+
+/// The interpreter a console script's first line names. Only the ABSOLUTE
+/// form is trusted: pip and uv write `#!<venv>/bin/python`, which is exactly
+/// the verified-venv interpreter this probe needs. An `env`-form shebang or
+/// any interpreter that is not executable answers `None` - the caller falls
+/// through to the uv tool dir rather than probing with the wrong interpreter.
+fn shebang_interpreter(script: &Path) -> Option<PathBuf> {
+    let first = fs::read_to_string(script).ok()?.lines().next()?.to_string();
+    let rest = first.strip_prefix("#!")?;
+    let interp = rest.split_whitespace().next()?;
+    if interp.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(interp);
+    if path.file_name()?.to_str()? == "env" {
+        return None;
+    }
+    if is_executable(&path) {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1212,13 @@ fn verify_ours(real: &Path) -> BootResult<()> {
                  refusing to run an unverified fno.",
             )
         })?;
+    verify_ours_with_python(real, &venv_python)
+}
 
+/// [`verify_ours`] for a target whose interpreter is NOT the sibling `python`:
+/// the packaged-console-script case, where the shebang names the venv python
+/// absolutely. Same probe, same identity rule, different interpreter path.
+fn verify_ours_with_python(real: &Path, venv_python: &Path) -> BootResult<()> {
     // Fall back to `Author-email` when `Author` is absent: a PEP 621 author
     // with an email (`{name, email}`) makes the build backend emit only
     // `Author-email: Jason Noah Choi <...>` and drop the bare `Author` field.
@@ -2701,5 +2801,101 @@ mod tests {
     #[test]
     fn strip_ansi_leaves_plain_text() {
         assert_eq!(strip_ansi("/plain/path"), "/plain/path");
+    }
+
+    // -- x-538e: the packaged-sibling resolution arm ------------------------
+
+    fn write_script(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A fake interpreter that answers the identity probe as OUR package.
+    fn write_ours_python(path: &Path) {
+        write_script(
+            path,
+            "#!/bin/sh\n\
+             printf 'name=fno\\nauthor=Jason Noah Choi\\nversion=9.9.9\\n'\n",
+        );
+    }
+
+    #[test]
+    fn shebang_yields_the_absolute_interpreter() {
+        let root = env::temp_dir().join(format!("fno-shebang-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("fno-py");
+        let py = root.join("python");
+        write_ours_python(&py);
+        write_script(&script, &format!("#!{}\n", py.display()));
+
+        let got = shebang_interpreter(&script).expect("absolute shebang resolves");
+        assert_eq!(got, py);
+
+        // The `env` form names no venv interpreter, so it is not trusted.
+        write_script(&script, "#!/usr/bin/env python3\n");
+        assert!(shebang_interpreter(&script).is_none());
+
+        // No shebang at all: same answer.
+        write_script(&script, "print('hi')\n");
+        assert!(shebang_interpreter(&script).is_none());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sibling_resolution_needs_an_executable_neighbor() {
+        // `fno-py` absent, or present without a usable interpreter: no sibling
+        // arm, the caller falls through to the uv tool dir.
+        let root = env::temp_dir().join(format!("fno-sibling-{}", std::process::id()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("fno");
+        write_script(&exe, "#!/bin/sh\n");
+
+        assert!(resolve_via_sibling(&exe).is_none(), "no sibling yet");
+
+        let py = root.join("python");
+        write_ours_python(&py);
+        write_script(
+            &bin.join("fno-py"),
+            &format!("#!{}\nprint('real cli')\n", py.display()),
+        );
+        let (sibling, python) =
+            resolve_via_sibling(&exe).expect("executable sibling + real interpreter");
+        assert_eq!(sibling, bin.join("fno-py"));
+        assert_eq!(python, py);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_verified_sibling_is_accepted_and_a_stranger_refused() {
+        // The whole point of the arm: the adjacent CLI is forwarded to ONLY
+        // after the same identity probe the uv arm runs, keyed to the
+        // interpreter the shebang names - so a planted `fno-py` that answers
+        // as a stranger is refused, never exec'd, never provisioned over.
+        let root = env::temp_dir().join(format!("fno-sibver-{}", std::process::id()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("fno");
+        write_script(&exe, "#!/bin/sh\n");
+        let py = root.join("python");
+        write_ours_python(&py);
+        write_script(
+            &bin.join("fno-py"),
+            &format!("#!{}\nprint('cli')\n", py.display()),
+        );
+        let (sibling, python) = resolve_via_sibling(&exe).unwrap();
+        verify_ours_with_python(&sibling, &python).expect("our metadata verifies");
+
+        // Now the same fixture answers as a stranger.
+        write_script(
+            &py,
+            "#!/bin/sh\n\
+             printf 'name=fno\\nauthor=Someone Else\\nversion=0.0.1\\n'\n",
+        );
+        let e = verify_ours_with_python(&sibling, &python)
+            .expect_err("a verifiable stranger is refused");
+        assert!(e.stable, "a stranger's answer is final");
+        assert!(e.msg.contains("not this project's package"), "{}", e.msg);
+        fs::remove_dir_all(&root).ok();
     }
 }

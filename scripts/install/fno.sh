@@ -11,8 +11,8 @@
 #   1. ensure uv is present (chain to Astral's installer when absent, reuse an
 #      existing uv when present, resolve uv at its known path despite the piped-
 #      script PATH gap),
-#   2. `uv tool install fno` (the published PyPI platform wheel: the Python CLI
-#      plus the three fno-agents* binaries, bundled),
+#   2. `uv tool install fno` (the published PyPI platform wheel: the `fno`
+#      front door, the Python CLI, and the fno-agents* binaries, bundled),
 #   3. verify the installed package is THIS project's before declaring success,
 #   4. print success + the version verified, and when uv's tool bin is not yet
 #      on PATH, run `uv tool update-shell` to add it to the right shell profile
@@ -367,20 +367,57 @@ fno_real_within() {
 	done
 }
 
+# --- front-door receipt (x-538e, AC2-HP/AC2-EDGE) ---------------------------
+# Name the actual front-door path and PROVE both command families answer
+# through it: `mux ls` is native Rust (no Python), `--version` forwards to
+# fno-py (the adopt arm of the bootstrapper runs offline - the wheel is
+# already provisioned here). A missing or shadowed front door is a NAMED
+# incomplete install with the supported repair, never a success inferred from
+# uv's exit code. Runs from report_success on every completion path, so the
+# already-installed arm reports the front-door state too.
+frontdoor_receipt() {
+	# FNO_REAL is <tool dir>/fno/bin/fno-py (set by resolve_real before every
+	# report), so the front door sits beside it in the same venv bin.
+	_mux="$(dirname "$FNO_REAL")/fno"
+	[ -x "$_mux" ] || _mux="$FNO_TOOL_BIN/fno"
+	if [ ! -x "$_mux" ]; then
+		say "INCOMPLETE install: no 'fno' front door (looked for $_mux). The Python CLI works as 'fno-py'."
+		say "repair: install a release wheel that carries the front door, or run 'cargo install fno'."
+		return 1
+	fi
+	say "fno front door: $_mux"
+	if _out=$("$_mux" mux ls 2>&1); then
+		say "fno mux answers (mux ls rc=0)."
+	else
+		say "INCOMPLETE install: 'fno mux ls' failed at $_mux: $(printf '%s' "$_out" | head -n 1)"
+		return 1
+	fi
+	if _out=$("$_mux" --version 2>&1); then
+		say "fno --version forwarded to the Python CLI ($_out)."
+	else
+		say "INCOMPLETE install: 'fno --version' did not forward at $_mux: $(printf '%s' "$_out" | head -n 1)"
+		return 1
+	fi
+	return 0
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
-# make a later `fno-py`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
+# make a later `fno`/`fno-py` call resolvable rather than a bare 127 (AC3-UI).
 report_success() {
 	# A blank version must not print as one: the version is the one fact this
 	# line exists to carry (the twin of verified_receipt in bootstrap.rs).
 	[ -n "$FNO_VERIFIED_VERSION" ] || FNO_VERIFIED_VERSION="(version unreadable)"
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
+	# The advertised command is `fno`; its receipt proves the mux and the
+	# Python forwarding rather than trusting uv's exit (x-538e AC2-HP/EDGE).
+	frontdoor_receipt
 	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
 	# on PATH would otherwise suppress the fix, yet `fno` would run that other
 	# binary instead of the one just verified here (codex P2).
 	case ":${PATH:-}:" in
 		*":$FNO_TOOL_BIN:"*)
-			say "done. run 'fno-py --help' for the CLI (the 'fno' mux front door is a separate binary; see the cargo channel)."
+			say "done. run 'fno --help' for the CLI."
 			return 0
 			;;
 	esac

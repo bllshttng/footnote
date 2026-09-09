@@ -283,6 +283,8 @@ auto_register_sessions = false
 happy_routed_panes = false
 # Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.
 retire_grace_s = 900
+# Seconds between runs of the daemon's retirement sweep (default 300, a third of the retire grace). The Rust resolver clamps this under a third of agents.retire_grace_s: the interval must be a fraction of the grace, never a multiple, so an eligible row never waits past the grace window it retires inside. Unset, unparseable, or below the 5s daemon tick resolves to the default. The `retire` row in `fno agents status` carries the value the loop enforces.
+retire_interval_s = 300
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
 max_live = 3
 # Per-territory team cap: the max live workers whose node is contained in one crown scope, enforced in the spawn gate beside agents.max_live (the machine ceiling, which stays independent and authoritative). Rows that work no node (kings, blueprinters, ad-hoc panes) never count. Unknown territory attribution refuses; other-territory headroom is untouched (default 4).
@@ -331,6 +333,10 @@ harness = {}
 [agents.reap_receipts]
 # Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.
 retain_days = 7
+
+[agents.reap]
+# Which rows the roster sweep may retire: off retires nothing, provenanced (the default) only rows whose provenance resolves to fno and whose work is done, all widens to rows fno itself spawned (sessions or registry provenance) with open work. A row that resolves to no fno node is never retirable at any value, including all, so a session the operator started by hand is safe by construction. A present value that cannot be honored degrades in place to the default and is named by fno config doctor.
+roster_scope = "provenanced"
 
 [agents.codex]
 # Use full-yolo (drop sandbox) for headless codex workers.

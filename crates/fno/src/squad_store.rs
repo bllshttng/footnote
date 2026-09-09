@@ -3494,6 +3494,38 @@ mod tests {
         );
     }
 
+    /// (x-91eb) The keeper guard: a keeper-held worker's child is alive while
+    /// its registry row reads Dead, so a held spawn receipt must outrank the
+    /// dead row or an automatic sweep dead-names a live worker.
+    #[test]
+    fn a_held_receipt_blocks_a_dead_registry_row_from_dead_naming_a_live_worker() {
+        use std::collections::HashSet;
+        let dead_row = |name: &str| crate::agents_view::RegistryAgent {
+            name: name.into(),
+            harness: Some("codex".into()),
+            liveness: crate::agents_view::Liveness::Dead,
+            ..Default::default()
+        };
+        let held = || ["w-keeper".to_string()].into_iter().collect();
+        let mut guarded = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        guarded.fold_registry_rows(&[dead_row("w-keeper")], HashSet::new(), held(), true);
+        assert!(
+            !guarded.is_dead_name("w-keeper"),
+            "the held receipt is the live child: no dead name"
+        );
+        let mut unguarded = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        unguarded.fold_registry_rows(
+            &[dead_row("w-keeper")],
+            HashSet::new(),
+            HashSet::new(),
+            true,
+        );
+        assert!(
+            unguarded.is_dead_name("w-keeper"),
+            "control: without the receipt the dead row kills the name"
+        );
+    }
+
     /// (x-0d08) A cascade POSITIVE answer retires the name-only member; a
     /// name the cascade left unresolved, open, or held stays Unknown. The
     /// reuse guard is upstream (the caller folds live identities first),

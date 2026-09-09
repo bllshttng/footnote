@@ -116,36 +116,9 @@ Controls whether autonomous (unattended) target runs can run for this domain:
 
 Use `allow_claw: false` for domains with real-world consequences (trading, deployments) where human confirmation is critical.
 
-## Model Fallback Chain
+## Model Fallback
 
-Configure automatic model fallback when the primary model hits rate limits or errors:
-
-```yaml
-# In config.toml config section:
-config:
-  model_fallback:
-    chain:
-      - claude-opus-4-6      # primary
-      - claude-sonnet-4-6    # first fallback
-      - claude-haiku-4-5     # emergency fallback
-    retry_on:
-      - rate_limit            # 429
-      - overloaded            # 529
-      - timeout               # connection timeout
-    max_retries_per_model: 2  # tries per model before moving to next
-    cooldown_seconds: 60      # wait before retry on rate limit
-```
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `chain` | `[claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5]` | Ordered model preference |
-| `retry_on` | `[rate_limit, overloaded, timeout]` | Error types that trigger retry/fallback |
-| `max_retries_per_model` | `2` | Attempts per model before falling to next |
-| `cooldown_seconds` | `60` | Wait before retrying on rate limit |
-
-**Interactive (`/target`):** Presents the user with options (wait/switch/pause) via AskUserQuestion.
-
-**Autonomous (unattended):** The external loop script (`scripts/run-target-loop.sh`) handles fallback automatically - detects errors, waits cooldown, retries with `--model` flag, moves through the chain.
+There is no `config.model_fallback` block. Load [references/model-fallback.md](model-fallback.md) for the real interactive-mode boundary: presenting rate-limit/overload options via AskUserQuestion, never an automated chain, login, or model selection.
 
 ## Shell API
 

@@ -12,12 +12,13 @@ path keeps provider rotation and the spawn cap in play).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fno.evals import history as _history
 from fno.evals.bank import TaskSpec
@@ -28,10 +29,58 @@ from fno.evals.grading import GradeOutcome, grade
 class SpawnResult:
     ok: bool
     reason: str = ""
+    worker_name: str = ""  # set on the real spawn; read back for observe()
 
 
 # spawn(prompt, workdir, timeout_s) -> SpawnResult
 SpawnFn = Callable[[str, Path, int], SpawnResult]
+
+
+def _observe_worker(name: str) -> Optional[dict]:
+    """Registry identity, when a lookupable row exists (never for the default headless spawn)."""
+    try:
+        from fno.agents.registry import load_registry
+        for entry in load_registry():
+            if entry.name == name:
+                return {"harness": entry.harness, "model": entry.model,
+                        "model_basis": entry.model_basis, "effort": entry.effort,
+                        "harness_session_id": entry.harness_session_id}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *,
+                   attempted: bool = True, spawned: bool = True) -> dict[str, object]:
+    """Requested vs. observed config; a harness/model mismatch is ``substituted``.
+    No ``observed`` dict is one of three things: never attempted (grade-only,
+    ``not-applicable``), a real spawn failure (``unavailable``), or a spawn that
+    succeeded but left nothing to check - the default headless lane always -
+    which is ``unverified``, not a capacity refusal."""
+    if lane is None:
+        return {}
+    fields: dict[str, object] = {
+        "requested_lane": lane.name, "requested_harness": lane.harness,
+        "requested_model": lane.model, "requested_effort": lane.effort,
+    }
+    if observed is None:
+        if not attempted:
+            fields["lane_status"] = "not-applicable"
+        elif not spawned:
+            fields["lane_status"] = "unavailable"
+        else:
+            fields["lane_status"] = "unverified"
+        return fields
+    fields.update(
+        observed_harness=observed.get("harness"), observed_model=observed.get("model"),
+        observed_model_basis=observed.get("model_basis"), observed_effort=observed.get("effort"),
+        observed_session_id=observed.get("harness_session_id"),
+    )
+    substituted = (bool(lane.harness) and observed.get("harness") != lane.harness) or (
+        bool(lane.model) and observed.get("model") != lane.model)
+    fields["substituted"] = substituted
+    fields["lane_status"] = "substituted" if substituted else "ok"
+    return fields
 
 
 @dataclass(frozen=True)
@@ -42,6 +91,13 @@ class RunResult:
     reason: str
     duration_s: float
     repeat_index: int
+    variant: str = "baseline"
+
+
+VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
+
+#: The implicit round of rows written before the variant axis existed.
+BASELINE = "baseline"
 
 
 def _now_iso() -> str:
@@ -83,21 +139,26 @@ def _git_rev(repo_root: Path, ref: str) -> Optional[str]:
 
 
 def _default_spawn(
-    prompt: str, workdir: Path, timeout_s: int, *, provider: Optional[str] = None
+    prompt: str, workdir: Path, timeout_s: int, *,
+    provider: Optional[str] = None, lane: Optional[Any] = None
 ) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
-
-    A non-zero exit, a missing binary, or a timeout is a *graded failure*
-    (SpawnResult.ok == False), never a crash of the sweep (AC3-ERR).
-    """
+    A non-zero exit, missing binary, or timeout is a graded failure, never a
+    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*."""
     name = f"eval-{os.getpid()}-{int(time.time())}"
     cmd = [
         "fno", "agents", "spawn", "--name", name,
         "--substrate", "headless", "--cwd", str(workdir),
         "--timeout", str(timeout_s),
     ]
-    if provider:
-        cmd += ["--harness", provider]
+    harness = (lane.harness if lane else None) or provider
+    if harness:
+        cmd += ["--harness", harness]
+    if lane:
+        for flag, val in (("--model", lane.model), ("--effort", lane.effort),
+                          ("--route", lane.route), ("--account", lane.account)):
+            if val:
+                cmd += [flag, val]
     # Behind `--` (fno's own click parser honors it, verified both
     # directions): a leading-flag seed must be the prompt positional.
     cmd += ["--", prompt]
@@ -111,8 +172,8 @@ def _default_spawn(
         return SpawnResult(False, f"spawn error: {exc}")
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
-        return SpawnResult(False, f"spawn exit {proc.returncode}: {tail[0]}")
-    return SpawnResult(True)
+        return SpawnResult(False, f"spawn exit {proc.returncode}: {tail[0]}", worker_name=name)
+    return SpawnResult(True, worker_name=name)
 
 
 def _make_disposable_worktree(repo_root: Path, ref: str, tag: str) -> Path:
@@ -180,23 +241,38 @@ def run_task(
     spawn: Optional[SpawnFn] = None,
     history_path: Optional[Path] = None,
     worker_provider: Optional[str] = None,
+    variant: str = "baseline",
+    variant_ref: Optional[str] = None,
+    lane: Optional[Any] = None,
+    experiment_id: Optional[str] = None,
+    observe: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per run.
+    Each run: fresh disposable worktree -> optional worker (skipped for a
+    grade-only task) -> mechanical grade -> history row -> worktree removed.
+    A worker-spawn failure is a graded fail; the remaining repeats still run.
+    A requested *lane* records the requested coordinate; *observe* (default
+    _observe_worker) reads back what ran. *experiment_id* is an opaque
+    cohort tag recorded on the row."""
+    if not VARIANT_RE.match(variant):
+        raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
+    if variant == BASELINE:
+        if variant_ref is not None:
+            raise ValueError("variant_ref is not allowed when variant is baseline")
+        variant_ref = task.repo_fixture
+    elif variant_ref is None:
+        raise ValueError(f"variant_ref is required when variant is {variant!r}")
+    checkout_ref = variant_ref
 
-    Each run: fresh disposable worktree at ``task.repo_fixture`` -> optional
-    worker (skipped for a grade-only task) -> mechanical grade -> history row ->
-    worktree removed (Invariant: removed after grading). A worker-spawn failure
-    is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
-    """
-    # When no spawn is injected, bind the worker provider into the default spawn
-    # so --provider actually routes the headless worker (not just logged).
+    # No injected spawn: bind provider/lane so they actually route the worker.
     spawn_fn = spawn or (
-        lambda p, w, t: _default_spawn(p, w, t, provider=worker_provider)
+        lambda p, w, t: _default_spawn(p, w, t, provider=worker_provider, lane=lane)
     )
+    observe_fn = observe or _observe_worker
     if history_path is None:
         from fno import paths as _paths
         history_path = _paths.evals_history()
-    bank_rev = _git_rev(repo_root, task.repo_fixture)
+    bank_rev = _git_rev(repo_root, checkout_ref)
     timeout_s = max(1, task.timeout_minutes * 60)
     results: list[RunResult] = []
 
@@ -205,11 +281,13 @@ def run_task(
         reason = ""
         outcome: Optional[GradeOutcome] = None
         workdir: Optional[Path] = None
+        worker_name = ""
+        spawned = False
         try:
-            workdir = _make_disposable_worktree(repo_root, task.repo_fixture, task.id)
+            workdir = _make_disposable_worktree(repo_root, checkout_ref, task.id)
         except subprocess.CalledProcessError as exc:
             # Fixture checkout failed: graded fail with a drift hint, not a crash.
-            reason = f"fixture checkout failed ({task.repo_fixture}); fixture drift? {exc.stderr or ''}".strip()
+            reason = f"fixture checkout failed ({checkout_ref}); fixture drift? {exc.stderr or ''}".strip()
 
         if workdir is not None:
             if task.prompt and spawn is None and not evals_enabled():
@@ -219,19 +297,26 @@ def run_task(
                 reason = "config.evals.enabled is false"
             elif task.prompt:
                 spawn_res = spawn_fn(task.prompt, workdir, timeout_s)
+                worker_name = spawn_res.worker_name
                 if not spawn_res.ok:
                     reason = spawn_res.reason
+                else:
+                    spawned = True
             if not reason:
                 outcome = grade(task, workdir)
                 if not outcome.passed:
                     reason = outcome.reason
             _remove_worktree(repo_root, workdir)
 
+        observed = observe_fn(worker_name) if spawned and worker_name else None
+        lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt), spawned=spawned)
+
         duration = round(time.monotonic() - started, 3)
         passed = outcome is not None and outcome.passed
         results.append(RunResult(
             task_id=task.id, tier=task.tier, passed=passed,
             reason="" if passed else reason, duration_s=duration, repeat_index=i,
+            variant=variant,
         ))
         _history.append_row(history_path, {
             "ts": _now_iso(),
@@ -243,6 +328,9 @@ def run_task(
             "repeat_index": i,
             "bank_rev": bank_rev,
             "worker_provider": worker_provider,
+            "variant": variant,
+            "experiment_id": experiment_id,
+            **lane_evidence,
         })
 
     return results

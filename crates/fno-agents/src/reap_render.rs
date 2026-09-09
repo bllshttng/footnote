@@ -236,32 +236,165 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
 /// identity, its observed surfaces, and the source coverage that says how
 /// complete the enumeration is. `None` renders exactly like
 /// [`render_reap`].
+///
+/// `mux` (x-91eb) is the second surface this verb sweeps: the mux tab
+/// sideline through `fno mux workspace prune --tabs-only
+/// --include-used-shells`. It renders in one of three distinguishable states
+/// - ran, unread, skipped - in both the JSON object and the human receipt.
 pub fn render_reap_with_inventory(
     summary: &GcSummary,
     inventory: Option<&crate::gc_inventory::Inventory>,
+    mux: Option<&MuxSweep>,
     json_out: bool,
     dry_run: bool,
 ) -> String {
     let base = render_reap(summary, json_out, dry_run);
-    let Some(inv) = inventory else {
+    let Some(mux) = mux else {
         return base;
     };
     if !json_out {
-        return base;
+        return format!("{base}{}", mux_sweep_text_line(mux, dry_run));
     }
-    // Splice the census into the summary object: one JSON read carries both
-    // the would-retire verdicts and the world they were judged against.
+    // Splice the census and the mux half into the summary object: one JSON
+    // read carries both the would-retire verdicts and the world they were
+    // judged against.
     let mut value: Value = match serde_json::from_str(base.trim()) {
         Ok(v) => v,
         Err(_) => return base,
     };
     if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "inventory".into(),
-            serde_json::to_value(inv).unwrap_or(Value::Null),
-        );
+        if let Some(inv) = inventory {
+            obj.insert(
+                "inventory".into(),
+                serde_json::to_value(inv).unwrap_or(Value::Null),
+            );
+        }
+        obj.insert("mux".into(), mux_sweep_json(mux));
     }
     format!("{}\n", value)
+}
+
+/// The parsed receipt of one `fno mux workspace prune --json` reading: the
+/// tab fold's outcome, named per tab, plus the sessions that never answered
+/// the pane probe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PruneReceipt {
+    pub closed: usize,
+    pub would_close: usize,
+    pub close_named: Vec<String>,
+    pub sessions_unreachable: Vec<String>,
+    pub notice: Option<String>,
+}
+
+/// Parse the prune verb's JSON receipt, fail-closed: `None` over a zeroed
+/// report. An unparsable stdout must never read as a clean zero - the same
+/// rule `parse_stale_sweep` (daemon.rs) already states (AC3-EDGE).
+pub fn parse_prune_receipt(stdout: &str) -> Option<PruneReceipt> {
+    let line = stdout
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with('{'))?;
+    let v: Value = serde_json::from_str(line).ok()?;
+    let count = |k: &str| -> Option<usize> { usize::try_from(v.get(k)?.as_u64()?).ok() };
+    let names = |k: &str| -> Option<Vec<String>> {
+        Some(
+            v.get(k)?
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect(),
+        )
+    };
+    Some(PruneReceipt {
+        closed: count("tabs_closed")?,
+        would_close: count("tabs_would_close")?,
+        close_named: names("tabs_close_named")?,
+        sessions_unreachable: names("sessions_unreachable")?,
+        notice: v.get("notice").and_then(|n| n.as_str()).map(String::from),
+    })
+}
+
+/// The mux half of one reap pass (x-91eb), in one of three distinguishable
+/// states. `Unread` carries no count field at all, so an unparsable sweep can
+/// never render as a measured zero; `Skipped` names the flag that asked for
+/// it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MuxSweep {
+    Ran {
+        receipt: PruneReceipt,
+    },
+    Unread {
+        exit_code: Option<i32>,
+        stderr_first: String,
+    },
+    Skipped,
+}
+
+impl MuxSweep {
+    pub fn state(&self) -> &'static str {
+        match self {
+            MuxSweep::Ran { .. } => "ran",
+            MuxSweep::Unread { .. } => "unread",
+            MuxSweep::Skipped => "skipped",
+        }
+    }
+}
+
+/// The `mux` object spliced into the reap JSON receipt. `would_close` exists
+/// only in the `ran` state (the plan's readers assert its ABSENCE elsewhere).
+pub fn mux_sweep_json(mux: &MuxSweep) -> Value {
+    match mux {
+        MuxSweep::Ran { receipt } => json!({
+            "state": "ran",
+            "closed": receipt.closed,
+            "would_close": receipt.would_close,
+            "tabs_close_named": receipt.close_named,
+            "sessions_unreachable": receipt.sessions_unreachable,
+            "notice": receipt.notice,
+        }),
+        MuxSweep::Unread {
+            exit_code,
+            stderr_first,
+        } => json!({
+            "state": "unread",
+            "exit_code": exit_code,
+            "stderr_first": stderr_first,
+        }),
+        MuxSweep::Skipped => json!({"state": "skipped"}),
+    }
+}
+
+/// The one human-receipt line for the mux half: the closed (or would-close)
+/// count plus every label, or the reason the half could not be read, or the
+/// flag that skipped it.
+pub fn mux_sweep_text_line(mux: &MuxSweep, dry_run: bool) -> String {
+    match mux {
+        MuxSweep::Ran { receipt } => {
+            let verb = if dry_run { "would close" } else { "closed" };
+            let count = if dry_run {
+                receipt.would_close
+            } else {
+                receipt.closed
+            };
+            let mut line = format!("mux sweep (ran): {verb} {count} tab(s)");
+            if !receipt.close_named.is_empty() {
+                line.push_str(": ");
+                line.push_str(&receipt.close_named.join("; "));
+            }
+            if let Some(notice) = &receipt.notice {
+                line.push_str(&format!(" (notice: {notice})"));
+            }
+            format!("{line}\n")
+        }
+        MuxSweep::Unread {
+            exit_code,
+            stderr_first,
+        } => match exit_code {
+            Some(code) => format!("mux sweep (unread): exit {code}: {stderr_first}\n"),
+            None => format!("mux sweep (unread): {stderr_first}\n"),
+        },
+        MuxSweep::Skipped => "mux sweep (skipped by --no-mux)\n".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -444,5 +577,121 @@ mod tests {
                 assert!(!text.contains(word), "{word} leaked into: {text}");
             }
         }
+    }
+
+    fn ran_receipt() -> MuxSweep {
+        MuxSweep::Ran {
+            receipt: PruneReceipt {
+                closed: 2,
+                would_close: 0,
+                close_named: vec!["main / squad 1 / \u{201c}ghost\u{201d} (tab 4)".into()],
+                sessions_unreachable: vec![],
+                notice: None,
+            },
+        }
+    }
+
+    #[test]
+    fn the_mux_half_renders_in_three_distinguishable_states() {
+        let unread = MuxSweep::Unread {
+            exit_code: Some(1),
+            stderr_first: "socket refused".into(),
+        };
+        for (mux, dry) in [
+            (ran_receipt(), false),
+            (ran_receipt(), true),
+            (unread, false),
+            (MuxSweep::Skipped, false),
+        ] {
+            let text = render_reap_with_inventory(&summary(&[]), None, Some(&mux), false, dry);
+            assert!(
+                text.contains(mux.state()),
+                "text names the state {:?}: {text}",
+                mux.state()
+            );
+            let out = render_reap_with_inventory(&summary(&[]), None, Some(&mux), true, dry);
+            let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+            let m = v.get("mux").expect("mux object present in every mode");
+            assert_eq!(m["state"], json!(mux.state()), "state word: {m}");
+        }
+    }
+
+    #[test]
+    fn the_ran_state_names_the_tabs_it_closed_with_their_labels() {
+        for (dry, count) in [(false, 2), (true, 0)] {
+            let out =
+                render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), true, dry);
+            let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+            assert_eq!(v["mux"]["closed"], json!(2));
+            assert_eq!(v["mux"]["would_close"], json!(0));
+            assert_eq!(
+                v["mux"]["tabs_close_named"],
+                json!(["main / squad 1 / \u{201c}ghost\u{201d} (tab 4)"]),
+                "the labels ride the JSON: the operator judges the pass"
+            );
+            let text =
+                render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), false, dry);
+            assert!(text.contains("ghost"), "the label rides the text: {text}");
+        }
+    }
+
+    #[test]
+    fn the_unread_state_never_carries_a_count() {
+        // AC3-EDGE: an unparsable sweep is `unread`, never a measured zero -
+        // would_close must be ABSENT, not 0 (the plan's reader asserts it).
+        let out = render_reap_with_inventory(
+            &summary(&[]),
+            None,
+            Some(&MuxSweep::Unread {
+                exit_code: Some(1),
+                stderr_first: "boom".into(),
+            }),
+            true,
+            false,
+        );
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        let m = v["mux"].as_object().expect("mux object");
+        assert_eq!(m["state"], json!("unread"));
+        assert!(!m.contains_key("would_close"), "{m:?}");
+        assert!(!m.contains_key("closed"), "{m:?}");
+        assert_eq!(m["exit_code"], json!(1));
+        let text = render_reap_with_inventory(
+            &summary(&[]),
+            None,
+            Some(&MuxSweep::Unread {
+                exit_code: None,
+                stderr_first: "No such file or directory".into(),
+            }),
+            false,
+            false,
+        );
+        assert!(
+            text.contains("No such file or directory"),
+            "the spawn failure rides the text line: {text}"
+        );
+    }
+
+    #[test]
+    fn parse_prune_receipt_fails_closed_on_garbage_and_reads_the_real_keys() {
+        // (x-91eb) None over a zeroed report: garbage stdout and a receipt
+        // missing the tab counts parse as None; the real verb's keys parse
+        // into the receipt.
+        assert_eq!(parse_prune_receipt("nothing to prune"), None);
+        assert_eq!(parse_prune_receipt("{\"tabs_kept\": 5}"), None);
+        let receipt = parse_prune_receipt(
+            "{\"tabs_closed\": 1, \"tabs_would_close\": 0, \
+             \"tabs_close_named\": [\"s / q / tab 2\"], \
+             \"sessions_unreachable\": [\"dead-host\"], \
+             \"notice\": \"server liveness incomplete\"}",
+        )
+        .expect("the real shape parses");
+        assert_eq!(receipt.closed, 1);
+        assert_eq!(receipt.would_close, 0);
+        assert_eq!(receipt.close_named, vec!["s / q / tab 2".to_string()]);
+        assert_eq!(receipt.sessions_unreachable, vec!["dead-host".to_string()]);
+        assert_eq!(
+            receipt.notice.as_deref(),
+            Some("server liveness incomplete")
+        );
     }
 }

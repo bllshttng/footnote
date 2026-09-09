@@ -6,6 +6,7 @@ rejected naming the id and file, and an all-trivial grade warns.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,3 +149,40 @@ def test_seed_bank_new_eval_tasks_load() -> None:
     assert growth is not None, "growth-launch-bundle task missing from bank"
     assert growth.tier == "capability"
     assert growth.prompt  # prompt-bearing; the seven requirements live in it
+
+
+# --------------------------------------------------------------------------- #
+# lane resolution (x-fd52 AC1-HP/AC1-ERR): join a NAME against the existing
+# config.routing.models inventory - never a second model/effort enum.
+# --------------------------------------------------------------------------- #
+
+def _settings(*rows: dict) -> SimpleNamespace:
+    return SimpleNamespace(routing=SimpleNamespace(
+        models=[SimpleNamespace(**{"name": "", "harness": "", "model": "",
+                                    "effort": "", "route": "", "account": "", **r})
+                for r in rows]
+    ))
+
+
+def test_resolve_lane_reads_matching_routing_models_row() -> None:
+    settings = _settings({"name": "astra-high", "harness": "codex",
+                          "model": "gpt-6-astra", "effort": "high"})
+    coord = bank.resolve_lane("astra-high", settings=settings)
+    assert coord.name == "astra-high"
+    assert coord.harness == "codex"
+    assert coord.model == "gpt-6-astra"
+    assert coord.effort == "high"
+
+
+def test_resolve_lane_later_row_overrides_earlier_same_name() -> None:
+    settings = _settings(
+        {"name": "astra-high", "harness": "codex", "effort": "medium"},
+        {"name": "astra-high", "effort": "high"},
+    )
+    assert bank.resolve_lane("astra-high", settings=settings).effort == "high"
+
+
+def test_resolve_lane_unknown_name_raises_naming_known_lanes() -> None:
+    settings = _settings({"name": "astra-high"}, {"name": "sol-low"})
+    with pytest.raises(bank.LaneError, match=r"astra-high.*sol-low|sol-low.*astra-high"):
+        bank.resolve_lane("no-such-lane", settings=settings)

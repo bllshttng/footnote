@@ -187,7 +187,11 @@ pub(super) async fn run_reap() -> String {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
-        .args(["reap", "--json"])
+        // (x-91eb) --no-mux keeps this gesture on its registry-row contract:
+        // the 20s bound kills only the direct child, so a mux tab sweep that
+        // outlives it would keep closing visible tabs detached. That half
+        // needs the operator verb, which has no fixed bound.
+        .args(["reap", "--json", "--no-mux"])
         // (x-f191) The bounded caller reads partial stderr on a timeout; the
         // env asks the sweep for its per-row progress lines. A sweep run
         // without a reader (the daemon's idle tick) stays silent.

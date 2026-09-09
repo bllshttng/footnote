@@ -245,6 +245,16 @@ exit 1 names the unreadable source. `fno config active-backlog-territories`
 missions, king or kingless state, live count against the cap, and the
 standing blueprinter's handle. Both are read-only.
 
+## A dispatch outcome is dispatched, skipped, or failed
+
+Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, king share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.
+
+The refusal must name its own cause. The gate prints warnings before its verdict, so the last human-readable line before a bare exit code can name an unrelated condition. The consumer therefore carries the gate's own refusal sentence (the last `spawn-gate:` line) beside the code. A reader of the arm output or the journal sees the axis and the numbers, never the warning.
+
+The failure streak follows the same rule in both legs. `cli/src/fno/graph/failure.py` owns the durable streak. Only a node failure counts, only a node close or undefer resets. A dispatch refusal never touches it either way. Charging it parks healthy rows. Resetting it lets a broken node launder its streak by waiting for a busy minute. The in-memory breaker in `crates/fno-agents/src/active_backlog.rs` reads the `skipped` decision the Python dispatcher emits and leaves the streak alone. A tripped breaker names the last failure in its defer reason.
+
+When in doubt, fail toward leaving the row ready. A node fault misread as capacity retries every pass in plain sight. The journal fills with skips and the row sits at the top of the queue. The reverse misreading parks the row and quiets the board, and nobody sees the loss. The exit-code family is closed and every member is emitted before any node work begins, so the visible failure is bounded.
+
 ## Selection-time enforcement (node claims)
 
 `node:<id>` claims are the cross-session mutex that stops two `/target`

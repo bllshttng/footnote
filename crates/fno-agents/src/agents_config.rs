@@ -335,6 +335,45 @@ pub fn retire_grace_secs(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_RETIRE_GRACE_SECS)
 }
 
+/// Default retirement-sweep cadence: a third of the 900s retire grace, so a
+/// done-and-quiet row waits at most one interval past eligibility while the
+/// sweep samples far slower than the state it detects (x-d354). The rule the
+/// clamp enforces: the interval is a FRACTION of grace, never a multiple.
+pub const DEFAULT_RETIRE_INTERVAL_SECS: u64 = 300;
+/// Floor: the daemon tick itself is 5s, so anything smaller re-creates the
+/// every-tick sweep the interval exists to prevent. Unset, unparseable, or
+/// below this coerces to [`DEFAULT_RETIRE_INTERVAL_SECS`].
+pub const MIN_RETIRE_INTERVAL_SECS: u64 = 5;
+
+/// Resolve the retirement sweep's cadence, same precedence + fail-open
+/// degrade as [`retire_grace_secs`]. `grace_secs` is the retire grace the
+/// sweep resolves beside it: the result is clamped under grace/3, so a
+/// configured 1800 against a 900 grace can never leave an eligible row
+/// waiting longer than the grace window it retires inside.
+/// `$FNO_AGENTS_RETIRE_INTERVAL_SECS` is a global test/tuning override.
+pub fn retire_interval_s(cwd: &Path, grace_secs: u64) -> u64 {
+    let configured = if let Some(v) = non_empty_env("FNO_AGENTS_RETIRE_INTERVAL_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    {
+        v
+    } else {
+        resolve(cwd, |t| {
+            t.get("agents")?
+                .as_table()?
+                .get("retire_interval_s")?
+                .as_integer()
+                .and_then(|i| u64::try_from(i).ok())
+        })
+        .unwrap_or(DEFAULT_RETIRE_INTERVAL_SECS)
+    };
+    let configured = if configured < MIN_RETIRE_INTERVAL_SECS {
+        DEFAULT_RETIRE_INTERVAL_SECS
+    } else {
+        configured
+    };
+    configured.min((grace_secs / 3).max(MIN_RETIRE_INTERVAL_SECS))
+}
+
 /// Default orphan-reap age guard: 15 minutes. Every measured zombie-leak
 /// specimen was over three hours old; a younger deps binary may be a live run.
 pub const DEFAULT_ORPHAN_MIN_ELAPSED_SECS: u64 = 900;
@@ -367,6 +406,50 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
             .and_then(|i| u64::try_from(i).ok())
     })
     .unwrap_or(DEFAULT_REAP_RECEIPT_RETAIN_DAYS)
+}
+
+/// Which rows the roster-side sweep may retire. `Provenanced` is
+/// today's behavior: only rows whose provenance resolves and whose work is
+/// done. `All` widens to resolved rows with open work. `Off` retires nothing.
+/// The one rule no value can cross: a row that resolves to no fno node is
+/// never retirable, so an operator's hand-started session is safe by
+/// construction, not by default value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterScope {
+    Off,
+    Provenanced,
+    All,
+}
+
+pub const DEFAULT_ROSTER_SCOPE: RosterScope = RosterScope::Provenanced;
+
+fn table_roster_scope(t: &toml::Table) -> Option<RosterScope> {
+    let value = t
+        .get("agents")?
+        .as_table()?
+        .get("reap")?
+        .as_table()?
+        .get("roster_scope")?;
+    // A PRESENT value that cannot be honored - an unknown string, or a
+    // non-string scalar - degrades here, in the file that holds it, so it
+    // cannot fall through to a lower-precedence file and resurrect a wider
+    // scope behind a mistyped local one.
+    let Some(raw) = value.as_str() else {
+        return Some(DEFAULT_ROSTER_SCOPE);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(RosterScope::Off),
+        "all" => Some(RosterScope::All),
+        "provenanced" => Some(RosterScope::Provenanced),
+        _ => Some(DEFAULT_ROSTER_SCOPE),
+    }
+}
+
+/// Resolve `agents.reap.roster_scope`. An absent key falls through the
+/// precedence chain to the default; an unparseable value degrades to the
+/// default - a config typo widens nothing and disables nothing.
+pub fn roster_scope(cwd: &Path) -> RosterScope {
+    resolve(cwd, table_roster_scope).unwrap_or(DEFAULT_ROSTER_SCOPE)
 }
 
 // --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
@@ -788,6 +871,12 @@ pub(crate) fn read_mux_bool(content: &str, key: &str) -> Option<bool> {
     table_mux_bool(&parse_config(content)?, key)
 }
 
+/// `agents.reap.roster_scope` from a config.toml body.
+#[cfg(test)]
+pub(crate) fn read_roster_scope(content: &str) -> Option<RosterScope> {
+    table_roster_scope(&parse_config(content)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +982,61 @@ mod tests {
         // prefix keys must not match without an exact key.
         let prefix = "[agents]\nmax_live_extra = 9\n";
         assert_eq!(read_agents_value(prefix, "max_live"), None);
+    }
+
+    #[test]
+    fn roster_scope_absent_is_none_and_resolves_to_the_default() {
+        // No agents.reap block -> the resolver's unwrap_or decides.
+        assert_eq!(read_roster_scope("schema_version = 1\n"), None);
+        assert_eq!(
+            roster_scope(Path::new("/nonexistent-roster-scope")),
+            DEFAULT_ROSTER_SCOPE
+        );
+    }
+
+    #[test]
+    fn roster_scope_reads_each_value() {
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"off\"\n"),
+            Some(RosterScope::Off)
+        );
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"all\"\n"),
+            Some(RosterScope::All)
+        );
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"provenanced\"\n"),
+            Some(RosterScope::Provenanced)
+        );
+        // Case and padding are spelling, not value.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \" ALL \"\n"),
+            Some(RosterScope::All)
+        );
+    }
+
+    #[test]
+    fn roster_scope_unknown_value_degrades_in_place_to_the_default() {
+        // An unknown value must not fall through to a lower-precedence file,
+        // and must not widen or disable the sweep.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"banana\"\n"),
+            Some(DEFAULT_ROSTER_SCOPE)
+        );
+        // A present non-string value degrades the same way: absence is the
+        // only shape that reads a lower-precedence file.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = 7\n"),
+            Some(DEFAULT_ROSTER_SCOPE)
+        );
+    }
+
+    #[test]
+    fn roster_scope_ignores_wrong_blocks_and_sibling_keys() {
+        // A top-level [reap] block is not agents.reap.
+        assert_eq!(read_roster_scope("[reap]\nroster_scope = \"all\"\n"), None);
+        // A sibling key inside agents.reap does not answer for roster_scope.
+        assert_eq!(read_roster_scope("[agents.reap]\nretain_days = 3\n"), None);
     }
 
     #[test]
@@ -1027,6 +1171,70 @@ mod tests {
         let f = dir.join("explicit.toml");
         std::fs::write(&f, body).unwrap();
         f
+    }
+
+    // --- retirement sweep cadence (x-d354) -------------------------------
+
+    #[test]
+    fn retirement_sweep_interval_defaults_to_a_third_of_grace() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("retire-interval-default", "schema_version = 1\n");
+        assert_eq!(retire_interval_s(&cwd, 900), 300);
+    }
+
+    #[test]
+    fn retirement_sweep_interval_clamps_to_a_fraction_of_grace() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "retire-interval-clamp",
+            "[agents]\nretire_interval_s = 1800\n",
+        );
+        assert_eq!(retire_interval_s(&cwd, 900), 300);
+    }
+
+    #[test]
+    fn retirement_sweep_interval_never_allows_the_every_tick_bug() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let zero =
+            write_project_settings("retire-interval-zero", "[agents]\nretire_interval_s = 0\n");
+        assert_eq!(retire_interval_s(&zero, 900), 300);
+        let garbage = write_project_settings(
+            "retire-interval-garbage",
+            "[agents]\nretire_interval_s = \"banana\"\n",
+        );
+        assert_eq!(retire_interval_s(&garbage, 900), 300);
+    }
+
+    #[test]
+    fn retirement_sweep_interval_env_override_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        std::env::set_var("FNO_AGENTS_RETIRE_INTERVAL_SECS", "30");
+        let cwd = write_project_settings("retire-interval-env", "schema_version = 1\n");
+        assert_eq!(retire_interval_s(&cwd, 900), 30);
+        std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
+    }
+
+    #[test]
+    fn retirement_sweep_interval_stays_under_the_grace_it_serves() {
+        // A row must retire within one interval of becoming eligible: the
+        // default interval is a strict fraction of the default grace.
+        assert!(DEFAULT_RETIRE_INTERVAL_SECS * 3 <= DEFAULT_RETIRE_GRACE_SECS);
+    }
+
+    #[test]
+    fn retirement_sweep_interval_below_floor_still_clamped_by_grace() {
+        // The below-floor substitution feeds the clamp, never bypasses it:
+        // a 30s grace bounds the interval at 10s even when the configured
+        // value resolves to the default.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("retire-interval-zero-short-grace", "schema_version = 1\n");
+        assert_eq!(retire_interval_s(&cwd, 30), 10);
     }
 
     #[test]

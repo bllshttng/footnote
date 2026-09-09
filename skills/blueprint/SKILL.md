@@ -154,7 +154,7 @@ fi
 
 2b-bis. **Answerer enumeration** - every plan that changes a read, write, or feed. Run [references/answerer-enumeration.md](references/answerer-enumeration.md)'s four steps: phrase the question in one line, enumerate every answerer (sites repo-wide, feeds measured at each site the plan changes), state the count as the PR estimate, and dispose of every answerer in principle 9's vocabulary. Record the outcome as a `surface:` frontmatter block (schema: [references/quick-template.md](references/quick-template.md)); `validate-plan.sh` refuses a post-2026-09-03 non-quick plan without one. The step sits here, before the Consolidation Gate (2d), because the order is load-bearing: enumerating answerers finds sibling SITES, consolidation finds sibling NODES, and a question with four answerers often already has two nodes filed against it. Sweeping first is what lets 2d see them.
 
-2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`, and `superseded_by` when set), `closure` for the resolved node (`status`, `pr_number`, `superseded_by`), and `decisions` (the node's own live rulings, newest first, each row carrying `decision_id`, `ts`, `lane`, `subject`, a truncated `text`; a failed read shows in `decisions_status`/`decisions_detail` rather than reading as "no rulings"). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. A candidate carrying `superseded_by` is a dead row, never a live fold target; that field settles liveness where the score does not. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions.
+2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`, and `superseded_by` when set), `closure` for the resolved node (`status`, `pr_number`, `superseded_by`), and `decisions` (the node's own live rulings, newest first, each row carrying `decision_id`, `ts`, `lane`, `subject`, a truncated `text`; a failed read shows in `decisions_status`/`decisions_detail` rather than reading as "no rulings"). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. A candidate carrying `superseded_by` is a dead row, never a live fold target; that field settles liveness where the score does not. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions. On the design-doc path, pass the doc's title and body as the seed, not a phrase: recall tracks seed width, so ten tokens rank noise while the same node's title plus details ranks the true family. Read `graph.recall.lane` alongside `duplicates`: when it reads `seed` and the list is empty, that is not a measured zero, so run `fno backlog find "<2-3 salient terms>"` before recording `proceed_alone` against nothing. Picking that short salient query is the reader's job; the receipt cannot do it for you.
 
    When `graph.closure.status` is `done` or `superseded`, halt before compiling. Report the closure fields. Do not finalize `status: ready` onto work that already shipped.
 
@@ -551,21 +551,16 @@ When the plan is stamped `source: claude-plan-mode`, the front door owns the dis
 
 Relay the receipt line it prints (`epic <id>: dispatched N, skipped M` / `dispatched <node>` / `skipped reason=...`; `--json` for the full dispatched id list) to the user. A refused or held advance is non-fatal: the plan stays intact and the node stays `ready` for a manual `/target bg <node>`. Never spawn the worker yourself and never add a blueprint-specific scheduler or spawn fallback.
 
-## When to redirect to /think
+## A missing supplied path fails loudly
 
-If the argument to `/blueprint` does NOT look like a file path, redirect immediately:
+A string is classified as a path (not a feature description) when it:
+- Contains `/`
+- Ends in `.md`
+- Starts with `~`, `./`, `../`, or `/`
 
-```
-No design doc found. Run `/think "<feature>"` first, then `/blueprint <resulting-doc-path>`.
-Or invoke `/target` for the full chain.
-```
+A path-shaped argument that does not exist on disk exits 1 with "file not found" naming the path - never a silent fall-through to raw-description mode. A typo in a supplied path is a loud refusal, not a guess.
 
-A string is treated as a feature description (not a path) when it:
-- Does not contain `/`
-- Does not end in `.md`
-- Does not start with `~`, `./`, `../`, or `/`
-
-A path that looks like a path but does not exist on disk also triggers this redirect (exit 1) rather than falling through to raw-description mode. This is deliberate: a typo in a path gets a loud "file not found" rather than silently treating the argument as a description.
+A NON-path-shaped argument is a raw feature description, not a missing-doc case: it runs [Single-doc creation](#single-doc-creation-idea-input), which self-grounds through step 2b's discovery gate (`fno do think inspect` + [references/discovery-gate.md](references/discovery-gate.md)). This never redirects to `/think` as a prerequisite - `/think` is a deliberate escalation step 2b takes only when the receipt shows the plan needs deeper investigation than 3-5 questions can ground.
 
 ## Gotchas
 
