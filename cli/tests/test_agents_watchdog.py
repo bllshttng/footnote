@@ -24,6 +24,7 @@ from fno.agents.watchdog import (
     GHOST,
     LEAVE,
     REROUTE,
+    SANDBOX_BLOCKED,
     Row,
     STALE,
     TailFacts,
@@ -3402,6 +3403,257 @@ def test_the_advisory_reaches_the_digest():
         "terminal_harness_rows": 0,
     }
     assert "t-worker" in digest_text(payload)
+
+
+def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
+    rows = [
+        Row("cccc3333-0011", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0011": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert v.action == "reap"
+    assert "sandbox" in v.basis.lower()
+
+
+def test_sandbox_verdict_carries_the_rows_agent(monkeypatch):
+    """The verdict rides the row's own agent, so a reader of v.agent resolves
+    the codex transcript store, never the claude default."""
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [
+        Row("cccc3333-0018", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0018": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert v.agent == "codex"
+
+
+def test_sandbox_basis_carries_the_bounded_help_tag(monkeypatch):
+    """The evidence in the basis is the matched help tag, never the whole
+    transcript slice it was found in."""
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    long_tail = (
+        '<help reason="Codex sandbox blocks Git writes" '
+        'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+        'Operation not permitted">'
+    )
+    rows = [
+        Row("cccc3333-0019", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {"cccc3333-0019": _facts(long_tail + " " + "padding " * 400)},
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert long_tail in v.basis
+    assert "padding" not in v.basis
+
+
+def test_codex_sandbox_denial_in_user_text_is_not_reaped(monkeypatch):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [
+        Row("cccc3333-0013", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0013": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">',
+                role="user",
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
+def test_codex_response_item_is_normalized_for_distress_reads():
+    facts = watchdog._facts_from_entries(
+        [
+            {
+                "timestamp": "2026-08-16T18:40:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": ".git/refs/heads/feature/x.lock: Operation not permitted",
+                        }
+                    ],
+                },
+            }
+        ],
+        40,
+    )
+    assert facts is not None
+    assert facts.last_role == "assistant"
+    assert "Operation not permitted" in facts.last_text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<help reason="Codex sandbox blocks Git writes" '
+        'evidence=".git/refs/heads/feature/x.lock: Operation not permitted',
+        '<help evidence=".git/refs/heads/feature/x.lock"> '
+        'Operation not permitted',
+        '<help reason="data-evidence=.git/refs/heads/feature/x.lock: '
+        'Operation not permitted">',
+        '<help reason="evidence=.git/refs/heads/feature/x.lock: '
+        'Operation not permitted">',
+    ],
+)
+def test_incomplete_or_mismatched_help_evidence_is_not_reaped(text, monkeypatch):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [
+        Row("cccc3333-0014", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {"cccc3333-0014": _facts(text)},
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
+def test_claude_row_with_same_text_is_not_a_codex_sandbox_reap():
+    rows = [Row("cccc3333-0016", "t-claude", "working", "x-sandbox", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0016": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
+@pytest.mark.parametrize(
+    "claims,commit_count,guard_text",
+    [
+        ({"x-sandbox": {"state": "live", "holder": "target-session:other"}}, 0, "claim"),
+        ({"x-sandbox": {"state": "free"}}, 2, "commit"),
+    ],
+)
+def test_codex_sandbox_denial_stays_when_a_guard_holds(
+    monkeypatch, claims, commit_count, guard_text
+):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: commit_count)
+    rows = [
+        Row("cccc3333-0012", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0012": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims=claims,
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+    assert guard_text in v.basis.lower()
+
+
+@pytest.mark.parametrize(
+    "claim,commit_count,guard_text",
+    [
+        ({"state": "live", "holder": "target-session:new"}, 0, "claim"),
+        ({"state": "free"}, 1, "commit"),
+    ],
+)
+def test_sandbox_reap_rechecks_guards_before_removal(
+    monkeypatch, claim, commit_count, guard_text
+):
+    calls = []
+    monkeypatch.setattr(watchdog, "_claim_view", lambda node: claim)
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: commit_count)
+    v = Verdict(
+        "cccc3333-0015",
+        "t-sandbox",
+        "working",
+        SANDBOX_BLOCKED,
+        "Codex sandbox blocked Git writes",
+        "reap",
+    )
+
+    outcome, detail = apply_verdict(
+        v,
+        lanes="all",
+        cwd="/tmp/w",
+        node="x-sandbox",
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert outcome == "held"
+    assert guard_text in detail
+    assert calls == []
+
+
+def test_sandbox_reap_requires_current_distress_before_removal(monkeypatch):
+    monkeypatch.setattr(watchdog, "_claim_view", lambda node: {"state": "free"})
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    monkeypatch.setattr(
+        watchdog,
+        "tail_facts",
+        lambda *args, **kwargs: _facts("ordinary assistant completion"),
+    )
+    calls = []
+    v = Verdict(
+        "cccc3333-0017",
+        "t-sandbox",
+        "working",
+        SANDBOX_BLOCKED,
+        "Codex sandbox blocked Git writes",
+        "reap",
+    )
+
+    outcome, detail = apply_verdict(
+        v,
+        lanes="all",
+        cwd="/tmp/w",
+        node="x-sandbox",
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert outcome == "refused"
+    assert "current transcript" in detail
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

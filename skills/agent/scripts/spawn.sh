@@ -176,8 +176,8 @@ fi
 sanitize() { printf '%s' "$1" | tr '\n\r' '  ' | sed 's/"/'"'"'/g' | cut -c1-300; }
 
 # A payload writes code when it is a node-id build dispatch or an explicit
-# /target|/execute|/fix passthrough. Keep this predicate ahead of every probe:
-# the Codex posture gate below must refuse before any registry-minting path.
+# /target|/execute|/fix passthrough. The shared predicate also controls the
+# automatic worktree path below.
 is_code_payload() {
   case "$PAYLOAD_MODE" in
     build) return 0 ;;
@@ -191,11 +191,6 @@ is_code_payload() {
     *) return 1 ;;
   esac
 }
-
-if [[ "$PROVIDER" == "codex" && "$YOLO" -eq 0 && "$PERMISSION_MODE" != "yolo" ]] \
-  && is_code_payload; then
-  fail "Codex code payloads require an unsandboxed launch so target init can write shared .git metadata. Pass -Y/--yolo; no worker launched"
-fi
 
 # ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ------
 # Preserve /agent's self-handoff and contested-worker receipts without taking a

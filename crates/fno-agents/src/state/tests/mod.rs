@@ -99,6 +99,7 @@ fn sample_entry(name: &str) -> RegistryEntry {
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        git_grant: None,
         origin: None,
         spawn_trigger: None,
         legacy_claude_short_id: None,

@@ -751,7 +751,9 @@ def test_us2_schema_version_is_three() -> None:
     # v29: additive `resolved_sandbox`/`granted_writable_roots` - what a codex
     # thread row's sandbox RESOLVED to server-side and the roots it carries,
     # beside the v19 `sandbox_posture` REQUEST that a resume re-applies.
-    assert SCHEMA_VERSION == 29
+    # v30: additive `git_grant` - the effective Git common-dir path carried by
+    # a bounded Codex thread.
+    assert SCHEMA_VERSION == 30
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2188,7 +2190,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION == 30
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2254,7 +2256,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION == 30
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",

@@ -106,12 +106,13 @@ calllog() { cat "$TMP/calls.log" 2>/dev/null; }
 
 NODE="x-7777"
 
-# --- codex code without -Y -> refusal before any registry-minting call -------
+# --- codex code without -Y -> shell wrapper delegates to the shared seam -----
 out="$(run --name codex-code-no-yolo --provider codex --payload-mode passthrough \
   --message '$fno:target x-816b')"
-ok 'codex code without -Y -> failed' "$(field "$out")" 'failed'
-has 'codex code refusal names -Y' "$out" 'Pass -Y'
-no  'codex code refusal minted no registry row' "$(calllog)" 'agents spawn'
+ok 'codex code without -Y -> launched by wrapper' "$(field "$out")" 'launched'
+no  'codex wrapper does not print seam refusal' "$out" 'Pass -Y'
+has 'codex wrapper delegated to spawn seam' "$(calllog)" 'agents spawn'
+ok 'codex refusal is not duplicated in shell' "$(grep -c 'Codex code payloads require' "$SPAWN" || true)" '0'
 
 # --- codex permission-mode yolo -> equivalent unsandboxed launch ------------
 out="$(run --name codex-code-permission-yolo --provider codex \

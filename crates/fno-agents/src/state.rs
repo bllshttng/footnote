@@ -197,6 +197,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // the same as a full-access thread. Same additive-optional writer-protection
 // rationale as v22-v28: a pre-v29 writer accepts the unknown keys and erases
 // them on its next read-modify-write. Accepted set widens to 1..=29.
+//
+// v30 adds the effective git common-dir grant for Codex threads. The path is
+// the positive receipt of which shared repository metadata the sandbox can
+// write; absence means the grant did not resolve, not that it resolved to an
+// empty directory. The field is additive-optional so older rows remain
+// readable, while the bump prevents an older writer from erasing it.
+// Accepted set widens to 1..=30.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -982,6 +989,13 @@ pub struct RegistryEntry {
     /// does not know is dropped on write-back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_posture: Option<String>,
+    /// Effective git common-dir grant for a Codex thread (schema v30). A path, rather than
+    /// a boolean, identifies which repository metadata the sandbox can write;
+    /// `None` distinguishes an unresolved grant from an empty string. This is
+    /// an X3 passthrough field so Python read-modify-write preserves the Rust
+    /// stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_grant: Option<String>,
     /// Registration origin (x-944f, v16), mirroring Python's `AgentEntry`:
     /// `Some("operator")` for a session a human started by hand (`fno agents
     /// register`, `/fno-me`), `Some("spawn")` for a footnote-created worker,

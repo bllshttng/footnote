@@ -2016,6 +2016,58 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn linked_worktree_grant_uses_the_repository_common_dir() {
+        let canonical = tempfile::tempdir().unwrap();
+        let run = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+        run(&["init", "--quiet"], canonical.path());
+        run(
+            &["config", "user.email", "test@example.com"],
+            canonical.path(),
+        );
+        run(&["config", "user.name", "Test"], canonical.path());
+        std::fs::write(canonical.path().join("README"), "base\n").unwrap();
+        run(&["add", "README"], canonical.path());
+        run(&["commit", "--quiet", "-m", "base"], canonical.path());
+        let linked = canonical.path().join("linked");
+        run(
+            &[
+                "worktree", "add", "--quiet", "-b", "linked", "linked", "HEAD",
+            ],
+            canonical.path(),
+        );
+        assert!(linked.join(".git").is_file());
+
+        let common = crate::provider::git_common_dir(&linked).unwrap();
+        let linked_git = linked.join(".git").to_string_lossy().into_owned();
+        let roots = granted_roots(&linked, &[]);
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7,
+            "thread-linked",
+            "go",
+            None,
+            &roots,
+            None,
+        ))
+        .unwrap();
+        let wired = value["params"]["sandboxPolicy"]["writableRoots"]
+            .as_array()
+            .unwrap();
+        assert!(wired
+            .iter()
+            .any(|root| root.as_str() == Some(common.as_str())));
+        assert!(!wired
+            .iter()
+            .any(|root| root.as_str() == Some(linked_git.as_str())));
+    }
+
     /// An ungranted spawn must build TODAY's frame, byte for byte. A new
     /// always-on field would change the posture of every existing lane.
     #[test]

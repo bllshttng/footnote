@@ -1907,6 +1907,7 @@ fn recovery_emits_drive_crashed_before_clearing_window() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         });
     })
@@ -2001,6 +2002,7 @@ fn recovery_marks_missing_state_inconsistent() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         });
     })
@@ -2163,6 +2165,7 @@ fn recovery_reaps_dead_pid() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         });
     })
@@ -2642,6 +2645,7 @@ fn recovery_reaps_recycled_pid() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         });
     })
@@ -2875,6 +2879,7 @@ fn short_id_derivation_dedups() {
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        git_grant: None,
         ..Default::default()
     });
     assert_eq!(derive_short_id("worker-A", &reg), "workerA1");

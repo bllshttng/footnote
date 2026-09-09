@@ -552,6 +552,82 @@ def rust_runtime_enabled() -> bool:
 #: writable-dir grant published before the route/fork.
 _WORKER_DIR_VERBS = ("resume", "ask", "revive", "wake")
 
+_CODE_PAYLOAD_PREFIXES = frozenset(
+    "/target /execute /tdd /fix /pr /fno:target /fno:execute /fno:tdd "
+    "/fno:fix /fno:pr $fno:target $fno:execute $fno:tdd $fno:fix $fno:pr".split()
+)
+
+
+def _is_codex_code_payload(args: Sequence[str]) -> bool:
+    """Recognize a bounded code workflow seed at the spawn seam."""
+    # A --node dispatch is a backlog work dispatch, so it is a code payload
+    # however its message is later spelled; the prefix scan below would miss
+    # a mint site that passes a bare node id positionally.
+    if _spawn_flag_value(list(args), "--node"):
+        return True
+    tokens = list(args[1:])
+    for index, token in enumerate(tokens):
+        if token == "--message" and index + 1 < len(tokens):
+            token = tokens[index + 1]
+        elif token.startswith("--message="):
+            token = token.split("=", 1)[1]
+        first = token.split(maxsplit=1)
+        if first and first[0] in _CODE_PAYLOAD_PREFIXES:
+            return True
+    return False
+
+
+def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
+    """Return true only for Codex code payloads that need a Git grant."""
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "").strip().lower()
+    if not harness:
+        try:
+            from fno.harness_identity import resolve_harness_identity
+
+            harness = (resolve_harness_identity(os.environ).harness or "claude").lower()
+        except Exception:
+            harness = "claude"
+    if harness != "codex" or not _is_codex_code_payload(args):
+        return False
+    if _has_flag(
+        args,
+        short="-Y",
+        longs=("--yolo", "--dangerously-bypass-approvals-and-sandbox"),
+    ):
+        return False
+    if _has_flag(args, longs=("--once", "--headless")):
+        # The codex headless one-shot lane hardcodes its own bypass, so no
+        # bounded sandbox stands between the worker and .git; spawn_defaults
+        # skips permission-mode mapping on this lane for the same reason.
+        return False
+    sandbox = (_spawn_flag_value(args, "--permission-mode") or "").split(":", 1)[0]
+    return sandbox.strip().lower() not in {"yolo", "bypasspermissions", "danger-full-access"}
+
+
+def _codex_git_grant_for_spawn(args: Sequence[str]) -> str:
+    """Resolve the Git common dir for the spawn's effective working directory."""
+    from fno.agents.harnesses.codex import _git_common_dir
+    from fno.agents.spawn_defaults import _flag_value
+
+    cwd = _flag_value(list(args), "--cwd", "-c")
+    return _git_common_dir(Path(cwd) if cwd else Path.cwd())
+
+
+def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
+    """Refuse a bounded Codex code spawn before any worker row is minted."""
+    if not _is_bounded_codex_code_spawn(args):
+        return
+    cwd = _spawn_flag_value(args, "--cwd", "-c") or str(Path.cwd())
+    if _codex_git_grant_for_spawn(args):
+        return
+    print(
+        "fno agents spawn: Codex code payloads require a resolved git grant; "
+        f"cwd={cwd}; git rev-parse --path-format=absolute --git-common-dir "
+        "failed; no worker launched",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
@@ -1315,29 +1391,7 @@ def make_agents_group_cls() -> type:
             return real.get_command(ctx, name)
 
     class _AgentsRuntimeGroup(LazyTypeGroup):
-        """Intercept ``fno agents <verb>`` before Typer parses the sub-command.
-
-        Routing follows :func:`runtime_mode`:
-
-        - ``rust``   -- force the binary for every verb (missing binary -> 127).
-        - ``python`` -- never touch the binary; defer to Python dispatch.
-        - ``auto`` (default) -- Rust is the runtime for the daemon-native verbs
-          (:data:`AUTO_ROUTE_VERBS`) when an *installed* binary is present;
-          otherwise (a verb with a Python contract, or no installed binary) fall
-          through to the mature Python dispatch.
-
-        A bare ``fno agents -h`` / ``--help`` (help as the first token) always
-        falls through to the Python group help so the wrapper stays discoverable;
-        ``fno agents <verb> --help`` forwards to the binary, which owns that
-        verb's help.
-
-        Because that bare ``--help`` renders the *Python* group, it would list
-        only the ``@agents_app.command`` verbs and silently omit every Rust-only
-        verb (``spawn``/``status``/the ``*-channel`` verbs). :meth:`list_commands` and :meth:`get_command` close
-        that gap by injecting the :data:`RUST_ONLY_VERB_HELP` entries into the
-        help listing (and into command resolution, for a legible fallback) without
-        touching the routing decision in :meth:`make_context`.
-        """
+        """Intercept agent commands before Typer parses their subcommand."""
 
         def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             super().__init__(
@@ -1356,23 +1410,13 @@ def make_agents_group_cls() -> type:
             )
 
         def list_commands(self, ctx):  # type: ignore[no-untyped-def]
-            """Python-registered verbs first, then the Rust-only verbs.
-
-            Keeps ``fno agents --help`` complete. The Rust-only names are appended
-            (not merged into the Typer registry) so ``agents_app.registered_commands``
-            -- the source of truth for "has a Python implementation" -- is unchanged.
-            """
+            """Keep help complete without registering Rust commands in Typer."""
             base = list(super().list_commands(ctx))
             seen = set(base)
             return base + [v for v in RUST_ONLY_VERB_HELP if v not in seen]
 
         def get_command(self, ctx, name):  # type: ignore[no-untyped-def]
-            """Resolve Python verbs normally; synthesize the Rust-only ones.
-
-            Only matters for help rendering and the no-route fallback: when a
-            Rust-only verb auto-routes with an installed binary, ``make_context``
-            execs the binary before Click ever calls this.
-            """
+            """Resolve Python commands or synthesize Rust-only help commands."""
             cmd = super().get_command(ctx, name)
             if cmd is not None:
                 return cmd
@@ -1384,10 +1428,6 @@ def make_agents_group_cls() -> type:
                 )
             if name in RETIRED_VERB_POINTERS:
                 return _make_retired_command(name, RETIRED_VERB_POINTERS[name])
-            # A removed agents verb refuses BY NAME rather than as a typo. This
-            # group cannot use `cls=tombstone_group_cls("agents")` -- it already
-            # needs its own class for the Rust routing -- so the same lookup is
-            # done here, on the same `get_command` seam TombstoneGroup hooks.
             from fno.tombstones import refuse, tombstone_for
 
             full = f"agents {name}"
@@ -1395,81 +1435,24 @@ def make_agents_group_cls() -> type:
                 raise refuse(full)
             return None
 
-        # Click's make_context signature carries precise Context types we do not
-        # need here; the override just intercepts then delegates verbatim.
         def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[no-untyped-def]
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
-                # config.agents.defaults injection runs at the seam, BEFORE the
-                # route/fork, so a bare `spawn` inherits the operator's defaults
-                # on both the Rust route and the Python dispatch (x-de9d US8).
-                # A bad config never bricks spawning: the helper returns args
-                # unchanged on a load failure (an unknown config provider still
-                # exits 2 by design).
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
                     if verb == "spawn":
                         from fno.agents.spawn_defaults import inject_spawn_defaults
 
                         args = inject_spawn_defaults(args)
-                    # Same seam, same reason as the account handling below: the
-                    # writable-dir grant must cover BOTH runtimes. The Python
-                    # token builders only ever see the pane substrate, because
-                    # the carve-out above keeps just that lane in Python; every
-                    # other spawn execs the Rust binary, which builds the
-                    # harness argv itself. Publishing on the env is what reaches
-                    # that binary (os.execv inherits it). resume/ask reach the
-                    # SAME argv builders on the bounded codex lane, where
-                    # `writable_roots` is a whole-value override: one seam,
-                    # every verb that can launch a worker.
+                        _refuse_codex_code_spawn_without_git_grant(args)
                     _export_worker_dirs_at_seam(args)
-                    # Same seam, same reason: these must see the post-defaults
-                    # args and must cover BOTH runtimes, so they run here rather
-                    # than in either spawn implementation. The pick runs FIRST so
-                    # the scrub below sees the account it chose and applies that
-                    # overlay, exactly as it would for an explicit --account.
-                    # spawn runs them too: an exec-routed bg spawn never
-                    # reaches a Python spawn seam, and would mint a parent's
-                    # stale account provenance.
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
-                    # The env-scrub warning is NOT emitted here: a Python-route
-                    # spawn falls through to dispatch_spawn / dispatch_spawn_pane,
-                    # which emit it, so warning at the seam too would print it
-                    # twice. The Rust-exec branches below emit it before they
-                    # exec, since the binary never reaches dispatch. The
-                    # incoherent-model scrub is likewise NOT applied to
-                    # os.environ here: bg_create floats its --settings floor
-                    # off a fresh incoherent_model_env() read of os.environ,
-                    # and a seam-level scrub would empty it before that read;
-                    # the Rust client's own spawn arms scrub their child env
-                    # and float the same floor themselves.
                 elif verb == "rm":
-                    # Same seam, same reason as the account handling and the
-                    # writable-dir grant above: the resume-handle notice must
-                    # cover BOTH runtimes. `rm` is in AUTO_ROUTE_VERBS, so an
-                    # installed binary serves it and a notice placed only in
-                    # `dispatch.rm_agent` would never fire for an installed
-                    # user -- a gate on one of two reachable paths is
-                    # decorative. Gating here is the single implementation that
-                    # both the Rust exec and the Python dispatch pass through.
-                    # A refusal exits before either runs, so neither registry
-                    # is touched.
                     if not _gate_rm_at_seam(args):
                         raise SystemExit(RM_DECLINED_EXIT)
 
                 mode = runtime_mode()
-                # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
-                # cannot parse --role, so never route it to the binary in any
-                # mode; fall through to the Python dispatch that implements it.
-                # A pane-substrate spawn (4a-G2, the default) is Python-only the
-                # same way: the mux-hosted back half lives in cmd_spawn, and the
-                # binary would route it to the retiring daemon PTY host.
-                # A provenance-bearing spawn (x-84a8, --node/--slug/--plan) is
-                # Python-only for the same reason as --role: the binary cannot
-                # parse those flags. A --resume-bearing spawn (x-9844 revive-in-
-                # place) is Python-only for the same reason: the Rust spawn
-                # parser has no --resume flag, and Python owns the revival.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
                     or _is_crown_bearing_spawn(verb, args)
@@ -1481,9 +1464,6 @@ def make_agents_group_cls() -> type:
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)
                     or _is_dispatch_account_bearing_spawn(verb, args)
-                    # An anycast ask resolves its recipient in Python before
-                    # the binary runs (see _is_anycast_ask); the ported ask
-                    # legs did not remove that one pre-exec step.
                     or _is_anycast_ask(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
@@ -1491,11 +1471,6 @@ def make_agents_group_cls() -> type:
                     _scrub_ambient_identity_at_exec(verb)
                     route_to_rust(list(args))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
-                    # Since ab-73da4ac2 this includes ``ask`` for every provider
-                    # (the unconditional flip): the Rust client owns the full
-                    # create/resume decision and surfaces the unresolvable-create
-                    # exit-2 error itself, so there is no provider-conditional
-                    # branch anymore.
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs

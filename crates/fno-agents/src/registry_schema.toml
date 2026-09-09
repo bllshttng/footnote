@@ -22,4 +22,7 @@
 # re-applies; the request and the outcome disagree on this lane, so a row that
 # carries only the request cannot answer what the worker could write.
 # Rationale lives beside the column in state.rs / registry.py.
-version = 29
+#
+# v30 adds the effective git common-dir grant for Codex threads. Rationale
+# lives beside the column in state.rs / registry.py.
+version = 30

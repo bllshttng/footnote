@@ -653,6 +653,7 @@ mod tests {
             launch_account: None,
             related_session_id: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         }
     }

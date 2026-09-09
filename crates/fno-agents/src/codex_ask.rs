@@ -1305,6 +1305,7 @@ fn dispatch_create(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        git_grant: None,
         ..RegistryEntry::new(
             Some(session_id.clone()),
             Lineage {

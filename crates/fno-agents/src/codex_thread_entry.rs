@@ -6,6 +6,9 @@ use crate::daemon::now_rfc3339_like;
 use crate::state::{Lineage, RegistryEntry};
 use crate::AgentStatus;
 
+pub(crate) fn git_grant_for_cwd(cwd: &Path) -> Option<String> {
+    crate::provider::git_common_dir(cwd)
+}
 /// Build the registry row for a Codex app-server thread. Codex has no fno
 /// short id: the full harness session id is both the resume handle and the
 /// canonical registry identity.
@@ -109,9 +112,33 @@ pub(crate) fn build_codex_thread_entry(
         // what this record ends.
         resolved_sandbox: Some(driver.resolved_sandbox_posture().to_string()),
         granted_writable_roots: driver.granted_writable_roots().to_vec(),
+        // v30: the effective positive Git grant carried by the bounded thread
+        // policy. Outside a repository there is no grant to record.
+        git_grant: git_grant_for_cwd(cwd),
         ..RegistryEntry::new(
             Some(session_id),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_grant_for_cwd;
+
+    #[test]
+    fn git_grant_is_a_common_dir_path_and_absent_outside_a_repo() {
+        let repo = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let grant = git_grant_for_cwd(repo.path()).unwrap();
+        assert!(grant.ends_with("/.git"));
+
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(git_grant_for_cwd(outside.path()), None);
     }
 }
