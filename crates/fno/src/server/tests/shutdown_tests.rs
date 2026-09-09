@@ -123,6 +123,24 @@ fn dirty_shutdown_does_not_overwrite_a_newer_overlapping_snapshot() {
 }
 
 #[test]
+fn normal_flush_cannot_erase_an_external_write_before_shutdown() {
+    let _scratch = StoreScratch::new("shutdown-capture-normal-flush-conflict");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("stale-local".into());
+    core.topology_dirty = true;
+
+    core.flush_topology();
+    assert!(!core.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
 fn local_store_write_refreshes_the_shutdown_generation_baseline() {
     let _scratch = StoreScratch::new("shutdown-capture-local-write");
     let (mut core, _) = template_core();

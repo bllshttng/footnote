@@ -7190,15 +7190,12 @@ impl Core {
         })
     }
 
-    /// Write one squad's membership and topology atomically.
+    /// Write one squad's membership and topology without replacing a newer writer.
     fn persist_squad(&mut self, sid: u64) {
         let Some(snapshot) = self.snapshot_squad(sid) else {
             return;
         };
-        match crate::squad_store::set_snapshot(&snapshot) {
-            Ok(generations) => self.store_generations.extend(generations),
-            Err(e) => self.persist_degraded(&e),
-        }
+        self.persist_snapshots_if_current(std::slice::from_ref(&snapshot), "topology");
     }
 
     /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -

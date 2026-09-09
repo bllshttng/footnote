@@ -804,23 +804,16 @@ pub fn set_tab_trees(
     })
 }
 
-/// Atomically replace one squad's membership and topology.
-pub fn set_snapshot(
-    snapshot: &SquadSnapshot,
-) -> io::Result<std::collections::HashMap<String, u64>> {
-    set_snapshots_inner(None, std::slice::from_ref(snapshot)).map(|batch| batch.generations)
-}
-
 /// Replace every current snapshot in one write and report stale identities.
 pub fn set_snapshots_if_generations(
     expected: &std::collections::HashMap<String, u64>,
     snapshots: &[SquadSnapshot],
 ) -> io::Result<SnapshotBatch> {
-    set_snapshots_inner(Some(expected), snapshots)
+    set_snapshots_inner(expected, snapshots)
 }
 
 fn set_snapshots_inner(
-    expected: Option<&std::collections::HashMap<String, u64>>,
+    expected: &std::collections::HashMap<String, u64>,
     snapshots: &[SquadSnapshot],
 ) -> io::Result<SnapshotBatch> {
     let keys: Option<Vec<_>> = snapshots
@@ -837,10 +830,9 @@ fn set_snapshots_inner(
         let mut generations = std::collections::HashMap::new();
         let mut conflicts = Vec::new();
         for (snapshot, generation_key) in snapshots.iter().zip(&keys) {
-            if expected.is_some_and(|expected| {
-                file.generations.get(generation_key).copied().unwrap_or(0)
-                    != expected.get(generation_key).copied().unwrap_or(0)
-            }) {
+            if file.generations.get(generation_key).copied().unwrap_or(0)
+                != expected.get(generation_key).copied().unwrap_or(0)
+            {
                 conflicts.push(generation_key.clone());
                 continue;
             }
