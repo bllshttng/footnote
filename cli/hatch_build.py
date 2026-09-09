@@ -1,12 +1,15 @@
-"""Hatchling build hook: bundle the three ``fno-agents`` Rust binaries into the wheel.
+"""Hatchling build hook: bundle the Rust ``fno`` front door and the three
+``fno-agents`` binaries into the wheel.
 
 Phase 6 W6 Wave 3; binary-complete in ab-18563bcc (US6). When the compiled
 binaries are staged under ``src/fno/_bin/`` (placed there by the release CI's
 cargo step, or via a dir override in ``FNO_AGENTS_BIN_DIR``), this hook ships
-each as a wheel *script* so ``pip install fno`` lands ``fno-agents``,
-``fno-agents-daemon``, and ``fno-agents-worker`` on PATH, and marks the wheel
-platform-specific. Staging is all-or-nothing: a partial set (some but not all
-three) hard-fails the build (a release wheel must be binary-complete).
+each as a wheel *script* so ``pip install fno`` lands the ``fno`` front door
+(the Rust mux binary), ``fno-agents``, ``fno-agents-daemon``, and
+``fno-agents-worker`` on PATH, and marks the wheel platform-specific. The
+Python CLI console script stays ``fno-py`` (a component name, never typed by
+a user - ``fno`` routes). Staging is all-or-nothing: a partial set hard-fails
+the build (a release wheel must be binary-complete).
 
 When no binary is staged (ordinary source builds, ``sdist``, ``pip install -e``
 during development) the hook is a no-op and the pure-Python wheel builds exactly
@@ -24,12 +27,14 @@ try:
 except ImportError:  # hatchling is the build backend, absent when unit-testing
     BuildHookInterface = object  # type: ignore[assignment,misc]  # the pure helpers below stay importable
 
-#: The three standalone Rust executables a release wheel ships (US6): the client
-#: (`fno agents` execs it), the daemon, and the worker. Staging only the client
-#: left daemon-backed verbs broken on a pip-only box (the hidden cliff US6
-#: closes). They are standalone executables, NOT CPython extensions, so the
-#: wheel tag stays `py3-none-<platform>` (see apply_binary_bundle).
-_BINARY_BASENAMES = ("fno-agents", "fno-agents-daemon", "fno-agents-worker")
+#: The standalone Rust executables a release wheel ships (US6 + x-538e): the
+#: `fno` front door (the mux binary that owns `fno` on PATH and forwards
+#: non-mux verbs to `fno-py`), the agent client (`fno agents` execs it), the
+#: daemon, and the worker. Staging only the agent triad left a pip-only box
+#: without the advertised `fno` command. They are standalone executables, NOT
+#: CPython extensions, so the wheel tag stays `py3-none-<platform>` (see
+#: apply_binary_bundle).
+_BINARY_BASENAMES = ("fno", "fno-agents", "fno-agents-daemon", "fno-agents-worker")
 #: Windows appends .exe; os.name reflects the BUILD machine, which is the correct
 #: platform for the wheel being produced, so the hook probes the right names on
 #: the windows runner (else it no-ops and silently ships a pure-Python wheel).
@@ -78,7 +83,7 @@ def _bin_dir(root: Path) -> Path:
 
 
 def staged_binaries(root: Path) -> tuple[list[Path], list[str]]:
-    """Probe the staging dir for the three release binaries.
+    """Probe the staging dir for the release binaries.
 
     Returns ``(present, missing)``: ``present`` is the existing binary paths in
     canonical order, ``missing`` the basenames not staged. A pure filesystem
@@ -103,8 +108,8 @@ def resolve_binary_bundle(root: Path) -> list[Path] | None:
     * zero staged -> ``None``: a pure-Python wheel is a valid variant (ordinary
       source / editable / sdist builds where no cargo step ran). Preserves W6's
       graceful-degradation property (AC6-EDGE).
-    * all three staged -> the list of paths to bundle (AC6-HP).
-    * a partial set (1-2 of 3) -> raise ``FileNotFoundError``: a release-matrix
+    * all staged -> the list of paths to bundle (AC6-HP).
+    * a partial set -> raise ``FileNotFoundError``: a release-matrix
       wheel that carries some but not all binaries is a staging defect, never a
       valid variant (AC6-ERR), mirroring the schema hard-fail.
     """
@@ -115,7 +120,7 @@ def resolve_binary_bundle(root: Path) -> list[Path] | None:
         raise FileNotFoundError(
             "binary-complete wheel staging is incomplete: found "
             f"{[p.name for p in present]} but missing {missing} in {_bin_dir(root)}. "
-            f"A release wheel must carry all three {list(BINARY_NAMES)} (a partial "
+            f"A release wheel must carry every one of {list(BINARY_NAMES)} (a partial "
             "set is a staging defect, not a valid variant). Stage every binary, or "
             "stage none for a pure-Python wheel."
         )

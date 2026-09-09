@@ -408,6 +408,50 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_REAP_RECEIPT_RETAIN_DAYS)
 }
 
+/// Which rows the roster-side sweep may retire. `Provenanced` is
+/// today's behavior: only rows whose provenance resolves and whose work is
+/// done. `All` widens to resolved rows with open work. `Off` retires nothing.
+/// The one rule no value can cross: a row that resolves to no fno node is
+/// never retirable, so an operator's hand-started session is safe by
+/// construction, not by default value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterScope {
+    Off,
+    Provenanced,
+    All,
+}
+
+pub const DEFAULT_ROSTER_SCOPE: RosterScope = RosterScope::Provenanced;
+
+fn table_roster_scope(t: &toml::Table) -> Option<RosterScope> {
+    let value = t
+        .get("agents")?
+        .as_table()?
+        .get("reap")?
+        .as_table()?
+        .get("roster_scope")?;
+    // A PRESENT value that cannot be honored - an unknown string, or a
+    // non-string scalar - degrades here, in the file that holds it, so it
+    // cannot fall through to a lower-precedence file and resurrect a wider
+    // scope behind a mistyped local one.
+    let Some(raw) = value.as_str() else {
+        return Some(DEFAULT_ROSTER_SCOPE);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(RosterScope::Off),
+        "all" => Some(RosterScope::All),
+        "provenanced" => Some(RosterScope::Provenanced),
+        _ => Some(DEFAULT_ROSTER_SCOPE),
+    }
+}
+
+/// Resolve `agents.reap.roster_scope`. An absent key falls through the
+/// precedence chain to the default; an unparseable value degrades to the
+/// default - a config typo widens nothing and disables nothing.
+pub fn roster_scope(cwd: &Path) -> RosterScope {
+    resolve(cwd, table_roster_scope).unwrap_or(DEFAULT_ROSTER_SCOPE)
+}
+
 // --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
 // `retire_grace_secs`; all coerce invalid values to their defaults so a config
 // typo can never brick the spawn primitive.
@@ -813,6 +857,12 @@ pub(crate) fn read_mux_bool(content: &str, key: &str) -> Option<bool> {
     table_mux_bool(&parse_config(content)?, key)
 }
 
+/// `agents.reap.roster_scope` from a config.toml body.
+#[cfg(test)]
+pub(crate) fn read_roster_scope(content: &str) -> Option<RosterScope> {
+    table_roster_scope(&parse_config(content)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +968,61 @@ mod tests {
         // prefix keys must not match without an exact key.
         let prefix = "[agents]\nmax_live_extra = 9\n";
         assert_eq!(read_agents_value(prefix, "max_live"), None);
+    }
+
+    #[test]
+    fn roster_scope_absent_is_none_and_resolves_to_the_default() {
+        // No agents.reap block -> the resolver's unwrap_or decides.
+        assert_eq!(read_roster_scope("schema_version = 1\n"), None);
+        assert_eq!(
+            roster_scope(Path::new("/nonexistent-roster-scope")),
+            DEFAULT_ROSTER_SCOPE
+        );
+    }
+
+    #[test]
+    fn roster_scope_reads_each_value() {
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"off\"\n"),
+            Some(RosterScope::Off)
+        );
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"all\"\n"),
+            Some(RosterScope::All)
+        );
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"provenanced\"\n"),
+            Some(RosterScope::Provenanced)
+        );
+        // Case and padding are spelling, not value.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \" ALL \"\n"),
+            Some(RosterScope::All)
+        );
+    }
+
+    #[test]
+    fn roster_scope_unknown_value_degrades_in_place_to_the_default() {
+        // An unknown value must not fall through to a lower-precedence file,
+        // and must not widen or disable the sweep.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = \"banana\"\n"),
+            Some(DEFAULT_ROSTER_SCOPE)
+        );
+        // A present non-string value degrades the same way: absence is the
+        // only shape that reads a lower-precedence file.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = 7\n"),
+            Some(DEFAULT_ROSTER_SCOPE)
+        );
+    }
+
+    #[test]
+    fn roster_scope_ignores_wrong_blocks_and_sibling_keys() {
+        // A top-level [reap] block is not agents.reap.
+        assert_eq!(read_roster_scope("[reap]\nroster_scope = \"all\"\n"), None);
+        // A sibling key inside agents.reap does not answer for roster_scope.
+        assert_eq!(read_roster_scope("[agents.reap]\nretain_days = 3\n"), None);
     }
 
     #[test]

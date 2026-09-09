@@ -12,6 +12,7 @@ path keeps provider rotation and the spawn cap in play).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -42,6 +43,13 @@ class RunResult:
     reason: str
     duration_s: float
     repeat_index: int
+    variant: str = "baseline"
+
+
+VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
+
+#: The implicit round of rows written before the variant axis existed.
+BASELINE = "baseline"
 
 
 def _now_iso() -> str:
@@ -180,14 +188,26 @@ def run_task(
     spawn: Optional[SpawnFn] = None,
     history_path: Optional[Path] = None,
     worker_provider: Optional[str] = None,
+    variant: str = "baseline",
+    variant_ref: Optional[str] = None,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per run.
 
-    Each run: fresh disposable worktree at ``task.repo_fixture`` -> optional
+    Each run: fresh disposable worktree at the checkout ref -> optional
     worker (skipped for a grade-only task) -> mechanical grade -> history row ->
     worktree removed (Invariant: removed after grading). A worker-spawn failure
     is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
     """
+    if not VARIANT_RE.match(variant):
+        raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
+    if variant == BASELINE:
+        if variant_ref is not None:
+            raise ValueError("variant_ref is not allowed when variant is baseline")
+        variant_ref = task.repo_fixture
+    elif variant_ref is None:
+        raise ValueError(f"variant_ref is required when variant is {variant!r}")
+    checkout_ref = variant_ref
+
     # When no spawn is injected, bind the worker provider into the default spawn
     # so --provider actually routes the headless worker (not just logged).
     spawn_fn = spawn or (
@@ -196,7 +216,7 @@ def run_task(
     if history_path is None:
         from fno import paths as _paths
         history_path = _paths.evals_history()
-    bank_rev = _git_rev(repo_root, task.repo_fixture)
+    bank_rev = _git_rev(repo_root, checkout_ref)
     timeout_s = max(1, task.timeout_minutes * 60)
     results: list[RunResult] = []
 
@@ -206,10 +226,10 @@ def run_task(
         outcome: Optional[GradeOutcome] = None
         workdir: Optional[Path] = None
         try:
-            workdir = _make_disposable_worktree(repo_root, task.repo_fixture, task.id)
+            workdir = _make_disposable_worktree(repo_root, checkout_ref, task.id)
         except subprocess.CalledProcessError as exc:
             # Fixture checkout failed: graded fail with a drift hint, not a crash.
-            reason = f"fixture checkout failed ({task.repo_fixture}); fixture drift? {exc.stderr or ''}".strip()
+            reason = f"fixture checkout failed ({checkout_ref}); fixture drift? {exc.stderr or ''}".strip()
 
         if workdir is not None:
             if task.prompt and spawn is None and not evals_enabled():
@@ -232,6 +252,7 @@ def run_task(
         results.append(RunResult(
             task_id=task.id, tier=task.tier, passed=passed,
             reason="" if passed else reason, duration_s=duration, repeat_index=i,
+            variant=variant,
         ))
         _history.append_row(history_path, {
             "ts": _now_iso(),
@@ -243,6 +264,7 @@ def run_task(
             "repeat_index": i,
             "bank_rev": bank_rev,
             "worker_provider": worker_provider,
+            "variant": variant,
         })
 
     return results

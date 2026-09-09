@@ -38,6 +38,24 @@ done
 grep -q 'SRC_VERSION' .claude-plugin/postinstall.sh \
   || { echo "FAIL: postinstall.sh by-name install is not version-guarded"; exit 1; }
 
+# x-538e AC2-HP/AC2-EDGE: the receipt proves the advertised command - the
+# front-door path, native mux, and Python forwarding - and a missing front
+# door is a NAMED incomplete install with its repair, never silent.
+for needle in \
+  "verify_frontdoor" \
+  "fno front door:" \
+  "fno mux ls" \
+  "incomplete install" \
+  "cargo install fno"; do
+  grep -q "$needle" .claude-plugin/postinstall.sh \
+    || { echo "FAIL: postinstall.sh missing front-door receipt content: $needle"; exit 1; }
+done
+
+# The idempotency skip must require the front door too: a same-version install
+# missing the mux (pre-x-538e wheel) must not take the skip.
+grep -q 'command -v fno >' .claude-plugin/postinstall.sh \
+  || { echo "FAIL: postinstall.sh idempotency guard does not require the fno front door"; exit 1; }
+
 # Syntax check: a broken postinstall silently no-ops the plugin install.
 bash -n .claude-plugin/postinstall.sh \
   || { echo "FAIL: postinstall.sh has a syntax error"; exit 1; }

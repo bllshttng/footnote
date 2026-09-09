@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from fno import stub_manifest as sm
+from fno.backlog import advance as adv
 from fno.backlog import reconcile_dispatch as rd
 from fno.claims.core import acquire_claim
 
@@ -237,3 +238,29 @@ def test_fire_pending_reconcile_noop_without_sentinel(iso, tmp_path, monkeypatch
     calls = _patch_spawn(monkeypatch)
     assert rd.fire_pending_reconcile("x-dep", tmp_path) is None
     assert calls == []
+
+
+# ---- a machine-scoped gate refusal is a skip, not a node fault ----
+
+
+def test_reconcile_capacity_refusal_skips_with_gate_detail(iso, tmp_path, monkeypatch):
+    sm.write("x-dep", [{"stub_id": "a", "file": "f", "kind": "fn"}], tmp_path,
+             contract_test="true")
+    _patch_deps(monkeypatch, [_dep(tmp_path)])
+    gate_line = "spawn-gate: refusing: load 348.26 against trigger 120.0"
+
+    def gate_refused(*a, **kw):
+        raise adv.SpawnError("fno agents spawn exited 79", exit_code=79, detail=gate_line)
+
+    monkeypatch.setattr(rd, "_spawn_worker", gate_refused)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert len(res) == 1
+    assert res[0].decision == "skipped" and res[0].reason == "capacity-refused"
+    evs = _events(iso)
+    skips = [e for e in evs if e["type"] == "advance_skipped"]
+    assert len(skips) == 1
+    assert skips[0]["data"]["exit_code"] == 79
+    assert gate_line in skips[0]["data"]["detail"]
+    assert not [e for e in evs if e["type"] == "advance_failed"]

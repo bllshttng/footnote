@@ -33,7 +33,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dash + shellcheck
-        run: sudo apt-get update && sudo apt-get install -y dash shellcheck
+        run: |
+          # The runner image's google-chrome apt source intermittently serves a
+          # stale Packages file (hash-sum mismatch), which fails `apt-get update`
+          # (exit 100) before dash and shellcheck ever install - twice on
+          # 2026-09-09, an hour apart. That source is irrelevant to this gate:
+          # drop it in both legacy (.list) and deb822 (.sources) forms, then
+          # update + install.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update && sudo apt-get install -y dash shellcheck
 
       - name: sh -n parse (default runner sh)
         run: sh -n scripts/install/fno.sh

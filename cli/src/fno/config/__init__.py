@@ -68,7 +68,7 @@ from fno.config._evals import EvalsBlock
 # test already imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
 from fno.config._loader import _settings_key as _settings_key
-from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
+from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, SweepKeys
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
@@ -2371,9 +2371,8 @@ class AgentsBlock(SweepKeys):
     # Retirement-sweep cadence in SECONDS (x-d354); the Rust resolver clamps
     # it under a third of the grace, never a multiple. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
-    # Reap-receipt retention in days (x-6db9); the same sweep expires expired
-    # receipts. Full contract: FIELD_META.
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
+    reap: ReapBlock = Field(default_factory=ReapBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults.

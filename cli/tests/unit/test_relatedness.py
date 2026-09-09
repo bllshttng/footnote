@@ -67,6 +67,43 @@ def test_build_map_ignores_dates_and_short_tokens():
     assert m["a"] == [] and m["b"] == []
 
 
+# --- AC1-HP / AC2-EDGE: similar_nodes passes its floor into _score ---
+
+def test_similar_nodes_floor_below_min_score_reaches_scorer():
+    # No domain on either side: jac = 1/7 = 0.1429, below _MIN_SCORE (0.15).
+    # Before this fix, _score's own default `minimum=_MIN_SCORE` clamped this
+    # to 0.0 regardless of the caller's floor, so similar_nodes(floor=0.05)
+    # dropped it too. Passing the floor through as `minimum` lets it stand.
+    a = _node("aaa", title="alpha bravo charlie")
+    b = _node("bbb", title="alpha delta echo foxtrot golf")
+    zeroed = R._score(a, b, R._tokens(a), R._tokens(b), include_epic=False)[0]
+    assert zeroed == 0.0
+    raw = R._score(a, b, R._tokens(a), R._tokens(b), include_epic=False, minimum=0.0)[0]
+    assert 0.05 < raw < 0.15
+    assert [r[0] for r in R.similar_nodes(a, [b], floor=0.05)] == ["bbb"]
+
+
+def test_similar_nodes_default_and_explicit_high_floor_unchanged():
+    # AC2-EDGE: an explicit floor at the dedup default is behavior-preserving
+    # relative to leaving floor unset - same pair, exactly at 0.30, included
+    # either way.
+    at_floor = _node("ccc", title="alpha bravo charlie", domain="code")
+    new_floor = _node("ddd", title="alpha delta echo", domain="code")
+    explicit = [r[0] for r in R.similar_nodes(new_floor, [at_floor], floor=0.30)]
+    default = [r[0] for r in R.similar_nodes(new_floor, [at_floor])]
+    assert explicit == default == ["ccc"]
+
+
+def test_epic_candidates_floor_reaches_scorer_like_similar_nodes():
+    # epic_candidates gets the same caller-narrowed floor similar_nodes has,
+    # so a domain-less seed probe's epic rollup is not silently under-recalled
+    # while its duplicate list is.
+    epic = _node("epic1", title="alpha bravo charlie", type="epic")
+    probe = _node("probe", title="alpha delta echo foxtrot golf")
+    assert R.epic_candidates(probe, [epic]) == []  # default floor: still clamped
+    assert [r[0] for r in R.epic_candidates(probe, [epic], floor=0.05)] == ["epic1"]
+
+
 def test_build_map_empty_graph():
     assert R.build_map([]) == {}
 

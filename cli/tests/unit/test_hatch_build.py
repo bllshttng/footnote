@@ -41,8 +41,9 @@ def test_binary_present_bundles_as_script(tmp_path) -> None:
     assert build_data["pure_python"] is False
 
 
-def test_all_three_binaries_bundle_as_scripts(tmp_path) -> None:
-    # US6: the wheel ships the client + daemon + worker, each on PATH.
+def test_all_binaries_bundle_as_scripts(tmp_path) -> None:
+    # US6 + x-538e: the wheel ships the front door + client + daemon + worker,
+    # each on PATH.
     binaries = [tmp_path / name for name in hatch_build.BINARY_NAMES]
     for b in binaries:
         b.write_text("#!/bin/sh\n")
@@ -52,6 +53,13 @@ def test_all_three_binaries_bundle_as_scripts(tmp_path) -> None:
     # value is the basename so the script lands under its own name on PATH
     assert set(build_data["shared_scripts"].values()) == set(hatch_build.BINARY_NAMES)
     assert build_data["pure_python"] is False
+
+
+def test_front_door_is_in_the_release_payload() -> None:
+    # x-538e: `fno` (the Rust mux front door) ships in the wheel so a pip-only
+    # box gets the advertised command; fno-py stays the Python component name.
+    assert "fno" in hatch_build.BINARY_NAMES
+    assert "fno" == hatch_build.BINARY_NAMES[0]
 
 
 def test_binary_present_sets_py3_none_platform_tag(tmp_path, monkeypatch) -> None:
@@ -83,7 +91,7 @@ def test_resolve_binary_bundle_none_when_unstaged(tmp_path) -> None:
     assert hatch_build.resolve_binary_bundle(tmp_path) is None
 
 
-def test_resolve_binary_bundle_all_three(tmp_path) -> None:
+def test_resolve_binary_bundle_all_staged(tmp_path) -> None:
     _stage(tmp_path / "src" / "fno" / "_bin", hatch_build.BINARY_NAMES)
     out = hatch_build.resolve_binary_bundle(tmp_path)
     assert out is not None
@@ -91,8 +99,8 @@ def test_resolve_binary_bundle_all_three(tmp_path) -> None:
 
 
 def test_resolve_binary_bundle_partial_hard_fails(tmp_path) -> None:
-    # Only the client staged: a release wheel must carry all three, so a partial
-    # set is a build defect, not a degraded variant (AC6-ERR).
+    # Only the front door staged: a release wheel must carry the complete set,
+    # so a partial set is a build defect, not a degraded variant (AC6-ERR).
     _stage(tmp_path / "src" / "fno" / "_bin", [hatch_build.BINARY_NAMES[0]])
     with pytest.raises(FileNotFoundError, match="binary-complete wheel staging is incomplete"):
         hatch_build.resolve_binary_bundle(tmp_path)
@@ -103,14 +111,14 @@ def test_resolve_binary_bundle_respects_bin_dir_env(tmp_path, monkeypatch) -> No
     _stage(alt, hatch_build.BINARY_NAMES)
     monkeypatch.setenv(hatch_build.BIN_DIR_ENV, str(alt))
     out = hatch_build.resolve_binary_bundle(tmp_path)  # root has no _bin; env wins
-    assert out is not None and len(out) == 3
+    assert out is not None and len(out) == len(hatch_build.BINARY_NAMES)
 
 
 def test_staged_binaries_reports_present_and_missing(tmp_path) -> None:
     _stage(tmp_path / "src" / "fno" / "_bin", hatch_build.BINARY_NAMES[:2])
     present, missing = hatch_build.staged_binaries(tmp_path)
     assert [p.name for p in present] == list(hatch_build.BINARY_NAMES[:2])
-    assert missing == [hatch_build.BINARY_NAMES[2]]
+    assert missing == list(hatch_build.BINARY_NAMES[2:])
 
 
 def test_platform_tag_is_a_real_tag() -> None:

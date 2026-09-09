@@ -96,11 +96,23 @@ else
   miss "verify-reported" "no 'verified fno' line on first run"
 fi
 
-# --- check 3: all three binaries on the uv tool bin (US2 / AC2-HP / AC6-UI) ---
-for b in fno-agents fno-agents-daemon fno-agents-worker; do
+# --- check 3: the front door + agent triad on the uv tool bin (US2/AC2-HP/AC6-UI) ---
+for b in fno fno-agents fno-agents-daemon fno-agents-worker; do
   if [ -x "$UV_BIN/$b" ]; then pass "binary:$b" "present on the uv tool bin"
   else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 done
+
+# --- check 3b: the provisioned front door answers natively (x-538e) ---
+if [ -x "$UV_BIN/fno" ]; then
+  run_capture "$UV_BIN/fno" mux ls
+  if [ "$RC" -eq 0 ]; then
+    pass "mux" "fno mux ls answers natively from the tool bin (rc=0)"
+  else
+    miss "mux" "rc=$RC out: $(printf '%s' "$OUT" | tail -1)"
+  fi
+else
+  miss "mux" "no front door on the tool bin"
+fi
 
 # --- check 4: sentinel fast-path on re-run, no re-provision (AC4-HP) ---
 run_capture "$SHIM" --version

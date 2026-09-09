@@ -2,16 +2,21 @@
 # ab-18563bcc US5/US6: clean-machine smoke for a release wheel.
 #
 # Given a built platform wheel, install it into a FRESH venv with cwd OUTSIDE
-# any git repo, then assert the three-class contract that distinguishes a
-# regression from an intended degrade (AC5-FR):
+# any git repo, then assert the contract that distinguishes a regression from
+# an intended degrade (AC5-FR):
 #
-#   1. binary-complete (US6, AC6-UI): all three Rust binaries on PATH.
-#   2. internalized/folded verbs run from in-package code (US1/US2): each
+#   1. binary-complete (US6, AC6-UI): the `fno` front door and all three agent
+#      binaries on PATH.
+#   2. the ADVERTISED ENTRYPOINT (x-538e): the first verb runs through `fno`,
+#      not fno-py - `mux ls --json` proves the native mux, and `--version`
+#      forwards to the ADJACENT fno-py (verified via its console-script
+#      shebang), the packaged-complete path a wheel install actually takes.
+#   3. internalized/folded verbs run from in-package code (US1/US2): each
 #      invocation must NOT 127 / "script not found" / traceback. A `--help`
 #      probe must exit 0 (proves the in-package module shipped + imports); a
 #      real run (notify) may fail on its own merits but never via a missing
 #      shell-out script.
-#   3. clone-only verbs degrade (US3): `fno do target init` / `fno doctor bundle` exit
+#   4. clone-only verbs degrade (US3): `fno do target init` / `fno doctor bundle` exit
 #      non-zero with the install-the-plugin message, never a 127 or a traceback.
 #
 # Prints pass/fail per check and exits non-zero on any miss. Runs on the
@@ -54,9 +59,10 @@ if ! "$VENV/bin/pip" install --quiet "$WHEEL"; then
   exit 1
 fi
 BIN="$VENV/bin"
-# The wheel's Python CLI console script is `fno-py` (the Rust mux binary owns
-# `fno`); a pip-only install lands exactly this one, not `fno`.
-FNO="$BIN/fno-py"
+# The wheel's Python CLI console script is `fno-py` (a component name); the
+# advertised entrypoint is the Rust `fno` front door the wheel now carries
+# (x-538e). Every verb below runs through it.
+FNO="$BIN/fno"
 
 # Run every verb from a dir OUTSIDE any git repo, with repo/plugin env unset, so
 # only the bare-install path is exercised (AC5-EDGE: no RuntimeError from
@@ -82,12 +88,34 @@ run_capture() {  # sets RC and OUT
 }
 
 # --- class 1: binary-complete (US6, AC6-UI) ---
-for b in fno-agents fno-agents-daemon fno-agents-worker; do
+for b in fno fno-py fno-agents fno-agents-daemon fno-agents-worker; do
   if [ -x "$BIN/$b" ]; then pass "binary:$b" "present on PATH"
-  else miss "binary:$b" "absent (a release wheel must carry all three)"; fi
+  else miss "binary:$b" "absent (a release wheel must carry the front door + component + agent triad)"; fi
 done
 
-# --- class 2: internalized / folded verbs run from in-package code (AC5-FR) ---
+# --- class 2: the advertised entrypoint routes (x-538e) ---
+# `mux ls --json` is native Rust: it answers with no Python and no
+# provisioning, and an empty session list is exactly `[]` - a miss here means
+# the front door itself is broken, not the Python side.
+run_capture "$FNO" mux ls --json
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qF '[]'; then
+  pass "mux" "fno mux ls --json answers natively (rc=0, empty list)"
+else
+  miss "mux" "rc=$RC out: $(printf '%s' "$OUT" | head -1)"
+fi
+
+# The Python forwarding: the front door verifies the ADJACENT fno-py (the
+# console script's shebang names this venv's python) and execs it - no uv, no
+# second copy of the wheel, no network. A 127 here would mean the sibling
+# resolution arm is broken; a traceback, a shipped module missing.
+run_capture "$FNO" --version
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -qE 'fno[[:space:]]+[0-9]+\.[0-9]+'; then
+  pass "frontdoor" "fno --version verified and forwarded to the adjacent CLI (rc=0)"
+else
+  miss "frontdoor" "rc=$RC out: $(printf '%s' "$OUT" | tail -1)"
+fi
+
+# --- class 3: internalized / folded verbs run from in-package code (AC5-FR) ---
 # `--help` proves the lazy in-package module shipped and imports: a missing
 # module surfaces as a non-zero exit here, not silently. The REGRESSION grep is
 # NOT applied to --help output - help text legitimately documents the script a
@@ -121,7 +149,7 @@ run_capture "$BIN/python" -c "import fno.cost._session_cost, fno.cost._register,
 if [ "$RC" -eq 0 ]; then pass "internal:cost-modules" "import OK on bare install"
 else miss "internal:cost-modules" "rc=$RC: $(printf '%s' "$OUT" | head -1)"; fi
 
-# --- class 3: clone-only verbs degrade loudly (US3, AC5-FR) ---
+# --- class 4: clone-only verbs degrade loudly (US3, AC5-FR) ---
 check_degrade() {  # name + argv: must exit !=0 with the plugin message, no 127/traceback
   local name="$1"; shift
   run_capture "$@"
