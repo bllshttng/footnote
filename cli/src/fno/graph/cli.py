@@ -11528,10 +11528,7 @@ def cmd_maintain(
                         continue
                     if n.get("completed_at") or n.get("deferred_at"):
                         continue  # raced to done/deferred; leave it
-                    reason = (
-                        f"{_failure.AUTO_FAILURE_SENTINEL} {cand.streak} "
-                        f"consecutive failed attempts"
-                    )
+                    reason = cand.reason()
                     # Mirror cmd_defer: clear claim/completion so the cascade derives status.
                     n["locked_by"] = None
                     n["locked_at"] = None

@@ -55,6 +55,57 @@ def test_config_only_model_resolves_for_its_band():
     assert any("grid candidate opencode/qwen" in step for step in chain)
 
 
+def test_declared_rows_read_the_real_loader_models(tmp_path, monkeypatch):
+    """x-947c: routing.models arrives from the loader as pydantic rows, not
+    mappings; _declared_rows must read them, never drop them at a Mapping
+    filter. Drives the REAL loader over a config file - no hand-built dict."""
+    from fno.config import load_settings
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "[[routing.models]]\n"
+        'name = "zai-flash"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'route = "zai/glm-5.3-flash[1m]"\n'
+        'account = "zai"\n'
+        'band = "medium"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    rows = rr._declared_rows(load_settings())
+    assert rows["zai-flash"] == {
+        "name": "zai-flash",
+        "harness": "claude",
+        "model": "glm-5.3-flash[1m]",
+        "route": "zai/glm-5.3-flash[1m]",
+        "account": "zai",
+        "band": "medium",
+        "effort": "",
+    }
+
+
+def test_grid_candidate_carries_route_and_account():
+    """AC2-HP (x-b545): the grid leg's candidate carries the declared row's
+    route and account, the same facts the lane leg always emitted. A routeless
+    row emits neither key, so every anthropic row is unchanged."""
+    inv = _inv([
+        {"name": "flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
+         "band": "high", "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+    ])
+    candidate, _chain = _grid(
+        "high", "p2", {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}}, inv=inv
+    )
+    assert candidate["route"] == "zai/glm-5.3-flash[1m]"
+    assert candidate["account"] == "zai-main"
+    inv = _inv([{"name": "bare", "harness": "claude", "model": "m-1", "band": "high"}])
+    candidate, _chain = _grid("high", "p2", {"claude": "ok"}, inv=inv)
+    assert "route" not in candidate
+    assert "account" not in candidate
+
+
 def test_later_row_overrides_per_field_and_keeps_the_rest():
     """AC2-HP: a same-named later row wins per field; fields it did not name
     keep the earlier row's value."""

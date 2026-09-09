@@ -705,6 +705,54 @@ def test_detect_failure_defers_event_for_absent_node_noops():
     assert m.detect_failure_defers([_n("ab-real")], events, 3) == []
 
 
+def _advance_failed(nid: str, error: str) -> dict:
+    return {"type": "advance_failed", "data": {"node_id": nid, "error": error}}
+
+
+def test_detect_failure_defers_carries_the_advance_failed_error():
+    """AC8-HP (x-b545): the candidate carries the newest advance_failed error
+    beside the streak, so the defer reason can name the real cause."""
+    events = [
+        _fail("ab-x"),
+        _advance_failed("ab-x", "fno agents spawn exited 2: model not in slot"),
+        _fail("ab-x"),
+        _fail("ab-x"),
+    ]
+    cands = m.detect_failure_defers([_n("ab-x")], events, 3)
+    assert [(c.node_id, c.streak) for c in cands] == [("ab-x", 3)]
+    assert cands[0].error == "fno agents spawn exited 2: model not in slot"
+
+
+def test_last_advance_failed_error_stops_at_the_reset_boundary():
+    """The error reader shares consecutive_failures' window: an advance_failed
+    older than the last undefer is not the cause of the current streak."""
+    events = [
+        _advance_failed("ab-x", "stale"),
+        {"type": "node_undeferred", "data": {"unit_id": "ab-x"}},
+        _fail("ab-x"),
+    ]
+    assert f.last_advance_failed_error("ab-x", events) == ""
+
+
+def test_last_advance_failed_error_no_advance_failed_in_window():
+    """AC9-EDGE: a node_failed-only streak yields \"\" - no empty cause
+    clause is appended to the reason."""
+    events = [_fail("ab-x"), _fail("ab-x")]
+    assert f.last_advance_failed_error("ab-x", events) == ""
+
+
+def test_reason_with_cause_still_matches_the_sentinel():
+    """AC10-EDGE: the appended cause keeps the sentinel leading, so
+    is_auto_failure_deferred and the stranded-dependent surfacing hold."""
+    reason = f"{f.AUTO_FAILURE_SENTINEL} 3 consecutive failed attempts: boom"
+    entries = [
+        _n("ab-block", status="deferred", deferred_at="t", deferred_reason=reason),
+        _n("ab-dep", status="blocked", blocked_by=["ab-block"]),
+    ]
+    assert f.is_auto_failure_deferred(entries[0])
+    assert set(f.stranded_dependents(entries)["ab-block"]) == {"ab-dep"}
+
+
 # --- leg 8: validity sweep - selection + fingerprint ---------------
 
 
