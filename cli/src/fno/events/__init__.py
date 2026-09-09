@@ -33,7 +33,7 @@ import re as _re
 import secrets as _secrets
 import sys as _sys
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import yaml as _yaml
 
@@ -132,12 +132,12 @@ def validate_retention_schema(schema: dict[str, Any]) -> None:
             )
 
 
-# Schema is loaded lazily so a missing manifest does NOT break module
-# import. ``validate()`` and the typed builders raise SchemaUnavailableError
-# when invoked without a loadable schema. Smoke-test contexts (an isolated
-# venv installing the wheel) need to import fno.events without
-# crashing if the YAML isn't on disk; fail at validate-time instead so
-# unrelated CLI subcommands still work.
+# Schema is loaded lazily so importing fno.events does not parse the manifest.
+# ``validate()`` and the typed builders raise SchemaUnavailableError when
+# invoked without a loadable schema. Smoke-test contexts (an isolated venv
+# installing the wheel) need to import fno.events without crashing if the YAML
+# isn't on disk; fail at validate-time instead so unrelated CLI subcommands
+# still work.
 SCHEMA: dict[str, Any] | None
 EVENT_TYPES: dict[str, dict[str, Any]] | None
 ENVELOPE_REQUIRED: list[str]
@@ -155,52 +155,108 @@ RETENTION_MINIMUM_TTL_HOURS: int
 # Python reader and writer; a parity test holds it equal to the Rust const.
 _schema_load_error: SchemaUnavailableError | None = None
 
-try:
-    SCHEMA = _load_schema()
-    validate_retention_schema(SCHEMA)
-    EVENT_TYPES = {e["name"]: e for e in SCHEMA.get("event_types", [])}
-    ENVELOPE_REQUIRED = SCHEMA["envelope"]["required"]
-    MAX_DATA_BYTES = SCHEMA.get("limits", {}).get("max_data_bytes", 65536)
-    DATA_SIZE_ENCODING = SCHEMA.get("limits", {}).get("data_size_encoding", "")
-    if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
-        raise SchemaUnavailableError(
-            f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
+if TYPE_CHECKING:
+    # These names are populated dynamically after import by
+    # _ensure_schema_loaded(). Keep them visible to static analysis without
+    # creating module attributes that would defeat __getattr__.
+    SCHEMA = EVENT_TYPES = ENVELOPE_REQUIRED = MAX_DATA_BYTES = None
+    DATA_SIZE_ENCODING = ALLOWED_SOURCES = ALLOWED_SOURCE_PATTERNS = None
+    ALLOWED_GATES = RETENTION_DEFAULT = RETENTION_MINIMUM_TTL_HOURS = None
+    PROTOCOL_FAMILY_TYPES = PROTOCOL_FAMILY_VERSION = None
+    PROTOCOL_ENVELOPE_ALLOWED = PROTOCOL_ENVELOPE_REQUIRED = None
+    PROTOCOL_OUTCOME_ENUM = PROTOCOL_OUTCOME_ON = None
+
+_schema_loaded = False
+_SCHEMA_PUBLIC_NAMES = frozenset(
+    {
+        "SCHEMA",
+        "EVENT_TYPES",
+        "ENVELOPE_REQUIRED",
+        "MAX_DATA_BYTES",
+        "DATA_SIZE_ENCODING",
+        "ALLOWED_SOURCES",
+        "ALLOWED_SOURCE_PATTERNS",
+        "ALLOWED_GATES",
+        "RETENTION_DEFAULT",
+        "RETENTION_MINIMUM_TTL_HOURS",
+        "PROTOCOL_FAMILY_TYPES",
+        "PROTOCOL_FAMILY_VERSION",
+        "PROTOCOL_ENVELOPE_ALLOWED",
+        "PROTOCOL_ENVELOPE_REQUIRED",
+        "PROTOCOL_OUTCOME_ENUM",
+        "PROTOCOL_OUTCOME_ON",
+    }
+)
+
+
+def _ensure_schema_loaded() -> None:
+    """Populate schema-derived globals on their first real use."""
+    global _schema_loaded, _schema_load_error
+    if _schema_loaded:
+        return
+    _schema_loaded = True
+    try:
+        schema = _load_schema()
+        validate_retention_schema(schema)
+        globals().update(
+            SCHEMA=schema,
+            EVENT_TYPES={e["name"]: e for e in schema.get("event_types", [])},
+            ENVELOPE_REQUIRED=schema["envelope"]["required"],
+            MAX_DATA_BYTES=schema.get("limits", {}).get("max_data_bytes", 65536),
+            DATA_SIZE_ENCODING=schema.get("limits", {}).get("data_size_encoding", ""),
+            ALLOWED_SOURCES=set(schema["envelope"]["properties"]["source"]["enum"]),
+            ALLOWED_SOURCE_PATTERNS=[
+                _re.compile(p)
+                for p in schema["envelope"]["properties"]["source"].get("patterns", [])
+            ],
+            ALLOWED_GATES=set(schema.get("gates", [])),
+            RETENTION_DEFAULT=schema.get("retention", {}).get("default", "durable"),
+            RETENTION_MINIMUM_TTL_HOURS=int(
+                schema.get("retention", {}).get("minimum_ephemeral_ttl_hours", 672)
+            ),
         )
-    ALLOWED_SOURCES = set(SCHEMA["envelope"]["properties"]["source"]["enum"])
-    ALLOWED_SOURCE_PATTERNS = [
-        _re.compile(p) for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
-    ]
-    ALLOWED_GATES = set(SCHEMA.get("gates", []))
-    RETENTION_DEFAULT = SCHEMA.get("retention", {}).get("default", "durable")
-    RETENTION_MINIMUM_TTL_HOURS = int(
-        SCHEMA.get("retention", {}).get("minimum_ephemeral_ttl_hours", 672)
-    )
-    # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
-    _family = SCHEMA.get("protocol_family", {})
-    PROTOCOL_FAMILY_TYPES = set(_family.get("types", []))
-    PROTOCOL_FAMILY_VERSION = _family.get("version", 1)
-    PROTOCOL_ENVELOPE_ALLOWED = set(_family.get("envelope", {}).get("allowed", []))
-    PROTOCOL_ENVELOPE_REQUIRED = list(_family.get("envelope", {}).get("required", []))
-    PROTOCOL_OUTCOME_ENUM = set(_family.get("outcome", {}).get("enum", []))
-    PROTOCOL_OUTCOME_ON = set(_family.get("outcome", {}).get("present_on", []))
-except SchemaUnavailableError as _exc:
-    SCHEMA = None
-    EVENT_TYPES = None
-    ENVELOPE_REQUIRED = []
-    MAX_DATA_BYTES = 65536
-    DATA_SIZE_ENCODING = ""
-    ALLOWED_SOURCES = set()
-    ALLOWED_SOURCE_PATTERNS = []
-    ALLOWED_GATES = set()
-    RETENTION_DEFAULT = "durable"
-    RETENTION_MINIMUM_TTL_HOURS = 672
-    PROTOCOL_FAMILY_TYPES = set()
-    PROTOCOL_FAMILY_VERSION = 1
-    PROTOCOL_ENVELOPE_ALLOWED = set()
-    PROTOCOL_ENVELOPE_REQUIRED = []
-    PROTOCOL_OUTCOME_ENUM = set()
-    PROTOCOL_OUTCOME_ON = set()
-    _schema_load_error = _exc
+        if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
+            raise SchemaUnavailableError(
+                f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
+            )
+        # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
+        family = schema.get("protocol_family", {})
+        globals().update(
+            PROTOCOL_FAMILY_TYPES=set(family.get("types", [])),
+            PROTOCOL_FAMILY_VERSION=family.get("version", 1),
+            PROTOCOL_ENVELOPE_ALLOWED=set(family.get("envelope", {}).get("allowed", [])),
+            PROTOCOL_ENVELOPE_REQUIRED=list(family.get("envelope", {}).get("required", [])),
+            PROTOCOL_OUTCOME_ENUM=set(family.get("outcome", {}).get("enum", [])),
+            PROTOCOL_OUTCOME_ON=set(family.get("outcome", {}).get("present_on", [])),
+        )
+    except SchemaUnavailableError as _exc:
+        globals().update(
+            SCHEMA=None,
+            EVENT_TYPES=None,
+            ENVELOPE_REQUIRED=[],
+            MAX_DATA_BYTES=65536,
+            DATA_SIZE_ENCODING="",
+            ALLOWED_SOURCES=set(),
+            ALLOWED_SOURCE_PATTERNS=[],
+            ALLOWED_GATES=set(),
+            RETENTION_DEFAULT="durable",
+            RETENTION_MINIMUM_TTL_HOURS=672,
+            PROTOCOL_FAMILY_TYPES=set(),
+            PROTOCOL_FAMILY_VERSION=1,
+            PROTOCOL_ENVELOPE_ALLOWED=set(),
+            PROTOCOL_ENVELOPE_REQUIRED=[],
+            PROTOCOL_OUTCOME_ENUM=set(),
+            PROTOCOL_OUTCOME_ON=set(),
+        )
+        _schema_load_error = _exc
+
+
+def __getattr__(name: str) -> Any:
+    """Load schema-derived compatibility exports only when accessed."""
+    if name in _SCHEMA_PUBLIC_NAMES:
+        _ensure_schema_loaded()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 MAX_SAFE_EVENT_INTEGER = 9_007_199_254_740_991
@@ -208,6 +264,7 @@ MAX_SAFE_EVENT_INTEGER = 9_007_199_254_740_991
 
 def _require_schema() -> None:
     """Raise the deferred SchemaUnavailableError if module import couldn't load."""
+    _ensure_schema_loaded()
     if _schema_load_error is not None:
         raise _schema_load_error
 
