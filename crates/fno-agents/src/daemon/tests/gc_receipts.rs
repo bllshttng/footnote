@@ -298,7 +298,10 @@ fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
     );
     assert_eq!(
         summary.retired,
-        vec![("rowp".to_string(), "every named node done: N1".to_string())]
+        vec![(
+            "rowp".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
     );
     assert!(summary.pruned.is_empty(), "{:?}", summary.pruned);
     assert_eq!(
@@ -363,7 +366,10 @@ fn a_shared_worktree_survives_while_the_other_row_is_live() {
     );
     assert_eq!(
         summary.retired,
-        vec![("rowx".to_string(), "every named node done: N1".to_string())]
+        vec![(
+            "rowx".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
     );
     assert!(summary.pruned.is_empty(), "{:?}", summary.pruned);
     assert_eq!(
@@ -506,7 +512,7 @@ fn a_parent_retires_once_its_descendant_is_gone() {
         summary.retired,
         vec![(
             "rowparent2".to_string(),
-            "every named node done: N1".to_string()
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
         )]
     );
     assert!(summary.kept_live_descendants.is_empty());
