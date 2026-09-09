@@ -8,14 +8,14 @@
 //! RECOVERED from any declared source, the sources cross-check rather than
 //! merely substitute, and the retirement records WHICH source answered.
 //!
-//! The declared order: `Sessions` (the reverse join), `Registry` (the stored
-//! `node` field), `Name` (the node id embedded in the row name),
-//! `TranscriptFirst` (the first user message, which carries the dispatch
-//! brief), `TranscriptLast`. The first source that answers owns the verdict;
-//! every later source naming the SAME node corroborates; a later source
-//! naming a DIFFERENT node is a conflict and the row is held - two witnesses
-//! that disagree are not evidence, and a wrong retirement must be impossible
-//! rather than merely rare.
+//! The declared cascade has a strong tier of dispatch records - `Sessions`
+//! (the reverse join), `Registry` (the stored `node` field), and `Name` (the
+//! node id embedded in the row name) - followed by a weak tier of transcript
+//! mentions - `TranscriptFirst` (the first user message, which carries the
+//! dispatch brief) and `TranscriptLast`. The first source that answers owns
+//! the verdict; sources disagree only within their tier. A weak source never
+//! vetoes a strong record, and a wrong retirement must be impossible rather
+//! than merely rare.
 //!
 //! There is deliberately no mux-pane source: measured on the live registry,
 //! the transcript route already resolves every row a name cannot, and the
@@ -29,7 +29,7 @@ use crate::gc_sweep::GraphRead;
 use crate::graph_store::WorkState;
 use crate::state::RegistryEntry;
 
-/// Which provenance source answered. The order IS the declared cascade.
+/// Which provenance source answered. The tier order is the declared cascade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeSource {
     Sessions,
@@ -290,41 +290,70 @@ pub fn resolve(
 ) -> NodeRoute {
     let ids: HashSet<String> = graph.statuses.keys().cloned().collect();
     let key = crate::graph_store::work_state_key(sid);
-    let answers: [Option<String>; 5] = [
-        graph
-            .index
-            .get(&key)
-            .and_then(|rows| rows.first())
-            .map(|(node, _)| node.clone()),
-        e.node.clone(),
-        name_route(&e.name, &ids),
-        transcript_first(transcripts, &ids),
-        transcript_last(transcripts, &ids),
-    ];
-    let sources = [
-        NodeSource::Sessions,
-        NodeSource::Registry,
-        NodeSource::Name,
-        NodeSource::TranscriptFirst,
-        NodeSource::TranscriptLast,
-    ];
     let mut route = NodeRoute::default();
-    for (source, answer) in sources.into_iter().zip(answers) {
-        let Some(node) = answer else { continue };
-        match &route.node {
-            None => {
-                route.node = Some(node);
-                route.source = Some(source);
-            }
-            Some(same) if *same == node => route.agreeing.push(source),
-            Some(other) => {
-                route.conflict = Some((source, node));
-                let _ = other;
-                break;
-            }
+    // The strong tier: dispatch records, all in-memory reads.
+    let strong = [
+        (
+            NodeSource::Sessions,
+            graph
+                .index
+                .get(&key)
+                .and_then(|rows| rows.first())
+                .map(|(node, _)| node.clone()),
+        ),
+        (NodeSource::Registry, e.node.clone()),
+        (NodeSource::Name, name_route(&e.name, &ids)),
+    ];
+    for (source, answer) in strong {
+        if !merge(&mut route, source, answer) {
+            return route;
+        }
+    }
+    if route.node.is_some() {
+        return route;
+    }
+
+    // The weak tier: transcript mentions. Both witnesses still cross-check
+    // when no dispatch record answered.
+    let weak = [
+        (
+            NodeSource::TranscriptFirst,
+            transcript_first(transcripts, &ids),
+        ),
+        (
+            NodeSource::TranscriptLast,
+            transcript_last(transcripts, &ids),
+        ),
+    ];
+    for (source, answer) in weak {
+        if !merge(&mut route, source, answer) {
+            return route;
         }
     }
     route
+}
+
+/// Fold one source's answer into the route. False means the row is held:
+/// two witnesses in the same tier that disagree are not evidence.
+fn merge(route: &mut NodeRoute, source: NodeSource, answer: Option<String>) -> bool {
+    let Some(node) = answer else {
+        return true;
+    };
+    match &route.node {
+        None => {
+            route.node = Some(node);
+            route.source = Some(source);
+            true
+        }
+        Some(same) if *same == node => {
+            route.agreeing.push(source);
+            true
+        }
+        Some(_) => {
+            route.conflict = Some((source, node));
+            false
+        }
+    }
 }
 
 impl NodeRoute {
@@ -491,10 +520,33 @@ mod tests {
         let e = entry("target-x-aaaa-row", None);
         let route = resolve(&e, "sid-none", &g, Some(&[path]));
         assert_eq!(route.source, Some(NodeSource::Name));
-        assert_eq!(
-            route.agreeing,
-            vec![NodeSource::TranscriptFirst, NodeSource::TranscriptLast]
+        // Text mentions are weak evidence and are not scanned after a
+        // dispatch record has already resolved the row.
+        assert!(route.agreeing.is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // AC1-HP: a strong dispatch record owns the verdict; a conflicting
+    // transcript mention cannot veto it.
+    #[test]
+    fn strong_sources_ignore_conflicting_transcript_last() {
+        let tmp = std::env::temp_dir().join(format!("node-route-strong-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_transcript(
+            &tmp,
+            &[r#"{"type":"assistant","message":{"content":"mentioned x-bbbb"}}"#],
         );
+        let mut g = graph(&[("x-aaaa", "open"), ("x-bbbb", "open")]);
+        g.index.insert(
+            "sid-strong".to_string(),
+            vec![("x-aaaa".to_string(), "open".to_string())],
+        );
+        let e = entry("unidentified-row", Some("x-aaaa"));
+        let route = resolve(&e, "sid-strong", &g, Some(&[path]));
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(route.agreeing, vec![NodeSource::Registry]);
+        assert_eq!(route.conflict, None);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
