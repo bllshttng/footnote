@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from fno.agents.cli import _stamp_launch_edge
+from fno.agents.spawn_lineage import _stamp_launch_edge
 
 
 PARENT = ("parent-session-abc123", "claude", "/parent/working/dir")
@@ -46,9 +46,9 @@ def graph(monkeypatch):
 @pytest.fixture
 def parent(monkeypatch):
     """Pin the ambient parent edge so the test never reads the real session."""
-    import fno.agents.dispatch as dispatch
+    import fno.agents.spawn_lineage as spawn_lineage
 
-    monkeypatch.setattr(dispatch, "_capture_parent_edge", lambda: PARENT)
+    monkeypatch.setattr(spawn_lineage, "_capture_parent_edge", lambda: PARENT)
 
 
 def test_ac1_hp_launch_edge_lands_on_the_node(graph, parent):
@@ -80,9 +80,9 @@ def test_ac3_edge_unproven_parent_writes_nothing(graph, monkeypatch):
     launch. The registry row and its agent_spawned event already record the
     absence with its reason, so the node stays silent."""
     entries, calls = graph
-    import fno.agents.dispatch as dispatch
+    import fno.agents.spawn_lineage as spawn_lineage
 
-    monkeypatch.setattr(dispatch, "_capture_parent_edge", lambda: (None, "claude", "/cwd"))
+    monkeypatch.setattr(spawn_lineage, "_capture_parent_edge", lambda: (None, "claude", "/cwd"))
 
     _stamp_launch_edge("x-1234")
 

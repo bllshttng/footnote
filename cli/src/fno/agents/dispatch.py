@@ -825,52 +825,12 @@ def _codex_create_path(
 
 
 
-def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Capture the spawning session's ambient identity from environment variables.
-
-    Returns ``(session_id, harness, cwd)`` — all three are strings or None.
-    Precedence applies within one harness family; markers from two families
-    attribute NOTHING (a foreign inherited marker must not be laundered into
-    the parent record, x-b57a). Never raises; always returns a triple
-    (missing fields degrade to None).
-
-    Harness detection order (Task 2.2, x-30f6):
-      CODEX_THREAD_ID        -> harness="codex"
-      CLAUDE_CODE_SESSION_ID -> harness="claude"
-      CODEX_SESSION_ID       -> harness="codex"
-      GEMINI_SESSION_ID      -> harness="gemini"
-      OPENCODE_SESSION_ID    -> harness="opencode"
-    """
-    # OWNED, not precedence (x-20f1): this triple is stamped onto the SPAWNED
-    # row as its `spawned_by_*` edge, so an inherited marker records a stranger
-    # as the parent for the life of that row. An ambiguous resolve records no
-    # lineage rather than a wrong one.
-    from fno.claims.self_identity import resolve_self_identity
-
-    identity = resolve_self_identity()
-
-    # $PWD may be unset (non-interactive shells, cron, daemonized procs); fall
-    # back to os.getcwd(), which for a `fno agents spawn` subprocess is the
-    # spawning session's cwd (inherited), so the parent cwd is always captured.
-    parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
-
-    # x-5c25: with NO marker in the env the resolve above returns nothing, so
-    # the row reads the same as a human-run spawn. The process-tree walk still
-    # names the family, and a harness ANCESTOR cannot be a stranger the way an
-    # inherited MARKER can, so take the harness from it and leave the id null.
-    # Gated on an empty marker set, not on a missing harness: a marker that IS
-    # present and resolved to nothing is the contradiction x-b57a / x-0992 rule
-    # must attribute nothing.
-    harness = identity.harness
-    if not harness and not identity.markers_present:
-        from fno.claims.session_pid import resolve_session_harness
-
-        try:
-            harness = resolve_session_harness()
-        except Exception:  # noqa: BLE001 - the walk never fails a spawn
-            harness = None
-
-    return identity.session_id, harness, parent_cwd
+# Moved to fno.agents.spawn_lineage (x-5c25, file budget). Re-exported so
+# every existing import site and every test that patches one still works.
+from fno.agents.spawn_lineage import (  # noqa: E402
+    _capture_parent_edge,
+    _report_unlinked_parent,
+)
 
 
 def _reign_typed_message(
@@ -887,28 +847,6 @@ def _reign_typed_message(
     if crown_level is not None and crown_scope and not revive:
         return f"/fno:reign {crown_scope}\n{message}", True
     return message, False
-
-
-def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
-    """Name an unrecorded parent edge in the spawn output, and return the
-    reason so the spawn event can carry it (x-5283): the event holds either
-    a session id or this reason, never both empty. A null can be CORRECT
-    (a foreign inherited marker would record a stranger as parent); the
-    defect was its silence, so say it with the identity resolution's reason.
-    """
-    if session_id:
-        return None
-    try:
-        from fno.claims.self_identity import resolve_self_identity
-
-        identity = resolve_self_identity()
-        markers = ",".join(m for m, _h, _v in identity.markers_present) or "no markers"
-        reason = f"identity disposition={identity.disposition}, markers={markers}"
-    except Exception:  # noqa: BLE001 - the notice never breaks the spawn
-        reason = "identity unreadable"
-    print(f"spawn: parent edge NOT recorded ({reason}); this worker will not "
-          f"appear in its spawner's orphan check", file=sys.stderr)
-    return reason
 
 
 def _capture_spawn_trigger() -> Optional[str]:
