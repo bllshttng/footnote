@@ -127,6 +127,14 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
+    /// Expired-claim filenames deleted after the 30-day retention window.
+    pub expired_claims_deleted: Vec<String>,
+    /// `(expired-claim filename, reason)` for entries the age reaper kept.
+    pub expired_claims_kept: Vec<(String, String)>,
+    /// PR-status JSON filenames deleted after the 14-day retention window.
+    pub pr_status_deleted: Vec<String>,
+    /// `(PR-status filename, reason)` for entries the age reaper kept.
+    pub pr_status_kept: Vec<(String, String)>,
 }
 
 /// The graph read that feeds a sweep: the entries (working graph plus
@@ -780,6 +788,7 @@ pub(crate) fn run(
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
+    expire_stale_state(home, dry_run, &mut summary);
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -1623,6 +1632,77 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
     }
 }
 
+const EXPIRED_CLAIM_RETAIN_DAYS: u64 = 30;
+const PR_STATUS_RETAIN_DAYS: u64 = 14;
+
+/// Delete direct children whose mtime is past a family's retention window.
+/// Unknown age and refused deletion both fail closed: the entry stays and is
+/// named for the operator instead of turning an I/O failure into permission.
+fn expire_mtime_entries(
+    dir: &std::path::Path,
+    retain_days: u64,
+    extension: Option<&str>,
+    deleted: &mut Vec<String>,
+    kept: &mut Vec<(String, String)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
+        {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let modified = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(modified) => modified,
+            Err(err) => {
+                kept.push((name, format!("metadata failed: {err}")));
+                continue;
+            }
+        };
+        let age_secs = now.duration_since(modified).unwrap_or_default().as_secs();
+        if age_secs <= window_secs {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => deleted.push(name),
+            Err(err) => kept.push((name, format!("delete failed: {err}"))),
+        }
+    }
+}
+
+/// Reap non-lock shared state on the retirement sweep's cadence. The agents
+/// home is `~/.fno/agents`; both retained families live under its parent.
+fn expire_stale_state(home: &AgentsHome, dry_run: bool, summary: &mut GcSummary) {
+    if dry_run {
+        return;
+    }
+    let Some(shared_root) = home.root().parent() else {
+        return;
+    };
+    expire_mtime_entries(
+        &shared_root.join("claims").join(".expired"),
+        EXPIRED_CLAIM_RETAIN_DAYS,
+        None,
+        &mut summary.expired_claims_deleted,
+        &mut summary.expired_claims_kept,
+    );
+    expire_mtime_entries(
+        &shared_root.join("cache").join("pr-status"),
+        PR_STATUS_RETAIN_DAYS,
+        Some("json"),
+        &mut summary.pr_status_deleted,
+        &mut summary.pr_status_kept,
+    );
+}
+
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = value?.as_str()?;
     chrono::DateTime::parse_from_rfc3339(raw)
@@ -1663,6 +1743,168 @@ pub(crate) fn default_ledger_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
+        let base = std::env::temp_dir().join(format!(
+            "fno-expire-stale-state-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(base.join("agents"));
+        home.ensure_root().unwrap();
+        (base, home)
+    }
+
+    fn age_file(path: &std::path::Path, days: u64) {
+        let modified = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(days * 86_400))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+
+    fn run_empty_registry_sweep(home: &AgentsHome, dry_run: bool) -> GcSummary {
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        run(
+            home,
+            &emitter,
+            900,
+            dry_run,
+            7,
+            &|_| panic!("empty registry must return before graph read"),
+            &|_| None,
+            &|_| false,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &|_| (None, None),
+            &|_| {},
+        )
+    }
+
+    #[test]
+    fn expire_stale_state_removes_only_expired_claims_past_thirty_days() {
+        let (base, home) = stale_state_home("claims");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let old = expired.join("old-claim");
+        let fresh = expired.join("fresh-claim");
+        let future = expired.join("future-claim");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        std::fs::write(&future, b"{}").unwrap();
+        age_file(&old, 40);
+        age_file(&fresh, 2);
+        std::fs::File::options()
+            .write(true)
+            .open(&future)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(86_400),
+            ))
+            .unwrap();
+
+        let summary = run_empty_registry_sweep(&home, false);
+
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(future.exists(), "future mtimes saturate to age zero");
+        assert_eq!(summary.expired_claims_deleted, vec!["old-claim"]);
+        assert!(summary.expired_claims_kept.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_state_removes_only_old_pr_status_json_and_keeps_lock_sidecars() {
+        let (base, home) = stale_state_home("pr-status");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&statuses).unwrap();
+        let old = statuses.join("old.json");
+        let fresh = statuses.join("fresh.json");
+        let lock = statuses.join("old.lock");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&old, 20);
+        age_file(&fresh, 2);
+        age_file(&lock, 20);
+
+        let mut summary = GcSummary::default();
+        expire_stale_state(&home, false, &mut summary);
+
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(lock.exists(), "live flock sidecars are outside this reaper");
+        assert_eq!(summary.pr_status_deleted, vec!["old.json"]);
+        assert!(summary.pr_status_kept.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expire_stale_state_keeps_and_names_entries_whose_age_cannot_be_read() {
+        use std::os::unix::fs::symlink;
+
+        let (base, home) = stale_state_home("unknown-age");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let broken = expired.join("broken-claim");
+        symlink(expired.join("missing-target"), &broken).unwrap();
+
+        let mut summary = GcSummary::default();
+        expire_stale_state(&home, false, &mut summary);
+
+        assert!(broken.symlink_metadata().is_ok());
+        assert_eq!(summary.expired_claims_kept.len(), 1);
+        assert_eq!(summary.expired_claims_kept[0].0, "broken-claim");
+        assert!(summary.expired_claims_kept[0].1.contains("metadata failed"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_state_keeps_fresh_groom_marker_for_staleness_consumer() {
+        let (base, home) = stale_state_home("groom");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let groom = expired.join("groom:2026-09-08");
+        std::fs::write(&groom, b"{}").unwrap();
+        age_file(&groom, 2);
+
+        let mut summary = GcSummary::default();
+        expire_stale_state(&home, false, &mut summary);
+
+        assert!(groom.exists());
+        assert!(summary.expired_claims_deleted.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_state_dry_run_deletes_nothing() {
+        let (base, home) = stale_state_home("dry-run");
+        let expired = base.join("claims/.expired");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&expired).unwrap();
+        std::fs::create_dir_all(&statuses).unwrap();
+        let claim = expired.join("old-claim");
+        let status = statuses.join("old.json");
+        std::fs::write(&claim, b"{}").unwrap();
+        std::fs::write(&status, b"{}").unwrap();
+        age_file(&claim, 40);
+        age_file(&status, 20);
+
+        let summary = run_empty_registry_sweep(&home, true);
+
+        assert!(claim.exists());
+        assert!(status.exists());
+        assert!(summary.expired_claims_deleted.is_empty());
+        assert!(summary.pr_status_deleted.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// A one-worker roster in the confirmed live shape (the shape the
     /// claude_roster parse test accepts).
