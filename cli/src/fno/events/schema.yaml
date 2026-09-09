@@ -3930,15 +3930,15 @@ event_types:
     consumers: [operator]
 
   - name: advance_skipped
-    description: "Emitted by `fno backlog advance` (and advance_dependents / epic advance) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown and the epic-advance-path reasons lane-cap / children-error. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    description: "Emitted by `fno backlog advance` (and advance_dependents / epic advance) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown and the epic-advance-path reasons lane-cap / children-error. capacity-refused and gate-unavailable are MACHINE-SCOPED (x-c6fe): a spawn-gate refusal is true for every row equally, so it is never charged to the node's failure streak and the row stays ready. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
     sources: [backlog]
     data:
       required: [reason]
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error]
-          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on (x-5d3e), so it stays ready until the reset. The epic-advance-path reasons (epic advance, x-9608 K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, slot-queue-deferred]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/x-33b2); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/x-33b2); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on (x-5d3e), so it stays ready until the reset. The epic-advance-path reasons (epic advance, x-9608 K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons (x-c6fe): capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80: queue timeout, no-wait, RAM, provider cap, load, king share), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81, a registry no spawn on this machine can pass; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
         node_id:
           type: string
           description: "The candidate next node, when a reason references one (already-claimed, quota-deferred, lane-cap, unmapped-project)."
@@ -3953,10 +3953,16 @@ event_types:
           description: "The resolved provider record id whose quota drove a quota-deferred skip (x-5d3e)."
         retry_at:
           type: number
-          description: "Unix epoch seconds of the provider's window reset on a quota-deferred skip (x-5d3e)."
+          description: "Unix epoch seconds when the refused dispatch may be retried: the provider's window reset on a quota-deferred skip (x-5d3e), or the gate's queue reset on an exit-78 skip (x-c6fe)."
+        exit_code:
+          type: integer
+          description: "The spawn-gate exit code behind a machine-scoped skip (x-c6fe): 75-80 with capacity-refused, 81 with gate-unavailable."
+        attempted:
+          type: boolean
+          description: "False on an epic-advance pass-stop row (x-c6fe LD4): the gate refused a sibling, the condition is machine-wide, and this child was never tried. Absent (the field omitted) on a child that was attempted."
         detail:
           type: string
-          description: "Optional human-readable detail (e.g. the next-error message), truncated."
+          description: "Optional human-readable detail (e.g. the next-error message, or the gate's own refusal sentence), truncated."
         rank:
           type: string
           enum: [env, config, default, autonomy]
@@ -3964,7 +3970,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_failed
-    description: "Emitted by `fno backlog advance` when the worker spawn failed after the dispatch reservation was acquired. advance releases the node's dispatch reservation and the host op (reconcile/post-merge) still completes; the next SessionStart reconcile retries (AC2-FR). Surfaced loudly in the next reconcile reminder."
+    description: "Emitted by `fno backlog advance` when the worker spawn failed after the dispatch reservation was acquired. A spawn-gate refusal (exit 75-81) is NOT this event: it is machine-scoped and lands as advance_skipped{capacity-refused|gate-unavailable} (x-c6fe), so counting advance_failed rows counts node faults only. advance releases the node's dispatch reservation and the host op (reconcile/post-merge) still completes; the next SessionStart reconcile retries (AC2-FR). Surfaced loudly in the next reconcile reminder."
     sources: [backlog]
     data:
       required: [node_id, error]
