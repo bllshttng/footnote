@@ -64,11 +64,11 @@ def run_command(
     ref: Optional[str] = typer.Option(None, "--ref", help="Git ref to check out for a non-baseline --variant."),
     lane: Optional[str] = typer.Option(
         None, "--lane",
-        help="Named config.routing.models row: the requested coordinate for this run (x-fd52). Overrides --provider.",
+        help="A resolved-inventory lane name: the requested coordinate for this run. Overrides --provider.",
     ),
     cohort: Optional[str] = typer.Option(
         None, "--cohort",
-        help="Experiment/cohort id recorded on every row this run writes (predeclare it before running; report --cohort groups on it).",
+        help="Experiment/cohort id recorded on every row this run writes.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
 ) -> None:
@@ -170,62 +170,21 @@ def report_command(
     n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
     compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
-    cohort_spec: Optional[Path] = typer.Option(
-        None, "--cohort-spec",
-        help=(
-            "JSON file predeclaring lane cohorts (x-fd52): "
-            '{"cohorts": [{"id", "repeats", "fixture_rev"?, "observation_window"?, '
-            '"stopping_rule"?, "budget_usd"?}, ...], "promotion_criteria"?: '
-            '{"baseline", "candidate", "min_pass_at_1"?, "require_review"?}}. '
-            "Rows join a cohort only by their recorded --cohort id from the run."
-        ),
-    ),
     history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
 
     Exit codes:
-      0  report rendered (or no data); a --compare/--cohort-spec view never fires the alarm
+      0  report rendered (or no data); a --compare view never fires the alarm
       4  regression alarm: a regression-tier task is below 100%
     """
     import json as _json
 
-    from fno.evals.report import (
-        CohortSpec, build_report, compare_cohorts, compare_variants,
-        graduation_candidates, load_rows,
-    )
+    from fno.evals.report import build_report, compare_variants, graduation_candidates, load_rows
 
     if history_file is None:
         from fno.paths import evals_history
         history_file = evals_history()
-
-    if cohort_spec is not None:
-        try:
-            spec = _json.loads(cohort_spec.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError) as exc:
-            typer.echo(f"Error: cannot read --cohort-spec {cohort_spec}: {exc}", err=True)
-            raise typer.Exit(code=1)
-        cohorts = [CohortSpec(**c) for c in spec.get("cohorts", [])]
-        if not cohorts:
-            typer.echo(f"Error: {cohort_spec} declares no cohorts", err=True)
-            raise typer.Exit(code=1)
-        result = compare_cohorts(
-            load_rows(history_file, since=since, variant=None),
-            cohorts, promotion_criteria=spec.get("promotion_criteria"),
-        )
-        if json_output:
-            typer.echo(_json.dumps(result, indent=2))
-        else:
-            for cid, c in result["cohorts"].items():
-                typer.echo(
-                    f"  {cid}  lanes={c['lanes']}  n={c['sample_count']}  "
-                    f"pass_at_1={c['pass_at_1']}  pass_k={c['pass_k']}  "
-                    f"review={c['review_evidence']}  usage={c['usage']}"
-                )
-            typer.echo(f"  unattributed rows: {result['unattributed_count']}")
-            if result["promotion"] is not None:
-                typer.echo(f"  promotion: {result['promotion']}")
-        raise typer.Exit(code=0)
 
     if compare is not None:
         if not VARIANT_RE.match(compare):
