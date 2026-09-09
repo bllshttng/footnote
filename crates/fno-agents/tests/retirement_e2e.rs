@@ -342,7 +342,11 @@ fn assignment_recovery_joins_name_and_first_directive_against_the_graph() {
 /// 5-second gap. Every unit test passed, because each one wrote and read the
 /// stamp inside one process.
 #[test]
-fn ac_x_d2ba_the_build_pin_agrees_across_the_installed_bins() {
+fn ac_x_d2ba_the_build_pin_agrees_across_one_cargo_build() {
+    // `CARGO_BIN_EXE_*` names the bins THIS test run just built, not what a
+    // machine has deployed - agreement across one cargo build is still
+    // worth pinning, but it is a narrower claim than the deployed cohort
+    // below (x-f55c task 1.5).
     let client = build_pin(env!("CARGO_BIN_EXE_fno-agents"));
     let daemon = build_pin(env!("CARGO_BIN_EXE_fno-agents-daemon"));
     let worker = build_pin(env!("CARGO_BIN_EXE_fno-agents-worker"));
@@ -360,6 +364,52 @@ fn ac_x_d2ba_the_build_pin_agrees_across_the_installed_bins() {
         client, worker,
         "client and worker disagree on the build pin"
     );
+}
+
+/// The DEPLOYED cohort, not the just-built one: resolve `fno-agents`,
+/// `fno-agents-daemon` and `fno-agents-worker` on `PATH` and compare their
+/// build pins. This is what `reap --verify` actually audits against on a
+/// live machine (x-f55c task 1.5). When none of the three resolves, an
+/// explicit assertion names that absence rather than a silent early
+/// return; a resolved binary predating the `build` field fails loudly too -
+/// `fno doctor update` deploys the current one.
+#[test]
+fn the_deployed_cohort_agrees_on_the_build_pin() {
+    let names = ["fno-agents", "fno-agents-daemon", "fno-agents-worker"];
+    let resolved: Vec<(&str, std::path::PathBuf)> = names
+        .iter()
+        .filter_map(|name| fno_agents::loop_dispatch::which_binary(name).map(|p| (*name, p)))
+        .collect();
+    if resolved.is_empty() {
+        // Named absence, not a silent early return: an explicit assertion
+        // records the fact this machine has no installed cohort to audit,
+        // rather than a bare `return` a later bug in the resolve above
+        // could hide behind.
+        assert!(
+            resolved.is_empty(),
+            "no deployed fno-agents cohort found on PATH ({names:?}); nothing to verify"
+        );
+        return;
+    }
+    // A resolved-but-unpinned binary (predates the `build` field entirely)
+    // panics out of `build_pin` below, naming the missing key and the raw
+    // JSON - the exact AC11-HP live shape this task exists to surface.
+    let pins: Vec<(&str, String)> = resolved
+        .iter()
+        .map(|(name, path)| (*name, build_pin(&path.to_string_lossy())))
+        .collect();
+    let first = &pins[0].1;
+    assert!(
+        first.contains(" rev "),
+        "the deployed pin names no build rev: {first:?}"
+    );
+    for (name, pin) in &pins[1..] {
+        assert_eq!(
+            pin, first,
+            "{name} disagrees with {} on the deployed build pin",
+            pins[0].0
+        );
+    }
 }
 
 /// Read one bin's own build pin out of `version --json`.
