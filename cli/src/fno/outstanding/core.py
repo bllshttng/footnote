@@ -195,15 +195,16 @@ def events_path(root: Path) -> Path:
 
 
 def _iter_question_lines(fh: "Iterable[str]") -> "Iterator[str]":
-    """Yield only the lines that can possibly be a question event.
+    """Yield only the lines that can possibly be a question or decision event.
 
     The substring test runs per line as it is read, so neither the whole file
-    nor the whole filtered set is ever held beyond what the fold needs. Both
-    question types share ``QUESTION_MARKER``, so a line without it cannot be
-    one of ours and skipping it changes no outcome.
+    nor the whole filtered set is ever held beyond what the fold needs. Our
+    rows carry one of two markers, so a line without either cannot be ours
+    and skipping it changes no outcome. Callers that read only asks and
+    closes ignore decision rows by type.
     """
     for line in fh:
-        if QUESTION_MARKER in line:
+        if QUESTION_MARKER in line or "operator_decision" in line:
             yield line
 
 
@@ -264,6 +265,7 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
                 if not isinstance(rec, dict) or rec.get("type") not in {
                     QUESTION_EVENT,
                     QUESTION_CLOSED_EVENT,
+                    "operator_decision",
                 }:
                     continue
                 data = rec.get("data")
@@ -427,10 +429,17 @@ def read_answered_questions() -> "list[dict[str, Any]]":
                     "question": str(origin.get("question") or ""),
                     "answer": str(data["answer"]),
                     "closed_ts": str(rec.get("ts") or ""),
+                    "closed_by": str(data.get("closed_by") or ""),
                 }
             )
     answered.sort(key=lambda a: (a["closed_ts"], a["id"]))
     return answered
+
+
+def read_question_events() -> "list[dict[str, Any]]":
+    """Every question-journal record (ask, close, decision), oldest-first:
+    the positional stream an answer-suppression fold replays."""
+    return _read_question_events(questions_path(), missing_hint=False)
 
 
 def _capture_project_roots(root: Path) -> "list[Path]":

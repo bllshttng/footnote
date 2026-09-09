@@ -85,13 +85,17 @@ CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
 #: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
 SILENCE = "silence"
+#: Report-only: a past-ceiling row whose evidence says FINISHED work (node
+#: shipped, or tail reads done) never enters the needs-human ask it can
+#: never age out of. Evidence rules: docs/architecture/fleet-watchdog.md.
+SPENT = "spent"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: a hand-copied tuple in the CLI - the copy went stale the moment a verdict
 #: was added (`--only unclaimed` once exited 2 on a live verdict).
 VERDICTS = frozenset({
     GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
-    CONTENDED, POLLING_SETTLED, SILENCE,
+    CONTENDED, POLLING_SETTLED, SILENCE, SPENT,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -708,19 +712,6 @@ def finished_with_the_tree(
     ) not in _ENGAGED_TAILS
 
 
-def _iso_epoch_s(stamp: Optional[str]) -> Optional[float]:
-    """Epoch seconds for an ISO stamp, or None when it will not read."""
-    if not stamp:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
-
-
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:
     if epoch is None:
         return None
@@ -734,6 +725,30 @@ def _age_clause(now_s: float, epoch: Optional[float]) -> str:
 
 def _verdict(row: Row, verdict: str, basis: str, action: str) -> Verdict:
     return Verdict(row.row_id, row.name, row.state, verdict, basis, action, row.agent)
+
+
+def _spent_basis(
+    row: Row,
+    facts: Optional[TailFacts],
+    facts_age_s: float,
+    *,
+    node_state_for: Callable[[str], Optional[dict]],
+) -> Optional[str]:
+    """Positive done evidence that a past-ceiling row is finished work, or None."""
+    age = f"quiet {int(facts_age_s // 3600)}h past the wake ceiling"
+    if row.node:
+        try:
+            node_state = node_state_for(row.node) or {}
+        except Exception:  # noqa: BLE001 - a failed read is never evidence
+            node_state = {}
+        status = str(node_state.get("status") or "").lower()
+        if status in _FINISHED_NODE_STATUSES:
+            return f"node {row.node} {status}; {age}; finished row, nothing to triage"
+    if facts is not None and classify_tail(
+        facts.last_role, facts.last_text, facts_age_s
+    ) == "done":
+        return f"tail reads done; {age}; finished row, nothing to triage"
+    return None
 
 
 def _verdict_one(
@@ -794,6 +809,9 @@ def _verdict_one(
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
+            spent = _spent_basis(row, facts, facts_age_s, node_state_for=node_state_for)
+            if spent is not None:
+                return _verdict(row, SPENT, spent, "none")
             return _verdict(
                 row, STALE,
                 f"{row.state} {int(facts_age_s // 3600)}h old, past the "
