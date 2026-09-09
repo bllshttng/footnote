@@ -1410,17 +1410,15 @@ def _spawn_worker(
         # The row's route owns vendor AND model as one fact; an explicit
         # dispatch-time `vendor` pin outranks it and is never replaced.
         cmd += ["--route", grid_lane_route]
-    if grid_lane_account:
-        # The capacity pick read THIS account's quota, so the worker must run
-        # under it. --account is claude-only at the spawn CLI: skip elsewhere.
-        if resolved.get("harness") == "claude":
-            cmd += ["--account", grid_lane_account]
-        else:
-            print(
-                f"advance: grid account {grid_lane_account!r} skipped "
-                f"(claude-only, harness {resolved.get('harness')!r})",
-                file=sys.stderr,
-            )
+    if grid_lane_account and resolved.get("harness") == "claude":
+        # The capacity pick read THIS account's quota; claude-only at the CLI.
+        cmd += ["--account", grid_lane_account]
+    elif grid_lane_account:
+        print(
+            f"advance: grid account {grid_lane_account!r} skipped "
+            f"(claude-only, harness {resolved.get('harness')!r})",
+            file=sys.stderr,
+        )
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -1689,13 +1687,10 @@ def _grid_lane_for(
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
 
-    On a decline the reason is the chain's own terminal, verbatim; receipts
-    only, never refusing (Locked 10). Deliberately ONE function: tests
-    monkeypatch this name, and a caller that reached past it would bypass
-    every patch; placement and spawn compose verb ``target`` through here.
-    Route and account ride beside harness and model because the row declares
-    them as one fact.
-
+    One seam: tests monkeypatch this name, and a caller reaching past it
+    bypasses every patch; placement and spawn compose verb ``target`` through
+    here. A decline surfaces the chain's terminal verbatim, never refusing
+    (Locked 10). Route and account ride beside harness/model as one row fact.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if model is not None or (provider or "").strip() or node is None:

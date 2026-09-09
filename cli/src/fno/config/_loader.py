@@ -56,8 +56,8 @@ def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
             canonical = _canonical_root_from_gitfile(repo_root)
             if canonical is not None and canonical != repo_root:
                 locations += [
-                    canonical / ".fno" / "config.toml",
-                    canonical / ".fno" / "settings.yaml",
+                    canonical / ".fno" / name
+                    for name in ("config.toml", "settings.yaml")
                 ]
         global_path = _global_settings_path()
         if global_path.name == "settings.yaml":

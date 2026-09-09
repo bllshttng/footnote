@@ -4,29 +4,18 @@ failed-node cascade redesign (ab-5b7cf63a, #34).
 Pure, IO-light helpers shared by ``fno backlog maintain`` (the auto-defer
 apply-leg) and ``fno backlog triage health`` (the stranded-dependent section).
 All policy lives here and in the Python CLI verbs, never in the Rust walker
-(Locked Decision #3); the streak is DERIVED from the walker's existing
-``node_failed`` / ``node_closed`` events (Locked Decision #4), not a new walker
-write or a persistent counter field.
+(Locked Decision #3); the streak is DERIVED from the walker's existing events
+(Locked Decision #4), not a new walker write or a persistent counter field.
 
-Event envelope
-==============
-
-The walker journals each loop event as
-``{"ts","type","source":"loop","data":{"unit_id",...}}``
-(crates/fno-agents/src/loop_runtime.rs). For the megawalk / target drivers the
-``unit_id`` IS the backlog node id, so the streak keys on ``data.unit_id`` (the
-design assumed ``graph_node_id``; the real field is ``unit_id`` - the design's
-Domain Pitfall flagged exactly this). The flat agents-emitter envelope
-(``{...,"kind":...}``) is also accepted; it is the shape
-``emit_undefer_boundary`` writes for the ``node_undeferred`` reset boundary.
-
-Failure / reset classification:
-
-* failure  -> ``node_failed``, or ``node_closed`` with ``close == "parked"``.
-* reset    -> ``node_closed`` with ``close == "closed"`` (a success ship), or
-              ``node_undeferred`` (emitted by ``fno backlog undefer``).
-* ignore   -> everything else, including ``node_closed{close=refused}`` (a
-              dispatch refusal, not a work failure): never counts, never resets.
+Event envelope: the walker journals ``{"ts","type","source":"loop",
+"data":{"unit_id",...}}`` (crates/fno-agents/src/loop_runtime.rs); for the
+megawalk / target drivers ``unit_id`` IS the backlog node id, so the streak
+keys on ``data.unit_id``. The flat agents-emitter envelope
+(``{...,"kind":...}``) is accepted too - the shape ``emit_undefer_boundary``
+writes. Classification: failure = ``node_failed`` or
+``node_closed{close=parked}``; reset = ``node_closed{close=closed}`` or
+``node_undeferred``; everything else (including a dispatch-refusal close)
+never counts, never resets.
 """
 
 from __future__ import annotations
@@ -66,20 +55,12 @@ def events_path() -> Path:
 
 
 def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
-    """Append a ``node_undeferred`` reset boundary for ``node_id``.
-
-    Writes the flat envelope ``_classify`` already accepts, to the same log
-    ``read_events`` consumes, so the reset writer and the streak reader cannot
-    drift apart. Lives here rather than borrowing ``fno.agents.events.emit``:
-    that would make the graph package depend on the agents runtime for what is
-    one appended line, and the log is graph-owned.
-
-    Best-effort, like the emitter it replaced. A failed write only means the
-    node keeps its pre-undefer streak; it must never break the undefer itself.
-    It does warn to stderr, as ``agents.events.emit`` did: a reset boundary that
-    silently never lands leaves the node one maintain pass from being re-deferred
-    on stale failure history, and a wholly silent drop makes that untraceable.
-    """
+    """Append a ``node_undeferred`` reset boundary for ``node_id``: the flat
+    envelope ``_classify`` accepts, to the same log ``read_events`` consumes,
+    so writer and reader cannot drift. Best-effort - a failed write only
+    means the node keeps its pre-undefer streak - but it warns to stderr:
+    a reset that silently never lands leaves the node one maintain pass from
+    re-deferral on stale history."""
     import sys
     from datetime import datetime, timezone
 
@@ -132,14 +113,10 @@ def merge_event_histories(*histories: Iterable[dict]) -> list[dict]:
 
 
 def read_events(path: Optional[Path] = None) -> list[dict]:
-    """Read raw event envelopes across retained rotation, oldest first.
-
-    Streams the file line by line so peak memory stays constant as the
-    append-only log grows. The Rust emitter keeps one ``.1`` generation; reading
-    it before the active file preserves consecutive failure/reset order across
-    rotation. A truncated / non-JSON line is skipped and never raises
-    (AC2-ERR); absent files yield an empty list (Boundaries).
-    """
+    """Read raw event envelopes across retained rotation, oldest first. The
+    Rust emitter keeps one ``.1`` generation; reading it before the active
+    file preserves failure/reset order across rotation. A truncated or
+    non-JSON line is skipped and never raises; absent files yield []."""
     targets = [path] if path is not None else _default_event_paths()
     histories: list[list[dict]] = []
     for target in targets:
@@ -258,11 +235,8 @@ def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
 
 
 def is_auto_failure_deferred(e: object) -> bool:
-    """True iff ``e`` is deferred with the ``auto-failure`` sentinel reason.
-
-    Distinguishes an auto-defer from a manual one so a hand-deferred node never
-    strand-reports its dependents (Invariants).
-    """
+    """True iff ``e`` is deferred with the ``auto-failure`` sentinel reason:
+    a hand-deferred node never strand-reports its dependents (Invariants)."""
     if not isinstance(e, dict) or not e.get("deferred_at"):
         return False
     reason = e.get("deferred_reason")
