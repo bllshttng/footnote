@@ -157,8 +157,7 @@ pub(crate) fn scan_and_emit(
         node,
         harness,
         &distress,
-    );
-    true
+    )
 }
 
 /// Emit the `blocked` x-dbaf event natively (x-77a0) and push it to the
@@ -178,11 +177,12 @@ pub(crate) fn emit_help_distress_blocked(
     node: Option<&str>,
     harness: Option<&str>,
     distress: &HelpDistress,
-) {
+) -> bool {
     if !append_blocked_event(project_events, global_events, run, node, harness, distress) {
-        return;
+        return false;
     }
     push_blocked_to_parent(cwd, run, node, &distress.reason);
+    true
 }
 
 /// Append the deduped `blocked` envelope to both logs. Returns whether a row
@@ -268,7 +268,7 @@ fn push_blocked_to_parent(cwd: &Path, run: &str, node: Option<&str>, reason: &st
         args.push(n);
     }
     match bounded_read(
-        std::ffi::OsStr::new("fno"),
+        std::ffi::OsStr::new(&loopcheck_fno_bin()),
         &args,
         cwd,
         "blocked_parent_push",
@@ -294,8 +294,8 @@ throughout: always exits 0. Prints 'distress: emitted <reason>' on a write,
 exist).";
 
 /// `fno-agents distress-scan --transcript <path> --run <id> [--node <id>]
-/// [--harness <name>] [--cwd <dir>] [--events <p>] [--global-events <p>]`
-/// (x-3567). The pre-manifest counterpart of the inline read `loop_check`
+/// [--harness <name>] [--cwd <dir>] [--events <p>] [--global-events <p>].
+/// The pre-manifest counterpart of the inline read `loop_check`
 /// runs: a stop hook that finds no manifest for the session has no
 /// `last_assistant_message` binding to reuse, so it calls this instead of
 /// inlining a second copy of the read. Event paths resolve the same way
