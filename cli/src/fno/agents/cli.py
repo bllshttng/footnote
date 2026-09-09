@@ -975,8 +975,7 @@ def cmd_court(
     print(render_court(json_output))
 
 
-# Moved to fno.agents.spawn_lineage (x-5c25, file budget). Re-exported so
-# every existing import site and every test that patches one still works.
+# Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
 from fno.agents.spawn_lineage import (  # noqa: E402
     _resolve_spawn_merge_grant,
     _stamp_launch_edge,

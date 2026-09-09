@@ -1,8 +1,7 @@
 """What a spawn records about the node it launched.
 
-``dispatch`` and ``cli`` re-export the names they used to define, so every
-import site and every test that patches one keeps working. The fields and how
-to read a null are in docs/architecture/node-provenance.md.
+``dispatch`` and ``cli`` re-export these names, so every import site and every
+test that patches one keeps working. Fields: docs/architecture/node-provenance.md.
 """
 from __future__ import annotations
 

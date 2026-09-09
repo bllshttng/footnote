@@ -825,8 +825,7 @@ def _codex_create_path(
 
 
 
-# Moved to fno.agents.spawn_lineage (x-5c25, file budget). Re-exported so
-# every existing import site and every test that patches one still works.
+# Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
 from fno.agents.spawn_lineage import (  # noqa: E402
     _capture_parent_edge,
     _report_unlinked_parent,
