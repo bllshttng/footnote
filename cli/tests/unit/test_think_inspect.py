@@ -286,6 +286,152 @@ def test_exact_archived_node_is_labeled_and_keeps_pr_link(tmp_path: Path) -> Non
     assert receipt["graph"]["resolved"]["pr_number"] == 321
 
 
+# --- AC3-HP / AC4-EDGE / AC5-EDGE: seed lane recall and its honesty marker ---
+
+
+def test_seed_lane_matches_node_lane_candidate_set(tmp_path: Path) -> None:
+    from fno.graph.relatedness import _DOMAIN_BONUS, _MIN_SCORE
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    # x-seed-src stands in for the not-yet-filed idea: present when resolved
+    # by id (the id lane's positive control), absent from the seed-lane graph
+    # (a design-doc seed never matches a node that does not exist yet).
+    node_a = {
+        "id": "x-seed-src",
+        "slug": "seed-src",
+        "title": "alpha bravo charlie delta echo",
+        "details": "foxtrot golf hotel",
+        "status": "ready",
+        "domain": "code",
+    }
+    node_b = {
+        "id": "bbb",
+        "slug": "bbb",
+        "title": "alpha bravo charlie india juliet",
+        "details": "",
+        "status": "ready",
+        "domain": "code",
+    }
+    node_c = {
+        "id": "ccc",
+        "slug": "ccc",
+        "title": "alpha bravo kilo lima mike",
+        "details": "",
+        "status": "ready",
+        "domain": "code",
+    }
+
+    node_receipt = build_receipt(
+        "x-seed-src",
+        repo=repo,
+        graph_entries=[node_a, node_b, node_c],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+    assert node_receipt["graph"]["recall"] == {
+        "lane": "node",
+        "seed_tokens": node_receipt["graph"]["recall"]["seed_tokens"],
+        "floor": _MIN_SCORE,
+    }
+    node_ids = sorted(row["id"] for row in node_receipt["graph"]["duplicates"])
+    assert node_ids == ["bbb", "ccc"]
+
+    seed_text = "alpha bravo charlie delta echo foxtrot golf hotel"
+    seed_receipt = build_receipt(
+        seed_text,
+        repo=repo,
+        graph_entries=[node_b, node_c],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+    assert seed_receipt["graph"]["recall"]["lane"] == "seed"
+    assert seed_receipt["graph"]["recall"]["floor"] == _MIN_SCORE - _DOMAIN_BONUS
+    seed_ids = sorted(row["id"] for row in seed_receipt["graph"]["duplicates"])
+    assert seed_ids == node_ids == ["bbb", "ccc"]
+
+
+def test_seed_lane_widens_k_so_low_score_family_is_not_evicted_by_noise(tmp_path: Path) -> None:
+    # A wider floor also widens how many candidates clear it. If the seed lane
+    # kept the node lane's k=5 cap, five higher-scoring but unrelated
+    # candidates could fill every slot and evict the one low-score candidate
+    # the floor widening exists to recover.
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    seed_words = [
+        "zeta", "eta", "theta", "iota", "kappa", "lambda", "omicron", "rho",
+        "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega", "beta",
+    ]
+    seed_text = " ".join(seed_words)
+
+    # Shares one seed word only: raw jac = 1/16 = 0.0625. Clears the seed
+    # floor (0.05) but would lose every one of 5 slots to the noise below.
+    true_family = {
+        "id": "true1", "title": "zeta", "details": "", "status": "ready", "domain": "code",
+    }
+    # Each shares two seed words plus one unique word: raw jac = 2/17 = 0.1176,
+    # ranking above true_family despite matching nothing true_family doesn't.
+    noise_pairs = [
+        ("eta", "theta"), ("iota", "kappa"), ("lambda", "omicron"),
+        ("rho", "sigma"), ("tau", "upsilon"),
+    ]
+    noise_nodes = [
+        {
+            "id": f"noise{i}",
+            "title": f"{a} {b} noiseword{i}",
+            "details": "",
+            "status": "ready",
+            "domain": "code",
+        }
+        for i, (a, b) in enumerate(noise_pairs, start=1)
+    ]
+
+    receipt = build_receipt(
+        seed_text,
+        repo=repo,
+        graph_entries=[true_family, *noise_nodes],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    ids = [row["id"] for row in receipt["graph"]["duplicates"]]
+    assert "true1" in ids, f"low-score true family evicted by higher-scoring noise: {ids}"
+    assert len(ids) == 6
+
+
+def test_seed_lane_empty_marks_incomplete_and_names_backlog_find(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    receipt = build_receipt(
+        "zzqx nonexistent vocabulary token",
+        repo=repo,
+        graph_entries=[],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    assert receipt["graph"]["recall"]["lane"] == "seed"
+    assert receipt["graph"]["duplicates"] == []
+    assert receipt["complete"] is False
+    assert any("fno backlog find" in w for w in receipt["warnings"])
+
+
 def test_cli_emits_machine_readable_receipt(monkeypatch, tmp_path: Path) -> None:
     from fno.provenance.cli import think_app
 
