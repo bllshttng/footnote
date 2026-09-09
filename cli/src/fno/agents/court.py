@@ -187,10 +187,8 @@ def find_presiding_crown(
         projects.discard(None)
         if len(projects) != 1:
             return None
-        (target_project,) = projects
-        return next(
-            (c for c in live if c.get("level") == 1 and c.get("scope") == target_project), None
-        )
+        (proj,) = projects
+        return next((c for c in live if c.get("level") == 1 and c.get("scope") == proj), None)
     if level == 1:
         return next(
             (c for c in live if c.get("level") == 0 and scope in split_scope(c.get("scope"))), None
