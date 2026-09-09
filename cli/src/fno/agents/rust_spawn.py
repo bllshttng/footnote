@@ -19,9 +19,9 @@ def _defaults_applied_marker() -> str:
     """The seam marker both bridges carry; it keeps the binary's seam
     gate from bouncing an already-configured spawn back to the front door.
     """
-    from fno.agents.spawn_defaults import routing_enforcement_state
+    from fno.agents.spawn_defaults import spawn_seam_marker
 
-    return f"--defaults-applied={routing_enforcement_state()}"
+    return spawn_seam_marker()
 
 
 def _opencode_serve_spawn(

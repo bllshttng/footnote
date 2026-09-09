@@ -925,20 +925,17 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _with_seam_marker(args: "list[str]", verb: str) -> "list[str]":
-    """Assert the Python seam crossed, and carry its enforcement verdict.
-
-    The binary reads no config, so ``--defaults-applied=<state>`` straight
-    after the verb is the only record it sees of the seam's decision; without
-    it the binary sends the spawn back to the front door. The token is
-    inserted, never appended: everything after ``--`` is the worker's seed,
-    and an appended marker would corrupt the prompt. Spawn-only: no other
-    verb crosses this fork.
+    """Assert the Python seam crossed, and carry its enforcement verdict:
+    ``--defaults-applied=<state>`` straight after the verb is the only record
+    the config-blind binary sees of the seam's decision. The token is
+    inserted, never appended: everything after ``--`` is the worker's seed.
+    Spawn-only: no other verb crosses this fork.
     """
     if verb != "spawn" or not args or args[0] != "spawn":
         return args
-    from fno.agents.spawn_defaults import routing_enforcement_state
+    from fno.agents.spawn_defaults import spawn_seam_marker
 
-    return [args[0], f"--defaults-applied={routing_enforcement_state()}", *args[1:]]
+    return [args[0], spawn_seam_marker(), *args[1:]]
 
 
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any

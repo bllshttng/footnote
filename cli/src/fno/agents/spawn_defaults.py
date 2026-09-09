@@ -1431,19 +1431,15 @@ def inject_spawn_defaults(
     elif cfg_route:
         # AC9-UI: config-sourced routing is never invisible. The account
         # branch below already says this; the route axis is the one that
-        # bills, so a dropped route names which condition fired.
+        # bills, so a dropped route names which condition fired. The grid
+        # case is named before any --model read: a grid candidate excludes an
+        # explicit -m anyway (model_occupied would have stood it down).
         if explicit_route:
             why = "the caller passed --route"
         elif explicit_vendor_present:
             why = f"the caller passed --provider {explicit_vendor!r}"
         elif grid_candidate is not None:
-            # The grid branch above sets has_model, so the grid case must be
-            # named before any --model read: a grid candidate excludes an
-            # explicit -m anyway (model_occupied would have stood it down).
-            why = (
-                "the capacity grid chose a lane ("
-                + ("; ".join(slot_chain) or "no reason recorded") + ")"
-            )
+            why = "the capacity grid chose a lane (" + ("; ".join(slot_chain) or "no reason recorded") + ")"
         elif explicit_model_present:
             why = "the caller passed --model"
         else:
@@ -1905,21 +1901,22 @@ def _emit_defaults_applied(
         pass
 
 
-def routing_enforcement_state(settings: object = None) -> str:
-    """The enforcement verdict the spawn marker carries to the Rust client.
+def spawn_seam_marker() -> str:
+    """The marker token both bridges carry, straight after the spawn verb."""
+    return f"--defaults-applied={routing_enforcement_state()}"
 
-    The binary reads no config, so ``--defaults-applied=<state>`` is the
-    only record it sees of the seam's decision: bare-or-unenforced means
-    legacy permissive, ``enforced`` means strict routing. Any read failure
-    degrades open: the seam itself is the enforcement decision maker and a
-    strict seam refuses upstream, before this value ever matters.
-    """
+
+def routing_enforcement_state(settings: object = None) -> str:
+    """The marker verdict: the binary reads no config, so
+    ``--defaults-applied=<state>`` is its only record of the seam's decision.
+    Read failure degrades open; a strict seam refuses upstream."""
     try:
+        from fno.route_resolve import _routing_enforced
+
         if settings is None:
             from fno.config import load_settings
 
             settings = load_settings()
-        routing = getattr(settings, "routing", None)
-        return "enforced" if getattr(routing, "enforce_inventory", False) else "unenforced"
+        return "enforced" if _routing_enforced(settings) else "unenforced"
     except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
         return "unenforced"
