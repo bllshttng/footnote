@@ -330,23 +330,22 @@ _DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
 
 
 def _declared_rows(settings: object) -> dict[str, Any]:
-    """The CONFIG-declared rows exactly (never the built-in fallback); reads
-    via ``_field`` because rows arrive as pydantic models (x-947c)."""
+    """The CONFIG-declared rows exactly (never the built-in fallback); rows
+    arrive as pydantic models, and a repeated name folds per field."""
     try:
         models = getattr(getattr(settings, "routing", None), "models", None) or []
-        rows = [r for r in models if r is not None]
+        if not models:
+            return {}
+        # one fold, one contract: the loader returns typed rows (BaseModel),
+        # and a repeated name overrides per field, never wholesale
+        folded = inventory_from_rows(models).rows
     except Exception:  # noqa: BLE001 - an unreadable config reads as empty
         return {}
-    out: dict[str, Any] = {}
-    for r in rows:
-        name = str(_field(r, "name", "") or "").strip()
-        if not name:
-            continue
-        out[name] = {
-            "name": name,
-            **{f: str(_field(r, f, "") or "").strip() for f in _DECLARED_FIELDS},
-        }
-    return out
+    return {
+        name: {"name": name,
+               **{f: str(getattr(r, f, "") or "").strip() for f in _DECLARED_FIELDS}}
+        for name, r in folded.items()
+    }
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:
