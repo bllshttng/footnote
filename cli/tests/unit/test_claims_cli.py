@@ -600,6 +600,34 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
     assert not do[0].get("ended_at")
 
 
+def test_declined_handover_names_its_reason_before_falling_through(tmp_path, monkeypatch):
+    """AC5-EDGE: a declined handover fell through to the ordinary
+    acquire with a bare pass, so the caller saw only "held by <holder>" and
+    could not tell its own handover claim from a foreign one. The reason now
+    reaches stderr; the fall-through behavior (refuse, non-zero) is unchanged."""
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-dh-1")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    acquire_claim(key="node:ab-decline", holder="spawn-handover:t-worker",
+                  ttl_ms=900_000, root=home)
+    out = runner.invoke(cli, [
+        "acquire", "node:ab-decline", "--holder", "target-session:w",
+        "--handover-from", "spawn-handover:OTHER", "--ttl", "2h",
+    ])
+    assert out.exit_code != 0, out.output
+    assert "handover declined:" in out.output, out.output
+    assert "holder mismatch" in out.output, out.output
+    assert "held by spawn-handover:t-worker" in out.output, out.output
+
+
 def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     """A node claim acquire opens the do row with started_at from the claim's
     acquire time and NO ended_at - so a session killed before its release

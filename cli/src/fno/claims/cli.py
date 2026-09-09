@@ -316,8 +316,12 @@ def acquire(
                 new_pid_unavailable=pid_unavailable,
                 root=_node_aware_root(key),
             )
-        except RebindRefused:
-            pass
+        except RebindRefused as refused:
+            # The fall-through is the design; the silence was not. A declined
+            # handover used to surface only as the ordinary acquire's "held
+            # by <holder>", so a worker could not tell its own handover claim
+            # from a foreign one.
+            typer.echo(f"handover declined: {refused.reason}", err=True)
         else:
             # The MODE decides, not the absence of an exception. A rebind that
             # declined the rename returns `idempotent` with the prior holder

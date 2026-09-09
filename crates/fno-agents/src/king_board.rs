@@ -352,7 +352,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             )
         }
         Some(_) => {
-            let (read, holders, w) = read_claimed_nodes(&claims, entries.as_deref());
+            let (read, mut holders, w) = read_claimed_nodes(&claims, entries.as_deref());
+            // The probe feed must also measure DEAD-stated claim holders:
+            // the reordered readers ask the holder before honoring the clock,
+            // and a holder nobody probed always reads inactive.
+            for h in classify::dead_claim_holders(&claims) {
+                if !holders.contains(&h) {
+                    holders.push(h);
+                }
+            }
             mark(&mut sources, "claimed_nodes", &read, false);
             (read, holders, w)
         }
@@ -813,8 +821,7 @@ pub(crate) fn default_needs_sources(home: &crate::paths::AgentsHome) -> (Vec<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    use super::classify::node_driver;
     use super::*;
 
     fn ok_read(payload: Value) -> SourceRead {
@@ -981,6 +988,76 @@ mod tests {
             .filter_map(|r| r["id"].as_str())
             .collect();
         assert_eq!(ids, vec!["x-leaf"], "{unheld}");
+    }
+
+    #[test]
+    fn an_expired_lease_under_a_writing_holder_reaches_neither_queue() {
+        // AC3-EDGE, the 2026-09-09 measured fault: five nodes sat in
+        // unheld_progress AND stale_claim at once because the clock check
+        // short-circuited the holder probe. The active verdict is the
+        // positive control: it proves the row was read and classified, not
+        // dropped by an unrelated guard.
+        let node = json!({
+            "id": "x-7471",
+            "priority": "p1",
+            "status": "in_progress",
+            "title": "the board probes the holder before it honors the clock",
+        });
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{
+                "key": "node:x-7471", "state": "stale",
+                "holder": "spawn-handover:target-7471-worker",
+            }]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![node.clone()]);
+        inputs.holder_activity.insert(
+            "target-7471-worker".to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                harness_title: None,
+                reachability: None,
+                basis: None,
+                last_activity_age_s: Some(30.0),
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+            },
+        );
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        let unheld_ids: Vec<&str> = unheld["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(unheld_ids, Vec::<&str>::new(), "{unheld}");
+        let stale = queues.iter().find(|q| q["name"] == "stale_claim").unwrap();
+        let stale_keys: Vec<&str> = stale["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["key"].as_str())
+            .collect();
+        assert_eq!(stale_keys, Vec::<&str>::new(), "{stale}");
+        // Positive control on the same inputs: the node classifies active.
+        let claim_by_node: HashMap<String, Value> = [(
+            "x-7471".to_string(),
+            json!({
+                "key": "node:x-7471", "state": "stale",
+                "holder": "spawn-handover:target-7471-worker",
+            }),
+        )]
+        .into_iter()
+        .collect();
+        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None);
+        assert_eq!(state, "active");
     }
 
     #[test]
