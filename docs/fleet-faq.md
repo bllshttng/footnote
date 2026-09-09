@@ -467,6 +467,16 @@ The source field cannot be fixed by hand either. `fno doctor event emit -s king-
 
 *Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
 
+## `fno do pr list` shows no pull request for work that has three
+
+**Answer.** The list returns pull requests whose base is `main`. A stacked pull request targets its parent branch, so the list cannot see it. Read the pull request by number, or by head branch, before you decide that none exists.
+
+**Specimen.** An L1 king read the list, found nothing for two branches, and asked the crown to open pull requests for both. All three were already open. PR 1651 targeted `main` from `feature/<node>`. PR 1660 targeted `feature/<node>` from `feature/<node>-wave2`. PR 1663 targeted `feature/<node>-wave2` from `feature/<node>-wave3`. Only the first has base `main`, so the other two were invisible. A caller who acts on that read opens a duplicate pull request on a branch that already carries one.
+
+The same read reported both branches as 32 commits behind `main`. That is the normal state of a stack, because each branch tracks its parent and not `main`. A behind-count is not evidence of neglect on a stacked branch.
+
+*Graduates to:* a list that names its base filter in its own output, or a list that follows a stack to its root.
+
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
