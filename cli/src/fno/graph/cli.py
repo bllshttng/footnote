@@ -11584,6 +11584,12 @@ def cmd_maintain(
                         f"{_failure.AUTO_FAILURE_SENTINEL} {cand.streak} "
                         f"consecutive failed attempts"
                     )
+                    if cand.error:
+                        # The spawn error the drains actually died on, beside
+                        # the count: without it five healthy nodes read as bad
+                        # nodes. The error is capped at 200 at emission; the
+                        # slice keeps a legacy long row from growing.
+                        reason = f"{reason}: {cand.error[:200]}"
                     # Mirror cmd_defer: clear claim/completion so the cascade derives status.
                     n["locked_by"] = None
                     n["locked_at"] = None

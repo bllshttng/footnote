@@ -1090,6 +1090,7 @@ AUTO_DEFER_BLAST_CAP = 10
 class FailureDefer:
     node_id: str
     streak: int
+    error: str = ""
 
 
 def detect_failure_defers(
@@ -1105,7 +1106,7 @@ def detect_failure_defers(
     is derived from the walker's events via ``failure.consecutive_failures``
     (Locked Decision #4); a malformed row is skipped rather than aborting.
     """
-    from fno.graph.failure import consecutive_failures
+    from fno.graph.failure import consecutive_failures, last_advance_failed_error
 
     if threshold < 1:
         return []
@@ -1122,7 +1123,13 @@ def detect_failure_defers(
             continue
         streak = consecutive_failures(nid, events)
         if streak >= threshold:
-            out.append(FailureDefer(node_id=nid, streak=streak))
+            out.append(
+                FailureDefer(
+                    node_id=nid,
+                    streak=streak,
+                    error=last_advance_failed_error(nid, events),
+                )
+            )
     return out
 
 

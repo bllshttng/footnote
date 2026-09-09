@@ -228,6 +228,39 @@ def consecutive_failures(node_id: str, events: Iterable[object]) -> int:
     return streak
 
 
+_ADVANCE_FAILED_TYPE = "advance_failed"
+
+
+def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
+    """Most recent ``advance_failed`` error inside the same window
+    ``consecutive_failures`` counts.
+
+    Scans newest -> oldest and stops at the SAME reset boundary the streak
+    stops at, so the cause can never outlive the streak it explains. The
+    newest ``advance_failed`` carrying a non-empty ``error`` wins; a streak
+    built from ``node_failed`` events with no ``advance_failed`` in the
+    window yields "" and the caller keeps the bare reason.
+    """
+    for raw in reversed(list(events)):
+        ev = _classify(raw)
+        if ev is not None:
+            if ev.node_id != node_id:
+                continue
+            if ev.kind == "reset":
+                break
+            continue  # a counted fail carries no advance_failed error
+        if not isinstance(raw, dict) or raw.get("type") != _ADVANCE_FAILED_TYPE:
+            continue
+        data = raw.get("data")
+        data = data if isinstance(data, dict) else raw
+        if (data.get("node_id") or data.get("unit_id")) != node_id:
+            continue
+        error = str(data.get("error") or "").strip()
+        if error:
+            return error
+    return ""
+
+
 # NOTE: the failure-defer CANDIDATE detector lives in maintain.py
 # (``detect_failure_defers``), alongside the other pure maintain detectors it
 # mirrors (``detect_temp_leaks`` / ``detect_rescope_fixes``). This module owns
