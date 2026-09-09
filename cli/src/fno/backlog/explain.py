@@ -116,11 +116,10 @@ _UNSAMPLED: object = object()
 
 
 def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
-    """One load-gate decision for a report build, or None when unreadable.
+    """One load-gate decision per report build, or None when unreadable.
 
-    The gates row and the stop reason share the sample: two footprint reads on
-    an already-loaded box is the preview costing more than the thing it
-    previews.
+    The gates row and the stop share the sample: two footprint reads on an
+    already-loaded box is the preview costing more than the thing it previews.
     """
     try:
         from fno.agents.spawn_gate import load_gate_decision
@@ -336,23 +335,6 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
                 )
             )
     return out
-
-
-def _load_gate_stop_reason(load_decision: object = _UNSAMPLED) -> Optional[str]:
-    """``"load-refused"`` when the spawn's load gate would refuse, else None.
-
-    Reads the SAME ``load_gate_decision`` the real gate runs, so a preview
-    cannot promise a dispatch on a box the spawn would refuse - the surface
-    that once sent a king looking at the wrong symptom.
-    """
-    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
-
-    decision = _explain_load_decision() if load_decision is _UNSAMPLED else cast(
-        "Optional[tuple[str, str, dict]]", load_decision
-    )
-    if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
-        return "load-refused"
-    return None
 
 
 def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
@@ -713,9 +695,11 @@ def build_lane_fill_report(
     # empty would promise a dispatch the real spawn refuses (the dry run once
     # passed every gate at load 255/120 while the arm died on exit 79). One
     # decision sample feeds both this stop and the gates row below.
+    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
+
     load_decision = _explain_load_decision()
-    if stop is None:
-        stop = _load_gate_stop_reason(load_decision)
+    if stop is None and load_decision is not None and load_decision[0] in _LOAD_REFUSAL_REASONS:
+        stop = "load-refused"
 
     ordered_names = [
         "no-project",
