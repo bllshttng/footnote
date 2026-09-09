@@ -30,6 +30,30 @@ def test_state_reap_configured_values_are_honored() -> None:
     assert block.model_dump() == configured
 
 
+@pytest.mark.parametrize("configured", ["false", 0, 1, 0.0, 1.0])
+def test_state_reap_enabled_requires_an_actual_bool(configured: object) -> None:
+    DEGRADED.clear()
+    block = AgentsBlock(state_reap={"enabled": configured}).state_reap
+    assert block.enabled is True
+    assert set(DEGRADED) == {"agents.state_reap.enabled"}
+
+
+@pytest.mark.parametrize(
+    ("field", "configured"),
+    [
+        (field, configured)
+        for field in DEFAULTS
+        if field != "enabled"
+        for configured in ("2", 2.0)
+    ],
+)
+def test_state_reap_days_require_actual_ints(field: str, configured: object) -> None:
+    DEGRADED.clear()
+    block = AgentsBlock(state_reap={field: configured}).state_reap
+    assert getattr(block, field) == DEFAULTS[field]
+    assert set(DEGRADED) == {f"agents.state_reap.{field}"}
+
+
 @pytest.mark.parametrize(
     "configured",
     [

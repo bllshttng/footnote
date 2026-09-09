@@ -1,13 +1,4 @@
-"""Knobs the daemon's periodic sweeps read.
-
-Reap-receipt retention, the single-flight latch, and the orphan reaper share
-one job: keeping the machine from filling up with work nobody is waiting on.
-
-The flat keys ride a mixin rather than a nested block because they are read as
-``agents.single_flight_ttl_seconds``. The Rust daemon resolves the same three
-in ``agents_config.rs``; this model keeps ``fno config get`` and ``fno config
-doctor`` honest about them.
-"""
+"""Config models for daemon sweep knobs mirrored by the Rust runtime."""
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -21,13 +12,7 @@ DEGRADED: dict[str, str] = {}
 
 
 class ReapReceiptsBlock(BaseModel):
-    """Retention for the reap-receipt store (nested under 'config.agents').
-
-    A reaped row's resume handle lives at ``~/.fno/reap-receipts/`` for this
-    many days, then the GC sweep expires it. A receipt whose ``reaped_at``
-    cannot be read is kept and named in the sweep summary - a failed read is
-    not evidence of age.
-    """
+    """Retention for readable, aged reap receipts under ``config.agents``."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -81,6 +66,14 @@ class StateReapBlock(BaseModel):
     expired_claims_retain_days: int = 30
     pr_status_cache_retain_days: int = 14
 
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, value: object) -> object:
+        if isinstance(value, bool):
+            return value
+        DEGRADED["agents.state_reap.enabled"] = repr(value)
+        return cls.model_fields["enabled"].default
+
     @field_validator(
         "locks_retain_days",
         "expired_claims_retain_days",
@@ -91,16 +84,8 @@ class StateReapBlock(BaseModel):
     def _coerce_days(cls, value: object, info: ValidationInfo) -> object:
         name = info.field_name or ""
         default = cls.model_fields[name].default
-        try:
-            if isinstance(value, bool):
-                raise ValueError
-            days = int(value)  # type: ignore[call-overload]
-            if isinstance(value, float) and not value.is_integer():
-                raise ValueError
-        except (TypeError, ValueError, OverflowError):
-            days = 0
-        if days > 0:
-            return days
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
         DEGRADED[f"agents.state_reap.{name}"] = repr(value)
         return default
 
