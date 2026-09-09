@@ -194,7 +194,7 @@ def _graph_section(
         } | _no_decisions()
 
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.relatedness import _MIN_SCORE, epic_candidates, similar_nodes
+    from fno.graph.relatedness import _DOMAIN_BONUS, _MIN_SCORE, _tokens, epic_candidates, similar_nodes
 
     active_by_id = {
         row["id"]: row for row in entries if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -216,7 +216,11 @@ def _graph_section(
     # floor=_MIN_SCORE: blueprint's consolidation gate reads this list, and the
     # real lock family behind that gate sits at 0.26-0.27 under a 0.30 dedup
     # floor. Ranked recall is the point; a full-context reader makes the call.
-    scored = similar_nodes(probe, combined, k=5, floor=_MIN_SCORE)
+    # A free-text seed has no domain to share, so it can never earn
+    # _DOMAIN_BONUS the way a resolved node row can; lower the floor by
+    # exactly that bonus so a seed and its own node id rank the same set.
+    floor = _MIN_SCORE if resolved else _MIN_SCORE - _DOMAIN_BONUS
+    scored = similar_nodes(probe, combined, k=5, floor=floor)
     duplicates = []
     for node_id, score, reason in scored:
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
@@ -273,6 +277,11 @@ def _graph_section(
         "epic_candidates": rollups,
         "archive_status": "error" if archive_error else "ok",
         "detail": f"archive unreadable: {archive_error}" if archive_error else None,
+        "recall": {
+            "lane": "node" if resolved else "seed",
+            "seed_tokens": len(_tokens(probe)),
+            "floor": floor,
+        },
     } | _decisions_section(resolved.get("id") if resolved else None)
 
 
@@ -465,6 +474,11 @@ def build_receipt(
         warnings.append("database schema evidence is missing")
     if database["schema_status"] == "stale":
         warnings.append("database schema evidence is stale")
+    if graph.get("recall", {}).get("lane") == "seed" and not graph["duplicates"]:
+        warnings.append(
+            "seed lane returned no candidates; this is not a measured absence. "
+            "Widen the seed to the design body, or run: fno backlog find '<2-3 salient terms>'"
+        )
     return {
         "version": 1,
         "seed": seed,
@@ -493,7 +507,7 @@ def render_receipt(receipt: dict[str, Any]) -> str:
         # floor, so a seed with no true duplicate still returns a full top-K.
         # A bare `duplicates=5` reads as five duplicates found, which is the
         # one thing this list cannot tell you.
-        f"graph: {graph['status']} resolved={resolved.get('id', '-')} candidates={len(graph['duplicates'])} (ranked, judge before trusting) epics={len(graph['epic_candidates'])}",
+        f"graph: {graph['status']} lane={graph.get('recall', {}).get('lane', '-')} tokens={graph.get('recall', {}).get('seed_tokens', '-')} resolved={resolved.get('id', '-')} candidates={len(graph['duplicates'])} (ranked, judge before trusting) epics={len(graph['epic_candidates'])}",
         f"pull requests: {prs['status']} matches={len(prs['matches'])}",
         f"database: detected={str(database['detected']).lower()} schema={database['schema_status']}",
         f"pitfalls: source={pitfalls['source']} entries={len(pitfalls['entries'])} syntheses={len(pitfalls['retro_syntheses'])} candidates={pitfalls['lesson_candidates']}",

@@ -286,6 +286,99 @@ def test_exact_archived_node_is_labeled_and_keeps_pr_link(tmp_path: Path) -> Non
     assert receipt["graph"]["resolved"]["pr_number"] == 321
 
 
+# --- AC3-HP / AC4-EDGE / AC5-EDGE: seed lane recall and its honesty marker ---
+
+
+def test_seed_lane_matches_node_lane_candidate_set(tmp_path: Path) -> None:
+    from fno.graph.relatedness import _DOMAIN_BONUS, _MIN_SCORE
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    # x-seed-src stands in for the not-yet-filed idea: present when resolved
+    # by id (the id lane's positive control), absent from the seed-lane graph
+    # (a design-doc seed never matches a node that does not exist yet).
+    node_a = {
+        "id": "x-seed-src",
+        "slug": "seed-src",
+        "title": "alpha bravo charlie delta echo",
+        "details": "foxtrot golf hotel",
+        "status": "ready",
+        "domain": "code",
+    }
+    node_b = {
+        "id": "bbb",
+        "slug": "bbb",
+        "title": "alpha bravo charlie india juliet",
+        "details": "",
+        "status": "ready",
+        "domain": "code",
+    }
+    node_c = {
+        "id": "ccc",
+        "slug": "ccc",
+        "title": "alpha bravo kilo lima mike",
+        "details": "",
+        "status": "ready",
+        "domain": "code",
+    }
+
+    node_receipt = build_receipt(
+        "x-seed-src",
+        repo=repo,
+        graph_entries=[node_a, node_b, node_c],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+    assert node_receipt["graph"]["recall"] == {
+        "lane": "node",
+        "seed_tokens": node_receipt["graph"]["recall"]["seed_tokens"],
+        "floor": _MIN_SCORE,
+    }
+    node_ids = sorted(row["id"] for row in node_receipt["graph"]["duplicates"])
+    assert node_ids == ["bbb", "ccc"]
+
+    seed_text = "alpha bravo charlie delta echo foxtrot golf hotel"
+    seed_receipt = build_receipt(
+        seed_text,
+        repo=repo,
+        graph_entries=[node_b, node_c],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+    assert seed_receipt["graph"]["recall"]["lane"] == "seed"
+    assert seed_receipt["graph"]["recall"]["floor"] == _MIN_SCORE - _DOMAIN_BONUS
+    seed_ids = sorted(row["id"] for row in seed_receipt["graph"]["duplicates"])
+    assert seed_ids == node_ids == ["bbb", "ccc"]
+
+
+def test_seed_lane_empty_marks_incomplete_and_names_backlog_find(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    receipt = build_receipt(
+        "zzqx nonexistent vocabulary token",
+        repo=repo,
+        graph_entries=[],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    assert receipt["graph"]["recall"]["lane"] == "seed"
+    assert receipt["graph"]["duplicates"] == []
+    assert receipt["complete"] is False
+    assert any("fno backlog find" in w for w in receipt["warnings"])
+
+
 def test_cli_emits_machine_readable_receipt(monkeypatch, tmp_path: Path) -> None:
     from fno.provenance.cli import think_app
 
