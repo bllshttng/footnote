@@ -279,6 +279,12 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         "--lock-timeout-secs",
         str(_LOCK_TIMEOUT_SECS),
     ]
+    try:
+        from fno import paths as _paths
+
+        argv.extend(["--events", str(_paths.project_events_json())])
+    except Exception:
+        pass
     if _is_canonical(path):
         argv.append("--canonical")
     proc = subprocess.Popen(
@@ -644,7 +650,12 @@ def _graph_commit_mode() -> str:
 
 
 def _commit_snapshot(
-    client, snap: dict, base_entries: list[dict], entries: list[dict], plan_rungs: dict
+    client,
+    snap: dict,
+    base_entries: list[dict],
+    entries: list[dict],
+    plan_rungs: dict,
+    attempt: int,
 ) -> dict:
     if _graph_commit_mode() == "rows":
         diff = _row_diff(base_entries, entries)
@@ -659,6 +670,7 @@ def _commit_snapshot(
                     "changed": changed,
                     "removed": removed,
                     "plan_rungs": plan_rungs,
+                    "attempt": attempt,
                 })
             except RuntimeError as exc:
                 marker = 'store error (invalid): unknown store method "commit_rows"'
@@ -671,6 +683,7 @@ def _commit_snapshot(
         "version": snap["version"],
         "entries": entries,
         "plan_rungs": plan_rungs,
+        "attempt": attempt,
     })
 
 
@@ -1259,7 +1272,9 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         _validate_company_work(entries)
         plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs)
+            outcome = _commit_snapshot(
+                client, snap, base_entries, entries, plan_rungs, attempt + 1
+            )
             break
         except _Conflict as conflict:
             _emit_graph_tx_event(

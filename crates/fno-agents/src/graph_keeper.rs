@@ -64,6 +64,8 @@ pub struct KeeperConfig {
     /// closure-release hook and canonical-board effects.
     pub canonical: bool,
     pub lock_timeout: Duration,
+    /// Project journal receiving bounded write-gate aggregates.
+    pub events: Option<PathBuf>,
     /// Idle self-exit bound. A keeper is long-lived by design in production,
     /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
     /// a killed pytest worker above all - and one orphan per fixture graph
@@ -85,6 +87,7 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
     let mut session = String::new();
     let mut canonical = false;
     let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
+    let mut events = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -100,6 +103,11 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                     .parse()
                     .map_err(|_| "--lock-timeout-secs needs a number")?;
                 lock_timeout = Duration::from_secs(v);
+            }
+            "--events" => {
+                events = Some(PathBuf::from(
+                    it.next().ok_or("--events needs a value")?,
+                ))
             }
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -123,6 +131,7 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         session,
         canonical,
         lock_timeout,
+        events,
         idle_limit,
     })
 }
@@ -253,6 +262,89 @@ struct StoreState {
     /// after evidence).
     file_opens: AtomicU64,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
+    gate_metrics: Mutex<GateMetrics>,
+    events: Option<PathBuf>,
+}
+
+const GATE_WINDOW: Duration = Duration::from_secs(300);
+const WAIT_BOUNDS_MS: [u64; 12] = [
+    1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, u64::MAX,
+];
+
+struct GateMetrics {
+    started: std::time::Instant,
+    started_epoch_ms: u128,
+    counts: [u64; WAIT_BOUNDS_MS.len()],
+    mutations: u64,
+    bytes_written: u64,
+    retries: u64,
+}
+
+impl GateMetrics {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_epoch_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or(0),
+            counts: [0; WAIT_BOUNDS_MS.len()],
+            mutations: 0,
+            bytes_written: 0,
+            retries: 0,
+        }
+    }
+}
+
+fn record_gate(state: &StoreState, wait: Duration, bytes_written: u64, attempt: u64) {
+    let mut metrics = state
+        .gate_metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let wait_ms = wait.as_millis().min(u64::MAX as u128) as u64;
+    let bucket = WAIT_BOUNDS_MS
+        .iter()
+        .position(|bound| wait_ms <= *bound)
+        .unwrap_or(WAIT_BOUNDS_MS.len() - 1);
+    metrics.counts[bucket] += 1;
+    metrics.mutations += 1;
+    metrics.bytes_written = metrics.bytes_written.saturating_add(bytes_written);
+    metrics.retries = metrics.retries.saturating_add(attempt.saturating_sub(1));
+}
+
+fn flush_gate_metrics(state: &StoreState) {
+    let Some(path) = &state.events else { return };
+    let mut metrics = state
+        .gate_metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let elapsed = metrics.started.elapsed();
+    let replacement = GateMetrics::new();
+    let finished_epoch_ms = replacement.started_epoch_ms;
+    let completed = std::mem::replace(&mut *metrics, replacement);
+    drop(metrics);
+    let bounds: Vec<Value> = WAIT_BOUNDS_MS
+        .iter()
+        .map(|bound| {
+            if *bound == u64::MAX {
+                Value::String("inf".into())
+            } else {
+                json!(bound)
+            }
+        })
+        .collect();
+    let emitter = crate::events::EventEmitter::new(path, "daemon");
+    let _ = emitter.emit("graph_write_gate", &json!({
+        "keeper_pid": std::process::id(),
+        "window_started_ms": completed.started_epoch_ms,
+        "window_finished_ms": finished_epoch_ms,
+        "completed_window_seconds": elapsed.as_secs_f64(),
+        "wait_ms_bounds": bounds,
+        "wait_ms_counts": completed.counts,
+        "mutation_count": completed.mutations,
+        "bytes_written": completed.bytes_written,
+        "retry_count": completed.retries,
+    }));
 }
 
 /// Run the store keeper to completion. Returns only on a startup failure;
@@ -286,6 +378,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         cache: RwLock::new(None),
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
+        gate_metrics: Mutex::new(GateMetrics::new()),
+        events: cfg.events.clone(),
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -302,6 +396,17 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     .into_bytes();
 
     let shutdown = Arc::new(AtomicU64::new(0));
+    if state.events.is_some() {
+        let metrics_state = Arc::clone(&state);
+        let metrics_shutdown = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("fno-store-metrics".into())
+            .spawn(move || loop {
+                std::thread::sleep(GATE_WINDOW);
+                if metrics_shutdown.load(Ordering::SeqCst) == 1 { break; }
+                flush_gate_metrics(&metrics_state);
+            });
+    }
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
@@ -886,7 +991,9 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         .and_then(Value::as_array)
         .ok_or_else(|| StoreError::Invalid("commit needs entries".into()))?
         .clone();
-    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    let waiting = std::time::Instant::now();
+    let gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    let waited = waiting.elapsed();
     let outcome = graph_store::locked_mutate(
         &state.graph,
         MutateInput {
@@ -896,8 +1003,14 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
-    )?;
-    seed_cache(state, outcome.entries.clone(), &outcome.version);
+    );
+    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    if let Ok(value) = &outcome {
+        seed_cache(state, value.entries.clone(), &value.version);
+    }
+    drop(gate);
+    record_gate(state, waited, bytes, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
+    let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
 
@@ -1005,10 +1118,12 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     }
     touched.extend(removed.iter().cloned());
 
-    let _gate = state
+    let waiting = std::time::Instant::now();
+    let gate = state
         .gate
         .write()
         .unwrap_or_else(|error| error.into_inner());
+    let waited = waiting.elapsed();
     let current_version = file_version(&state.graph);
     let current = graph_store::read_defaulted(&state.graph, false)?;
     if current_version != base_version {
@@ -1028,6 +1143,8 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             .filter(|id| normalized_base.get(id) != current_digests.get(id) && touched.contains(id))
             .collect();
         if !conflicts.is_empty() {
+            drop(gate);
+            record_gate(state, waited, 0, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
             return Err(CommitRowsError::Conflict(conflicts));
         }
     }
@@ -1066,8 +1183,21 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
-    )?;
+    );
+    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    if let Ok(value) = &outcome {
+        seed_cache(state, value.entries.clone(), &value.version);
+    }
+    drop(gate);
+    record_gate(state, waited, bytes, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
+    let outcome = outcome?;
     Ok(outcome_json(&outcome))
+}
+
+fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
+    let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
+    let backup = outcome.backup.as_ref().and_then(|path| std::fs::metadata(path).ok()).map(|meta| meta.len()).unwrap_or(0);
+    graph.saturating_add(backup)
 }
 
 /// The client-supplied node id -> plan rung map (see
@@ -2495,6 +2625,7 @@ mod tests {
             session: "test-idle".into(),
             canonical: false,
             lock_timeout: Duration::from_secs(2),
+            events: None,
             idle_limit: Some(Duration::from_millis(700)),
         };
         let handle = std::thread::spawn(move || run(cfg));
@@ -2533,6 +2664,8 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            events: None,
         };
         let stale = json!({
             "name": "update_fields",

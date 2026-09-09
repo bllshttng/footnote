@@ -62,6 +62,24 @@ gates:
 
 event_types:
 
+  - name: graph_write_gate
+    retention: durable
+    description: "Five-minute mergeable histogram for graph keeper write-gate contention."
+    sources: [daemon]
+    data:
+      required: [keeper_pid, window_started_ms, window_finished_ms, completed_window_seconds, wait_ms_bounds, wait_ms_counts, mutation_count, bytes_written, retry_count]
+      properties:
+        keeper_pid: { type: integer }
+        window_started_ms: { type: integer }
+        window_finished_ms: { type: integer }
+        completed_window_seconds: { type: number }
+        wait_ms_bounds: { type: array }
+        wait_ms_counts: { type: array }
+        mutation_count: { type: integer }
+        bytes_written: { type: integer }
+        retry_count: { type: integer }
+    consumers: [scripts/analysis/graph-write-gate-audit.py]
+
   - name: event_migration_landed
     retention: durable
     description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."
