@@ -70,7 +70,7 @@ import typer
 # suite patches functions, not classes.
 from . import core as _claims_core
 from . import io as _claims_io
-from .roster import RosterReading, _finished_row_states, _really_finished, _transcript_activity, read_roster
+from . import roster as _roster
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
@@ -84,6 +84,12 @@ from .core import (
     HolderMismatch,
 )
 from fno.tombstones import tombstone_group_cls
+
+RosterReading = _roster.RosterReading
+_finished_row_states = _roster._finished_row_states
+_really_finished = _roster._really_finished
+_transcript_activity = _roster._transcript_activity
+read_roster = _roster.read_roster
 
 
 cli = typer.Typer(
