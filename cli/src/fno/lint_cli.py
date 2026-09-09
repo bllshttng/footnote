@@ -45,6 +45,7 @@ CHECKS: dict[str, str] = {
     "hook-tombstones": "hook_tombstones",
     "seam-crossings": "seam_crossings",
     "field-coverage": "field_coverage",
+    "graph-parity": "graph_parity",
 }
 
 
@@ -202,6 +203,16 @@ def _repo_root() -> Path:
     from fno.paths import resolve_repo_root
 
     return resolve_repo_root()
+
+
+def graph_parity(
+    graph: Optional[Path] = None,
+    db: Optional[Path] = None,
+) -> None:
+    """Compare the JSON export with every row in the SQLite graph store."""
+    from fno.lint_graph_parity import compare
+
+    raise typer.Exit(compare(graph=graph, db=db))
 
 
 
@@ -1940,6 +1951,12 @@ def lint(
         help="hook-tombstones: revision to measure deletions against, "
         "instead of the auto-resolved base.",
     ),
+    graph: Optional[Path] = typer.Option(
+        None, "--graph", help="graph-parity: JSON export to compare."
+    ),
+    db: Optional[Path] = typer.Option(
+        None, "--db", help="graph-parity: SQLite store to compare."
+    ),
 ) -> None:
     """Run a repository lint check by name.
 
@@ -1968,6 +1985,8 @@ def lint(
         "as_json": as_json,
         "live": live,
         "base": base,
+        "graph": graph,
+        "db": db,
     }
     accepted = set(inspect.signature(fn).parameters)
     fn(**{k: v for k, v in supplied.items() if k in accepted})
