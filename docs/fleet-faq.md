@@ -56,6 +56,8 @@ A stale file can sit at the canonical path. One session read that copy and saw a
 
 Resolving the directory is only half of it. One worktree directory held four session transcripts. A recency sort picked a file written two days earlier by a different session, and it read as a worker long dead. Pick the file by session id, at `~/.claude/projects/<cwd-key>/<session-id>.jsonl`.
 
+Use the FULL id. Three codex rows read as `01a0741a`, `01a07f26` and `01a07f26` at eight characters. Two of them looked like one session held by two names, which reads as a roster defect. At full length they are three distinct sessions. Codex mints ids sharing a long `01a0` prefix, so a short key collides where a claude key does not.
+
 *Graduates to:* one liveness verb with a decisive answer, so four readers stop disagreeing, and a transcript path resolver every caller shares.
 
 ## How do I get a worker back?
@@ -80,7 +82,11 @@ One session found a completed, validated plan this way twelve minutes after the 
 
 The general rule: `last_message_at` measures mail, not work.
 
-*Graduates to:* a finished worker mailing its own report, or a roster field that separates "worked and did not mail" from "did nothing".
+A subagent fails the same way and gives you less to read. One finished at 23:13 and again at 23:22, and its result reached the caller at 23:40. By then the caller had read its listing row as `idle`, called it wedged, sent it a nudge to finish, and stopped it. The nudge did nothing, because the work was already done. Silence after a nudge reads as proof of a wedge and is not.
+
+`idle` in an agent listing means "not running a tool right now". It does not separate finished-and-undelivered from stuck. Read what the worker produced before you call it wedged. For a spawned worker that is its transcript. For a subagent there is no equivalent reader, which is the gap.
+
+*Graduates to:* a finished agent's report reaching its caller, or a listing that separates a completed agent from an idle one. Until then, never infer a wedge from an idle row alone.
 
 ## I need to change a worker's instructions
 
@@ -118,7 +124,11 @@ Refusals seen in practice, all correct:
 
 A refusal message can name the wrong cause while still being right to refuse. Fix the message in the project, obey the refusal now.
 
-*Graduates to:* every refusal naming a cause it actually verified.
+**A capacity refusal is a hold.** One sample is not the band. Four readings of the gating load average landed inside forty minutes, with no change in real work. They read 182.7 over, 99.7 under, 153.2 over and 186.0 over, against a ceiling of 120. Sustained CPU over the same window read 2.458, 3.304, 4.252 and 2.838 cores of twelve. The last pair moved in opposite directions. Retrying because one sample came back under is edge-triggering on a signal that flaps.
+
+Read the refusal's own words before you name the cause. One refusal blamed load. A later one from the same caller said `30/30 live worker slots` and queued 271 seconds, which is a different gate entirely. The slot cap counts registry rows, so quiet and parked workers hold slots while consuming nothing.
+
+*Graduates to:* every refusal naming a cause it actually verified, and an admission decision that reads work rather than a one-minute load average.
 
 ## An absence, a zero, or an unconfirmed result is not a verdict
 
@@ -139,6 +149,8 @@ The shapes, each measured:
 **A dry run promises what the real run cannot deliver.** `fno agents reap --dry-run` listed nine rows. The real run returned `retired: 0` and kept eight with `the stop did not confirm; row kept for retry`. Only a live process can confirm a stop, so an already-dead row can never clear. Every one of the eight pids probed dead, with the probe shell's own pid reading ALIVE as the control.
 
 **A refusal exits 0.** The spawn gate writes its refusal to stdout as JSON and still exits 0: `{"status": "refused", "reason": "queue_timeout", "max_live": 30, ...}` followed by `[exited with code 0]`.
+
+**A guard that lists a wrong value as legal lets it pass.** One arm printed `main:pending` every tick for a session. It read the commit status API. Its guard allowed `success|pending|failure|error` and anything else became UNREADABLE, so a permanently wrong value passed as a legal one. This repo publishes check-runs, not commit statuses, and the status API returns `state` pending with zero statuses forever. Measured directly it read `{"state":"pending","total":0}` while the check-runs API read 21 success and 6 skipped, none failing and none running. Zero statuses is the tell: a ref with no statuses is not pending, it is unmeasured by that API.
 
 **A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
@@ -387,6 +399,18 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 *Graduates to:* the warning reporting the unlinked live count beside the linked list, so a silent zero and an unreadable one are told apart.
 
+## The law allows a scoped fix-verify and the tool cannot express one
+
+**Answer.** Attest the whole branch diff or attest nothing. `emit-attestation.sh` computes its own base as the merge-base with `origin/main` and records `reviewed_line_count` for that whole range. A reviewer who read only the fix delta and emits anyway files a row claiming it read the branch.
+
+**Specimen.** The standing two-review law says a scoped fix and its verify is not a round. A reviewer was asked to verify a three-commit fix delta and post dispositions. It verified all three fixes and then refused to emit, because the branch diff was 456 lines and it had read the delta. The script's own header says running it over unresolved findings "makes the gate the whole board trusts tell a lie, and nothing downstream can tell that apart from a real pass." The reviewer was right to refuse. The honest action and the mechanically available action were different actions.
+
+**The half that costs more.** A findings chain is keyed by branch NAME. That reviewer had worked from a locally fetched copy. Its rows recorded a review-only branch name, while the PR's own chain carried six findings of its own. `_coverage_gate.py` builds `findings_by_key` from the chain, so disposing findings against the wrong chain is inert rather than wrong. That is worse, because it looks like progress. Three review rounds landed where nothing read them.
+
+Review on the PR's own branch, in a worktree that has it checked out. A review done on a fetched copy is invisible to the gate forever.
+
+*Graduates to:* an attestation that records a scoped range, so a fix-verify states what it read instead of overclaiming or staying silent. And a chain keyed on something a fetched copy cannot change.
+
 ## A peer confirmed my finding and we were both wrong
 
 **Answer.** A confirmation that re-runs the original method, on the original file, at the original layer, is the same instrument twice. It cannot fail. A cross-check must change the layer, not only the reader.
@@ -432,6 +456,8 @@ Do not check the monitors with a task reader. A task reader covers the planning 
 An earlier version of this entry cited a task reader here, and that citation was wrong. Measured the same day, a task list returned none while two monitors ran, named by their ids. A task get on one of those ids returned not found.
 
 **You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no king and no crown scope. With no state file present, the source field defaults to `test`. A king session has none, so every reign check-in journals as a test event. A fleet-wide question about which kings still have a beat has no reader at all.
+
+The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no king value. Its one extensible pattern is `worker:` or `stream-worker:`. So a king defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
 
 *Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
 
