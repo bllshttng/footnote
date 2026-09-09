@@ -41,6 +41,20 @@ The claim checking out is step one. Probe around it, at the same surface: empty 
 
 A probe that finds nothing is still a step and still gets its line - it tells the author what WAS covered, which a bare PASS cannot. **A Steps list that is all pass and no probe is a happy-path replay: fno's prove-it REFUSES to report PASS over it** (`scripts/validate-prove-it.sh` enforces this; /verify would still say PASS with a note - this is the deliberate hardening).
 
+## Claims
+
+Prove-it answers a second question beside does the change work: is what you just said true. A completion claim ("the badge refreshes on every focus event") is checked the way the route above is driven - by a command, run fresh, whose output sits beside the claim. Five steps, run before any claim is written into the report:
+
+1. Name the command that proves this claim.
+2. Run it fresh and complete in this session. A previous run is not evidence, and neither is a run of a narrower command.
+3. Read all of the output: the exit code, and any failure or error count the command prints.
+4. Confirm the output supports the claim as stated, not a weaker claim next to it.
+5. Only then write the claim, with its command, exit code and captured output beside it.
+
+The prohibitions are what the validator refuses: no success language before step 5, no partial check standing in for the whole, no extrapolation from a related check, no reuse of an earlier run's output. A record saying a probe executed is not evidence; the command and its output are. **A PASS with no `### Claims` section is REFUSED, and so is any claim row missing its `CMD:` - a claim with no command is a claim nobody checked.**
+
+A surface no command can drive is the one honest escape: it reports **BLOCKED** or **SKIP**, which carry no verdict and pass the validator untouched - never an unproven claim.
+
 ## Capture
 
 Stdout, response bodies, screenshots, pane dumps. Captured output is evidence; memory is not. Something unexpected: capture it, note it, decide if it is the change or the environment. Unrelated breakage is a finding, not noise. Isolate shared process state - `tmux -L`, bound ports, `mktemp -d`.
@@ -58,12 +72,19 @@ Inline, final message:
 1. ✅/❌/⚠️/🔍 <what you did to the running app> -> <what you observed>
    <evidence: the app's own output, captured>
 2. 🔍 <probe> -> <result>
+### Claims
+1. CLAIM: <the completion statement this report makes>
+   CMD: `<the command run fresh, verbatim>`
+   EXIT: <integer exit code>
+   OUT: <the captured lines that carry the verdict>
+   VERDICT: PASS | FAIL
+2. CLAIM: ...
 ### Findings
 - each probe gets a line here even when it held
 fno-prove-it: {"verdict":"<PASS|FAIL|BLOCKED|SKIP>","claim":"<one line>"}
 ```
 
-Build/install/checkout are setup, not steps. The terminal `fno-prove-it:` JSON line is the machine record: `validate-prove-it.sh` reads it, refuses a PASS with no 🔍 marker in Steps, and passes FAIL/BLOCKED/SKIP through untouched.
+Build/install/checkout are setup, not steps. The terminal `fno-prove-it:` JSON line is the machine record: `validate-prove-it.sh` reads it, refuses a PASS with no 🔍 marker in Steps, refuses a PASS with no `### Claims` section or a claim row missing its `CMD:`, and passes FAIL/BLOCKED/SKIP through untouched.
 
 Verdicts, and what each is worth:
 
