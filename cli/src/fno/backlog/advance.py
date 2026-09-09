@@ -2883,8 +2883,7 @@ def _join_node(
             # The grid's route rides beside the model it belongs to; a row
             # without one adds nothing.
             *(("--route", lane_r) if lane_r else ()),
-            # The capacity pick read the account's quota, so the joiner runs
-            # under it; the thread substrate is claude-only here already.
+            # The capacity pick read the account's quota; claude-only already.
             *(("--account", lane_a) if lane_a else ()),
             "--cwd", worktree, "--name", name,
             *(

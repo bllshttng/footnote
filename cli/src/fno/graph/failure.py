@@ -49,9 +49,8 @@ def events_path() -> Path:
 def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
     """Append a ``node_undeferred`` reset boundary for ``node_id``: the flat
     envelope ``_classify`` accepts, to the same log ``read_events`` consumes,
-    so writer and reader cannot drift. Best-effort - a failed write only
-    means the node keeps its pre-undefer streak - but it warns to stderr:
-    a reset that silently never lands leaves the node one maintain pass from
+    so writer and reader cannot drift. Best-effort, but warns to stderr: a
+    reset that silently never lands leaves the node one maintain pass from
     re-deferral on stale history."""
     import sys
     from datetime import datetime, timezone
