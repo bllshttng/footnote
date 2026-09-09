@@ -620,12 +620,20 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         );
     } else {
         for r in &rows {
+            // The who column falls back to the ACTOR, so a plain reader still
+            // sees who acted on a row whose actor is a mechanism. Printing a
+            // bare dash there dropped the only name those rows carry.
+            let who = r
+                .session_id
+                .as_deref()
+                .or(r.actor.as_deref())
+                .unwrap_or("-");
             println!(
                 "{} {} {} {} {}",
                 r.ts,
                 r.kind,
                 r.node.as_deref().unwrap_or("-"),
-                r.session_id.as_deref().unwrap_or("-"),
+                who,
                 r.title
             );
         }

@@ -196,8 +196,8 @@ pub(crate) fn pan_by(s: &str, cols: usize) -> String {
     out
 }
 
-/// The widest title in the panel, in display columns. The pan ceiling: past
-/// it every row is blank, which teaches nothing.
+/// The widest title in the panel, in display columns. The pan stops one
+/// column short of this, so the widest row always keeps something on screen.
 pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
     items
         .iter()
@@ -209,34 +209,6 @@ pub(crate) fn widest_title(items: &[FeedItem]) -> usize {
 /// `HH:MM` out of an RFC3339 stamp; an unparseable ts shows raw.
 fn short_ts(ts: &str) -> String {
     ts.get(11..16).unwrap_or(ts).to_string()
-}
-
-/// The deep link. Joined first (the sideline's own resolution - node id
-/// matches a row's name or worktree basename, session id its harness id), so
-/// a live worker's row gets exactly the command a sideline click on that
-/// worker yields. Unjoined but carrying a session id: attach it on portal 0;
-/// a dead session answers through the server's existing refusal notice. No
-/// session id at all: not selectable.
-pub(crate) fn feed_hit(view: &View, item: &FeedItem) -> Option<ChromeHit> {
-    let keys: Vec<&str> = [item.node.as_deref(), item.session_id.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
-    if let Some(row) = view.layout.agents.iter().find(|a| {
-        keys.iter().any(|k| a.name == *k)
-            || a.cwd_base.as_deref().is_some_and(|c| keys.contains(&c))
-    }) {
-        return Some(agent_hit(row, view.layout.active_squad));
-    }
-    item.session_id.as_deref().map(|sid| {
-        ChromeHit::Cmds(vec![Command::AttachAgent {
-            id: sid.to_string(),
-            placement: PanePlacement {
-                portal: Some(0),
-                ..PanePlacement::default()
-            },
-        }])
-    })
 }
 
 /// The feed panel's width until the operator drags its border once; persisted
@@ -510,14 +482,15 @@ impl View {
     }
 
     /// What the provenance view's Enter does, resolved from the SAME evidence
-    /// the view rendered its footer from. A row carrying a recovery line hands
-    /// that line over verbatim rather than attaching a session that is gone.
+    /// the view rendered its footer from - one `Destination`, read twice. Resolving
+    /// it twice is how the footer came to promise a command the action did not
+    /// send: the footer joined on the exact session id while the action joined
+    /// on the row name, so a node_created row with a live worker on that node
+    /// read `esc close` and then focused a pane.
     pub(super) fn feed_detail_hit(&self) -> Option<ChromeHit> {
         let item = self.feed_detail_of.as_ref()?;
-        if let Some(detail) = item.detail.as_deref() {
-            return Some(ChromeHit::Notice(detail.to_string()));
-        }
-        feed_hit(self, item)
+        let dest = feed_detail::destination(&self.layout.agents, item);
+        feed_detail::detail_hit(self, &dest)
     }
 
     /// The hover marker follows the pointer inside the panel; anything else
@@ -552,7 +525,7 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     let Some(f) = view.feed.as_mut() else {
         return;
     };
-    if !(f.want && !f.inflight) {
+    if !f.want || f.inflight {
         return;
     }
     f.want = false;
@@ -610,6 +583,10 @@ pub(crate) async fn toggle(
         // never starts already holding it.
         view.feed = None;
         view.feed_detail_of = None;
+        // A half-read escape sequence must not survive the close: carried
+        // into the next focus it folds with the fresh bytes into a key
+        // nobody pressed.
+        view.feed_esc.clear();
     }
     let (r, c) = view.content_dims();
     write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
@@ -681,6 +658,7 @@ pub(crate) async fn focus(
     if let Some(f) = view.feed.as_mut() {
         f.focused = true;
     }
+    view.feed_esc.clear();
     Ok(())
 }
 
@@ -730,14 +708,16 @@ pub(crate) async fn feed_keys(
             }
             continue;
         }
+        if matches!(tok, ModalKey::Esc) {
+            release(view);
+            continue;
+        }
         let Some(f) = view.feed.as_mut() else {
             break; // closed mid-chunk: swallow the rest, never forward
         };
         let len = f.items.len();
         match tok {
-            ModalKey::Esc => {
-                f.focused = false;
-            }
+            ModalKey::Esc => {}
             ModalKey::Up => {
                 f.sel = f.sel.saturating_sub(1);
                 view.follow_feed_selection();
@@ -750,7 +730,10 @@ pub(crate) async fn feed_keys(
             // anchored, so a panned row is still the row you selected.
             ModalKey::Left => f.hpan = f.hpan.saturating_sub(1),
             ModalKey::Right => {
-                let ceiling = feed_view::widest_title(&f.items);
+                // One column short of the widest title. AT that width every
+                // row is blank, so the pan would strand the operator in an
+                // empty panel with nothing on screen to pan back by.
+                let ceiling = feed_view::widest_title(&f.items).saturating_sub(1);
                 f.hpan = (f.hpan + 1).min(ceiling);
             }
             ModalKey::PageUp => {

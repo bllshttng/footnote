@@ -1,13 +1,15 @@
 //! The feed panel's client-side tests (x-4433, x-f089): render order, the
-//! hover marker, the click mapping, and the deep-link contract. A joined row
-//! resolves exactly what `agent_hit` yields for that sideline row; an
-//! unjoined row with a session id attaches it on portal 0; a row with no
-//! session id is not selectable. The panel is chrome: the click resolver and
-//! the painter must invert each other exactly.
+//! hover marker, the click mapping, the focus mode, and the provenance view.
+//! One `Reach` resolves a row, and the footer and the action both read it, so
+//! a joined row yields exactly what `agent_hit` yields for that sideline row,
+//! an unjoined row with a session id attaches on portal 0, and a row with no
+//! session id offers nothing. The click resolver and the painter must invert
+//! each other exactly.
 
 use super::tests::{two_pane_view, view_with_agents};
 use super::*;
-use crate::client::feed_view::{feed_hit, feed_panel_lines, feed_row_item, FeedOverlay};
+use crate::client::feed_detail::{self, destination, Destination};
+use crate::client::feed_view::{feed_panel_lines, feed_row_item, FeedOverlay};
 use crate::proto::Reach;
 
 const W: usize = 40;
@@ -170,7 +172,8 @@ fn degraded_footer_renders_the_typed_reason() {
 fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
     // The cwd basename is the node id: the join the sideline itself uses.
     let v = view_with_rows(vec![joined_row("worker-01", Some("x-9223"), Some(7))]);
-    let joined = feed_hit(&v, &feed_item(Some("x-9223"), Some("s-ghost"))).unwrap();
+    let item = feed_item(Some("x-9223"), Some("s-ghost"));
+    let joined = feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).unwrap();
     let expected = {
         let r = &v.layout.agents[0];
         agent_hit(r, v.layout.active_squad)
@@ -185,7 +188,8 @@ fn hit_on_a_joined_row_equals_agent_hit_for_that_row() {
 #[test]
 fn hit_on_an_unjoined_row_attaches_its_session() {
     let v = view_with_rows(vec![]);
-    let hit = feed_hit(&v, &feed_item(Some("x-nope"), Some("s-ghost"))).unwrap();
+    let item = feed_item(Some("x-nope"), Some("s-ghost"));
+    let hit = feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).unwrap();
     assert!(matches!(hit, ChromeHit::Cmds(c)
     if c == vec![Command::AttachAgent {
         id: "s-ghost".into(),
@@ -196,7 +200,8 @@ fn hit_on_an_unjoined_row_attaches_its_session() {
 #[test]
 fn hit_on_a_row_without_session_id_is_none() {
     let v = view_with_rows(vec![]);
-    assert!(feed_hit(&v, &feed_item(Some("x-nope"), None)).is_none());
+    let item = feed_item(Some("x-nope"), None);
+    assert!(feed_detail::detail_hit(&v, &destination(&v.layout.agents, &item)).is_none());
 }
 
 #[test]
@@ -479,7 +484,8 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
         "00847995-e0db-47c2-ab5b-24468ba1a4f5",
         "resume: claude --resume x",
     );
-    let fields = feed_detail::detail_fields(&item, None);
+    let d = destination(&[], &item);
+    let fields = feed_detail::detail_fields(&item, &d);
     let pane = fields.iter().find(|(l, _)| *l == "pane").unwrap();
     assert!(
         pane.1.starts_with(feed_detail::NOT_APPLICABLE),
@@ -487,9 +493,9 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
         pane.1
     );
     assert!(pane.1.contains("removed"));
-    let lines = feed_detail::detail_lines(&item, None);
+    let lines = feed_detail::detail_lines(&item, &d);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
-    assert!(feed_detail::detail_footer(&item, None).contains("resume line"));
+    assert!(feed_detail::detail_footer(&d).contains("resume line"));
 
     let mut v = view_with_rows(vec![]);
     v.feed_detail_of = Some(item);
@@ -509,13 +515,17 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     row.harness_session_id = Some("s-9".into());
     row.portal = Some(0);
     row.spawned_by_session = Some("s-parent".into());
-    row.crown_scope = Some("x-16b7".into());
+    row.crown_scope = Some("e-0001".into());
     row.crown_level = Some(1);
 
     let item = feed_item(Some("x-a"), Some("s-9"));
     let rows = [row];
-    let found = feed_detail::live_row(&rows, &item).expect("joined on the session id");
-    let fields = feed_detail::detail_fields(&item, Some(found));
+    let d = destination(&rows, &item);
+    assert!(
+        matches!(d, Destination::Exact(_)),
+        "joined on the session id"
+    );
+    let fields = feed_detail::detail_fields(&item, &d);
     let by = |label: &str| {
         fields
             .iter()
@@ -525,13 +535,26 @@ fn a_live_row_at_pane_zero_reports_its_seat_and_resolves_its_focus() {
     };
     assert_eq!(by("pane"), "pane 0 · portal 0");
     assert_eq!(by("parent"), "s-parent");
-    assert_eq!(by("king"), "L1 x-16b7");
-    assert!(feed_detail::detail_footer(&item, Some(found)).contains("focus its pane"));
+    assert_eq!(by("king"), "L1 e-0001");
+    assert!(feed_detail::detail_footer(&d).contains("focus its pane"));
 
-    // A row whose session id does not match is NOT this event's row, however
-    // its name reads.
-    let other = feed_item(Some("x-a"), Some("s-someone-else"));
-    assert!(feed_detail::live_row(&rows, &other).is_none());
+    // A row whose session id does not match is NOT this event's session,
+    // however its name reads: parent and king stay unrecorded, and the pane
+    // says whose seat it actually is.
+    let other = feed_item(Some("some-other-name"), Some("s-someone-else"));
+    let other_dest = destination(&rows, &other);
+    assert!(matches!(other_dest, Destination::NameOnly(_)));
+    let other_fields = feed_detail::detail_fields(&other, &other_dest);
+    let by_other = |label: &str| {
+        other_fields
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(by_other("parent"), feed_detail::NOT_RECORDED);
+    assert_eq!(by_other("king"), feed_detail::NOT_RECORDED);
+    assert!(by_other("pane").contains("the node's current worker"));
 }
 
 // An absent field says WHICH silence it is. A blank cell would teach nothing
@@ -542,7 +565,7 @@ fn an_absent_field_names_its_own_kind_of_silence() {
     let mut item = feed_item(Some("x-a"), None);
     item.kind = "node_created".into();
     item.harness = None;
-    let fields = feed_detail::detail_fields(&item, None);
+    let fields = feed_detail::detail_fields(&item, &destination(&[], &item));
     let by = |label: &str| {
         fields
             .iter()
@@ -558,7 +581,7 @@ fn an_absent_field_names_its_own_kind_of_silence() {
     let mut acted = feed_item(None, None);
     acted.kind = "decision_recorded".into();
     acted.actor = Some("fno agents stale-escalate".into());
-    let fields = feed_detail::detail_fields(&acted, None);
+    let fields = feed_detail::detail_fields(&acted, &destination(&[], &acted));
     let sid = fields.iter().find(|(l, _)| *l == "session-id").unwrap();
     assert!(
         sid.1.contains("acted by fno agents stale-escalate"),
