@@ -362,7 +362,8 @@ def similar_nodes(
     judgment is the full-context reader's. The default stays
     ``_DEDUP_MIN_SCORE`` so intake's tuned 0.30 behavior is unchanged. One
     scorer, one parameter (the ``include_epic`` precedent), never a second
-    implementation.
+    implementation. ``floor`` is passed to ``_score`` as its ``minimum``, so a
+    floor below ``_MIN_SCORE`` (0.15) is honored rather than clamped there.
     """
     threshold = _DEDUP_MIN_SCORE if floor is None else floor
     entry_id = entry.get("id")
@@ -399,7 +400,7 @@ def similar_nodes(
             else None
         )
         tb = cached_candidate_tokens if cached_candidate_tokens is not None else _tokens(e)
-        score, reason = _score(entry, e, ta, tb, include_epic=False)
+        score, reason = _score(entry, e, ta, tb, include_epic=False, minimum=threshold)
         if score >= threshold:
             scored.append((eid, score, reason))
     scored.sort(key=lambda r: (-r[1], r[0]))
