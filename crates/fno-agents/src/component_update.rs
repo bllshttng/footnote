@@ -357,6 +357,7 @@ struct ProbeArgs {
     mux_dir: Option<String>,
     python_expected: Option<String>,
     python_rev: Option<String>,
+    python_error: Option<String>,
     python_evidence: Option<String>,
 }
 
@@ -370,6 +371,7 @@ fn parse_probe_args(args: &[String]) -> Result<ProbeArgs, String> {
         mux_dir: None,
         python_expected: None,
         python_rev: None,
+        python_error: None,
         python_evidence: None,
     };
     let mut it = args.iter();
@@ -391,6 +393,7 @@ fn parse_probe_args(args: &[String]) -> Result<ProbeArgs, String> {
                 let v = value("--python-rev")?;
                 p.python_rev = Some(v).filter(|v| v != "-");
             }
+            "--python-error" => p.python_error = Some(value("--python-error")?),
             "--python-evidence" => p.python_evidence = Some(value("--python-evidence")?),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -465,14 +468,17 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             effect_ok: None,
         });
     }
-    if let Some(py_rev) = p.python_rev.clone() {
+    if p.python_rev.is_some() || p.python_error.is_some() {
+        // A requested python-tool row is emitted even when the marker could
+        // not be read: that state is Unknown with the named instrument, never
+        // a silent omission from the summary.
         components.push(ComponentProbe {
             component: PYTHON_TOOL.to_string(),
             expected_rev: p.python_expected.clone(),
             executable: python_exec.or(Some("<unresolved python>".to_string())),
             pre_rev: None,
-            post_rev: Some(py_rev),
-            instrument_error: None,
+            post_rev: p.python_rev.clone(),
+            instrument_error: p.python_error.clone(),
             contradicting_evidence: p.python_evidence.clone(),
             effect_attempted: p.attempted,
             effect_ok: None,

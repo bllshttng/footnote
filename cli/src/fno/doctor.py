@@ -647,6 +647,7 @@ def _component_convergence(
                 if content_drift
                 else None
             ),
+            "error": None if marker else "the installed-rev marker could not be read",
         },
     )
     if report and isinstance(report.get("components"), list):

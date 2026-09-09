@@ -352,11 +352,15 @@ def _component_verdict(
         cmd.append("--attempted")
     if python_tool:
         cmd += ["--python-rev", python_tool.get("rev") or "-"]
-        for flag, key in (("--python-expected", "expected"), ("--python-evidence", "evidence")):
+        for flag, key in (
+            ("--python-expected", "expected"),
+            ("--python-evidence", "evidence"),
+            ("--python-error", "error"),
+        ):
             if python_tool.get(key):
                 cmd += [flag, python_tool[key]]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60.0)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=90.0)
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("component-verdict transport failed: %s", exc)
         return None
