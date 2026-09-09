@@ -2365,23 +2365,14 @@ class AgentsBlock(SweepKeys):
     # Opt in per machine after happy is installed and paired. Only routed claude
     # panes use it; primary claude, every other harness, and bg stay unchanged.
     happy_routed_panes: bool = False
-    # Row-retirement grace in SECONDS (x-c672): a worker's registry row
-    # retires when every node its session is named on is done AND its
-    # transcript has been quiet this long. The Rust daemon's sweep reads the
-    # same `config.agents.retire_grace_s` key (agents_config.rs), so a
-    # non-default here changes both the idle tick and `fno agents reap`.
-    # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
+    # Row-retirement grace in SECONDS (x-c672); the daemon's sweep retires a
+    # row after this much quiet past done work. Full contract: FIELD_META.
     retire_grace_s: int = Field(default=900, ge=0)
-    # Retirement-sweep cadence in SECONDS (x-d354): how often the daemon's
-    # idle tick runs the retirement sweep at all. The Rust resolver clamps
-    # this under a third of `retire_grace_s` (the interval must be a fraction
-    # of the grace, never a multiple), so 1800 against a 900 grace resolves
-    # to 300. Unset, unparseable, or below the 5s daemon tick resolves to 300.
+    # Retirement-sweep cadence in SECONDS (x-d354); the Rust resolver clamps
+    # it under a third of the grace, never a multiple. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
-    # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
-    # this window in the same GC sweep that writes new ones; the Pydantic
-    # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
-    # be read is kept, never deleted on a failed read.
+    # Reap-receipt retention in days (x-6db9); the same sweep expires expired
+    # receipts. Full contract: FIELD_META.
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
