@@ -274,6 +274,126 @@ pub fn decide(payload: &Value) -> Value {
         }
     }
 
+    // --- effort --------------------------------------------------------- //
+    // The seam pre-validates the effort surface (effort_tokens) and passes
+    // the reason when validation failed; a config value with no reason
+    // injects. Explicit --effort remains fail-closed in cmd_spawn.
+    let effort = axis(payload, "effort");
+    if !flag(payload, "has_effort") && !effort.value.is_empty() {
+        match opt_str(payload, "effort_reason").filter(|s| !s.is_empty()) {
+            None => {
+                inject.push(json!(["--effort", effort.value]));
+                applied.push(json!([
+                    "effort",
+                    effort.value,
+                    format!("{}.effort", effort.rung),
+                ]));
+            }
+            Some(reason) => {
+                messages.push(format!(
+                    "fno agents spawn: effort skipped ({reason}); {}.effort = {} ignored",
+                    effort.rung,
+                    repr(&effort.value),
+                ));
+                suppressed.push(json!(["effort", effort.value, effort.rung, reason]));
+            }
+        }
+    }
+
+    // --- substrate ------------------------------------------------------ //
+    // A config-sourced substrate must be a KNOWN value AND honored by the
+    // resolved provider (the seam precomputes both facts); otherwise it
+    // degrades open with the named condition, never failing at the spawn
+    // parser. The injected value feeds the permission axis' effective lane.
+    let substrate = axis(payload, "substrate");
+    let explicit_substrate = opt_str(payload, "explicit_substrate").filter(|s| !s.is_empty());
+    let mut injected_substrate: Option<String> = None;
+    if explicit_substrate.is_none() && !substrate.value.is_empty() {
+        let substrate_ok = flag(payload, "substrate_ok");
+        if !prov.is_empty() && substrate_ok {
+            inject.push(json!(["--substrate", substrate.value]));
+            injected_substrate = Some(substrate.value.clone());
+            applied.push(json!([
+                "substrate",
+                substrate.value,
+                format!("{}.substrate", substrate.rung),
+            ]));
+        } else {
+            let reason = if prov.is_empty() {
+                "harness resolution failed".to_string()
+            } else if flag(payload, "substrate_unknown") {
+                format!(
+                    "unknown substrate (valid: {})",
+                    payload
+                        .get("substrate_valid_list")
+                        .and_then(Value::as_str)
+                        .unwrap_or("pane, thread, headless, bg")
+                )
+            } else {
+                format!(
+                    "{prov} does not support substrate {}; thread requires a \
+                     journey-proven lane (claude and codex today; opencode remains \
+                     unearned), so the spawn falls back to the pane default",
+                    repr(&substrate.value)
+                )
+            };
+            messages.push(format!(
+                "fno agents spawn: substrate skipped ({reason}); {}.substrate = {} ignored",
+                substrate.rung,
+                repr(&substrate.value),
+            ));
+            suppressed.push(json!([
+                "substrate",
+                substrate.value,
+                substrate.rung,
+                reason,
+            ]));
+        }
+    }
+
+    // --- permission mode ------------------------------------------------ //
+    // Same shape as substrate, but mappability depends on the EFFECTIVE
+    // substrate (explicit pin > this-run injection > the pane default): a
+    // non-claude bg/headless lane refuses a mapped --permission-mode. Claude
+    // honors it everywhere; the pane token check is precomputed by the seam.
+    let permission = axis(payload, "permission_mode");
+    if !flag(payload, "has_permission") && !permission.value.is_empty() {
+        let eff = explicit_substrate
+            .or(injected_substrate)
+            .unwrap_or_else(|| "pane".to_string());
+        let mappable = prov == "claude" || (eff == "pane" && flag(payload, "pane_tokens_ok"));
+        if !prov.is_empty() && mappable {
+            inject.push(json!(["--permission-mode", permission.value]));
+            applied.push(json!([
+                "permission_mode",
+                permission.value,
+                format!("{}.permission_mode", permission.rung),
+            ]));
+        } else {
+            let reason = if prov.is_empty() {
+                "harness resolution failed".to_string()
+            } else {
+                format!(
+                    "{prov} cannot map permission mode {} on substrate {}",
+                    repr(&permission.value),
+                    repr(&eff)
+                )
+            };
+            messages.push(format!(
+                "fno agents spawn: permission-mode skipped ({reason}); \
+                 {}.permission_mode = {} ignored",
+                permission.rung,
+                repr(&permission.value),
+            ));
+            suppressed.push(json!([
+                "permission_mode",
+                permission.value,
+                permission.rung,
+                reason,
+            ]));
+        }
+    }
+
     let mut out = Map::new();
     out.insert("inject".into(), json!(inject));
     out.insert("applied".into(), json!(applied));

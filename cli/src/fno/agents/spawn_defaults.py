@@ -1549,102 +1549,72 @@ def inject_spawn_defaults(
         # the value is re-read through the harness rungs HERE, after the grid
         # or slot has settled the harness (x-8975) - a codex-keyed overlay
         # effort must win on codex while the scalar still answers claude.
-        # resolved_harness() is the same lazy answer the substrate and
-        # permission blocks read: explicit -H > config provider > inference.
         cfg_effort, effort_rung = _seamed("effort")
-        if cfg_effort:
-            from fno.agents.mux_spawn import effort_tokens
 
-            reason = None
-            try:
-                effort_tokens(resolved_harness() or "", cfg_effort)
-            except Exception as exc:
-                reason = str(exc)
-            else:
-                inject += ["--effort", cfg_effort]
-                from_config.append(("effort", cfg_effort, f"{effort_rung}.effort"))  # type: ignore[arg-type]
-            if reason is not None:
-                # Config-sourced effort degrades open on a lane with no effort
-                # surface. Explicit --effort remains fail-closed in cmd_spawn.
-                print(
-                    f"fno agents spawn: effort skipped ({reason}); "
-                    f"{effort_rung}.effort = {cfg_effort!r} ignored",
-                    file=err,
-                )
-                suppressed.append(("effort", cfg_effort, effort_rung or "", reason))
-
-    # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
-    # positional token, --headless/-o, or resume-implied bg - all post-normalize).
-    # A config-sourced value that is unknown, or incompatible with the resolved
-    # provider, degrades open (warn, skip) rather than failing at the spawn parser.
+    # Substrate + permission + effort ride the same owner (spawn-axes): the
+    # seam precomputes the harness-capability facts their decisions consume
+    # (effort surface, substrate compatibility, pane token mapping) and
+    # applies the returned plan. The pane-group stays here: its placement
+    # judgment is already the spawn-overlay verb's. (x-3d5b lineage.)
     explicit_substrate = _has_explicit_substrate(out[1:])
-    injected_substrate: Optional[str] = None
-    if explicit_substrate is None:
-        # Re-read through the harness rungs (x-8975): a substrate that only a
-        # harness overlay carries must still reach its harness here.
-        prov = resolved_harness()
-        cfg_substrate, substrate_rung = _seamed("substrate")
-        if cfg_substrate:
-            if prov and _substrate_compatible(cfg_substrate, prov):
-                inject += ["--substrate", cfg_substrate]
-                injected_substrate = cfg_substrate
-                from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
-            else:
-                if not prov:
-                    reason = "harness resolution failed"
-                elif cfg_substrate not in _SUBSTRATES:
-                    reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
-                else:
-                    reason = (
-                        f"{prov} does not support substrate {cfg_substrate!r}; thread "
-                        "requires a journey-proven lane (claude and codex today; "
-                        "opencode remains unearned), so the spawn falls back to the "
-                        "pane default"
-                    )
-                print(
-                    f"fno agents spawn: substrate skipped ({reason}); "
-                    f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
-                    file=err,
-                )
-                suppressed.append(("substrate", cfg_substrate, substrate_rung or "", reason))
+    _effort_reason: Optional[str] = None
+    if cfg_effort:
+        from fno.agents.mux_spawn import effort_tokens
 
-    # Permission mode (x-3d5b): same shape as substrate, but the compatibility
-    # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
-    # per-provider default), because a non-claude bg/headless lane refuses a
-    # mapped --permission-mode. An explicit --permission-mode/--yolo keeps the
-    # fail-closed behavior (has_permission short-circuits this branch).
-    if not _has_permission_mode(out[1:]):
-        prov = resolved_harness()
-        # Re-read through the harness rungs (x-8975): the value is a flag
-        # spelling the HARNESS defines, so the answer can be keyed by harness.
-        # An empty re-read keeps the harness-blind read alive: that is the
-        # builtin.autonomous rung (x-7198), which field() cannot see.
+        try:
+            effort_tokens(resolved_harness() or "", cfg_effort)
+        except Exception as _exc:
+            _effort_reason = str(_exc)
+    if explicit_substrate is None:
+        cfg_substrate, substrate_rung = _seamed("substrate")
+    else:
+        cfg_substrate, substrate_rung = None, None
+    _has_permission = _has_permission_mode(out[1:])
+    if not _has_permission:
+        # Re-read through the harness rungs (x-8975): an empty re-read keeps
+        # the harness-blind read alive: that is the builtin.autonomous rung
+        # (x-7198), which field() cannot see.
         h_permission, h_rung = _seamed("permission_mode")
         if h_permission:
             cfg_permission, permission_rung = h_permission, h_rung
-        # The effective substrate this spawn resolves to: an explicit pin, else a
-        # config value injected this run, else the `fno agents spawn` default -
-        # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
-        # headless for providers whose spawn claim is not native and would wrongly
-        # skip a pane-mappable mode).
-        eff_substrate = explicit_substrate or injected_substrate or "pane"
-        if cfg_permission and prov and _permission_mappable(prov, cfg_permission, eff_substrate):
-            inject += ["--permission-mode", cfg_permission]
-            from_config.append(("permission_mode", cfg_permission, f"{permission_rung}.permission_mode"))  # type: ignore[arg-type]
-        elif cfg_permission:
-            reason = (
-                f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
-                if prov
-                else "harness resolution failed"
-            )
+    prov = resolved_harness() or ""
+    _substrate_unknown = bool(cfg_substrate) and cfg_substrate not in _SUBSTRATES
+    _substrate_ok = bool(prov) and bool(cfg_substrate) and _substrate_compatible(cfg_substrate, prov)
+    _pane_tokens_ok = False
+    if cfg_permission and prov and _permission_mappable(prov, cfg_permission, "pane"):
+        _pane_tokens_ok = True
+    _axes: dict = {}
+    if cfg_effort or cfg_substrate or cfg_permission:
+        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
+
+        try:
+            _axes = spawn_axes_call({
+                "effort": {"value": cfg_effort, "rung": effort_rung},
+                "has_effort": has_effort,
+                "effort_reason": _effort_reason or "",
+                "substrate": {"value": cfg_substrate or "", "rung": substrate_rung},
+                "explicit_substrate": explicit_substrate or "",
+                "substrate_unknown": _substrate_unknown,
+                "substrate_ok": _substrate_ok,
+                "substrate_valid_list": ", ".join(_SUBSTRATES),
+                "permission_mode": {"value": cfg_permission, "rung": permission_rung},
+                "has_permission": _has_permission,
+                "pane_tokens_ok": _pane_tokens_ok,
+                "prov": prov,
+            })
+        except SpawnAxesUnavailable as _exc:
             print(
-                f"fno agents spawn: permission-mode skipped ({reason}); "
-                f"{permission_rung}.permission_mode = {cfg_permission!r} ignored",
+                f"fno agents spawn: mechanical axes skipped (spawn-axes "
+                f"unavailable: {_exc})",
                 file=err,
             )
-            suppressed.append(
-                ("permission_mode", cfg_permission, permission_rung or "", reason)
-            )
+            _axes = {}
+    for _line in _axes.get("messages") or []:
+        print(_line, file=err)
+    inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
+    from_config.extend([tuple(e) for e in _axes.get("applied") or []])
+    suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
+    injected_substrate = _axes.get("injected_substrate") or None
 
     # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
     # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
