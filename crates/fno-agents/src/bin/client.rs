@@ -37,6 +37,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "court-fold",
     "detect",
     "digest",
+    "distress-scan",
     "drive",
     "drive-authority",
     "finalize",
@@ -491,6 +492,12 @@ async fn run(args: Vec<String>) -> i32 {
     // ledger.json for a session. Never touches the daemon; exits 0 on empty.
     if verb == "digest" {
         return fno_agents::digest::run_digest(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `distress-scan`: pre-manifest <help> tag read (see distress.rs doc).
+    // Direct dispatch, no daemon RPC; always exits 0.
+    if verb == "distress-scan" {
+        return fno_agents::distress::run_distress_scan(&args[1..]);
     }
 
     // `needs` (x-feec): read-only needs-me-queue fold over events.jsonl +
