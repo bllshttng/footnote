@@ -485,9 +485,9 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     def _grid(node, *, model, provider):
         band = node["difficulty"]
         picked.append(band)
-        return {"high": ("claude", "glm-x", None),
-                "medium": ("codex", "gpt-x", None),
-                "low": ("claude", "glm-sm", None)}[band]
+        return {"high": ("claude", "glm-x", None, None, None),
+                "medium": ("codex", "gpt-x", None, None, None),
+                "low": ("claude", "glm-sm", None, None, None)}[band]
 
     monkeypatch.setattr(advance, "_grid_lane_for", _grid)
     receipt = join_node("x-8d1d", 5)
@@ -529,7 +529,7 @@ def test_band_count_capped_by_width_rule(tmp_path, monkeypatch):
         "title: d\n    blocked_by: []", "title: d\n    blocked_by: ['1.1']",
     ))
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None, None, None)
     )
     receipt = join_node("x-8d1d", 3)
     assert receipt["width"] == 3
@@ -550,7 +550,7 @@ def test_grid_declined_spawns_default_lane_and_records_it(tmp_path, monkeypatch)
     monkeypatch.setattr(
         advance,
         "_grid_lane_for",
-        lambda *_a, **_k: (None, None, "grid=no-inventory-declared"),
+        lambda *_a, **_k: (None, None, None, None, "grid=no-inventory-declared"),
     )
     receipt = join_node("x-8d1d", 5)
     assert len(calls) == 3
@@ -574,7 +574,7 @@ def test_grid_pick_records_no_decline_reason(tmp_path, monkeypatch):
     problem."""
     _wire(monkeypatch, tmp_path, BANDED_PLAN)
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None, None, None)
     )
     receipt = join_node("x-8d1d", 5)
     for lane in receipt["lanes"].values():
@@ -595,7 +595,7 @@ def test_lane_count_is_not_capped_by_the_number_of_distinct_bands(
     """
     calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None, None, None)
     )
     receipt = join_node("x-8d1d", 4)
 
@@ -774,7 +774,7 @@ def _settings(monkeypatch, sandbox: bool) -> None:
 
     model = SettingsModel(join={"sandbox": sandbox})
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: model)
-    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None, "grid=no-inventory-declared"))
+    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None, None, None, "grid=no-inventory-declared"))
 
 
 def test_flag_off_is_byte_identical(tmp_path, monkeypatch):
@@ -1139,7 +1139,7 @@ def test_sandbox_on_caps_lanes_at_the_band_count(tmp_path, monkeypatch):
     calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: settings)
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None, None, None)
     )
 
     receipt = join_node("x-8d1d", 4)
@@ -1156,7 +1156,7 @@ def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
     cardinality caps nothing, which is the whole point of the fix."""
     calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None, None, None)
     )
 
     receipt = join_node("x-8d1d", 4)
