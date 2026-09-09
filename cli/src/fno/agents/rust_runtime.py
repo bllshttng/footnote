@@ -595,6 +595,11 @@ def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
         longs=("--yolo", "--dangerously-bypass-approvals-and-sandbox"),
     ):
         return False
+    if _has_flag(args, longs=("--once", "--headless")):
+        # The codex headless one-shot lane hardcodes its own bypass, so no
+        # bounded sandbox stands between the worker and .git; spawn_defaults
+        # skips permission-mode mapping on this lane for the same reason.
+        return False
     sandbox = (_spawn_flag_value(args, "--permission-mode") or "").split(":", 1)[0]
     return sandbox.strip().lower() not in {"yolo", "bypasspermissions", "danger-full-access"}
 

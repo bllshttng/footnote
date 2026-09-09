@@ -106,6 +106,7 @@
       "cc_session_id",
       "exited_at",
       "fno_id",
+      "git_grant",
       "granted_writable_roots",
       "host_mode",
       "inside_leg",
