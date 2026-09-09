@@ -35,6 +35,8 @@ pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 mod list_rows;
 use self::list_rows::{attention_sort_key, handle_list};
+mod prune_outcome;
+pub(crate) use self::prune_outcome::PruneOutcome;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1332,38 +1334,36 @@ fn worktree_gate(cwd: &str) -> WorktreeGate {
     WorktreeGate::Unanswerable("the reapable probe could not answer".into())
 }
 
-/// (x-d545) A human removed ONE named row: its worktree goes with it, but
-/// only through the reapable gate plus the merge check - the same three
-/// buckets the `--merged` sweep and the watchdog honor (DIRTY untouched,
-/// clean-and-unmerged never auto-pruned, clean-and-MERGED loses the TREE and
-/// keeps the BRANCH: `git worktree remove` never deletes branches). A gate
-/// that cannot answer keeps the tree - removal never guesses. The row is
-/// removed either way; a protected worktree must not wedge the row on the
-/// sideline. `None`: the row owned no linked worktree, a clean no-op.
+/// A human removed ONE named row: its worktree goes with it, through the
+/// same reapable gate plus merge check the `--merged` sweep and watchdog
+/// honor (dirty untouched, clean-and-unmerged never auto-pruned, clean-and-
+/// merged loses the tree but keeps the branch - `git worktree remove` never
+/// deletes branches). A gate that cannot answer keeps the tree; the row is
+/// removed either way. `None`: the row owned no linked worktree.
 fn rm_take_worktree_with(
     entry: &state::RegistryEntry,
     gate: &dyn Fn(&str) -> WorktreeGate,
     remove: &dyn Fn(&str) -> Result<(), String>,
-) -> Option<String> {
+) -> Option<PruneOutcome> {
     let cwd = entry.cwd.as_str();
     if !is_linked_worktree(cwd) {
         return None;
     }
     match gate(cwd) {
         WorktreeGate::Reapable => match remove(cwd) {
-            Ok(()) => Some(format!("worktree removed: {cwd}")),
-            Err(e) => Some(format!(
-                "worktree kept: {cwd} (git worktree remove failed: {e})"
-            )),
+            Ok(()) => Some(PruneOutcome::Removed(cwd.to_string())),
+            Err(e) => Some(PruneOutcome::Kept(format!(
+                "{cwd} (git worktree remove failed: {e})"
+            ))),
         },
-        WorktreeGate::Blocked(reason) => {
-            Some(format!("worktree kept: {cwd} (the gate said no: {reason})"))
-        }
-        WorktreeGate::Unanswerable(why) => Some(format!("worktree kept: {cwd} ({why})")),
+        WorktreeGate::Blocked(reason) => Some(PruneOutcome::Kept(format!(
+            "{cwd} (the gate said no: {reason})"
+        ))),
+        WorktreeGate::Unanswerable(why) => Some(PruneOutcome::Kept(format!("{cwd} ({why})"))),
     }
 }
 
-pub(crate) fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+pub(crate) fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<PruneOutcome> {
     rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
         // Run git FROM the worktree: the daemon's own cwd is usually not a
         // repository, and `git worktree remove` needs one to resolve against.
@@ -7193,7 +7193,7 @@ async fn handle_rm_with(
         } else {
             None
         };
-        (measured, rm_take_worktree(&entry))
+        (measured, rm_take_worktree(&entry).map(|o| o.receipt()))
     });
     let worktree_removed = worktree_touched && !worktree_path.exists();
     let reclaimed_bytes =
@@ -10288,7 +10288,7 @@ mod tests {
         row.cwd = wt.to_string_lossy().into_owned();
         let receipt = rm_take_worktree_with(&row, &|_| WorktreeGate::Reapable, &|_| Ok(()));
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!("worktree removed: {}", wt.to_string_lossy()))
         );
         std::fs::remove_dir_all(&wt).ok();
@@ -10308,7 +10308,7 @@ mod tests {
             &|_| Ok(()),
         );
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!(
                 "worktree kept: {} (the gate said no: modified-tracked)",
                 wt.to_string_lossy()
@@ -10329,7 +10329,7 @@ mod tests {
             &|_| Ok(()),
         );
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!(
                 "worktree kept: {} (the reapable probe could not answer)",
                 wt.to_string_lossy()
@@ -10353,7 +10353,7 @@ mod tests {
             },
             &|_| Ok(()),
         );
-        assert_eq!(receipt, None);
+        assert!(receipt.is_none());
         assert_eq!(asked.get(), 0, "the gate was never consulted");
     }
 

@@ -25,6 +25,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, path)| json!({"id": id, "worktree": path}))
             .collect();
+        let prune_failed: Vec<Value> = summary
+            .prune_failed
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         let open_work: Vec<Value> = summary
             .kept_open_work
             .iter()
@@ -67,6 +72,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             json!({
                 "retired": retired,
                 "pruned": pruned,
+                "prune_failed": prune_failed,
                 "settled_do_rows": settled,
                 "settle_refused": pair(&summary.settle_refused),
                 "kept_operator": summary.kept_operator,
@@ -83,6 +89,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_dirty": pathed(&summary.kept_dirty),
                 "kept_unmerged": pathed(&summary.kept_unmerged),
                 "kept_unprobed": pathed(&summary.kept_unprobed),
+                "kept_shared_tree": pair(&summary.kept_shared_tree),
+                "kept_live_descendants": pair(&summary.kept_live_descendants),
                 "stop_refused": pair(&summary.stop_refused),
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
@@ -92,8 +100,12 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         );
     }
     let verb = if dry_run { "would retire" } else { "retired" };
+    // A rehearsal never calls prune_tree, so `pruned` here is a PROJECTION
+    // off TreeAction::Prune alone, never a confirmed removal - the verb
+    // must say so, the same way `retired` already does.
+    let prune_verb = if dry_run { "would prune" } else { "pruned" };
     let mut out = format!(
-        "{verb} {} row(s); pruned {} worktree(s)\n",
+        "{verb} {} row(s); {prune_verb} {} worktree(s)\n",
         summary.retired.len(),
         summary.pruned.len(),
     );
@@ -101,7 +113,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  {verb} {id} ({basis})\n"));
     }
     for (id, path) in &summary.pruned {
-        out.push_str(&format!("  pruned {id} (clean and merged: {path})\n"));
+        out.push_str(&format!("  {prune_verb} {id} (clean and merged: {path})\n"));
+    }
+    for (id, reason) in &summary.prune_failed {
+        out.push_str(&format!("  prune failed {id} ({reason})\n"));
     }
     let settle_verb = if dry_run { "would settle" } else { "settled" };
     for (node, harness, session_id) in &summary.settled_do_rows {
@@ -174,6 +189,14 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!(
             "  kept tree {id} (the cleanliness probe could not answer: {path})\n"
         ));
+    }
+    for (id, holder) in &summary.kept_shared_tree {
+        out.push_str(&format!(
+            "  kept tree {id} (shared with {holder}, still live)\n"
+        ));
+    }
+    for (id, child) in &summary.kept_live_descendants {
+        out.push_str(&format!("  kept {id} (live descendant: {child})\n"));
     }
     for (id, reason) in &summary.stop_refused {
         out.push_str(&format!("  kept {id} (stop refused: {reason})\n"));
@@ -251,6 +274,7 @@ mod tests {
         for key in [
             "retired",
             "pruned",
+            "prune_failed",
             "settled_do_rows",
             "settle_refused",
             "kept_operator",
@@ -267,6 +291,8 @@ mod tests {
             "kept_dirty",
             "kept_unmerged",
             "kept_unprobed",
+            "kept_shared_tree",
+            "kept_live_descendants",
             "stop_refused",
             "kept_no_receipt",
             "expired_receipts",
@@ -311,6 +337,22 @@ mod tests {
             "must not also say retired: {out}"
         );
         assert!(out.contains("(dry-run: no changes made)"));
+    }
+
+    #[test]
+    fn reap_dry_run_says_would_prune_not_pruned() {
+        // A rehearsal never confirms a removal - the `pruned` line must
+        // carry the same "would" verb the `retired` line already does.
+        let s = GcSummary {
+            pruned: vec![("a1".into(), "/tmp/wt".into())],
+            ..Default::default()
+        };
+        let dry = render_reap(&s, false, true);
+        assert!(dry.contains("would prune a1"), "{dry}");
+        assert!(!dry.contains("  pruned a1"), "must not say pruned: {dry}");
+        let live = render_reap(&s, false, false);
+        assert!(live.contains("  pruned a1"), "{live}");
+        assert!(!live.contains("would prune"), "{live}");
     }
 
     #[test]
