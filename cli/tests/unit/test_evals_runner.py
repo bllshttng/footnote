@@ -119,6 +119,7 @@ def test_run_grade_only_task_appends_history_and_removes_worktree(tmp_path: Path
     rows = list(_history.iter_rows(hp))
     assert len(rows) == 1
     assert rows[0]["pass"] is True and rows[0]["tier"] == "regression"
+    assert rows[0]["variant"] == "baseline"  # default run records the round
     assert rows[0]["bank_rev"]  # HEAD sha recorded
     assert _worktree_count(root) == before  # worktree removed after grading
 
@@ -178,7 +179,6 @@ def test_evals_enabled_defaults_true_matching_prior_ungated_behavior(
 ) -> None:
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
-    from fno import config as config_mod
 
     assert evals_enabled() is True
 
@@ -208,6 +208,67 @@ def test_repeat_k_runs_k_times(tmp_path: Path) -> None:
     assert len(results) == 4
     assert all(r.passed for r in results)
     assert [r.repeat_index for r in results] == [0, 1, 2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# variant axis: a scored round names baseline or v<N> and checks out its ref
+# --------------------------------------------------------------------------- #
+
+def _branch(root: Path, name: str, filename: str) -> None:
+    def g(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(root), check=True, capture_output=True)
+    g("checkout", "-b", name)
+    (root / filename).write_text("x\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-qm", filename)
+    g("checkout", "-")
+
+
+def _git_sha(root: Path, ref: str) -> str:
+    proc = subprocess.run(["git", "rev-parse", ref], cwd=str(root),
+                          capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+def test_variant_run_checks_out_variant_ref_and_records_row(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path)
+    _branch(root, "v1-work", "extra.txt")
+    hp = tmp_path / "hist.jsonl"
+    task = _task(grade=[GradeCheck("file-exists", path="extra.txt")])
+    before = _worktree_count(root)
+
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, variant="v1", variant_ref="v1-work")
+    assert results[0].passed
+    assert results[0].variant == "v1"
+    rows = list(_history.iter_rows(hp))
+    assert rows[0]["variant"] == "v1"
+    assert rows[0]["bank_rev"] == _git_sha(root, "v1-work")
+    assert _worktree_count(root) == before  # worktree removed after grading
+
+
+def test_variant_bad_name_refuses_before_any_worktree(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    before = _worktree_count(root)
+
+    with pytest.raises(ValueError, match=r"baseline\|v<N>"):
+        run_task(_task(), repeat=1, repo_root=root, history_path=hp,
+                 spawn=_never_called_spawn, variant="round2")
+    with pytest.raises(ValueError, match="baseline"):
+        run_task(_task(), repeat=1, repo_root=root, history_path=hp,
+                 spawn=_never_called_spawn, variant="baseline", variant_ref="x")
+    assert len(list(_history.iter_rows(hp))) == 0  # nothing recorded
+    assert _worktree_count(root) == before          # no worktree made
+
+
+def test_variant_bad_ref_is_graded_fail_with_ref_name(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    results = run_task(_task(), repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, variant="v1", variant_ref="no-such-ref")
+    assert not results[0].passed
+    assert "no-such-ref" in results[0].reason
 
 
 # --------------------------------------------------------------------------- #
