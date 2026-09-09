@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from fno.agents.dispatch_errors import DispatchAskError
 from fno.agents.harnesses.base import ReachabilityProbeError
 
 
@@ -1057,3 +1058,56 @@ def restore_session_index_entries(
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def capture_for_rm_rollback(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> list:
+    """Snapshot the index lines a teardown will drop, or refuse the removal.
+
+    Raises DispatchAskError (exit 1) when the read fails: an unreadable
+    snapshot is a rollback nobody can promise, so the removal refuses
+    before any store is touched.
+    """
+    try:
+        return capture_session_index_entries(
+            session_id, session_index_path=session_index_path
+        )
+    except OSError as exc:
+        raise DispatchAskError(
+            f"could not snapshot the codex session index for rollback: {exc}",
+            exit_code=1,
+        ) from exc
+
+
+def restore_after_declined_write(
+    lines: list, *, session_index_path: Optional[Path] = None
+) -> None:
+    """Put the snapshot back after a declined write; raises on failure."""
+    restore_session_index_entries(lines, session_index_path=session_index_path)
+
+
+def teardown_session_index(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> Optional[tuple]:
+    """Drop the session's index record: None on success, (message, exit) on failure.
+
+    Record-only: the rollout files are never touched. An already-absent
+    record is idempotent success, so a manually-cleaned index never
+    wedges ``fno agents rm``.
+    """
+    try:
+        removed = remove_session_index_entry(
+            session_id, session_index_path=session_index_path
+        )
+    except ValueError as exc:
+        return (str(exc), 12)
+    except OSError as exc:
+        return (f"codex session index rewrite failed: {exc}", 1)
+    print(
+        f"torn down: codex session index entry {session_id}"
+        if removed
+        else f"already gone: codex session index entry {session_id}",
+        flush=True,
+    )
+    return None

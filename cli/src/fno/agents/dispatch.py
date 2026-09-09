@@ -407,15 +407,9 @@ _PROVABLY_LIVE_WINDOW_SEC = 3600.0
 
 
 
-class DispatchAskError(RuntimeError):
-    """Raised by the dispatch helpers for any callable failure.
-
-    Carries the exit code the CLI layer should propagate to the shell.
-    """
-
-    def __init__(self, message: str, *, exit_code: int) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
+# Re-exported: every existing importer keeps its import site, and harness
+# modules raise the SAME type without importing dispatch itself.
+from fno.agents.dispatch_errors import DispatchAskError
 
 
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
@@ -4096,19 +4090,6 @@ def stop_agent(
         ) from exc
 
 
-def _restore_torn_down_index(captured_lines: list) -> None:
-    """Put captured codex session-index lines back after a declined write.
-
-    Called only on the decline paths, after the teardown already removed
-    the entry: restoring is what makes the refusal's "nothing was
-    removed" true of every store. A failed restore raises so a
-    half-removal never reads as a clean refusal.
-    """
-    from fno.agents.harnesses import codex as codex_mod
-
-    codex_mod.restore_session_index_entries(captured_lines)
-
-
 def _teardown_harness_session(
     existing: AgentEntry,
     *,
@@ -4224,18 +4205,9 @@ def _teardown_harness_session(
     if harness == "codex":
         from fno.agents.harnesses import codex as codex_mod
 
-        try:
-            removed = codex_mod.remove_session_index_entry(sid)
-        except ValueError as exc:
-            return _fail(str(exc), exit_code=12)
-        except OSError as exc:
-            return _fail(f"codex session index rewrite failed: {exc}", exit_code=1)
-        print(
-            f"torn down: codex session index entry {sid}"
-            if removed
-            else f"already gone: codex session index entry {sid}",
-            flush=True,
-        )
+        failure = codex_mod.teardown_session_index(sid)
+        if failure is not None:
+            return _fail(failure[0], exit_code=failure[1])
         return None
 
     # Fail loud rather than fall off the end: the caller's harness tuple and
@@ -4309,8 +4281,6 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
-            # The codex index lines the teardown removed, snapshotted before
-            # the teardown so a declining registry write can put them back.
             captured_index_lines: list = []
             from fno.worktree_reapable import is_linked_worktree
 
@@ -4451,28 +4421,16 @@ def rm_agent(
                         )
 
             elif existing.harness in ("codex", "opencode", "cursor-agent"):
-                # Snapshot the exact index lines the rewrite will drop, so a
-                # declining registry write can put them back: a removal that
-                # does not succeed leaves every store unchanged, and the
-                # refusal's "nothing was removed" must be true of the harness
-                # store too.
+                # Snapshot the index lines the teardown drops, so a declining
+                # write can put them back: the refusal leaves every store
+                # unchanged, harness store included.
                 captured_index_lines = []
                 if existing.harness == "codex" and existing.harness_session_id:
-                    from fno.agents.harnesses import codex as codex_capture
+                    from fno.agents.harnesses import codex as codex_mod
 
-                    try:
-                        captured_index_lines = codex_capture.capture_session_index_entries(
-                            existing.harness_session_id
-                        )
-                    except OSError as exc:
-                        # Refuse BEFORE any store is touched: a snapshot the
-                        # reaper cannot read is a rollback it cannot promise,
-                        # and the invariant dies quietly exactly there.
-                        raise DispatchAskError(
-                            f"could not snapshot the codex session index for "
-                            f"rollback: {exc}",
-                            exit_code=1,
-                        ) from exc
+                    captured_index_lines = codex_mod.capture_for_rm_rollback(
+                        existing.harness_session_id
+                    )
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,
@@ -4496,7 +4454,7 @@ def rm_agent(
                 )
             except (OSError, RegistryVersionError) as exc:
                 if captured_index_lines:
-                    _restore_torn_down_index(captured_index_lines)
+                    codex_mod.restore_after_declined_write(captured_index_lines)
                 events.emit(
                     "agent_removed",
                     name=name,
@@ -4514,7 +4472,7 @@ def rm_agent(
                 ) from exc
             if not registry_changed:
                 if captured_index_lines:
-                    _restore_torn_down_index(captured_index_lines)
+                    codex_mod.restore_after_declined_write(captured_index_lines)
                 row_removed = decline_reason and decline_reason[0] == "row_removed"
                 events.emit(
                     "agent_removed",
