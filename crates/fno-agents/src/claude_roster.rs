@@ -363,6 +363,24 @@ pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
     Vec::new()
 }
 
+/// The config dir a removal must address for this row, `None` meaning the
+/// ambient root. A union row's measured account outranks the historical
+/// launch account; the latter is used only when the snapshot has no row.
+pub fn removal_config_dir(
+    snapshot: &ClaudeAgentsSnapshot,
+    short_id: &str,
+    launch_account: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let account = match snapshot.find(short_id) {
+        Some(row) => row.account.clone()?,
+        None => launch_account?.to_string(),
+    };
+    isolated_account_dirs()
+        .into_iter()
+        .find(|(id, _)| id == &account)
+        .map(|(_, dir)| dir)
+}
+
 /// Parse `[[providers.records]]` / `[[accounts.records]]` entries carrying an
 /// isolated `config_dir`, as `(account_id, dir)` with `~/` expanded. Malformed
 /// records are skipped, never a panic.
@@ -1006,5 +1024,67 @@ mod tests {
         };
         assert_eq!(rows[0].pid, Some(65340));
         assert_eq!(rows[1].pid, None);
+    }
+
+    fn with_alt_account_config(test: impl FnOnce(PathBuf)) {
+        use std::sync::{Mutex, OnceLock};
+
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "fno-removal-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[[accounts.records]]\nid = \"alt\"\nconfig_dir = \"{}\"\n",
+                root.join("claude-alt").display()
+            ),
+        )
+        .unwrap();
+        let previous = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", root.join("settings.toml"));
+        test(root.join("claude-alt"));
+        match previous {
+            Some(value) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn removal_config_dir_uses_measured_isolated_row_root() {
+        with_alt_account_config(|alt_dir| {
+            let mut row = ClaudeAgentRow::new("aaaa1111", Some("done"));
+            row.account = Some("alt".to_string());
+            let snapshot = ClaudeAgentsSnapshot::known(vec![row]);
+            assert_eq!(
+                removal_config_dir(&snapshot, "aaaa1111", None),
+                Some(alt_dir)
+            );
+        });
+    }
+
+    #[test]
+    fn removal_config_dir_uses_ambient_root_for_missing_row_without_record() {
+        with_alt_account_config(|_| {
+            let snapshot = ClaudeAgentsSnapshot::known(Vec::new());
+            assert_eq!(removal_config_dir(&snapshot, "bbbb2222", None), None);
+        });
+    }
+
+    #[test]
+    fn removal_config_dir_prefers_measured_ambient_root_over_launch_record() {
+        with_alt_account_config(|_| {
+            let snapshot =
+                ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new("cccc3333", Some("done"))]);
+            assert_eq!(removal_config_dir(&snapshot, "cccc3333", Some("alt")), None);
+        });
     }
 }

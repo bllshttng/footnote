@@ -998,7 +998,13 @@ pub(crate) fn cascade_harness_session_result_with(
 }
 
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
-    run_claude_rm_in(None, short_id)
+    let dir = if crate::claude_roster::isolated_account_dirs().is_empty() {
+        None
+    } else {
+        let snapshot = crate::claude_roster::read_all_agents_union();
+        crate::claude_roster::removal_config_dir(&snapshot, short_id, None)
+    };
+    run_claude_rm_in(dir.as_deref(), short_id)
 }
 
 /// `claude rm` against ONE account root. `None` is the ambient root; the
