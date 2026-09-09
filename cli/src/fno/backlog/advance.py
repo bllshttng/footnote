@@ -4178,12 +4178,16 @@ def advance_epic(
     # bounds it. An overall --max caps total dispatches this run.
     max_lanes = _spawn_headroom(provider)
 
-    from fno.graph._intake import project_root_from_settings
-
-    def _resolve(child: dict):
-        # A project-less child cannot be capped, mapped, or launched - skip it
-        # with `no-project` (matching _dispatch_one_dependent). Falsy check so
-        # an empty-string project is treated as missing too (gemini).
+    results: list[AdvanceResult] = []
+    dispatched: list[str] = []
+    total = 0
+    for child in children:
+        if max_dispatch is not None and total >= max_dispatch:
+            break  # overall cap reached; remaining ready children wait for a drain/re-run
+        # A project-less child cannot be capped, mapped, or launched - skip it with
+        # the accurate `no-project` reason (matching _dispatch_one_dependent), not a
+        # misleading `unmapped-project` with an empty detail. Falsy check so an
+        # empty-string project is treated as missing too (gemini).
         proj = child.get("project")
         if not proj:
             _emit(
@@ -4191,24 +4195,46 @@ def advance_epic(
                 {"reason": "no-project", "node_id": child["id"], "mission": canon, "rank": rank},
                 ev_path,
             )
-            skip = AdvanceResult("skipped", EVENT_SKIPPED, reason="no-project", node_id=child["id"])
-            return None, None, skip
-        # A mapped-but-absent project cannot be launched; surface it by name AND
-        # the exact config key (Boundaries), then continue - one unmapped project
-        # never blocks the others.
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="no-project", node_id=child["id"])
+            )
+            continue
+        # A mapped-but-absent project cannot be launched; surface it by name AND the
+        # exact config key (Boundaries), then continue - one unmapped project never
+        # blocks the others.
+        from fno.graph._intake import project_root_from_settings
+
         root = project_root_from_settings(proj)
         if not root:
-            return None, None, _converge_skip_unmapped(child, proj, canon, ev_path, rank=rank)
-        return root, proj, None
-
-    dispatched, results = _dispatch_ready(
-        children, _resolve,
-        ev_path=ev_path, verbose=verbose, mission=canon, model=model, provider=provider,
-        rank=rank, max_dispatch=max_dispatch, max_lanes=max_lanes, cross_project=True,
-    )
+            results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
+            continue
+        # Spawn-gate headroom exhausted this pass (0 = the fleet or the
+        # binding provider is already full). The remaining ready children wait
+        # for a drain / re-run; the gate itself still refuses at spawn time if
+        # the world changed since the read.
+        if total >= max_lanes:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
+                 "detail": f"{proj}: headroom={max_lanes} (spawn gate)", "rank": rank},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="lane-cap", node_id=child["id"])
+            )
+            continue
+        res = _converge_one(
+            child, root, ev_path, verbose,
+            cross_project=True, mission=canon, model=model, provider=provider, rank=rank,
+        )
+        results.append(res)
+        if res.decision == "dispatched":
+            dispatched.append(res.node_id or child["id"])
+            total += 1
 
     return AdvanceEpicResult(
-        canon, activated=True, dispatched=dispatched, child_results=results,
+        canon, activated=True,
+        dispatched=tuple(dispatched), child_results=tuple(results),
     )
 
 
@@ -4297,51 +4323,17 @@ def advance_project_loose(
 
     max_lanes = _spawn_headroom(provider)
 
-    dispatched, results = _dispatch_ready(
-        children, lambda child: (root, project, None),
-        ev_path=ev_path, verbose=verbose, mission=label, model=model, provider=provider,
-        rank=rank, max_dispatch=max_dispatch, max_lanes=max_lanes, cross_project=False,
-    )
-
-    return AdvanceEpicResult(project, dispatched=dispatched, child_results=results)
-
-
-def _dispatch_ready(
-    children: list[dict],
-    resolve_root,
-    *,
-    ev_path: Path,
-    verbose: bool,
-    mission: str,
-    model: Optional[str],
-    provider: Optional[str],
-    rank: Optional[str],
-    max_dispatch: Optional[int],
-    max_lanes: int,
-    cross_project: bool,
-) -> tuple[tuple[str, ...], tuple[AdvanceResult, ...]]:
-    """Fan ready children through _converge_one under one dispatch/lane cap.
-
-    `resolve_root(child)` returns ``(root, lane_cap_label, skip)``: skip is a
-    completed AdvanceResult when the child cannot be routed, else None. One
-    skeleton for advance_epic and advance_project_loose so the two ready-drain
-    shapes can never fork (AGENTS.md principle 9).
-    """
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
     total = 0
     for child in children:
         if max_dispatch is not None and total >= max_dispatch:
             break
-        root, label, skip = resolve_root(child)
-        if skip is not None:
-            results.append(skip)
-            continue
         if total >= max_lanes:
             _emit(
                 EVENT_SKIPPED,
-                {"reason": "lane-cap", "node_id": child["id"], "mission": mission,
-                 "detail": f"{label}: headroom={max_lanes} (spawn gate)", "rank": rank},
+                {"reason": "lane-cap", "node_id": child["id"], "mission": label,
+                 "detail": f"{project}: headroom={max_lanes} (spawn gate)", "rank": rank},
                 ev_path,
             )
             results.append(
@@ -4350,13 +4342,16 @@ def _dispatch_ready(
             continue
         res = _converge_one(
             child, root, ev_path, verbose,
-            cross_project=cross_project, mission=mission, model=model, provider=provider, rank=rank,
+            cross_project=False, mission=label, model=model, provider=provider, rank=rank,
         )
         results.append(res)
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
-    return tuple(dispatched), tuple(results)
+
+    return AdvanceEpicResult(
+        project, dispatched=tuple(dispatched), child_results=tuple(results),
+    )
 
 
 def _converge_skip_unmapped(
