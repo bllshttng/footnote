@@ -66,11 +66,11 @@ A **lane** is a NAME joined against the existing `config.routing.models` invento
 `fno doctor evals run --lane astra-high --cohort astra-trial` resolves `astra-high` from config and runs every selected task through it. The lane's harness overrides `--provider`, since a lane is a complete coordinate. Every history row from the run records:
 
 - `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
-- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: what the agent registry says actually ran. This is read back after the worker spawns, never re-derived.
-- `lane_status`: `ok`, `substituted`, `unavailable`, or `not-applicable`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`.
+- `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: read back once, right after the worker spawns, never re-derived. When the agent registry still holds a lookupable row for the spawned worker, these fields carry its answer.
+- `lane_status`: `ok`, `substituted`, `unavailable`, `not-applicable`, or `unverified`. When capacity serves a different harness than requested, the run is `substituted`. It is never counted as a sample of the requested lane. A refused spawn is `unavailable`, and no model is graded as the requested one. A grade-only task never attempts a worker, so a `--lane` on it reads `not-applicable`, never a false `unavailable`. The default spawn (`--substrate headless`) never leaves a lookupable registry row. Claude's one-shot path never writes one, and codex tears its own down on success. A run that succeeded with no row left to check reads `unverified`, distinct from `unavailable`. The run is real. Only its identity stays unconfirmed.
 - `experiment_id`: the `--cohort` id, a join key for a future comparison.
 
-The observed fields come from a post-spawn read of the agent registry, retried once on a miss. The spawn already blocked until the worker exited, so a first-look miss is more likely an unflushed write than a real absence. A registry row still missing after the retry reads `unavailable`.
+Treat `unverified` as "probably ran as requested but not independently checked", not as a failure. Only `ok` and `substituted` carry a checked identity today.
 
 A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can never join a cohort's score. Folding these rows into a cohort comparison (reliability, duration, cost, review evidence per cohort, a promotion recommendation) is not yet built. For now, read the raw history rows for a `--cohort` id directly to compare lanes.
 

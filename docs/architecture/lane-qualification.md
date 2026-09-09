@@ -40,6 +40,8 @@ A `lane_status` of `substituted` on any row means capacity served a different ha
 
 A `lane_status` of `unavailable` means the account cannot reach the lane at all. Read this as `unavailable`. Never read it as a score of zero on the requested model.
 
+A `lane_status` of `unverified` means the run succeeded but nothing confirmed which harness or model actually served it. This is the normal case for the default headless spawn today ([docs/evals.md](../evals.md#lanes)). A bad model or harness name fails the spawn loudly, so count an `unverified` row as a pass-rate sample of the requested lane. Do not cite it as proof of identity the way an `ok` row is.
+
 ## One whole-delivery comparison before splitting roles
 
 Run one comparison of a lane doing the full delivery (plan, implement, review) against the current baseline before recommending a planner/implementer split for that lane. A lane can be weak at blueprint's scope judgment (task 1) and still be a fine implementer (task 2) under a stronger planner. Splitting on a single blended score hides that difference. The three paired tasks exist precisely so this comparison does not require guessing which axis moved.

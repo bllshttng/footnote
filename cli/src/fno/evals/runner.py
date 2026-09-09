@@ -37,29 +37,26 @@ SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
 def _observe_worker(name: str) -> Optional[dict]:
-    """Registry identity for the spawned worker; retries once on a miss, since the
-    spawn already blocked until exit, so a first-look miss is likely unflushed, not absent."""
-    from fno.agents.registry import load_registry
-
-    for attempt in range(2):
-        try:
-            entries = load_registry()
-        except Exception:  # noqa: BLE001
-            return None
-        for entry in entries:
+    """Registry identity, when a lookupable row exists (never for the default headless spawn)."""
+    try:
+        from fno.agents.registry import load_registry
+        for entry in load_registry():
             if entry.name == name:
                 return {"harness": entry.harness, "model": entry.model,
                         "model_basis": entry.model_basis, "effort": entry.effort,
                         "harness_session_id": entry.harness_session_id}
-        if attempt == 0:
-            time.sleep(0.5)
+    except Exception:  # noqa: BLE001
+        return None
     return None
 
 
-def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *, attempted: bool = True) -> dict[str, object]:
-    """Requested vs. observed config for one run; a harness/model mismatch is ``substituted``.
-    A grade-only task never attempts a worker, so ``attempted=False`` reads as
-    ``not-applicable`` rather than a false ``unavailable`` capacity signal."""
+def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *,
+                   attempted: bool = True, spawned: bool = True) -> dict[str, object]:
+    """Requested vs. observed config; a harness/model mismatch is ``substituted``.
+    No ``observed`` dict is one of three things: never attempted (grade-only,
+    ``not-applicable``), a real spawn failure (``unavailable``), or a spawn that
+    succeeded but left nothing to check - the default headless lane always -
+    which is ``unverified``, not a capacity refusal."""
     if lane is None:
         return {}
     fields: dict[str, object] = {
@@ -67,7 +64,12 @@ def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *, attempted: 
         "requested_model": lane.model, "requested_effort": lane.effort,
     }
     if observed is None:
-        fields["lane_status"] = "not-applicable" if not attempted else "unavailable"
+        if not attempted:
+            fields["lane_status"] = "not-applicable"
+        elif not spawned:
+            fields["lane_status"] = "unavailable"
+        else:
+            fields["lane_status"] = "unverified"
         return fields
     fields.update(
         observed_harness=observed.get("harness"), observed_model=observed.get("model"),
@@ -138,7 +140,7 @@ def _git_rev(repo_root: Path, ref: str) -> Optional[str]:
 
 def _default_spawn(
     prompt: str, workdir: Path, timeout_s: int, *,
-    provider: Optional[str] = None, lane: Optional[Any] = None,
+    provider: Optional[str] = None, lane: Optional[Any] = None
 ) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
     A non-zero exit, missing binary, or timeout is a graded failure, never a
@@ -246,14 +248,12 @@ def run_task(
     observe: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per run.
-
     Each run: fresh disposable worktree -> optional worker (skipped for a
     grade-only task) -> mechanical grade -> history row -> worktree removed.
     A worker-spawn failure is a graded fail; the remaining repeats still run.
-    A requested *lane* is recorded as the requested coordinate; *observe*
-    (default _observe_worker) reads back what actually ran. *experiment_id*
-    is an opaque cohort tag recorded on the row.
-    """
+    A requested *lane* records the requested coordinate; *observe* (default
+    _observe_worker) reads back what ran. *experiment_id* is an opaque
+    cohort tag recorded on the row."""
     if not VARIANT_RE.match(variant):
         raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
     if variant == BASELINE:
@@ -309,7 +309,7 @@ def run_task(
             _remove_worktree(repo_root, workdir)
 
         observed = observe_fn(worker_name) if spawned and worker_name else None
-        lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt))
+        lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt), spawned=spawned)
 
         duration = round(time.monotonic() - started, 3)
         passed = outcome is not None and outcome.passed

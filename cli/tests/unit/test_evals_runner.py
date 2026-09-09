@@ -287,26 +287,15 @@ def _never_called_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResu
 _LANE = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
 
 
-def test_observe_worker_retries_once_on_a_not_yet_flushed_registry_row(monkeypatch) -> None:
-    """The spawn already blocked until the worker exited, so a first-look miss
-    is more likely an unflushed write than a real absence - retry before
-    reading unavailable."""
+def test_observe_worker_reads_a_still_present_registry_row(monkeypatch) -> None:
     import types
 
     entry = types.SimpleNamespace(name="eval-worker-9", harness="codex", model="gpt-6-astra",
                                    model_basis="verified", effort="high", harness_session_id="s1")
-    calls = {"n": 0}
-
-    def fake_load_registry():
-        calls["n"] += 1
-        return [] if calls["n"] == 1 else [entry]
-
-    monkeypatch.setattr("fno.agents.registry.load_registry", fake_load_registry)
-    monkeypatch.setattr(_runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [entry])
     observed = _runner._observe_worker("eval-worker-9")
     assert observed is not None
     assert observed["harness"] == "codex"
-    assert calls["n"] == 2
 
 
 def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) -> None:
@@ -394,6 +383,31 @@ def test_lane_grade_only_task_records_not_applicable_never_unavailable(tmp_path:
     assert results[0].passed
     row = list(_history.iter_rows(hp))[0]
     assert row["lane_status"] == "not-applicable"
+    assert row["requested_lane"] == "astra-high"
+    assert "observed_model" not in row
+
+
+def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverified(tmp_path: Path) -> None:
+    """The real default spawn (--substrate headless) never leaves a lookupable
+    registry row (claude never writes one; codex tears its own down on
+    success), so a successful run with no observation must read unverified,
+    never a false unavailable that reads like the lane refused capacity."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True, worker_name="eval-worker-3")
+
+    def observe(name: str):
+        return None  # headless: nothing left to look up
+
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
+                       lane=_LANE, observe=observe)
+    assert results[0].passed
+    row = list(_history.iter_rows(hp))[0]
+    assert row["lane_status"] == "unverified"
     assert row["requested_lane"] == "astra-high"
     assert "observed_model" not in row
 

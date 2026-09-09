@@ -62,14 +62,8 @@ def run_command(
     provider: Optional[str] = typer.Option(None, "--provider", help="Worker provider for the headless spawn."),
     variant: str = typer.Option(BASELINE, "--variant", help="Round name: baseline, or v<N> for a scored change."),
     ref: Optional[str] = typer.Option(None, "--ref", help="Git ref to check out for a non-baseline --variant."),
-    lane: Optional[str] = typer.Option(
-        None, "--lane",
-        help="A resolved-inventory lane name: the requested coordinate for this run. Overrides --provider.",
-    ),
-    cohort: Optional[str] = typer.Option(
-        None, "--cohort",
-        help="Experiment/cohort id recorded on every row this run writes.",
-    ),
+    lane: Optional[str] = typer.Option(None, "--lane", help="Resolved-inventory lane name; overrides --provider."),
+    cohort: Optional[str] = typer.Option(None, "--cohort", help="Cohort id recorded on every row this run writes."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
 ) -> None:
     """Run bank tasks in disposable worktrees and grade them mechanically.
