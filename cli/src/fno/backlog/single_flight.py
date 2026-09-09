@@ -52,8 +52,11 @@ class FlightGate:
     def release(self) -> None:
         try:
             _flight_verb(
-                "flight-release",
-                [self.key, "--holder", self.holder, "--claims-root", str(claims_root_for(self.key))],
+                [
+                    "claim", "flight-release", self.key,
+                    "--holder", self.holder,
+                    "--claims-root", str(claims_root_for(self.key)),
+                ]
             )
         except Exception:
             pass  # the TTL plus the pid probe retire it; never mask the work's outcome
@@ -89,8 +92,8 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld | None:
         )
         return None
     holder = f"single-flight:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    receipt = _flight_verb("flight-acquire", [
-        key,
+    receipt = _flight_verb([
+        "claim", "flight-acquire", key,
         "--scope", scope,
         "--ttl-ms", str(FLIGHT_TTL_MS),
         "--holder", holder,
@@ -119,16 +122,16 @@ def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | No
         return None
 
 
-def _flight_verb(verb: str, argv: list[str]) -> Optional[dict]:
-    """Run one binary-direct flight verb and parse its JSON receipt; None on
-    any failure (an old binary without the verb, spawn trouble, a gate-side
-    error), which the caller treats as fail-open."""
+def _flight_verb(argv: list[str]) -> Optional[dict]:
+    """Run one `fno-agents claim` lock operation and parse its JSON receipt;
+    None on any failure (an old binary without the operation, spawn trouble,
+    a gate-side error), which the caller treats as fail-open."""
     binary = resolve_binary()
     if binary is None:
         return None
     try:
         proc = subprocess.run(
-            [str(binary), verb, *argv],
+            [str(binary), *argv],
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):

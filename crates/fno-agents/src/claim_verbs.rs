@@ -31,7 +31,9 @@ use std::path::PathBuf;
 /// another live writer, 2 usage/validation/io error.
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
-        eprintln!("fno-agents: claim requires an operation: acquire|release|status|list|sweep");
+        eprintln!(
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|flight-acquire|flight-release"
+        );
         return 2;
     };
     if op == "sweep" {
@@ -39,6 +41,17 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
     if op == "list" {
         return run_claim_list(&args[1..]);
+    }
+    // The backlog one-in-flight gate's lock operations (x-ef2c): arguments of
+    // this verb, never new leaves. The lock is held in the name of the
+    // CALLING process (--pid), never this short-lived binary, and a dead
+    // holder is reclaimed on the pid probe - for a one-shot subprocess the
+    // transcript-liveness basis is the wrong policy.
+    if op == "flight-acquire" {
+        return crate::flight_gate::run_flight_acquire(&args[1..]);
+    }
+    if op == "flight-release" {
+        return crate::flight_gate::run_flight_release(&args[1..]);
     }
     let Some(key) = args.get(1).filter(|k| !k.starts_with("--")).cloned() else {
         eprintln!("fno-agents: claim {op} requires a key argument");

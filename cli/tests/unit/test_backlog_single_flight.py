@@ -31,18 +31,29 @@ from fno.backlog.single_flight import (
 from fno.claims.core import acquire_claim, claim_status
 from fno.claims.io import claims_root_for
 from fno.cli import app
+from fno.rust_binary import find_dev_binary
 
 runner = CliRunner()
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 @pytest.fixture
 def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Pin claims + repo root + events under tmp_path (see test_advance.iso)."""
+    """Pin claims + repo root + events under tmp_path, and point the gate's
+    binary at THIS checkout's build (see test_advance.iso)."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_AUTO_CONTINUE", raising=False)
     events_path = tmp_path / ".fno" / "events.jsonl"
     monkeypatch.setenv("FNO_EVENTS_PATH", str(events_path))
+    dev = find_dev_binary()
+    if dev is None:
+        pytest.skip("compiled fno-agents binary not present")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(dev))
     return tmp_path
 
 
@@ -153,12 +164,9 @@ def test_gate_releases_so_the_next_run_is_not_held(iso, monkeypatch):
 
 
 def test_gate_unavailable_fails_open(iso, monkeypatch):
-    """A gate that cannot run (sandboxed state root, contention exhaustion)
-    never breaks the verb: it proceeds ungated, the pre-gate behavior."""
-    def _broken(*_a, **_k):
-        raise RuntimeError("claim write denied by the sandbox")
-
-    monkeypatch.setattr("fno.backlog.single_flight.acquire_flight", _broken)
+    """No fno-agents binary (or one older than the verb): the gate is
+    unavailable and the verb proceeds ungated, the pre-gate behavior."""
+    monkeypatch.setenv("FNO_AGENTS_BIN", "/nonexistent/fno-agents")
     calls = []
     monkeypatch.setattr(
         adv, "advance", lambda *a, **k: calls.append(1) or _advance_result()

@@ -100,8 +100,13 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
     let events_dir = arg_value(args, "--events-dir").map(PathBuf::from);
     let scope = arg_value(args, "--scope").unwrap_or_else(|| "backlog single-flight".into());
     let root_ref = root.as_deref();
+    // The claim is held in the name of the CALLING process (the Python verb
+    // that will do the work), never this short-lived binary: the lock must
+    // die with the work, not with the messenger.
+    let pid = arg_value(args, "--pid").and_then(|v| v.parse::<u32>().ok());
 
     let mut opts = claims::AcquireOpts {
+        pid,
         ttl_ms: Some(ttl_ms),
         reason: Some(format!("backlog single-flight: {scope}")),
         root: root.clone(),
