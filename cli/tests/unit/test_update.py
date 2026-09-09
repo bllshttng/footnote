@@ -1581,6 +1581,10 @@ def test_ac1_edge_force_installs_when_no_binary(
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
             state["built"] = True
+            # The deploy must LAND the binary: the post-effect verdict probes
+            # the file on disk, and a fake cargo that writes nothing halts.
+            post_bin.parent.mkdir(parents=True, exist_ok=True)
+            post_bin.write_text("x", encoding="utf-8")
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
