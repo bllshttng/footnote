@@ -83,7 +83,7 @@ pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,tit
 pub(crate) const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
 pub(crate) const SRC_NEEDS: &str = "fno agents needs --json";
 pub(crate) const SRC_DISTRESS: &str =
-    "~/.fno/events.jsonl (blocked rows) + fno agents distress-answered";
+    "~/.fno/events.jsonl (blocked rows) + bus/messages.jsonl + fno agents distress-verdicts";
 
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
@@ -293,6 +293,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_ready = budget.start(SRC_READY);
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
+    let s_blocked_child = budget.start(SRC_DISTRESS);
 
     // Mostly in-process: graph already read; claims scan, claimed-node lookups,
     // the needs fold, and the lane file. Undispatched is the exception and
@@ -673,93 +674,102 @@ pub fn read_board(opts: &BoardOpts) -> Value {
 
     // Blocked child: read the global distress journal and resolve every
     // candidate's answered/unanswered state HERE, where claims, the graph,
-    // and the mail-check subprocess already live - build_board only
-    // scope-filters and renders what this collects (x-3ecf). Wrapped in
+    // and the verdict subprocess already live - build_board only
+    // scope-filters and renders what this collects (x-3ecf). Gated on
+    // `s_blocked_child` like every other source, so an exhausted board
+    // budget skips it rather than running an unbounded read anyway - the
+    // ONE bound this module's own contract promises. Wrapped in
     // catch_unwind for the same reason the needs thread's `.join()` is:
     // `AgentsHome::from_env()` panics under a test process with no
     // declared hermetic root (paths.rs), and this function's own contract
     // is "never panics on a source" (see doc comment above).
-    let blocked_child_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let home = crate::paths::AgentsHome::from_env();
-        let journal = crate::daemon::global_events_path(&home);
-        match read_blocked_rows(&journal) {
-            Err(e) => SourceRead::err(e),
-            Ok(rows) => {
-                let claim_rows = claims.rows();
-                let claim_state_by_node: HashMap<String, String> = claim_rows
-                    .iter()
-                    .filter_map(|row| {
-                        let node = s_str(row, "key")?.strip_prefix("node:")?;
-                        Some((
-                            node.to_string(),
-                            s_str(row, "state").unwrap_or("").to_string(),
-                        ))
-                    })
-                    .collect();
-                let status_by_node: HashMap<String, String> = entries
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter_map(|n| {
-                        Some((
-                            s_str(n, "id")?.to_string(),
-                            s_str(n, "status").unwrap_or("").to_string(),
-                        ))
-                    })
-                    .collect();
-                let candidates = queues::resolve_blocked_child_candidates(
-                    rows,
-                    &claim_state_by_node,
-                    &status_by_node,
-                    blocked_child_grace_minutes(&cwd),
-                    now_secs_board() as i64,
-                );
-                if candidates.is_empty() {
-                    SourceRead::ok(Value::Array(Vec::new()))
-                } else {
-                    let cutoffs: HashMap<String, String> = candidates
-                        .iter()
-                        .map(|(row, _)| (row.session.clone(), row.ts.clone()))
-                        .collect();
-                    let answered = queues::mail_answered_since(&bus_live_log_path(), &cutoffs);
-
-                    let sessions: Vec<Value> = candidates
-                        .iter()
-                        .map(|(row, _)| Value::String(row.session.clone()))
-                        .collect();
-                    let mut cmd = fno_py_cmd();
-                    cmd.extend([
-                        "agents".to_string(),
-                        "distress-verdicts".to_string(),
-                        "--sessions".to_string(),
-                        serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string()),
-                    ]);
-                    let verdict_payload = run_json(
-                        cmd,
-                        &cwd,
-                        std::time::Duration::from_millis(HAND_RUN_BUDGET_MS),
-                    );
-                    let verdicts: HashMap<String, String> = candidates
-                        .iter()
-                        .filter_map(|(row, _)| {
-                            verdict_payload
-                                .payload
-                                .as_ref()
-                                .and_then(|p| p.get(&row.session))
-                                .and_then(Value::as_str)
-                                .map(|v| (row.session.clone(), v.to_string()))
-                        })
-                        .collect();
-                    SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
-                        candidates, &answered, &verdicts,
-                    )))
-                }
-            }
+    let blocked_child = match s_blocked_child {
+        None => {
+            spent(&mut sources, "blocked_child", &budget);
+            SourceRead::err(budget.spent_error())
         }
-    }));
-    let blocked_child =
-        blocked_child_result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
-    mark(&mut sources, "blocked_child", &blocked_child, false);
+        Some(slice) => {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let home = crate::paths::AgentsHome::from_env();
+                let journal = crate::daemon::global_events_path(&home);
+                match read_blocked_rows(&journal) {
+                    Err(e) => SourceRead::err(e),
+                    Ok(rows) => {
+                        let claim_rows = claims.rows();
+                        let claim_state_by_node: HashMap<String, String> = claim_rows
+                            .iter()
+                            .filter_map(|row| {
+                                let node = s_str(row, "key")?.strip_prefix("node:")?;
+                                Some((
+                                    node.to_string(),
+                                    s_str(row, "state").unwrap_or("").to_string(),
+                                ))
+                            })
+                            .collect();
+                        let status_by_node: HashMap<String, String> = entries
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter_map(|n| {
+                                Some((
+                                    s_str(n, "id")?.to_string(),
+                                    s_str(n, "status").unwrap_or("").to_string(),
+                                ))
+                            })
+                            .collect();
+                        let candidates = queues::resolve_blocked_child_candidates(
+                            rows,
+                            &claim_state_by_node,
+                            &status_by_node,
+                            blocked_child_grace_minutes(&cwd),
+                            now_secs_board() as i64,
+                        );
+                        if candidates.is_empty() {
+                            SourceRead::ok(Value::Array(Vec::new()))
+                        } else {
+                            let cutoffs: HashMap<String, String> = candidates
+                                .iter()
+                                .map(|(row, _)| (row.session.clone(), row.ts.clone()))
+                                .collect();
+                            let answered =
+                                queues::mail_answered_since(&bus_live_log_path(), &cutoffs);
+
+                            let sessions: Vec<Value> = candidates
+                                .iter()
+                                .map(|(row, _)| Value::String(row.session.clone()))
+                                .collect();
+                            let mut cmd = fno_py_cmd();
+                            cmd.extend([
+                                "agents".to_string(),
+                                "distress-verdicts".to_string(),
+                                "--sessions".to_string(),
+                                serde_json::to_string(&sessions)
+                                    .unwrap_or_else(|_| "[]".to_string()),
+                            ]);
+                            let verdict_payload = run_json(cmd, &cwd, slice);
+                            let verdicts: HashMap<String, String> = candidates
+                                .iter()
+                                .filter_map(|(row, _)| {
+                                    verdict_payload
+                                        .payload
+                                        .as_ref()
+                                        .and_then(|p| p.get(&row.session))
+                                        .and_then(Value::as_str)
+                                        .map(|v| (row.session.clone(), v.to_string()))
+                                })
+                                .collect();
+                            SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
+                                candidates, &answered, &verdicts,
+                            )))
+                        }
+                    }
+                }
+            }));
+            let read = result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
+            mark(&mut sources, "blocked_child", &read, false);
+            read
+        }
+    };
 
     let inputs = BoardInputs {
         ready,
