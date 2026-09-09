@@ -8,7 +8,7 @@ A retirement is one sequence shared by the scheduled sweep and the merge trigger
 
 The durable record comes first. The receipt is built from the registry row and the harness capability table, then written to disk BEFORE any effect fires, and each effect appends its typed record and rewrites it. A crash after an effect leaves a receipt naming what happened, instead of a removal nothing recorded. A receipt that cannot be built or persisted refuses the retirement before the harness is touched, and the row is kept.
 
-The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. The planning lane adds its own gate: a planner row retires only when its own blueprint/think `sessions[]` entry carries `ended_at`, the positive marker `fno backlog session close` writes, so a quiet replanning worker cannot inherit a completion an earlier assignment wrote. Under the commit, the graph is re-read and any session that has gained an open do row is held before the registry write.
+The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. For the planning lane the gate is different: a planner row retires only when its own blueprint/think `sessions[]` entry carries `ended_at`, the positive marker `fno backlog session close` writes, so a quiet replanning worker cannot inherit a completion an earlier assignment wrote. Under the commit, the graph is re-read and any session that has gained an open do row is held before the registry write.
 
 ## The receipt and its required ops
 
@@ -30,4 +30,4 @@ Mux effects are NOT required. No fno-agents call site emits a mux effect record 
 
 ## The rerunnable probe
 
-`scripts/probes/retirement-gate-refuses-incomplete.sh` seeds an isolated home with the synthetic incomplete receipt (one op, current-build stamp), runs the verifier, and requires the refusal. Exit 0 with the refusal reason means the gate holds; exit 1 means the gate certifies an incomplete retirement again. Run it against a freshly built binary before trusting the gate from source.
+`scripts/probes/retirement-gate-refuses-incomplete.sh` seeds an isolated home with the synthetic incomplete receipt (one op, current-build stamp), runs the verifier, and requires the refusal. Exit 0 with the refusal reason means the gate holds. Exit 1 means the gate certifies an incomplete retirement again. Run it against a freshly built binary before trusting the gate from source.
