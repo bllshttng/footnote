@@ -558,8 +558,9 @@ mod tests {
     fn fold_one_counts_whole_scope_lists_active_states_the_omitted_count() {
         let workers = BTreeMap::new();
         let mut e = entries();
-        // Ledger-derived cost sessions arrive as objects, not bare strings.
-        e[2]["cost_sessions"] = json!([{"session_id": "s6", "cost_usd": 0.4}]);
+        // Ledger-derived cost sessions arrive as objects, not bare strings;
+        // both shapes can coexist in one list.
+        e[1]["cost_sessions"] = json!(["s4", {"session_id": "s6", "cost_usd": 0.4}]);
         let fold = fold_one("e-1", Some(2), &e, &no_projects(), &workers);
         assert_eq!(fold["status"], "ok");
         assert_eq!(fold["total"], 4);
