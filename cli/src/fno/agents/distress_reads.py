@@ -1,8 +1,6 @@
-"""Watchdog-verdict lookup for the king board's blocked_child queue (x-3ecf,
-Change 2: one classifier, two callers). Registered via import from cli.py,
-same pattern as transcript_reads.py, so cli.py itself stays net 0. The
-mail-answered signal (AC3-EDGE) is read natively in Rust; see
-king_board/queues.rs::mail_answered_since."""
+"""Watchdog-verdict lookup for the king board's blocked_child queue
+(x-3ecf Change 2). Registered via import from cli.py, matching
+transcript_reads.py, so cli.py itself stays net 0."""
 
 from __future__ import annotations
 
@@ -18,8 +16,7 @@ from fno.agents.cli import agents_app
 def cmd_distress_verdicts(
     sessions: str = typer.Option(..., "--sessions", help="JSON array of session ids."),
 ) -> None:
-    """Print ``{"<session>": "<verdict>"|null}``, the watchdog's own word for
-    each - informational only, never a gate."""
+    """Print ``{"<session>": "<verdict>"|null}``."""
     try:
         ids = _json.loads(sessions)
     except (TypeError, ValueError):

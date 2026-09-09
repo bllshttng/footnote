@@ -142,10 +142,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":
-    """The crown one rung above the escalating session's own, or None on any
-    unreadable input, an uncrowned session, or nothing outranking it.
-    Fail-quiet: escalation still falls through to the operator (x-3ecf
-    AC4-HP: a disagreement climbs the crown ladder first)."""
+    """The crown above the escalating session's own, or None (x-3ecf AC4-HP)."""
     if not session_id:
         return None
     try:
@@ -168,9 +165,7 @@ def resolve_presiding_king(session_id: "str | None") -> "dict | None":
 
 
 def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> bool:
-    """Best-effort mail to the presiding king. True only on a confirmed
-    send; any failure reads False so the caller still records the durable
-    operator question."""
+    """True only on a confirmed send; any failure reads False."""
     import shutil
     import subprocess
 

@@ -593,11 +593,8 @@ def escalate_cmd(
         "NoProgress", "--reason", "-R", help="The terminal reason that triggered this."
     ),
 ) -> None:
-    """Tell the presiding crown - or the operator when nothing outranks this
-    king - that it stopped with work still pending. Called by both king
-    terminals; idempotent per stalled id set. The operator question always
-    records; a live presiding crown also gets mailed and named as the
-    receipt's target (x-3ecf, AC4-HP)."""
+    """Tell the presiding crown, or the operator when nothing outranks this
+    king, that it stopped with work pending (x-3ecf AC4-HP)."""
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate, mail_presiding_king, resolve_presiding_king
     from fno.king.state import reign_state

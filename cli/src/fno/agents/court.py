@@ -178,9 +178,7 @@ def find_presiding_crown(
     crowns: list[dict[str, Any]],
     by_id: Optional[dict[str, dict]],
 ) -> Optional[dict[str, Any]]:
-    """The live crown one rung above scope/level, or None (x-3ecf AC4-HP:
-    escalation climbs the crown ladder before the operator). Excludes
-    manifest-only rows - no live worker to mail."""
+    """The live crown one rung above scope/level, or None (x-3ecf AC4-HP)."""
     if level is None or level <= 0:
         return None
     live = [c for c in crowns if c.get("status") != "manifest-only"]
