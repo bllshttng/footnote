@@ -78,7 +78,6 @@ prefix = "fno"
 # Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).
 commit_mode = "rows"
 read_source = "json"
-read_source = "json"
 
 [obsidian]
 # Whether this project uses an Obsidian vault for plans/docs.

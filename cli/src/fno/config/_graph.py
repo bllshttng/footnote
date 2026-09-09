@@ -13,4 +13,3 @@ class GraphBlock(BaseModel):
 
     commit_mode: Literal["rows", "whole"] = "rows"
     read_source: Literal["json", "sqlite"] = "json"
-    read_source: Literal["json", "sqlite"] = "json"
