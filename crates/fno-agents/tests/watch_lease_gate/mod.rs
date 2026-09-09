@@ -109,6 +109,60 @@ fn watching_ignored_names_a_missing_claim_as_permanent() {
     );
 }
 
+// The refusal above and the hint below it used to arrive in one message: no
+// watcher can help, now go arm a watcher. This session obeyed that three times.
+#[test]
+fn a_permanent_refusal_carries_no_arm_and_tag_hint() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-watching-nohint", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_watching()).unwrap();
+
+    let mock = MockBins::ci_pending();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "claude",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("recorded no node claim at init"),
+        "the permanent cause must be named: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("Arm a harness-tracked watcher"),
+        "the refused ritual must not be prescribed in the same message: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("CI still running on PR #17"),
+        "the actionable blocker must remain: {}",
+        d.message
+    );
+}
+
 #[test]
 fn watching_ignored_unaddressed_findings_are_audible() {
     let tmp = findings_cwd("sess-watching-findings");

@@ -1537,7 +1537,7 @@ use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
-use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal};
+use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal, ARM_HINT_LEAD};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -10095,6 +10095,13 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         )
                     });
                 let block_reason = match watching_refusal {
+                    // The refusal already said no watcher can help here, so the
+                    // hint the classifier appended would contradict it inside
+                    // one message. Cut the hint, keep the blocker.
+                    Some(ref refusal) if refusal == watch_lease::NO_CLAIM_REFUSAL => {
+                        let rest = watch_lease::without_arm_hint(&block_reason);
+                        format!("{refusal}; {rest}")
+                    }
                     Some(refusal) => format!("{refusal}; {block_reason}"),
                     None => block_reason,
                 };
@@ -10453,7 +10460,7 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
         )
     };
     format!(
-        " Arm a harness-tracked watcher with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
+        "{ARM_HINT_LEAD} with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
     )
 }
 /// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate

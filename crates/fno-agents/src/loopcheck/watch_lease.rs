@@ -61,3 +61,19 @@ pub(super) const NO_CLAIM_REFUSAL: &str =
     "watching ignored: this session recorded no node claim at init, so no watch lease can \
 ever renew, and arming another watcher will not change that. Spend each wake on real work, \
 or hand the PR to a session that holds the claim.";
+
+/// The lead of the arm-and-tag hint. One literal, shared by the writer and by
+/// [`without_arm_hint`], so the cut can never drift off the sentence it cuts.
+pub(super) const ARM_HINT_LEAD: &str = " Arm a harness-tracked watcher";
+
+/// `reason` with the arm-and-tag hint cut off.
+///
+/// Said when [`NO_CLAIM_REFUSAL`] already told the reader that no watcher can
+/// help. One message must not prescribe the ritual it just refused: a session
+/// obeyed exactly that contradiction three times before this cut existed.
+pub(super) fn without_arm_hint(reason: &str) -> String {
+    match reason.find(ARM_HINT_LEAD) {
+        Some(i) => reason[..i].trim_end().to_string(),
+        None => reason.to_string(),
+    }
+}
