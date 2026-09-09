@@ -1583,9 +1583,8 @@ def _spawn_worker(
             and "verdict=already-running" in stderr
         ):
             raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
-        # Name the code's meaning beside the bare number and carry the gate's
-        # own sentence as detail, so the consumer's error line does not lead
-        # with an unrelated warning.
+        # Name the code's meaning; carry the gate's own sentence (not the
+        # first, unrelated warning) as detail.
         gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
         meaning = _GATE_REFUSAL_REASONS.get(proc.returncode)
         suffix = f" ({meaning})" if meaning else ""
@@ -3282,10 +3281,8 @@ def advance(
         if detail:
             tick_detail += f" detail={detail[:120]}"
         _tick(0, reason, tick_detail)
-        return AdvanceResult(
-            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail,
-            exit_code=exit_code,
-        )
+        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason,
+                             node_id=node_id, detail=detail, exit_code=exit_code)
 
     def failed(node_id: str, error: str) -> AdvanceResult:
         data = {"node_id": node_id, "error": error[:200], "rank": rank}
@@ -3449,8 +3446,7 @@ def advance(
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
     except SpawnError as exc:
-        # A machine-scoped refusal skips (row stays ready, no strike, no defer);
-        # a node fault fails and charges.
+        # Machine-scoped: skip (row ready, no strike, no defer); else fail.
         _safe_release(dispatch_key, holder, dispatch_root)
         refusal = gate_refusal(exc)
         if refusal is None:
@@ -3737,10 +3733,8 @@ def _converge_one(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        return AdvanceResult(
-            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail,
-            exit_code=exit_code,
-        )
+        return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason,
+                             node_id=node_id, detail=detail, exit_code=exit_code)
 
     def failed(error: str) -> AdvanceResult:
         _emit(EVENT_FAILED, _tag({"node_id": node_id, "error": error[:200]}), ev_path)
@@ -4026,9 +4020,7 @@ class AdvanceEpicResult:
     child_results: tuple = ()  # AdvanceResult per attempted child
 
     def receipt(self) -> dict:
-        """The epic-advance --json receipt. A failed child carries the actual
-        error text in ``detail`` (``reason`` is the generic category), so the
-        mission drain's defer reason names what broke."""
+        """The epic-advance --json receipt; detail names what actually broke."""
         return {
             "epic_id": self.epic_id,
             "error": self.error,
@@ -4363,18 +4355,10 @@ def advance_epic(
             # provider-scoped and falls through: siblings on other routes may
             # still dispatch. Name every child the pass did NOT try.
             for remaining in children[idx + 1:]:
-                _emit(
-                    EVENT_SKIPPED,
-                    {"reason": res.reason, "node_id": remaining["id"],
-                     "mission": canon, "rank": rank, "attempted": False},
-                    ev_path,
-                )
-                results.append(
-                    AdvanceResult(
-                        "skipped", EVENT_SKIPPED,
-                        reason=res.reason, node_id=remaining["id"],
-                    )
-                )
+                _emit(EVENT_SKIPPED, {"reason": res.reason, "node_id": remaining["id"],
+                                      "mission": canon, "rank": rank, "attempted": False}, ev_path)
+                results.append(AdvanceResult("skipped", EVENT_SKIPPED,
+                                             reason=res.reason, node_id=remaining["id"]))
             break
 
     return AdvanceEpicResult(
