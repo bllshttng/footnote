@@ -117,7 +117,12 @@ fn prune_reaps_orphans_keeps_named_and_unageable() {
     );
 
     let after = s.store();
-    assert!(!after.contains("orphan"), "orphan removed: {after}");
+    let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let squads = parsed["squads"].as_array().unwrap();
+    assert!(
+        !squads.iter().any(|s| s["key"].as_str() == Some("orphan")),
+        "orphan removed: {after}"
+    );
     assert!(
         after.contains("\"name\": \"work\""),
         "named squad kept: {after}"
@@ -308,7 +313,16 @@ fn prune_include_named_removes_a_named_orphan() {
         stdout.contains("pruned stale"),
         "named orphan removed: {stdout}"
     );
-    assert!(!s.store().contains("stale"), "named orphan gone from store");
+    let after = s.store();
+    let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert!(
+        !parsed["squads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"].as_str() == Some("stale")),
+        "named orphan gone from store: {after}"
+    );
 }
 
 #[test]
