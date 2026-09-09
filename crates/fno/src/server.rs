@@ -69,6 +69,7 @@ pub(crate) mod lifecycle_target;
 mod pane_identity;
 mod pane_reseat;
 mod portal_reach;
+mod retire_session;
 mod squad_sync;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
@@ -692,6 +693,14 @@ enum CoreMsg {
     /// `squad_members` on the core loop, so an external prune survives the
     /// next `persist_squad`.
     SquadReload {
+        reply: ControlReply,
+    },
+    /// (v75, x-7649) `ControlVerb::RetireSession`: tombstone one (harness,
+    /// full session id) identity across every held squad and close only its
+    /// attached panes. Idempotent; a repeat retires nothing.
+    RetireSession {
+        harness: String,
+        session_id: String,
         reply: ControlReply,
     },
     Gone(u64),
@@ -5451,71 +5460,6 @@ impl Core {
             });
         }
         self.persist_squad(detached.squad);
-    }
-
-    /// Capture a worker member before a visible pane is reaped. The detached
-    /// path cannot use `member_ctx`, whose attach-id shape belongs to claude
-    /// attach members.
-    fn worker_member_context(&self, pane: u64) -> Option<DetachedPane> {
-        let (squad, tab_index) = self.session.find_pane(pane)?;
-        let entry = self.panes.get(&pane)?;
-        let name = entry.name.as_deref()?.to_string();
-        let sq = self.session.squad(squad)?;
-        let tab_name = sq.tabs.get(tab_index).and_then(|tab| tab.name.clone());
-        if let Some(member) = self.squad_members.get(&squad).and_then(|members| {
-            members
-                .iter()
-                .find(|member| member.worker.as_deref() == Some(name.as_str()))
-        }) {
-            return DetachedPane::from_member(
-                member,
-                squad,
-                sq.name.clone().unwrap_or_default(),
-                sq.key.clone(),
-                sq.origins.clone(),
-            );
-        }
-        self.agents
-            .iter()
-            .find(|agent| {
-                agent.name == name
-                    && agent.mux.as_ref().is_some_and(|(session, candidate)| {
-                        session == &self.session_name && *candidate == pane
-                    })
-            })
-            .map(|agent| {
-                DetachedPane::from_agent(
-                    agent,
-                    squad,
-                    sq.name.clone().unwrap_or_default(),
-                    sq.key.clone(),
-                    sq.origins.clone(),
-                    tab_name,
-                )
-            })
-    }
-
-    fn reconcile_worker_member_close(&mut self, detached: &DetachedPane, churn: bool) {
-        let Some(members) = self.squad_members.get_mut(&detached.squad) else {
-            return;
-        };
-        if churn {
-            if let Some(member) = members
-                .iter_mut()
-                .find(|member| detached.matches_member(member))
-            {
-                member.tombstone = true;
-                member.detached = false;
-            }
-        } else {
-            members.retain(|member| !detached.matches_member(member));
-        }
-        if self.session.squad(detached.squad).is_some() {
-            self.persist_squad(detached.squad);
-        } else {
-            self.squad_members.remove(&detached.squad);
-            self.persist_remove(&detached.squad_name, &detached.squad_key);
-        }
     }
 
     /// Create a fresh tab (one shell leaf) in squad `sid`, returning its stable
@@ -13847,6 +13791,11 @@ impl Core {
                 self.handle_squad_reload(reply);
                 Flow::Continue
             }
+            CoreMsg::RetireSession {
+                harness,
+                session_id,
+                reply,
+            } => self.handle_retire_session(harness, session_id, reply),
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
                 // constraining client releases its clamp, so the tab regrows
@@ -15891,6 +15840,18 @@ async fn handle_control(
                 .await
         }
         ControlVerb::SquadReload => core_tx.send(CoreMsg::SquadReload { reply: reply_tx }).await,
+        ControlVerb::RetireSession {
+            harness,
+            session_id,
+        } => {
+            core_tx
+                .send(CoreMsg::RetireSession {
+                    harness,
+                    session_id,
+                    reply: reply_tx,
+                })
+                .await
+        }
         ControlVerb::PaneFocus { pane } => {
             core_tx
                 .send(CoreMsg::PaneFocus {
@@ -16474,6 +16435,9 @@ mod tests {
 
     // The squad-store sync family (prune reload marker + negative control).
     mod squad_sync_tests;
+
+    // (v75, x-7649) The exact-session retirement handler family.
+    mod retire_session_tests;
 
     // The per-pane orphan verdict family.
     mod pane_identity_tests;

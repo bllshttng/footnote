@@ -860,7 +860,9 @@ impl FakeClient {
             // connection, never an attached client.
             | ServerMsg::WorkspaceRestored { .. }
             // (v71) Prune reload: same one-shot control connection shape.
-            | ServerMsg::SquadReloaded { .. } => {}
+            | ServerMsg::SquadReloaded { .. }
+            // (v75) Exact-session retirement: same one-shot control shape.
+            | ServerMsg::SessionRetired { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.
             ServerMsg::PeekBody { .. } => {}
