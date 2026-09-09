@@ -183,9 +183,7 @@ def find_presiding_crown(
         return None
     live = [c for c in crowns if c.get("status") != "manifest-only"]
     if level == 2:
-        if by_id is None:
-            return None
-        projects = {by_id.get(m, {}).get("project") for m in split_scope(scope)}
+        projects = {by_id.get(m, {}).get("project") for m in split_scope(scope)} if by_id else set()
         projects.discard(None)
         if len(projects) != 1:
             return None

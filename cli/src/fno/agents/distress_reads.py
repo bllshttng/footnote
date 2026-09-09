@@ -26,16 +26,14 @@ def cmd_distress_verdicts(
         typer.echo("fno agents distress-verdicts: --sessions must be a JSON array", err=True)
         raise typer.Exit(code=2)
 
-    verdict_by_session: dict[str, Any] = {}
+    verdicts: dict[str, Any] = {}
     try:
         from fno.agents.watchdog import run_sweep
 
         payload, _rows = run_sweep()
-        verdict_by_session = {
-            v.get("row_id"): v.get("verdict") for v in payload.get("verdicts", [])
-        }
+        verdicts = {v.get("row_id"): v.get("verdict") for v in payload.get("verdicts", [])}
     except Exception:  # noqa: BLE001 - enrichment only, never fatal
         pass
 
-    out = {s: verdict_by_session.get(s) for s in ids if isinstance(s, str)}
+    out = {s: verdicts.get(s) for s in ids if isinstance(s, str)}
     typer.echo(_json.dumps(out))
