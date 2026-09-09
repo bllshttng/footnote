@@ -83,6 +83,7 @@ from .core import (
     ClaimState,
     HolderMismatch,
 )
+from fno.graph._constants import is_wellformed_node_id
 from fno.tombstones import tombstone_group_cls
 
 
@@ -1095,7 +1096,15 @@ def status(
     compute a field it discards would tax every tool call to answer a question
     it never asked.
     """
+    if is_wellformed_node_id(key):
+        key = f"node:{key}"
     info = _claims_core.claim_status(key=key, root=_node_aware_root(key))
+    if ":" not in key and info.get("state") == ClaimState.FREE.value:
+        typer.echo(
+            f"claim key must include a recognized prefix; no claim exists for {key!r}",
+            err=True,
+        )
+        raise typer.Exit(2)
     node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:

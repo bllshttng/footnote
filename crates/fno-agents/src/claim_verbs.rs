@@ -425,6 +425,7 @@ pub(crate) fn default_session_witness() -> (
         let answer = session_liveness_answer(rec, &index, &memo);
         *last_answer.borrow_mut() = Some(match &answer {
             crate::claims::SessionLiveness::Live(basis) => *basis,
+            crate::claims::SessionLiveness::Absent => crate::claims::basis::SESSION_ABSENT,
             crate::claims::SessionLiveness::Unresolved => "unresolved",
         });
         answer
@@ -536,8 +537,12 @@ fn session_liveness_answer_uncached(
     // the transcript still answers. Reachability is the liveness reading;
     // "waiting" or "stalled" names a wedged session, never a dead one.
     if let Some(probe) = crate::truth_probe::family1_truth_probe(session) {
-        if probe.reachability.as_deref() == Some("reachable") {
-            return crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE);
+        match probe.reachability.as_deref() {
+            Some("reachable") => {
+                return crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
+            }
+            Some("unreachable") => return crate::claims::SessionLiveness::Absent,
+            _ => {}
         }
     }
     crate::claims::SessionLiveness::Unresolved
