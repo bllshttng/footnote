@@ -128,6 +128,46 @@ def test_receipt_session_prints_resume_verbatim(history):
     assert "EXIT=0" in out
 
 
+def test_receipt_resolves_by_row_name_and_short_id(history):
+    # Nobody remembers a uuid, and the receipt filename is keyed on one, so
+    # the worker name is not in the path either. The same three keys
+    # `fno agents resume` matches.
+    run = history(receipts=[_receipt()])
+    by_name = run("t-x6db9-worker")
+    assert "name:     t-x6db9-worker" in by_name
+    assert "resume:   " + _REASUME_VERBATIM in by_name
+    assert "EXIT=0" in by_name
+
+    by_short = run("TX6DB9WOR")
+    assert "name:     t-x6db9-worker" in by_short
+    assert "EXIT=0" in by_short
+
+
+def test_a_reused_name_prints_every_receipt_newest_first(history):
+    older = _receipt(sid="00000000-1111-2222-3333-444444444444")
+    older["reaped_at"] = "2026-08-20T10:00:00Z"
+    run = history(receipts=[_receipt(), older])
+    out = run("t-x6db9-worker")
+    assert "2 receipts answer this handle, newest first" in out
+    assert out.index("2026-08-26T10:00:00Z") < out.index("2026-08-20T10:00:00Z")
+    assert "EXIT=0" in out
+
+
+def test_a_receipt_miss_names_the_keys_it_matched_against(history):
+    run = history(rows=[], receipts=[_receipt()])
+    out = run("t-nobody")
+    assert "harness_session_id, short_id, row_name" in out
+    assert "EXIT=1" in out
+
+
+def test_an_empty_receipt_field_never_matches_an_empty_handle(history):
+    blank = _receipt()
+    blank["row_name"] = ""
+    run = history(rows=[], receipts=[blank])
+    out = run("")
+    assert "receipt:  not recorded" in out
+
+
 def test_node_finds_receipt_through_ledger_enrichment(history):
     # No ledger row for the node at all: the receipt's own enrichment is
     # the join from work to session.
