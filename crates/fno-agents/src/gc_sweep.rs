@@ -2096,6 +2096,7 @@ mod tests {
             &|_| None,
             &|_| false,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
             &|_| (None, None),
             &|_| None,
         )
