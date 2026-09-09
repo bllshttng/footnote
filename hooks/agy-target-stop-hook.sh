@@ -336,7 +336,9 @@ fi
 
 # jq confirmed present from here down.
 CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2>/dev/null || true)
-TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2>/dev/null || true)
+# Already resolved above (jq-optional, needed before jq was confirmed present)
+# for the pre-manifest exit; reuse it rather than a second jq extraction.
+TRANSCRIPT_PATH="$EARLY_TRANSCRIPT_PATH"
 
 # ── 4. Synthesize a claude-shaped transcript loop-check can read ───────────────
 # loop-check reads transcripts through the shared Python reader (fno agents

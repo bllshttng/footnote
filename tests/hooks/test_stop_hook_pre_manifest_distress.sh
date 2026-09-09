@@ -78,7 +78,13 @@ run_hook() {
     HOOK_STDERR=""
     HOOK_STDERR=$(
         cd "$cwd" || exit 1
-        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
+        # Scrub the ambient harness markers before adding the test's own: this
+        # script itself may run inside a live Claude Code session (CI, or a
+        # dev driving it from an agent), and env VAR=val only ADDS to the
+        # inherited environment - a leaked CLAUDE_CODE_SESSION_ID silently
+        # stamped harness:claude on a codex fixture and masked a real T1 gap.
+        env -u CLAUDE_CODE_SESSION_ID -u CODEX_THREAD_ID -u GEMINI_SESSION_ID \
+            CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
     ) || HOOK_RC=$?
 }
 
@@ -101,7 +107,8 @@ log "T1: pre-manifest stop with a real help-tag transcript"
         "HOME=${HOME_DIR}" \
         "FNO_SPACES_DIR=${SPACES_DIR}" \
         "FNO_AGENTS_BIN=${REAL_BIN}" \
-        "FNO_LOOPCHECK_FNO_BIN=${READER_STUB}"
+        "FNO_LOOPCHECK_FNO_BIN=${READER_STUB}" \
+        "CODEX_THREAD_ID=t1-codex-thread"
 
     t1_ok=true
     if [[ "$HOOK_RC" -ne 0 ]]; then
@@ -191,7 +198,8 @@ print(json.dumps(rec))
             "HOME=${T1_HOME_DIR}" \
             "FNO_SPACES_DIR=${T1_SPACES_DIR}" \
             "FNO_AGENTS_BIN=${REAL_BIN}" \
-            "FNO_LOOPCHECK_FNO_BIN=${READER_STUB2}"
+            "FNO_LOOPCHECK_FNO_BIN=${READER_STUB2}" \
+            "CODEX_THREAD_ID=t3-codex-thread"
 
         t3_ok=true
         if [[ "$HOOK_RC" -ne 0 ]]; then
