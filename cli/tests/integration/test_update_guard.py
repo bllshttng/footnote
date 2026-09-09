@@ -394,7 +394,9 @@ def test_malformed_version_output_halts_the_rust_leg(
     result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 1
     assert "post-deploy verify FAILED" in result.output
-    assert "unparseable" in result.output
+    # The deployed binary cannot answer the verdict, and the receipt says so
+    # instead of claiming freshness.
+    assert "component verdict unavailable" in result.output
     assert not captured, "a halt must never reach the installer exec"
 
 

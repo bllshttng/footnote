@@ -84,6 +84,10 @@ def _cargo_stub(
     )
     inner = (
         "#!/bin/sh\n"
+        'if [ "$1" = "component-verdict" ]; then\n'
+        '  shift\n'
+        '  exec "$FNO_AGENTS_BIN" component-verdict "$@"\n'
+        "fi\n"
         'if [ "$1" = "version" ] && [ "$2" = "--json" ]; then\n'
         f"  echo '{version_json}'\n"
         "fi\n"

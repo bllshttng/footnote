@@ -2873,7 +2873,9 @@ def test_ac3_hp_doctor_shows_unknown_with_the_named_instrument(
         components=[
             {"component": "fno-agents", "status": "fresh"},
             {"component": "fno-agents-worker", "status": "unknown",
-             "detail": "hung on `version --json` (>20s)"},
+             "detail": "hung on `version --json` (>20s)",
+             "line": "component fno-agents-worker: unknown (no revision reported,"
+                     " expected abc1234abcd); hung on `version --json` (>20s)"},
             {"component": "python-tool", "status": "fresh"},
         ],
     )
@@ -2921,7 +2923,10 @@ def test_doctor_component_stale_renders_repair_and_gates_exit(
         components=[
             {"component": "fno-agents-daemon", "status": "stale",
              "observed_rev": "0" * 40, "expected_rev": "a" * 40,
-             "repair": "cargo install --path /src/crates/fno-agents --bins"},
+             "repair": "cargo install --path /src/crates/fno-agents --bins",
+             "line": "component fno-agents-daemon: stale (rev 000000000000,"
+                     " expected aaaaaaaaaaaa); repair: cargo install --path"
+                     " /src/crates/fno-agents --bins"},
             {"component": "fno-agents", "status": "fresh"},
         ],
     )
