@@ -29,10 +29,13 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
     }
 
     fn family_line(name: &str, family: &StateReapFamilySummary) -> String {
-        let kept = family
-            .kept
-            .iter()
-            .map(|entry| format!("{} ({})", entry.path, entry.reason))
+        let mut reason_counts = std::collections::BTreeMap::new();
+        for entry in &family.kept {
+            *reason_counts.entry(entry.reason.as_str()).or_insert(0usize) += 1;
+        }
+        let kept = reason_counts
+            .into_iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
             .collect::<Vec<_>>()
             .join(", ");
         let oldest = family
@@ -790,13 +793,27 @@ mod tests {
 
     #[test]
     fn state_file_reap_text_names_each_family_total_and_dry_run() {
-        let summary = crate::gc_sweep::StateFilesReapSummary::default();
+        let mut summary = crate::gc_sweep::StateFilesReapSummary::default();
+        summary.plan_locks.kept = vec![
+            crate::gc_sweep::StateReapKept {
+                path: "locks/plan.lock".into(),
+                reason: "within retention window".into(),
+            };
+            10_000
+        ];
+        summary.totals.kept = 10_000;
         let out = render_state_files_reap(&summary, false);
 
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 6, "four families, total, and dry-run marker");
+        assert!(
+            out.len() < 1_024,
+            "text output grew with kept paths: {}B",
+            out.len()
+        );
         assert!(lines[0].starts_with("expired_claims:"));
         assert!(lines[1].starts_with("plan_locks:"));
+        assert!(lines[1].contains("within retention window=10000"));
         assert!(lines[2].starts_with("agent_locks:"));
         assert!(lines[3].starts_with("pr_status_cache:"));
         assert!(lines[4].starts_with("total:"));
