@@ -6576,22 +6576,13 @@ impl View {
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(item) = &self.feed_detail_of {
-            // One row's full provenance. Every field says how it is known, and
-            // an empty one says WHICH silence it is rather than going blank.
-            let row = feed_detail::live_row(&self.layout.agents, item);
-            let lines = feed_detail::detail_lines(item, row);
-            let chrome = chrome::Chrome::new("event provenance", Anchor::Center)
-                .footer(feed_detail::detail_footer(item, row));
-            draw_lines_overlay(
+            feed_detail::draw(
+                self,
+                item,
                 &mut cells,
-                rows,
-                cols,
+                (rows, cols),
                 overlay_origin,
                 overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                None,
             );
         } else if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
@@ -12617,7 +12608,7 @@ async fn handle_stdin(
     // this slot protects - typing reaches the focused pane - holds by
     // default and is set aside only on request.
     if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
-        return feed_keys(view, &passthrough, sock_w).await;
+        return feed_view::feed_keys(view, &passthrough, sock_w).await;
     }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
@@ -13066,81 +13057,6 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
     }
     Ok(())
-}
-
-/// The focused feed panel's keys, and the provenance view's.
-///
-/// Reached only when the operator asked for it: `E` focused the panel, or a
-/// click opened a row's provenance. Every other time the panel takes no keys
-/// at all and this function is never called, which is the whole point.
-///
-/// Precedence inside: the provenance view wins while it is open (it is the
-/// thing in front), then the focused panel. Esc unwinds one layer at a time -
-/// the view first, then the focus - so a reader never loses both at once.
-async fn feed_keys(
-    view: &mut View,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.feed_esc);
-    let toks = fold_modal_keys(&mut esc, bytes);
-    view.feed_esc = esc;
-    for tok in toks {
-        if view.feed_detail_of.is_some() {
-            match tok {
-                ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
-                    view.feed_detail_of = None;
-                }
-                ModalKey::Enter => {
-                    // The deep link is the view's ACTION, never its opening
-                    // gesture: inspecting attaches and resumes nothing.
-                    if let Some(hit) = view.feed_detail_hit() {
-                        apply_hit(view, hit, sock_w).await?;
-                    }
-                    view.feed_detail_of = None;
-                }
-                _ => {}
-            }
-            continue;
-        }
-        let Some(f) = view.feed.as_mut() else {
-            break; // closed mid-chunk: swallow the rest, never forward
-        };
-        let len = f.items.len();
-        match tok {
-            ModalKey::Esc => {
-                f.focused = false;
-            }
-            ModalKey::Up => {
-                f.sel = f.sel.saturating_sub(1);
-                view.follow_feed_selection();
-            }
-            ModalKey::Down => {
-                f.sel = (f.sel + 1).min(len.saturating_sub(1));
-                view.follow_feed_selection();
-            }
-            // Panning moves the TITLE only; the stamp, kind and node stay
-            // anchored, so a panned row is still the row you selected.
-            ModalKey::Left => f.hpan = f.hpan.saturating_sub(1),
-            ModalKey::Right => {
-                let ceiling = feed_view::widest_title(&f.items);
-                f.hpan = (f.hpan + 1).min(ceiling);
-            }
-            ModalKey::PageUp => {
-                let page = (view.term.0 as usize).saturating_sub(2).max(1);
-                f.sel = f.sel.saturating_sub(page);
-                view.follow_feed_selection();
-            }
-            ModalKey::PageDown => {
-                let page = (view.term.0 as usize).saturating_sub(2).max(1);
-                f.sel = (f.sel + page).min(len.saturating_sub(1));
-                view.follow_feed_selection();
-            }
-            ModalKey::Enter => view.open_feed_detail(),
-            ModalKey::Byte(_) => {}
-        }
-    }
-    Ok(StdinFlow::Continue)
 }
 
 /// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends

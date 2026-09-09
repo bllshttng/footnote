@@ -20,6 +20,7 @@
 //! exact `harness_session_id` - never on the row NAME, which a later worker
 //! can reuse and which would answer about a different session.
 
+use super::*;
 use crate::feed_overlay::FeedItem;
 use crate::proto::AgentRow;
 
@@ -173,4 +174,31 @@ pub(crate) fn detail_footer(item: &FeedItem, row: Option<&AgentRow>) -> String {
         None if item.session_id.is_some() => "enter: attach on portal 0 · esc close".to_string(),
         None => "esc close".to_string(),
     }
+}
+
+/// Paint the provenance view. Lives here rather than in the compose pass so
+/// the render and the fields it renders read as one module.
+pub(crate) fn draw(
+    view: &View,
+    item: &FeedItem,
+    cells: &mut [Cell],
+    (rows, cols): (usize, usize),
+    origin: (usize, usize),
+    dims: (usize, usize),
+) {
+    let row = live_row(&view.layout.agents, item);
+    let lines = detail_lines(item, row);
+    let chrome =
+        chrome::Chrome::new("event provenance", Anchor::Center).footer(detail_footer(item, row));
+    draw_lines_overlay(
+        cells,
+        rows,
+        cols,
+        origin,
+        dims,
+        &chrome,
+        &lines,
+        &view.theme,
+        None,
+    );
 }

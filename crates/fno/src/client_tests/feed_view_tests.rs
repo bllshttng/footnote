@@ -569,3 +569,40 @@ fn an_absent_field_names_its_own_kind_of_silence() {
     let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
     assert_eq!(parent.1, feed_detail::NOT_RECORDED);
 }
+
+// The whole render path, not just the line builder: open the provenance view
+// on a real View and read the COMPOSED frame. A field that never reaches the
+// screen is the defect this view exists to prevent, so the assertion is on
+// painted text.
+#[test]
+fn the_composed_frame_paints_every_field_and_its_action() {
+    let mut v = view_with_rows(vec![]);
+    v.term = (44, 120);
+    v.feed = Some(overlay(vec![feed_item(Some("x-a"), Some("s-1"))]));
+    let mut item = feed_item(Some("x-9223"), Some("s-1"));
+    item.harness = Some("claude".into());
+    item.model = Some("glm-5.3-flash".into());
+    v.feed_detail_of = Some(item);
+
+    let text = crate::vt::frame_text(&v.compose());
+    for label in [
+        "harness",
+        "timestamp",
+        "model",
+        "effort",
+        "node",
+        "session-id",
+        "pane",
+        "parent",
+        "king",
+    ] {
+        assert!(text.contains(label), "the frame never painted {label}");
+    }
+    // The values that ARE recorded, and the honest silence for the ones that
+    // are not - never a blank cell.
+    assert!(text.contains("glm-5.3-flash"));
+    assert!(text.contains("x-9223"));
+    assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
+    // The action is named before it is pressed.
+    assert!(text.contains("attach on portal 0"), "footer missing");
+}
