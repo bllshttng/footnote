@@ -112,6 +112,12 @@ Votes also stop the age drain. `maintain` counts an encounter as movement, so a 
 
 An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path makes the record deniable. A later correction is a progress note.
 
+### Progress notes reach the people building the node
+
+`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to three readers. The node's live claim holder. The holder of the node whose PR carries it. Whoever is crowned over the epic. Every outcome prints, including "nobody to reach". Silence reads the same as delivery.
+
+Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+
 ## Moving cards
 
 ### Between columns
