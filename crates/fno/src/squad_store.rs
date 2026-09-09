@@ -690,20 +690,24 @@ pub fn upsert(
     origins: &[String],
     members: &[StoredMember],
 ) -> io::Result<()> {
-    upsert_with_generations(name, key, origins, members).map(|_| ())
+    upsert_with_generations(None, name, key, origins, members).map(|_| ())
 }
 
 pub fn upsert_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     name: &str,
     key: &str,
     origins: &[String],
     members: &[StoredMember],
-) -> io::Result<std::collections::HashMap<String, u64>> {
+) -> io::Result<SnapshotBatch> {
     // A squad with neither a name nor a durable key has no identity across a
     // restart, so it cannot be persisted (nor found again). Skip it here, the
     // one place every write path funnels through, rather than at each caller.
     if name.is_empty() && key.is_empty() {
-        return Ok(std::collections::HashMap::new());
+        return Ok(SnapshotBatch {
+            generations: std::collections::HashMap::new(),
+            conflicts: Vec::new(),
+        });
     }
     // (x-6b0b) A named squad keys by name and leaves the key empty (the
     // struct's own contract at `StoredSquad::key`). Enforced here, where every
@@ -711,7 +715,7 @@ pub fn upsert_with_generations(
     // lives here: a caller passing both minted a row that matched by name
     // while its key-keyed twin stayed alive.
     let key = if name.is_empty() { key } else { "" };
-    mutate_generations(|squads| {
+    mutate_generations(expected, |squads| {
         let existing = squads.iter().find(|s| same_squad(s, name, key));
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -744,14 +748,15 @@ pub fn upsert_with_generations(
 /// before any membership write). A store-write failure is the caller's to treat
 /// as degraded persistence (the live layout stands).
 pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> {
-    set_tab_specs_with_generations(name, tab_specs).map(|_| ())
+    set_tab_specs_with_generations(None, name, tab_specs).map(|_| ())
 }
 
 pub fn set_tab_specs_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     name: &str,
     tab_specs: &[StoredTabSpec],
-) -> io::Result<std::collections::HashMap<String, u64>> {
-    mutate_generations(|squads| {
+) -> io::Result<SnapshotBatch> {
+    mutate_generations(expected, |squads| {
         if let Some(s) = squads.iter_mut().find(|s| s.name == name) {
             s.tab_specs = tab_specs.to_vec();
         } else {
@@ -876,14 +881,17 @@ fn set_snapshots_inner(
 /// `key`): a user-closed / removed workspace, or an unnamed lane whose last pane
 /// closed. An identity not present is a silent no-op.
 pub fn remove(name: &str, key: &str) -> io::Result<()> {
-    remove_with_generations(name, key).map(|_| ())
+    remove_with_generations(None, name, key).map(|_| ())
 }
 
 pub fn remove_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     name: &str,
     key: &str,
-) -> io::Result<std::collections::HashMap<String, u64>> {
-    mutate_generations(|squads| squads.retain(|s| !same_squad(s, name, key)))
+) -> io::Result<SnapshotBatch> {
+    mutate_generations(expected, |squads| {
+        squads.retain(|s| !same_squad(s, name, key))
+    })
 }
 
 // --- prune: reap squads whose every origin is gone and nothing is live -----
@@ -1778,16 +1786,17 @@ pub fn rename(
     origins: &[String],
     members: &[StoredMember],
 ) -> io::Result<()> {
-    rename_with_generations(old, new, origins, members).map(|_| ())
+    rename_with_generations(None, old, new, origins, members).map(|_| ())
 }
 
 pub fn rename_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     old: &str,
     new: &str,
     origins: &[String],
     members: &[StoredMember],
-) -> io::Result<std::collections::HashMap<String, u64>> {
-    mutate_generations(|squads| {
+) -> io::Result<SnapshotBatch> {
+    mutate_generations(expected, |squads| {
         let existing = squads.iter().find(|s| s.name == old || s.name == new);
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -1972,9 +1981,10 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
 }
 
 fn mutate_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     f: impl FnOnce(&mut Vec<StoredSquad>),
-) -> io::Result<std::collections::HashMap<String, u64>> {
-    mutate_squads_file_with_generations(|sf| f(&mut sf.squads)).map(|(_, generations)| generations)
+) -> io::Result<SnapshotBatch> {
+    mutate_squads_file_with_generations(expected, |sf| f(&mut sf.squads)).map(|(_, batch)| batch)
 }
 
 /// Retire every member whose (harness, session id) matches, by the store's
@@ -2063,12 +2073,13 @@ fn assert_writable() -> io::Result<()> {
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
 fn mutate_squads_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
-    mutate_squads_file_with_generations(f).map(|(result, _)| result)
+    mutate_squads_file_with_generations(None, f).map(|(result, _)| result)
 }
 
 fn mutate_squads_file_with_generations<T>(
+    expected: Option<&std::collections::HashMap<String, u64>>,
     f: impl FnOnce(&mut StoreFile) -> T,
-) -> io::Result<(T, std::collections::HashMap<String, u64>)> {
+) -> io::Result<(T, SnapshotBatch)> {
     mutate_file(|file| {
         let before: std::collections::HashMap<_, _> = file
             .squads
@@ -2088,14 +2099,28 @@ fn mutate_squads_file_with_generations<T>(
         let identities: std::collections::HashSet<_> =
             before.keys().chain(after.keys()).cloned().collect();
         let mut generations = std::collections::HashMap::new();
+        let mut conflicts = Vec::new();
         for identity in identities {
             if before.get(&identity) != after.get(&identity) {
+                let observed = file.generations.get(&identity).copied().unwrap_or(0);
                 let generation = file.generations.entry(identity.clone()).or_default();
                 *generation = generation.saturating_add(1);
-                generations.insert(identity, *generation);
+                if expected.is_none_or(|expected| {
+                    expected.get(&identity).copied().unwrap_or(0) == observed
+                }) {
+                    generations.insert(identity, *generation);
+                } else {
+                    conflicts.push(identity);
+                }
             }
         }
-        (result, generations)
+        (
+            result,
+            SnapshotBatch {
+                generations,
+                conflicts,
+            },
+        )
     })
 }
 

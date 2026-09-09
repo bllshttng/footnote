@@ -160,6 +160,32 @@ fn local_store_write_refreshes_the_shutdown_generation_baseline() {
 }
 
 #[test]
+fn partial_local_write_cannot_launder_a_newer_topology_generation() {
+    let _scratch = StoreScratch::new("shutdown-capture-partial-write-conflict");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    let mut external = core.snapshot_squad(1).unwrap();
+    external.tab_trees[0].tab_name = Some("external-tree".into());
+    crate::squad_store::set_snapshots_if_generations(
+        &core.store_generations,
+        std::slice::from_ref(&external),
+    )
+    .unwrap();
+
+    core.persist_stored("sq", "", &["/a".into()], &[deadbeef_member()]);
+    assert!(!core.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert_eq!(
+        squad.tab_trees[0].tab_name.as_deref(),
+        Some("external-tree")
+    );
+    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
 fn store_reload_refreshes_the_shutdown_generation_baseline() {
     let _scratch = StoreScratch::new("shutdown-capture-store-reload");
     let (mut core, _) = template_core();

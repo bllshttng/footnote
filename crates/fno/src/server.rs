@@ -71,6 +71,7 @@ mod pane_reseat;
 mod portal_reach;
 mod retire_session;
 mod shutdown_capture;
+mod squad_persistence;
 mod squad_sync;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
@@ -6025,31 +6026,6 @@ impl Core {
         });
     }
 
-    /// Capture every template-managed, NAMED tab in squad `sid` into the store
-    /// (US8). Restore re-applies these. Unnamed template tabs stay live-only
-    /// (no durable identity to key on). A store-write failure degrades
-    /// persistence only - the live layout stands (matches `persist_squad`).
-    fn persist_template_specs(&mut self, sid: u64) {
-        let Some(sq) = self.session.squad(sid) else {
-            return;
-        };
-        let name = sq.name.clone();
-        let Some(name) = name.filter(|n| !n.is_empty()) else {
-            return; // an unnamed (attach-born) squad is never persisted
-        };
-        let specs: Vec<crate::squad_store::StoredTabSpec> = sq
-            .tabs
-            .iter()
-            .filter_map(|t| {
-                let tab_name = t.name.clone().filter(|n| !n.is_empty())?;
-                let spec = self.template_specs.get(&t.id)?.clone();
-                Some(crate::squad_store::StoredTabSpec { tab_name, spec })
-            })
-            .collect();
-        let result = crate::squad_store::set_tab_specs_with_generations(&name, &specs);
-        self.persist_result(result);
-    }
-
     /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8),
     /// returning how many tabs were created. Each spec gets a fresh named tab
     /// addressed by id (so a member tab of the same name never makes the target
@@ -7190,14 +7166,6 @@ impl Core {
         })
     }
 
-    /// Write one squad's membership and topology without replacing a newer writer.
-    fn persist_squad(&mut self, sid: u64) {
-        let Some(snapshot) = self.snapshot_squad(sid) else {
-            return;
-        };
-        self.persist_snapshots_if_current(std::slice::from_ref(&snapshot), "topology");
-    }
-
     /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -
     /// EVERY tab, hand-split and template alike, ending the three gates
     /// (template-only, named-squad-only, named-tab-only) that left the
@@ -7646,42 +7614,12 @@ impl Core {
         }
     }
 
-    /// Write-through a raw upsert from captured fields (used when the in-session
-    /// squad is already gone - a churned member's last pane). Identity is `name`
-    /// when named, else the durable `key`.
-    fn persist_stored(
-        &mut self,
-        name: &str,
-        key: &str,
-        origins: &[String],
-        members: &[crate::squad_store::StoredMember],
-    ) {
-        let result = crate::squad_store::upsert_with_generations(name, key, origins, members);
-        self.persist_result(result);
-    }
-
     /// The store identity of a live squad: `(name, key)`, `name` empty for an
     /// unnamed one. Captured BEFORE a mutation that may remove the squad, so the
     /// de-persist has something to key on afterwards.
     fn squad_identity(&self, sid: u64) -> Option<(String, String)> {
         let sq = self.session.squad(sid)?;
         Some((sq.name.clone().unwrap_or_default(), sq.key.clone()))
-    }
-
-    /// Write-through a delete of a squad's store entry, keyed by `name` when
-    /// named else by its durable `key` (an unnamed lane whose last pane closed).
-    /// A named caller may pass `""` for key; an unpersisted squad (empty key)
-    /// removes nothing.
-    fn persist_remove(&mut self, name: &str, key: &str) {
-        let result = crate::squad_store::remove_with_generations(name, key);
-        self.persist_result(result);
-    }
-
-    fn persist_result(&mut self, result: std::io::Result<std::collections::HashMap<String, u64>>) {
-        match result {
-            Ok(generations) => self.store_generations.extend(generations),
-            Err(e) => self.persist_degraded(&e),
-        }
     }
 
     /// Notice every client exactly once that persistence is degraded (AC3-ERR),
@@ -8133,8 +8071,12 @@ impl Core {
                     .iter()
                     .any(|m| !m.tombstone && live.contains(&m.attach_id));
             if sweep {
-                match crate::squad_store::remove_with_generations("", &sq.key) {
-                    Ok(generations) => self.store_generations.extend(generations),
+                match crate::squad_store::remove_with_generations(
+                    Some(&self.store_generations),
+                    "",
+                    &sq.key,
+                ) {
+                    Ok(batch) => self.store_generations.extend(batch.generations),
                     Err(e) => {
                         self.notice_all(format!("squad prune at restore skipped: {e}"));
                     }
@@ -12760,7 +12702,11 @@ impl Core {
                                         .map(|s| s.origins.clone())
                                         .unwrap_or_default();
                                     let result = crate::squad_store::rename_with_generations(
-                                        &old, &new, &origins, &members,
+                                        Some(&self.store_generations),
+                                        &old,
+                                        &new,
+                                        &origins,
+                                        &members,
                                     );
                                     self.persist_result(result);
                                 }

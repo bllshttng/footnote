@@ -1,33 +1,6 @@
 use super::*;
 
 impl Core {
-    pub(super) fn persist_snapshots_if_current(
-        &mut self,
-        snapshots: &[crate::squad_store::SquadSnapshot],
-        context: &str,
-    ) -> bool {
-        let batch = match crate::squad_store::set_snapshots_if_generations(
-            &self.store_generations,
-            snapshots,
-        ) {
-            Ok(batch) => batch,
-            Err(e) => {
-                self.persist_degraded(&e);
-                return false;
-            }
-        };
-        self.store_generations.extend(batch.generations);
-        if batch.conflicts.is_empty() {
-            true
-        } else {
-            eprintln!(
-                "fno mux: stale {context} snapshots skipped for {}",
-                batch.conflicts.join(", ")
-            );
-            false
-        }
-    }
-
     /// Capture live topology at teardown, even when the dirty flag is clear.
     pub(super) fn capture_topology_now(&mut self) -> bool {
         if !self.restored {

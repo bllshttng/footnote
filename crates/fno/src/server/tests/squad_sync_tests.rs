@@ -68,10 +68,9 @@ fn prune_reload_survives_the_next_persist() {
     );
 }
 
-/// The same sequence WITHOUT the reload: the next persist writes the reaped
-/// member back. This is the bug; it is why "the file shrank" proves nothing.
+/// The same sequence without reload: generation CAS still protects the prune.
 #[test]
-fn prune_without_reload_is_undone_by_the_next_persist() {
+fn prune_without_reload_survives_the_next_persist() {
     let _s = StoreScratch::new("squad-sync-control");
     let mut core = empty_core();
     core.session.add_squad(
@@ -99,13 +98,13 @@ fn prune_without_reload_is_undone_by_the_next_persist() {
     );
     crate::squad_store::prune_with_evidence(|_| crate::squad_store::PruneDecision::Keep, &evidence)
         .unwrap();
-    // No reload: memory still holds both members, and the next pane event
-    // persists that list over the pruned file.
+    // Memory still holds both members, but its stale generation cannot replace
+    // the pruned file.
     core.persist_squad(7);
     assert_eq!(
         crate::squad_store::load().squads[0].members.len(),
-        2,
-        "the reaped member is back - the control that shows the marker test can fail"
+        1,
+        "generation CAS preserves the externally-pruned membership"
     );
 }
 
