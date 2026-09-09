@@ -114,7 +114,7 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
                 &snapshot,
                 short_id,
                 e.launch_account.as_deref(),
-            );
+            )?;
             crate::daemon::run_claude_rm_in(dir.as_deref(), short_id)
         },
     )

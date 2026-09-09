@@ -1002,7 +1002,7 @@ pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
         None
     } else {
         let snapshot = crate::claude_roster::read_all_agents_union();
-        crate::claude_roster::removal_config_dir(&snapshot, short_id, None)
+        crate::claude_roster::removal_config_dir(&snapshot, short_id, None)?
     };
     run_claude_rm_in(dir.as_deref(), short_id)
 }

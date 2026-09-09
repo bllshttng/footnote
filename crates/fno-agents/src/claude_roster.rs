@@ -370,15 +370,22 @@ pub fn removal_config_dir(
     snapshot: &ClaudeAgentsSnapshot,
     short_id: &str,
     launch_account: Option<&str>,
-) -> Option<std::path::PathBuf> {
+) -> Result<Option<std::path::PathBuf>, String> {
     let account = match snapshot.find(short_id) {
-        Some(row) => row.account.clone()?,
-        None => launch_account?.to_string(),
+        Some(row) => match &row.account {
+            Some(account) => account.clone(),
+            None => return Ok(None),
+        },
+        None => match launch_account {
+            Some(account) => account.to_string(),
+            None => return Ok(None),
+        },
     };
     isolated_account_dirs()
         .into_iter()
         .find(|(id, _)| id == &account)
-        .map(|(_, dir)| dir)
+        .map(|(_, dir)| Some(dir))
+        .ok_or_else(|| format!("claude account root '{account}' is not configured"))
 }
 
 /// Parse `[[providers.records]]` / `[[accounts.records]]` entries carrying an
@@ -1027,10 +1034,9 @@ mod tests {
     }
 
     fn with_alt_account_config(test: impl FnOnce(PathBuf)) {
-        use std::sync::{Mutex, OnceLock};
-
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
             "fno-removal-config-{}-{}",
             std::process::id(),
@@ -1066,7 +1072,7 @@ mod tests {
             let snapshot = ClaudeAgentsSnapshot::known(vec![row]);
             assert_eq!(
                 removal_config_dir(&snapshot, "aaaa1111", None),
-                Some(alt_dir)
+                Ok(Some(alt_dir))
             );
         });
     }
@@ -1075,7 +1081,7 @@ mod tests {
     fn removal_config_dir_uses_ambient_root_for_missing_row_without_record() {
         with_alt_account_config(|_| {
             let snapshot = ClaudeAgentsSnapshot::known(Vec::new());
-            assert_eq!(removal_config_dir(&snapshot, "bbbb2222", None), None);
+            assert_eq!(removal_config_dir(&snapshot, "bbbb2222", None), Ok(None));
         });
     }
 
@@ -1084,7 +1090,47 @@ mod tests {
         with_alt_account_config(|_| {
             let snapshot =
                 ClaudeAgentsSnapshot::known(vec![ClaudeAgentRow::new("cccc3333", Some("done"))]);
-            assert_eq!(removal_config_dir(&snapshot, "cccc3333", Some("alt")), None);
+            assert_eq!(
+                removal_config_dir(&snapshot, "cccc3333", Some("alt")),
+                Ok(None)
+            );
         });
+    }
+
+    #[test]
+    fn removal_config_dir_refuses_an_unmapped_measured_account() {
+        with_alt_account_config(|_| {
+            let mut row = ClaudeAgentRow::new("dddd4444", Some("done"));
+            row.account = Some("missing".to_string());
+            let snapshot = ClaudeAgentsSnapshot::known(vec![row]);
+            let got = format!("{:?}", removal_config_dir(&snapshot, "dddd4444", None));
+            assert!(
+                got.starts_with("Err("),
+                "an unmapped measured account must refuse, got {got}"
+            );
+        });
+    }
+
+    #[test]
+    fn alternate_account_tests_share_the_crate_environment_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let shared = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            with_alt_account_config(|_| sent.send(()).unwrap());
+        });
+        assert!(
+            received.recv_timeout(Duration::from_millis(50)).is_err(),
+            "the helper bypassed the crate-wide environment lock"
+        );
+        drop(shared);
+        received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the helper did not resume after the shared lock released");
+        worker.join().unwrap();
     }
 }
