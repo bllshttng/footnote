@@ -1,0 +1,46 @@
+# Capability tier: an ambiguous scope decision (x-fd52 wave 4). A ready node
+# names a symptom in one module but a plausible-looking neighbor shares part
+# of the name. The worker must pick the file the symptom actually points at
+# and explicitly rule the neighbor out, not just list every file that matches
+# a keyword search.
+#
+# This is a paired fixture with capability-lane-implementation.yaml and
+# capability-lane-review.yaml (docs/architecture/lane-qualification.md): the
+# same repeats/budget/stopping-rule apply to every lane cohort compared
+# against it, so a score difference is attributable to the lane, not to a
+# fixture that drifted between runs.
+id: capability-lane-blueprint
+tier: capability
+prompt: |
+  A backlog node reads: "fno agents rm leaves a dead pane row - removing an
+  agent from the registry does not also kill its mux pane, so the row
+  disappears from `fno agents list` while the pane keeps running."
+
+  Two files could plausibly own this fix:
+  - `cli/src/fno/agents/cli.py` - the registry-removal verb itself.
+  - `cli/src/fno/agents/keeper_lane.py` - the pane's pty-master keeper,
+    which outlives the registry row by design (a different, unrelated
+    invariant: the keeper is SUPPOSED to survive a server restart).
+
+  Decide which file is actually in scope for THIS symptom and which one a
+  correct fix must leave alone. Write your answer to `scope-decision.md` as
+  two lines exactly:
+
+    in-scope: <file path>
+    out-of-scope: <file path>
+
+grade:
+  - kind: file-exists
+    path: scope-decision.md
+  - kind: grep
+    path: scope-decision.md
+    pattern: "in-scope: cli/src/fno/agents/cli.py"
+  - kind: exit
+    # Absence check: a grep-only grade cannot express "must NOT contain X",
+    # so this asserts it via a negated shell exit instead (AC1 "compiled
+    # scope" evidence needs both the right file present and the wrong one
+    # ruled out, not just any two file paths).
+    command: "! grep -q 'in-scope: cli/src/fno/agents/keeper_lane.py' scope-decision.md"
+    expect: 0
+timeout_minutes: 15
+tags: [lane-qualification, blueprint, scope]

@@ -1,0 +1,28 @@
+# Capability tier: an unambiguous implementation task (x-fd52 wave 4),
+# paired with capability-lane-blueprint.yaml and capability-lane-review.yaml
+# under the same declared repeats/budget/stopping-rule
+# (docs/architecture/lane-qualification.md). No scope decision here - the
+# grade is purely observed functional behavior, so this isolates "can the
+# lane write correct, working code" from the scope-judgment axis.
+id: capability-lane-implementation
+tier: capability
+prompt: |
+  Add a new module `cli/src/fno/evals/lane_probe.py` with exactly one public
+  function:
+
+      def lane_probe(n: int) -> int:
+          """Return n doubled. Raise ValueError for a negative n."""
+
+  Add a test at `cli/tests/unit/test_lane_probe.py` covering: a positive
+  input doubles correctly, zero returns zero, and a negative input raises
+  `ValueError`. Match the surrounding test style (plain `pytest`, no new
+  dependencies). Commit your work.
+grade:
+  - kind: exit
+    command: "cd cli && uv run pytest tests/unit/test_lane_probe.py -q"
+    expect: 0
+  - kind: grep
+    path: "cli/src/fno/evals/lane_probe.py"
+    pattern: "def lane_probe"
+timeout_minutes: 15
+tags: [lane-qualification, implementation]
