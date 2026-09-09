@@ -751,8 +751,7 @@ def update_readiness(
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
-    # Name both Python deployments: the front door's script and the running
-    # interpreter (AC2-HP).
+    # Name both Python deployments: the front door's script and this interpreter (AC2-HP).
     front_script: Optional[str] = None
     _mux = _cargo_installed_mux() or shutil.which("fno")
     if _mux:
@@ -1001,8 +1000,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]} from binary);"
             " skipping cargo install"
         )
-        # The mux front door can still be absent or stale at a fresh triad
-        # (its install is best-effort); reinstall when missing or rev-mismatched.
+        # The mux front door can be absent or stale at a fresh triad; reinstall then.
         mux = _cargo_installed_mux()
         if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
