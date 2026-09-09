@@ -257,6 +257,39 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     assert res.decision == "skipped" and res.reason == "already-claimed"
 
 
+def test_live_worked_node_refuses_and_names_worker(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {NODE["id"]: ["bp-worker"]},
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+
+    observation = adv._observe_node_claim(NODE["id"])
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "already-claimed"
+    assert observation.worker == "bp-worker"
+    assert emitted[0][1]["worker"] == "bp-worker"
+
+
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_advance_preserves_family2_refusal_reason(iso, monkeypatch, reason):
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)

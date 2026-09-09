@@ -196,6 +196,7 @@ class DispatchClaimObservation:
     holder: str
     truth_status: str
     action: str
+    worker: str = ""
 
     @property
     def blocks_dispatch(self) -> bool:
@@ -3061,6 +3062,18 @@ def _observe_node_claim(
     claim_state = info.get("state")
     holder = info.get("holder") or "unknown"
     occupied = verdict in ("ours", "foreign_live")
+    worker = ""
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+
+        workers = live_worked_node_ids().get(node_id, [])
+        if workers:
+            occupied = True
+            worker = ", ".join(workers)
+    except Exception:
+        # The claim classifier remains the authoritative fallback when the
+        # additive worked overlay cannot be read.
+        pass
     dead_action = (
         None
         if occupied or not enforce_failure_limit
@@ -3089,6 +3102,7 @@ def _observe_node_claim(
             action=action,
             # Session witness basis, only when the classifier reported one.
             **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
+            **({"worker": worker} if worker else {}),
         )
     if emit and claim_state in ("stale", "suspect"):
         message = (
@@ -3105,6 +3119,7 @@ def _observe_node_claim(
         holder=holder,
         truth_status=truth,
         action=action,
+        worker=worker,
     )
 
 
