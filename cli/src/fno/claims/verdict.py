@@ -45,8 +45,16 @@ def claim_verdicts(
     *,
     prefix: str | None = None,
     root: Path | None = None,
+    timeout: float | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return native verdict rows for many keys in one subprocess."""
+    """Return native verdict rows for many keys in one subprocess.
+
+    ``timeout`` bounds the binary (``subprocess.run`` semantics; ``None``, the
+    default, waits forever as before). Callers rendering on a hot path pass
+    one: the binary probes pid liveness per claim, and under machine load the
+    per-claim cost inflates well past interactive budgets. A timeout raises
+    ``subprocess.TimeoutExpired``.
+    """
     binary = resolve_binary()
     if binary is None:
         raise ClaimVerdictUnavailable(
@@ -70,7 +78,9 @@ def claim_verdicts(
     command.extend(("--claims-dir", str(claims_dir(root))))
 
     try:
-        result = run_subprocess(command, capture_output=True, text=True, check=False)
+        result = run_subprocess(
+            command, capture_output=True, text=True, check=False, timeout=timeout
+        )
     except OSError as exc:
         raise ClaimVerdictUnavailable(
             "fno-agents claim verdict unavailable: could not run the native binary; "

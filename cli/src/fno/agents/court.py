@@ -303,8 +303,8 @@ def gather_court(
 def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
     """Fold each crown's scope nodes onto its row as ``scope_nodes``, in place.
 
-    Pure over rows the caller already read: no file access, no subprocess, no
-    second graph read. The resolver is injected from the crown row's own
+    Pure over rows the caller already read: never a second graph read. The
+    resolver is injected from the crown row's own
     ``level``/``scope`` because ``gather_court`` already adjudicated that
     scope (``agree``) - re-validating inside ``compile_scope_ids`` would buy
     nothing and re-read the graph (measured 9.5-13.4 s through the keeper).
@@ -314,7 +314,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
     always present on an ok fold: a crown whose active list is empty must
     read as "N nodes, none active", never as "nothing here".
     """
-    from fno.claims.core import live_worker
+    from fno.claims.core import live_workers
     from fno.graph.statuses import ACTIVE_STATUSES
     from fno.king.scope import compile_scope_ids
 
@@ -331,23 +331,43 @@ def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
         "in_progress", "in_review", "ready", "blocked", "design",
         "idea", "deferred", "done", "superseded",
     ]
+    # Pass 1: compile every crown and collect the active ids the worker read
+    # will name.
+    compiled: list[tuple[dict[str, Any], list[dict], Optional[dict[str, Any]]]] = []
+    active_ids: list[str] = []
     for crown in crowns:
         scope = crown.get("scope")
         level = crown.get("level")
         if not (isinstance(scope, str) and scope.strip()) or level is None:
-            crown["scope_nodes"] = {
-                "status": "unresolved",
-                "reason": "the row carries no scope or no crown level",
-            }
+            compiled.append((
+                crown,
+                [],
+                {
+                    "status": "unresolved",
+                    "reason": "the row carries no scope or no crown level",
+                },
+            ))
             continue
         try:
             ids = compile_scope_ids(
                 scope, entries, resolve=lambda _m, level=level, scope=scope: (level, scope)
             )
         except (ValueError, KeyError) as exc:
-            crown["scope_nodes"] = {"status": "unresolved", "reason": str(exc)}
+            compiled.append((crown, [], {"status": "unresolved", "reason": str(exc)}))
             continue
         members = [by_id[i] for i in sorted(ids) if i in by_id]
+        active_ids.extend(
+            str(e["id"]) for e in members if e.get("status") in ACTIVE_STATUSES
+        )
+        compiled.append((crown, members, None))
+    # Pass 2: ONE verdict batch, stat-filtered to the lockfiles that exist;
+    # the per-key read pays one native verdict each and measured 1.7 s over
+    # 122 active rows.
+    workers = live_workers(list(dict.fromkeys(active_ids)))
+    for crown, members, error in compiled:
+        if error is not None:
+            crown["scope_nodes"] = error
+            continue
         counts: dict[str, int] = {}
         for entry in members:
             status = str(entry.get("status") or "unknown")
@@ -373,7 +393,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
                     "id": entry.get("id"),
                     "slug": entry.get("slug") or "",
                     "status": str(entry.get("status") or ""),
-                    "worker": live_worker(str(entry["id"])),
+                    "worker": workers.get(str(entry["id"])),
                     "pr_number": entry.get("pr_number"),
                     "sessions": sessions,
                 }
