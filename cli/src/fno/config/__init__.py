@@ -2000,10 +2000,7 @@ class AgentProviderBlock(BaseModel):
 
 # The routing schema blocks live in routing_blocks (the config hub is over
 # the file budget and shrink-only); re-exported for every reader.
-from fno.config.routing_blocks import (  # noqa: E402
-    RoutingBlock as RoutingBlock,
-    RoutingModelBlock as RoutingModelBlock,
-)
+from fno.config.routing_blocks import RoutingBlock as RoutingBlock  # noqa: E402
 
 
 # The spawn-defaults schema blocks live in spawn_blocks (the config hub is

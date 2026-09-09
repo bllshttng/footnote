@@ -670,13 +670,15 @@ def test_the_fallback_emits_one_row_per_model():
 def test_declared_rows_survive_the_real_loader(tmp_path):
     """The slot payload's declared rows must accept what the loader returns.
 
-    The config loader hands over typed RoutingModelBlock objects, not Mappings,
-    so an isinstance-Mapping filter dropped every declared row and grid-routed
-    spawns were refused with 'declared rows: (none)'. Drives the REAL loader
-    (settings_from_files: the same parse + validate path as production) and
-    asserts the named row survives - a nonzero count alone cannot tell a right
-    answer from a silent empty. operator_view rides every declared row: the
-    qualification field the strict inventory reads (x-90a9).
+    The x-947c defect was a type test at the READER: an isinstance-Mapping
+    filter dropped rows the loader had parsed fine, and grid-routed spawns
+    were refused with 'declared rows: (none)'. Rows are therefore plain
+    mappings handed to readers verbatim - the Mapping spelling is the
+    contract. Drives the REAL loader (settings_from_files: the same parse +
+    validate path as production) and asserts the named row survives - a
+    nonzero count alone cannot tell a right answer from a silent empty.
+    operator_view rides every declared row: the qualification field the
+    strict inventory reads (x-90a9).
     """
     from fno.config import settings_from_files
 
@@ -696,10 +698,9 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
         'band = "low"\n'
     )
     settings = settings_from_files([cfg])
-    # premise, not decoration: the loader returns typed blocks - the exact
-    # type the old Mapping filter rejected. If this ever returns dicts, the
-    # trap this guards against has moved.
-    assert all(hasattr(r, "model_dump") for r in settings.routing.models)
+    # premise, not decoration: the loader hands plain mappings - the spelling
+    # every declared-row reader must consume without a type test.
+    assert all(isinstance(r, dict) for r in settings.routing.models)
 
     rows = rr._declared_rows(settings)
 

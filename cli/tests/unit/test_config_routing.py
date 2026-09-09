@@ -10,7 +10,7 @@ import tomllib
 from types import SimpleNamespace
 from pathlib import Path
 
-from fno.config import RoutingBlock, RoutingModelBlock, SettingsModel
+from fno.config import RoutingBlock, SettingsModel
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 # The sample ships in its own data package beside fno/ (pure data; the Python
@@ -66,12 +66,12 @@ def test_full_routing_block_parses():
         },
     })
     row = s.routing.models[0]
-    assert row.name == "glm-5.3"
-    assert row.harness == "claude"
-    assert row.cost_per_mtok_in == 6.9
-    assert row.context == 1000000
-    assert row.route == "zai/glm-5.3"
-    assert row.account == "makers"
+    assert row["name"] == "glm-5.3"
+    assert row["harness"] == "claude"
+    assert row["cost_per_mtok_in"] == 6.9
+    assert row["context"] == 1000000
+    assert row["route"] == "zai/glm-5.3"
+    assert row["account"] == "makers"
     assert s.routing.objective == "prefer-harness"
 
 
@@ -85,7 +85,7 @@ def test_rows_carry_no_validation_at_load_time():
     s = _settings({"routing": {"models": [
         {"name": "x", "harness": "not-a-harness", "model": "m", "band": "purple"},
     ]}})
-    assert s.routing.models[0].band == "purple"
+    assert s.routing.models[0]["band"] == "purple"
 
 
 def test_shipped_sample_parses_and_declares_rows():
@@ -114,11 +114,15 @@ def test_sample_shows_one_model_two_access_paths():
     assert all(c[0] != c[1] for c in paired)  # two profiles, never averaged
 
 
-def test_routing_model_block_defaults():
-    row = RoutingModelBlock()
-    assert row.name == "" and row.harness == "" and row.model == ""
-    assert row.band == "" and row.effort == ""
-    assert row.cost_per_mtok_in is None and row.context is None
+def test_routing_model_row_defaults_read_through_the_fold():
+    """An empty declared row reads as empty strings at the seam boundary:
+    row defaults are applied by the reader (_field), never at load time."""
+    from fno import route_resolve as rr
+
+    s = _settings({"routing": {"models": [{"name": "bare"}]}})
+    rows = rr._declared_rows(s)
+    assert rows["bare"]["harness"] == "" and rows["bare"]["band"] == ""
+    assert rows["bare"]["operator_view"] == ""
 
 
 def test_routing_block_tolerates_extra_keys():
@@ -162,12 +166,12 @@ def test_routing_model_row_carries_color():
         {"name": "zai-glm-flash", "harness": "claude",
          "model": "glm-5.3-flash[1m]", "route": "zai", "color": "green"},
     ]}})
-    assert s.routing.models[0].color == "green"
+    assert s.routing.models[0]["color"] == "green"
 
 
 def test_routing_model_row_color_defaults_empty():
-    row = RoutingModelBlock()
-    assert row.color == ""
+    row = _settings({"routing": {"models": [{}]}}).routing.models[0]
+    assert row.get("color", "") == ""
 
 
 def test_spawn_defaults_carry_a_harness_overlay():

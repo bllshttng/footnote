@@ -1,39 +1,13 @@
-"""The routing schema blocks: model rows and the routing block.
+"""The routing schema block: the routing block itself.
 
 The config hub (``fno.config``) is over the file budget and shrink-only;
-these live here by the same ruling that moved the spawn-defaults blocks to
+this lives here by the same ruling that moved the spawn-defaults blocks to
 ``spawn_blocks``. Re-exported from ``fno.config`` for every reader.
 """
 
-from typing import Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-
-class RoutingModelBlock(BaseModel):
-    """One declared model row (nested under 'config.routing.models'): the
-    invocation facts a benchmark snapshot cannot carry. ``name`` is the join
-    key and later rows override per field. Field prose:
-    docs/architecture/role-based-model-routing.md."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    name: str = ""
-    harness: str = ""
-    model: str = ""
-    # route names a vendor lane, account a provider record id: both say
-    # which ACCOUNT'S quota the row spends.
-    route: str = ""
-    account: str = ""
-    band: str = ""
-    effort: str = ""
-    cost_per_mtok_in: Optional[float] = None
-    context: Optional[int] = None
-    # The sideline lane color when this row matches an agent (x-1b35).
-    color: str = ""
-    # The verified native view for this access path; empty is unverified,
-    # invisible to strict routing while remote or unknown.
-    operator_view: str = ""
 
 
 class RoutingBlock(BaseModel):
@@ -47,7 +21,12 @@ class RoutingBlock(BaseModel):
 
     objective: str = "cheapest-that-clears"
     prefer_harness: str = ""
-    models: list[RoutingModelBlock] = Field(default_factory=list)
+    # Declared rows stay plain mappings, handed to readers verbatim. The row
+    # shape is {name, harness, model, route, account, band, effort,
+    # operator_view, cost_per_mtok_in, context, color}; a repeated name folds
+    # per field. The one seam boundary (_field) reads the mapping spelling -
+    # a type test at a reader is the trap (x-947c), never the cure.
+    models: list[dict[str, Any]] = Field(default_factory=list)
     # Opt-in strict inventory (default off): a spawn qualifies against the
     # work-kind slot's declared lanes only; a pin constrains, never bypasses.
     enforce_inventory: bool = False
@@ -64,5 +43,3 @@ class RoutingBlock(BaseModel):
         return v if v in ("cheapest-that-clears", "best-available", "prefer-harness") else (
             "cheapest-that-clears"
         )
-
-
