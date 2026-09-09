@@ -2372,15 +2372,7 @@ class AgentsBlock(SweepKeys):
     # non-default here changes both the idle tick and `fno agents reap`.
     # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
     retire_grace_s: int = Field(default=900, ge=0)
-    # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
-    # this window in the same GC sweep that writes new ones; the Pydantic
-    # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
-    # be read is kept, never deleted on a failed read.
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
-    # Roster-sweep scope. Values off / provenanced / all; default
-    # provenanced. One rule no value can cross: a row that resolves to no fno
-    # node is never retirable at any value, including all - an operator's
-    # hand-started session is safe by construction, not by default value.
     reap: ReapBlock = Field(default_factory=ReapBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
