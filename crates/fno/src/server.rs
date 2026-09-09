@@ -14383,6 +14383,8 @@ async fn serve(
             // tick: the fallback is a fact about the environment, and a fleet
             // with no daemon must not pay one line per second for it.
             let mut fallback_logged = false;
+            // Same once-only discipline for the wedged-probe skip below.
+            let mut latch_wedge_logged = false;
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
             let mut truth_probe_seq: u64 = 0;
@@ -14439,21 +14441,37 @@ async fn serve(
                 // most this interval - invisible next to the 600s threshold
                 // it feeds.
                 if last_truth.elapsed() >= TRUTH_PROBE_EVERY {
-                    if let Some(latch) = TruthProbeLatch::begin(&truth_in_flight) {
-                        last_truth = Instant::now();
-                        truth_probe_seq += 1;
-                        let seq = truth_probe_seq;
-                        let tx = core_tx.clone();
-                        tokio::spawn(async move {
-                            let probe = tokio::task::spawn_blocking(probe_truth_map)
-                                .await
-                                .ok()
-                                .flatten();
-                            drop(latch);
-                            if let Some(map) = probe {
-                                let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
+                    match TruthProbeLatch::begin(&truth_in_flight) {
+                        Some(latch) => {
+                            last_truth = Instant::now();
+                            truth_probe_seq += 1;
+                            let seq = truth_probe_seq;
+                            let tx = core_tx.clone();
+                            tokio::spawn(async move {
+                                let probe = tokio::task::spawn_blocking(probe_truth_map)
+                                    .await
+                                    .ok()
+                                    .flatten();
+                                drop(latch);
+                                if let Some(map) = probe {
+                                    let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
+                                }
+                            });
+                        }
+                        None => {
+                            // A probe still running a full interval after it
+                            // started is wedged, not slow. The old code healed
+                            // that by stacking a new probe; the latch cannot,
+                            // so say so once instead of silently freezing
+                            // every row's age at the last good reading.
+                            if !latch_wedge_logged {
+                                latch_wedge_logged = true;
+                                eprintln!(
+                                    "fno mux: a fleet truth probe has run over {TRUTH_PROBE_EVERY:?}; \
+                                     skipping probes until it exits"
+                                );
                             }
-                        });
+                        }
                     }
                 }
                 // The registry leg subscribes to the daemon
