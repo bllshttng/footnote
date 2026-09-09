@@ -391,6 +391,46 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
     assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
 
 
+def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
+    """The recorded error for a failed dispatch must contain the
+    refusal. Head-capture of a stderr whose head is advisory recorded the
+    warning and cut the refusal; the budgets made it permanent. Every assert
+    below fails against the old error[:200]/error[:120] capture."""
+    refusal = (
+        "spawn-gate: 1-min load 284.3 is over the max_load_per_cpu trigger "
+        + "n" * 280
+        + " refusing to spawn"
+    )
+
+    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
+        raise adv.SpawnError(f"fno agents spawn exited 79: {refusal}")
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", boom)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.node_id == NODE["id"]
+    evs = _events(iso)
+    assert len(evs) == 1 and evs[0]["type"] == "advance_failed"
+    recorded = evs[0]["data"]["error"]
+    assert "refusing to spawn" in recorded
+    assert len(recorded) >= 300
+    ticks = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
+    ]
+    failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
+    assert failed_ticks
+    detail = failed_ticks[-1]["data"].get("detail") or ""
+    # The composed tick row keeps 200 chars total; the error is tail-truncated
+    # to match, so the window ENDS at the refusal instead of opening on the
+    # advisory. 140 chars of the error's tail survive the prefix budgets.
+    assert refusal[-140:] in detail
+    assert "refusing to spawn" in detail
+
+
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     """A name-collision (peer beat us) -> already-claimed, reservation released."""
     def collide(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
@@ -404,6 +444,216 @@ def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
     assert res.decision == "skipped" and res.reason == "already-claimed"
     key = f"dispatch:{NODE['id']}"
     assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+
+
+# ---------------------------------------------------------------------------
+# A capacity refusal is a fact about the machine, not a node fault
+# ---------------------------------------------------------------------------
+
+_GATE_LINE = "spawn-gate: refusing: load 348.26 against trigger 120.0"
+
+
+def test_gate_refusal_maps_the_gate_exit_family():
+    """The closed gate family classifies machine-scoped; every other code is
+    a node fault and returns None."""
+    from fno.agents.spawn_gate import (
+        EXIT_KING_SHARE,
+        EXIT_LOAD_REFUSED,
+        EXIT_NO_WAIT,
+        EXIT_PROVIDER_CAP,
+        EXIT_QUEUE_TIMEOUT,
+        EXIT_RAM_REFUSED,
+        EXIT_REGISTRY_SCHEMA,
+    )
+
+    for code in (
+        EXIT_QUEUE_TIMEOUT,
+        EXIT_NO_WAIT,
+        EXIT_RAM_REFUSED,
+        EXIT_PROVIDER_CAP,
+        EXIT_LOAD_REFUSED,
+        EXIT_KING_SHARE,
+    ):
+        refusal = adv.gate_refusal(
+            adv.SpawnError(f"exited {code}", exit_code=code, detail=_GATE_LINE)
+        )
+        assert refusal is not None and refusal.reason == "capacity-refused"
+        assert refusal.exit_code == code and refusal.detail == _GATE_LINE
+
+    schema = adv.gate_refusal(
+        adv.SpawnError(
+            "exited 81",
+            exit_code=EXIT_REGISTRY_SCHEMA,
+            detail="spawn-gate: registry schema 3 > 2; refusing",
+        )
+    )
+    assert schema.reason == "gate-unavailable" and schema.exit_code == EXIT_REGISTRY_SCHEMA
+
+    # A node fault carries no gate code, or a code outside the family.
+    assert adv.gate_refusal(adv.SpawnError("daemon unreachable")) is None
+    assert adv.gate_refusal(adv.SpawnError("boom", exit_code=1, detail="x")) is None
+    # The spawn-gate: marker is required provenance: the codex create path
+    # propagates a provider's raw exit, so the number alone is not proof.
+    assert (
+        adv.gate_refusal(
+            adv.SpawnError("exited 79", exit_code=79, detail="codex exited 79")
+        )
+        is None
+    )
+
+
+def test_gate_refusal_carries_queue_retry_at():
+    from fno.agents.spawn_gate import EXIT_PROVIDER_CAP
+
+    exc = adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0)
+    exc.detail = _GATE_LINE
+    refusal = adv.gate_refusal(exc)
+    assert refusal is not None
+    assert refusal.reason == "capacity-refused" and refusal.exit_code == EXIT_PROVIDER_CAP
+    assert refusal.retry_at == 1234.0
+
+
+def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
+    """LD6: the exit code rides the exception and the detail is the gate's own
+    LAST spawn-gate: line - not the unrelated provider-stamp warning that
+    three crowned sessions misread on 2026-09-09."""
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda cmd, **kw: _FakeProc(
+            79,
+            "",
+            "spawn-gate: 1 live row(s) were minted without a provider stamp\n"
+            f"{_GATE_LINE}\n",
+        ),
+    )
+    with pytest.raises(adv.SpawnError) as ei:
+        adv._spawn_worker("ab-2222aaaa", None)
+    exc = ei.value
+    assert exc.exit_code == 79
+    assert exc.detail == _GATE_LINE
+    assert "79" in str(exc)
+    assert "provider stamp" not in exc.detail
+
+
+def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
+    """No spawn-gate: line on stderr -> the head of stderr is the detail."""
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(79, "", "daemon unreachable"),
+    )
+    with pytest.raises(adv.SpawnError) as ei:
+        adv._spawn_worker("ab-2222aaaa", None)
+    assert ei.value.exit_code == 79
+    assert ei.value.detail == "daemon unreachable"
+
+
+def test_capacity_refusal_skips_and_names_the_gate_line(iso, monkeypatch):
+    """AC1-HP + AC7-UI: exit 79 -> advance_skipped(capacity-refused) carrying
+    exit_code and the gate's own sentence; the auto-continue arm row reads
+    skip=capacity-refused with that detail; no strike is charged."""
+    def gate_refused(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
+        raise adv.SpawnError("fno agents spawn exited 79", exit_code=79, detail=_GATE_LINE)
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", gate_refused)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == "capacity-refused"
+    evs = _events(iso)
+    skips = [e for e in evs if e["type"] == "advance_skipped"]
+    assert len(skips) == 1
+    assert skips[0]["data"]["reason"] == "capacity-refused"
+    assert skips[0]["data"]["exit_code"] == 79
+    assert _GATE_LINE in skips[0]["data"]["detail"]
+    assert not [e for e in evs if e["type"] == "advance_failed"]
+    # AC7-UI: the arm row (a control_plane_tick, filtered out of _events)
+    # reads skip=capacity-refused with the gate's own sentence - the axis and
+    # the numbers, never the provider-stamp warning.
+    ticks = [
+        event
+        for line in iso.read_text().splitlines()
+        if line.strip()
+        and (event := json.loads(line))["type"] == "control_plane_tick"
+        and event["data"].get("arm") == "auto_continue"
+    ]
+    assert ticks and ticks[-1]["data"]["skip_reason"] == "capacity-refused"
+    assert "load 348.26 against trigger 120.0" in ticks[-1]["data"]["detail"]
+    assert "provider stamp" not in ticks[-1]["data"]["detail"]
+
+
+def test_node_scoped_exit_still_fails(iso, monkeypatch):
+    """AC6-EDGE: a spawn failure outside the closed gate family keeps the
+    failed verdict and charges the strike."""
+    def boom(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
+        raise adv.SpawnError("exited 1: unwritable brief", exit_code=1, detail="unwritable brief")
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", boom)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.reason == "spawn-failed"
+    assert [e for e in _events(iso) if e["type"] == "advance_failed"]
+
+
+def test_exit_78_skips_with_retry_at_and_never_defers(iso, monkeypatch):
+    """AC5-EDGE + LD5: a slot-queue refusal leaves the row ready (no defer
+    subprocess - deleted, not moved) and the skip carries retry_at."""
+    def queue_refused(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
+        exc = adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0)
+        exc.detail = _GATE_LINE
+        raise exc
+
+    def no_defer(cmd, **kw):
+        if "defer" in [str(a) for a in cmd]:
+            pytest.fail("exit 78 must not defer the node")
+        return _REAL_SUBPROCESS_RUN(cmd, **kw)
+
+    monkeypatch.setattr(adv.subprocess, "run", no_defer)
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", queue_refused)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == "capacity-refused"
+    skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
+    assert skips[0]["data"]["retry_at"] == 1234.0
+    assert skips[0]["data"]["exit_code"] == 78
+
+
+def test_reserved_exit_without_gate_marker_stays_failed(iso, monkeypatch):
+    """P1: a provider crash can exit with a reserved code (the codex create
+    path propagates the provider's raw exit verbatim), so the code alone is
+    not machine provenance. Without the gate's own spawn-gate: marker the
+    verdict stays failed and the strike is charged."""
+    def provider_crash(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
+        raise adv.SpawnError(
+            "codex exited 79 (see output)", exit_code=79, detail="codex exited 79"
+        )
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", provider_crash)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.reason == "spawn-failed"
+    assert [e for e in _events(iso) if e["type"] == "advance_failed"]
+    assert not [e for e in _events(iso) if e["type"] == "advance_skipped"]
+
+
+def test_converge_one_capacity_refusal_skips(monkeypatch, tmp_path):
+    """AC1-HP at the converge site: a gate refusal is a skip, not a failed."""
+    _converge_env(monkeypatch, tmp_path)
+
+    def gate_refused(node_id, root, slug, **kw):
+        raise adv.SpawnError("fno agents spawn exited 79", exit_code=79, detail=_GATE_LINE)
+
+    monkeypatch.setattr(adv, "_spawn_worker", gate_refused)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "skipped" and result.reason == "capacity-refused"
 
 
 def test_failed_then_retry_dispatches(iso, monkeypatch):

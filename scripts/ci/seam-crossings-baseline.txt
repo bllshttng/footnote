@@ -5,20 +5,21 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/authorized_merge.rs	556	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1295	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1348	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	3657	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	1305	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	1358	let err = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	2353	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	3717	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	1277	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2944	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3012	let mut pane_command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3330	let mut pane_command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	1143	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	1303	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2388	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2457	std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6519	let mut child = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6578	let mut child = match std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	7759	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	1124	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	1284	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/daemon.rs	2367	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/daemon.rs	2436	std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6498	let mut child = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6557	let mut child = match std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	7716	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1880	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1936	let ok = Command::new("fno")
@@ -61,12 +62,12 @@ crossing	crates/fno/src/server.rs	3159	let mut command = crate::process_admissio
 crossing	crates/fno/src/server.rs	3191	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	10866	let mut cmd = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	10960	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server/agent_actions.rs	371	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server/agent_actions.rs	375	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/yard_overlay.rs	49	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
 resolver	crates/fno-agents/src/claims.rs	2666	fn durable_session_pid() -> Option<i32> {
-resolver	crates/fno-agents/src/daemon.rs	2035	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
+resolver	crates/fno-agents/src/daemon.rs	2016	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
 resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> DeliveryCompletion {
 resolver	crates/fno-agents/src/loop_dispatch.rs	136	pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
 resolver	crates/fno-agents/src/loop_target.rs	369	fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
@@ -77,6 +78,6 @@ resolver	crates/fno-agents/src/loopcheck.rs	8221	fn decide_inner(args: &[String]
 resolver	crates/fno-agents/src/loopcheck.rs	11114	fn build_block_reason(
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/scrape.rs	174	fn fno_bin() -> std::ffi::OsString {
-resolver	crates/fno/src/bootstrap.rs	1005	fn diagnose_locate_failure() -> Option<String> {
+resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	5904	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	2889	pub(crate) fn fno_bin() -> PathBuf {

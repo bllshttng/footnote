@@ -37,6 +37,7 @@ from fno.backlog.advance import (
     EVENT_SKIPPED,
     AdvanceResult,
     SpawnAlreadyRunning,
+    SpawnError,
     _auto_continue_resolve,
     _claim_is_live,
     _emit,
@@ -45,6 +46,7 @@ from fno.backlog.advance import (
     _spawn_worker,
     _walker_key,
     _worker_agent_name,
+    gate_refusal,
 )
 
 # The pending sentinel covers the window between the blocker's merge and the
@@ -175,10 +177,19 @@ def _dispatch_reconcile(
     """
     node_id = dep["id"]
 
-    def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
+    def skip(
+        reason: str,
+        detail: Optional[str] = None,
+        retry_at: Optional[float] = None,
+        exit_code: Optional[int] = None,
+    ) -> AdvanceResult:
         data: dict = {"reason": reason, "node_id": node_id, "kind": "reconcile"}
         if rank:
             data["rank"] = rank
+        if retry_at is not None:
+            data["retry_at"] = retry_at
+        if exit_code is not None:
+            data["exit_code"] = exit_code
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -239,6 +250,14 @@ def _dispatch_reconcile(
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed")
+    except SpawnError as exc:
+        # Machine-scoped -> skip naming the gate's own sentence; node fault -> failed.
+        _safe_release(dispatch_key, holder, dispatch_root)
+        refusal = gate_refusal(exc)
+        if refusal is None:
+            return failed(str(exc))
+        return skip(refusal.reason, detail=refusal.detail,
+                    retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(str(exc))

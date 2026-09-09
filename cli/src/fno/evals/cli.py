@@ -62,22 +62,32 @@ def run_command(
     provider: Optional[str] = typer.Option(None, "--provider", help="Worker provider for the headless spawn."),
     variant: str = typer.Option(BASELINE, "--variant", help="Round name: baseline, or v<N> for a scored change."),
     ref: Optional[str] = typer.Option(None, "--ref", help="Git ref to check out for a non-baseline --variant."),
+    lane: Optional[str] = typer.Option(None, "--lane", help="Resolved-inventory lane name; overrides --provider."),
+    cohort: Optional[str] = typer.Option(None, "--cohort", help="Cohort id recorded on every row this run writes."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt above 20 total runs."),
 ) -> None:
     """Run bank tasks in disposable worktrees and grade them mechanically.
 
     Exit codes:
       0  all runs graded (individual fails are in the summary + history)
-      1  no bank present, --task/--tier selected nothing, or a bad --variant/--ref pair
+      1  no bank present, --task/--tier selected nothing, or a bad --variant/--ref/--lane
       2  a bank task is invalid (load-time discipline violation)
     """
-    from fno.evals.bank import BankError, discover_bank
+    from fno.evals.bank import BankError, LaneError, discover_bank, resolve_lane
     from fno.evals.runner import run_task, sweep_orphans
     from fno.paths import resolve_canonical_repo_root
 
     if repeat < 1:
         typer.echo("Error: --repeat must be >= 1", err=True)
         raise typer.Exit(code=1)
+
+    lane_coord = None
+    if lane is not None:
+        try:
+            lane_coord = resolve_lane(lane)
+        except LaneError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1)
 
     if not VARIANT_RE.match(variant):
         typer.echo(f"Error: --variant must be 'baseline' or 'v<N>', got '{variant}'", err=True)
@@ -110,7 +120,7 @@ def run_command(
     # provider-less non-pane spawn), so a prompt-bearing task with no --provider
     # would grade every run as a spawn failure. Default to claude when any
     # selected task has a prompt. Grade-only tasks never spawn, so they are fine.
-    if provider is None and any(t.prompt for t in tasks):
+    if provider is None and lane_coord is None and any(t.prompt for t in tasks):
         provider = "claude"
         typer.echo("no --provider given; defaulting prompt-bearing tasks to claude headless")
 
@@ -133,7 +143,8 @@ def run_command(
     all_passed = True
     for t in tasks:
         results = run_task(t, repeat=repeat, repo_root=repo_root, worker_provider=provider,
-                           variant=variant, variant_ref=ref)
+                           variant=variant, variant_ref=ref, lane=lane_coord,
+                           experiment_id=cohort)
         passes = sum(1 for r in results if r.passed)
         passk = "PASS" if passes == repeat else "FAIL"
         typer.echo(f"  {t.tier:11} {t.id} [{variant}]: {passes}/{repeat} pass  (pass^{repeat}={passk})")

@@ -2236,6 +2236,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // it shells to runs ps + a kill, so it never runs on the core loop.
     let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_orphan_sweep = Instant::now();
+    // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
+    // plus the next interval cell the sweep body hands back (the idle-probe
+    // verdict pattern), so the tick reads a mutex instead of config files.
+    let mut last_gc_sweep = Instant::now();
+    let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as the sweeps beside
     // it rather than running inline in the select arm.
@@ -2326,27 +2331,20 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // done (reverse join) and its transcript is quiet past
                 // `agents.retire_grace_s`; its held process is stopped first,
                 // its receipt is written before the drop, and its
-                // clean-and-merged worktree is pruned. Cheap in steady state
-                // (no candidates -> no probes, no registry write).
-                // Runs off-loop under spawn_blocking behind a one-in-flight
-                // gate, like the scrape and worktree sweeps above (x-ef7f):
-                // inline, a slow sweep starved accept() and the SIGTERM arm
-                // beside it.
-                if !gc_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let flag = Arc::clone(&gc_in_flight);
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        let grace_secs =
-                            crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
-                        let retain_days =
-                            crate::agents_config::reap_receipt_retain_days(&grace_cwd);
-                        let _ = gc_sweep(&home, &emitter, grace_secs, retain_days);
-                        crate::gc::unowned_sweeps(&home, &emitter, &grace_cwd);
-                    });
-                }
+                // clean-and-merged worktree is pruned. Throttled to
+                // `agents.retire_interval_s` (x-d354, default grace/3), handed
+                // back by the sweep body so the tick never blocks on config
+                // reads; off-loop behind a gate like every sweep (x-ef7f).
+                let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
+                crate::gc::maybe_retirement_sweep(
+                    &mut last_gc_sweep,
+                    &gc_in_flight,
+                    &retire_interval_next,
+                    ctx.home.clone(),
+                    ctx.opts.agents_config_cwd.clone(),
+                    ctx.home.events_jsonl(),
+                    retire_interval,
+                );
                 // Worktree sweep + merge reaper (x-07dc). The sweep is the
                 // backstop for what the reaper cannot reach; the reaper is the
                 // merge-triggered consumer of `merge_cleanup_requested`, with

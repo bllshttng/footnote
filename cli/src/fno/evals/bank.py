@@ -202,6 +202,23 @@ def load_task(path: Path) -> TaskSpec:
     )
 
 
+class LaneError(ValueError):
+    """A requested lane name has no matching resolved inventory row."""
+
+
+def resolve_lane(name: str, *, settings: object = None):
+    """Resolve a named lane through the existing route_resolve inventory -
+    the same fold ``agents.profiles.*.lanes`` joins against, never a second
+    model/effort enum. Raises :class:`LaneError` naming known lanes on a miss."""
+    from fno.route_resolve import resolve_inventory
+
+    inventory = resolve_inventory(settings=settings)
+    row = inventory.rows.get(name)
+    if row is None:
+        raise LaneError(f"unknown lane {name!r}; declared lanes: {sorted(inventory.rows)}")
+    return row
+
+
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     """Load every ``*.yaml`` under *bank_dir*, sorted by id.
 

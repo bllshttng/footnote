@@ -162,3 +162,36 @@ class TestReviewAttestationFindingRecord:
 
     def test_pre_existing_event_without_record_validates(self) -> None:
         validate(self._event())
+
+
+# ---------------------------------------------------------------------------
+# The machine-scoped skip vocabulary
+# ---------------------------------------------------------------------------
+
+
+def _advance_skipped(reason: str, **extra) -> dict:
+    from fno.events import _build
+
+    return _build("advance_skipped", "backlog", {"reason": reason, **extra})
+
+
+def test_advance_skipped_accepts_machine_scoped_reasons() -> None:
+    _require_schema_loaded()
+    validate(_advance_skipped("capacity-refused", exit_code=79, detail="spawn-gate: load"))
+    validate(_advance_skipped("gate-unavailable", exit_code=81, detail="spawn-gate: registry"))
+    # Historic emission, declared late: the enum admits rows already in journals.
+    validate(_advance_skipped("slot-queue-deferred", retry_at=1234.0))
+
+
+def test_advance_skipped_declares_the_machine_scoped_vocabulary() -> None:
+    """The validator walks this type structurally only (required fields), so
+    the contract under test is the declaration itself: the new reasons are in
+    the enum and the two properties exist."""
+    _require_schema_loaded()
+    props = EVENT_TYPES["advance_skipped"]["data"]["properties"]
+    assert set(props["reason"]["enum"]) >= {
+        "capacity-refused",
+        "gate-unavailable",
+        "slot-queue-deferred",
+    }
+    assert "exit_code" in props and "attempted" in props

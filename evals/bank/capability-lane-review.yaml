@@ -1,0 +1,44 @@
+# Capability tier: a seeded review defect, paired with
+# capability-lane-blueprint.yaml and capability-lane-implementation.yaml
+# under the same declared repeats/budget/stopping-rule
+# (docs/architecture/lane-qualification.md). The grade is a correct finding
+# tied to the seeded changed symbol - never a grade-only or synthetic pass;
+# an empty or off-target finding fails exactly like a missed real bug.
+id: capability-lane-review
+tier: capability
+prompt: |
+  Review this changed function for a defect and report it. Do not fix it -
+  only diagnose it.
+
+      def clamp_repeat_count(requested: int, cap: int) -> int:
+          """Clamp `requested` eval repeats to `cap`, minimum 1."""
+          if requested > cap:
+              return cap
+          if requested < 1:
+              return 0
+          return requested
+
+  Write your finding to `review-findings.md` as two lines exactly:
+
+      symbol: clamp_repeat_count
+      defect: <one line naming the specific wrong behavior>
+
+  The defect line must name the actual wrong return value against the
+  docstring's own documented contract, not a generic description of "a bug".
+grade:
+  - kind: file-exists
+    path: review-findings.md
+  - kind: grep
+    path: review-findings.md
+    pattern: "symbol: clamp_repeat_count"
+  - kind: grep
+    path: review-findings.md
+    # A grade-only or synthetic pass is exactly the failure this fixture
+    # exists to catch (docs/evals.md), so the check is grounded in the
+    # actual wrong value the function returns, not a generic "bug" keyword.
+    # `grep` here is a plain substring match (fno.evals.grading), not a
+    # regex, so this names the one literal phrase the prompt tells the
+    # worker to use rather than an alternation.
+    pattern: "returns 0"
+timeout_minutes: 15
+tags: [lane-qualification, review]

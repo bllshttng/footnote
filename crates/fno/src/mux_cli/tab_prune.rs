@@ -678,4 +678,55 @@ mod tests {
             "the unreachable close is kept and counted, never silent"
         );
     }
+
+    #[test]
+    fn the_reap_flag_set_leaves_a_live_process_tab_standing() {
+        // (x-91eb) The combination `fno agents reap` passes automatically is
+        // `--tabs-only --include-used-shells`. The live-process floor under
+        // it: a pane carrying an `fno_id`, or a busy shell (`shell_idle:
+        // false`), folds to neither `used_shell_only` (the
+        // `fno_id.is_none() && shell_idle` clause) nor `orphaned` (the same
+        // clause fails the disposable fold), so this pass must close nothing
+        // live and name nothing.
+        let live_tab = |tab_id: u64, tab_name: &str| LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id,
+            tab_name: Some(tab_name.into()),
+            pane_count: 1,
+            pristine: false,
+            used_shell_only: false,
+            orphaned: false,
+        };
+        let spent_shell = used_shell_tab(31);
+        let tabs = vec![
+            live_tab(32, "agent-fno-id"),
+            live_tab(33, "busy-shell"),
+            spent_shell,
+        ];
+        let out = prune_live_tabs(&tabs, false, true, true);
+        // The positive control: the flag set is armed - it names (here: in
+        // dry-run) the qualifying spent shell for closing.
+        assert_eq!(out.would_close, 1);
+        assert_eq!(out.would_close_used, 1);
+        assert!(
+            out.closed_named.iter().any(|l| l.contains("t31")),
+            "the spent shell is the one candidate: {closed_named:?}",
+            closed_named = out.closed_named
+        );
+        // The floor: both live-process tabs stay, kept on the classification
+        // (not last-in-squad), and neither is ever named.
+        assert_eq!(
+            out.kept_not_pristine, 2,
+            "both live tabs are kept on the live-process floor, not last-in-squad"
+        );
+        assert_eq!(out.used_shells, 1, "only the spent shell qualifies");
+        assert_eq!(
+            out.closed_named.len(),
+            1,
+            "a live tab is never a close candidate: {closed_named:?}",
+            closed_named = out.closed_named
+        );
+    }
 }

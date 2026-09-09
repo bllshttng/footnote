@@ -2287,14 +2287,15 @@ fn run_reap(rest: &[String]) -> i32 {
     }
 
     let dry_run = rest.iter().any(|a| a == "--dry-run");
+    let no_mux = rest.iter().any(|a| a == "--no-mux");
     let extras: Vec<&str> = rest
         .iter()
         .map(String::as_str)
-        .filter(|a| *a != "--json" && *a != "-J" && *a != "--dry-run")
+        .filter(|a| *a != "--json" && *a != "-J" && *a != "--dry-run" && *a != "--no-mux")
         .collect();
     if !extras.is_empty() {
         eprintln!(
-            "fno-agents: reap takes no arguments other than --json/--dry-run (got: {})",
+            "fno-agents: reap takes no arguments other than --json/--dry-run/--no-mux (got: {})",
             extras.join(" ")
         );
         return 2;
@@ -2324,16 +2325,64 @@ fn run_reap(rest: &[String]) -> i32 {
     } else {
         None
     };
+    // (x-91eb) The mux sideline sweep: the registry pass above reaps rows,
+    // but ghost panes are the surface an operator SEES. The sweep body stays
+    // the one prune verb (reused, not reimplemented); `--no-mux` skips it.
+    let mux = if no_mux {
+        fno_agents::reap_render::MuxSweep::Skipped
+    } else {
+        run_mux_sweep(dry_run)
+    };
     print!(
         "{}",
         fno_agents::reap_render::render_reap_with_inventory(
             &summary,
             inventory.as_ref(),
+            Some(&mux),
             json_out,
             dry_run
         )
     );
     0
+}
+
+/// (x-91eb) Shell out to the existing prune verb - one sweep body, reused,
+/// not reimplemented. Fail-closed: a spawn failure, a non-zero exit, or an
+/// unparsable receipt is `Unread`, never a measured zero (AC3-EDGE).
+fn run_mux_sweep(dry_run: bool) -> fno_agents::reap_render::MuxSweep {
+    let mut cmd = std::process::Command::new("fno");
+    cmd.args([
+        "mux",
+        "workspace",
+        "prune",
+        "--tabs-only",
+        "--include-used-shells",
+        "--json",
+    ]);
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    match cmd.output() {
+        Ok(out) => {
+            let code = out.status.code();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match (code, fno_agents::reap_render::parse_prune_receipt(&stdout)) {
+                (Some(0), Some(receipt)) => fno_agents::reap_render::MuxSweep::Ran { receipt },
+                (code, _) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
+                    fno_agents::reap_render::MuxSweep::Unread {
+                        exit_code: code,
+                        stderr_first,
+                    }
+                }
+            }
+        }
+        Err(e) => fno_agents::reap_render::MuxSweep::Unread {
+            exit_code: None,
+            stderr_first: e.to_string(),
+        },
+    }
 }
 
 /// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
@@ -2356,7 +2405,8 @@ fn run_roster_reap(rest: &[String]) -> i32 {
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, dry_run);
+    let scope = fno_agents::agents_config::roster_scope(&cwd);
+    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, scope, dry_run);
     print!(
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)

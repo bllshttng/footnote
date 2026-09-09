@@ -10,7 +10,7 @@ selection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 from fno.graph.store import ready as store_ready
 from fno.graph._intake import repo_root
@@ -110,7 +110,34 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
     return Gate(name, None, None, f"unreadable: {exc}", key=key)
 
 
-def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[Gate]:
+#: Sentinel for "sample one"; None means the shared read ran and found the
+#: gate unreadable.
+_UNSAMPLED: object = object()
+
+
+def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
+    """One load-gate decision per report build, or None when unreadable: the
+    gates row and the stop share one sample instead of paying it twice.
+    """
+    try:
+        from fno.agents.spawn_gate import load_gate_decision
+        from fno.config import load_settings
+
+        agents = load_settings().agents
+        return load_gate_decision(
+            float(agents.max_load_per_cpu),
+            float(agents.max_fleet_cpu_share),
+            float(agents.hard_max_load_per_cpu),
+        )
+    except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
+        return None
+
+
+def gates_for(
+    node: Optional[dict],
+    grid_harness: Optional[str] = None,
+    load_decision: object = _UNSAMPLED,
+) -> list[Gate]:
     """Every gate advance would consult for ``node``, each measured.
 
     Calls the measurement functions only - never ``preflight_gate``, which
@@ -120,6 +147,9 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
     ``grid_harness`` is the harness the capacity grid picked, so the provider
     lane reported is the one the spawn would actually be counted against rather
     than the config default the grid was about to override.
+
+    ``load_decision`` is a decision a caller already sampled for this report
+    (one footprint read per build); leave it unsampled to read fresh.
     """
     from fno.agents.spawn_gate import (
         ProviderCountUnavailable,
@@ -226,7 +256,7 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
 
-    out.extend(_machine_gates())
+    out.extend(_machine_gates(load_decision))
     return out
 
 
@@ -236,7 +266,7 @@ def _max_live() -> int:
     return int(load_settings().agents.max_live)
 
 
-def _machine_gates() -> list[Gate]:
+def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
     """RAM and load, read the way the gate reads them (never probing to refuse)."""
     from fno.agents.spawn_gate import available_ram_gb
 
@@ -272,25 +302,41 @@ def _machine_gates() -> list[Gate]:
             )
 
     try:
-        import os
+        from fno.agents.spawn_gate import (
+            _LOAD_REFUSAL_REASONS,
+            _load_snapshot,
+            load_gate_decision,
+        )
 
-        load1 = os.getloadavg()[0]
-        cpus = os.cpu_count() or 1
-        trigger = per_cpu * cpus
-        out.append(
-            Gate(
-                "load-trigger",
-                f"{load1:.1f}",
-                f"{trigger:.1f} ({per_cpu:g} x {cpus} cpu)",
-                # Over the trigger the gate does NOT refuse; it asks footprint
-                # whose CPU this is. Calling that "refuse" here would be a
-                # second instrument disagreeing with the first (x-7c0f).
-                "over trigger; attribution decides" if load1 > trigger else "pass",
-                key="agents.max_load_per_cpu",
-            )
+        snapshot = _load_snapshot(per_cpu)
+        decision = load_gate_decision(per_cpu) if load_decision is _UNSAMPLED else cast(
+            "Optional[tuple[str, str, dict]]", load_decision
         )
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
+    else:
+        if snapshot.spawn_load_status == "unavailable":
+            out.append(
+                _unreadable(
+                    "load-trigger",
+                    RuntimeError("load average unreadable"),
+                    key="agents.max_load_per_cpu",
+                )
+            )
+        else:
+            refusing = decision is not None and decision[0] in _LOAD_REFUSAL_REASONS
+            out.append(
+                Gate(
+                    "load-trigger",
+                    "-" if snapshot.load_1m is None else f"{snapshot.load_1m:.1f}",
+                    f"{snapshot.load_ceiling:.1f} ({per_cpu:g} x {snapshot.load_cpu_count} cpu)",
+                    # Same decision function the real gate runs, so the dry
+                    # run cannot pass a box the spawn would refuse.
+                    "refuse" if refusing else "pass",
+                    key="agents.max_load_per_cpu",
+                    note=None if decision is None else decision[1],
+                )
+            )
     return out
 
 
@@ -662,6 +708,15 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
+    # The load gate refuses machine-wide; a preview that left stop empty
+    # would promise a dispatch the real spawn refuses. One decision sample
+    # feeds both this stop and the gates row below.
+    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
+
+    load_decision = _explain_load_decision()
+    if stop is None and load_decision is not None and load_decision[0] in _LOAD_REFUSAL_REASONS:
+        stop = "load-refused"
+
     ordered_names = [
         "no-project",
         "unmapped-project",
@@ -717,7 +772,9 @@ def build_lane_fill_report(
         "asked": asked,
         "gates": [
             g.as_dict()
-            for g in gates_for(subject, (routing.get("candidate") or {}).get("harness"))
+            for g in gates_for(
+                subject, (routing.get("candidate") or {}).get("harness"), load_decision
+            )
         ],
         "routing": routing,
         "decision": {
