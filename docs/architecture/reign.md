@@ -15,9 +15,9 @@ Three facts fix the design, all measured against the harness internals:
 Each arm is a harness-tracked Monitor running a shell until-loop. No tokens while waiting. When a condition changes, the session wakes.
 
 1. **Unread mail, 60s.** Worker reports, peer facts, and operator answers all land here.
-2. **Board change, 120s.** The board read is expensive at load. The arm watches the cheap proxy: the project events journal (`pr_opened`, `loop_terminated`, `claim_released`) and the `fno backlog ready` count.
+2. **Board change, 120s.** The board read is expensive at load. The arm reads the journal with `fno doctor event find <kind> --since <window> -J`. Never a hand-rolled tail of one file. Board motion is `advance_dispatched`, `termination`, `plan_stamped` and `blocked`; a freed node is `claim_released` in `events.jsonl.ephemeral`. The trigger is the board digest over `(id, status, _kanban_column, priority)`, never a count.
 3. **Crown liveness, 300s.** A crown can be lost silently. A king cannot re-crown itself, but it can escalate the minute it is crownless. It reads `reign_state(scope)`, whose compute lives in `crates/fno-agents/src/loop_reign.rs` behind a thin Python JSON client. Unreadable instruments report `CROWN-UNKNOWN`. `split` and court `conflicts` report separately from the agree counts.
-4. **Main branch CI, 300s.** A red main blocks every merge in the fleet. Several of the most productive reign wakes began with "main flipped green".
+4. **Main branch CI, 300s.** A red main blocks every merge in the fleet. The arm triggers on the verdict token (`red`, `green`, `pending`), never on a check-run count. Several of the most productive reign wakes began with "main flipped green".
 5. **Capacity band, 300s, debounced across two samples.** The load-derived verdict flaps. Measured over, within, over, within inside fifteen minutes, with no change in real work. The band must HOLD before it is believed. The arm prints `sustained_cpu_cores` beside the verdict and flags disagreement.
 6. **Arm staleness, 600s.** Any red row in `fno agents status` is the mechanical trigger for the one dispatch exception.
 
