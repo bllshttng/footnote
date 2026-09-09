@@ -355,8 +355,8 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             let (read, mut holders, w) = read_claimed_nodes(&claims, entries.as_deref());
             // The probe feed must also measure DEAD-stated claim holders:
             // the reordered readers ask the holder before honoring the clock,
-            // and a holder nobody probed always reads inactive (x-7471).
-            for h in classify::dead_claim_holders(&claims, classify::MAX_CLAIMED_NODE_READS) {
+            // and a holder nobody probed always reads inactive.
+            for h in classify::dead_claim_holders(&claims) {
                 if !holders.contains(&h) {
                     holders.push(h);
                 }

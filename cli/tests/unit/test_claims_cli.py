@@ -601,7 +601,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
 
 
 def test_declined_handover_names_its_reason_before_falling_through(tmp_path, monkeypatch):
-    """AC5-EDGE (x-7471): a declined handover fell through to the ordinary
+    """AC5-EDGE: a declined handover fell through to the ordinary
     acquire with a bare pass, so the caller saw only "held by <holder>" and
     could not tell its own handover claim from a foreign one. The reason now
     reaches stderr; the fall-through behavior (refuse, non-zero) is unchanged."""

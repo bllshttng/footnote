@@ -128,16 +128,16 @@ pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -
 /// must probe before it calls them dead. `read_claimed_nodes` skips these
 /// rows, so without this feed the truth probe never measures them and a
 /// stale lease under a writing worker can never classify active - the clock
-/// would win by starvation instead of by ordering.
-pub(crate) fn dead_claim_holders(claims: &SourceRead, cap: usize) -> Vec<String> {
+/// would win by starvation instead of by ordering. Uncapped on purpose: the
+/// claims list is already bounded by its own read, and a truncated feed
+/// misclassifies the unprobed tail as dead, the exact harm this vocabulary
+/// exists to stop.
+pub(crate) fn dead_claim_holders(claims: &SourceRead) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if !claims.is_ok() {
         return out;
     }
     for row in &claims.rows() {
-        if out.len() >= cap {
-            break;
-        }
         let state = s_str(row, "state").unwrap_or("");
         if !DEAD_CLAIM_STATES.contains(&state) {
             continue;
@@ -369,7 +369,7 @@ mod tests {
             {"key": "node:x-bare", "state": "stale", "holder": ""},
             {"key": "node:x-dup", "state": "stale", "holder": "spawn-handover:worker-a"},
         ]));
-        let holders = dead_claim_holders(&claims, 20);
+        let holders = dead_claim_holders(&claims);
         assert_eq!(
             holders,
             vec![

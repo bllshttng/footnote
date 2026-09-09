@@ -1563,18 +1563,31 @@ PYEOF
       if [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]]; then
         _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
       else
-        # x-7471: the env var is how the spawner proves the handover, but a
-        # spawned worker can reach init without it. The spawner's claim then
-        # reads as a foreign 15-minute lease and the ordinary acquire refuses
-        # its own beneficiary (measured live 2026-09-09: a fresh /target on
-        # x-7471 failed rc=1 against spawn-handover:<its own worker>). Fall
-        # back to the holder on disk: pass --handover-from only when the live
-        # claim is itself a spawn-handover, which keeps the blast radius on
-        # launch-window claims (the prefix is the whole grant).
-        _DISK_HOLDER="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:${_NODE_ID}" --json 2>/dev/null \
+        # The env var is how the spawner proves the handover, but a spawned
+        # worker can reach init without it. The spawner's claim then reads as
+        # a foreign 15-minute lease and the ordinary acquire refuses its own
+        # beneficiary (measured live 2026-09-09). The disk holder supplies the
+        # value, but a published holder is not proof of successorship: the
+        # claim store answers "who holds" to any reader, so the match is
+        # bound to THIS worker's provenance. The launch-window holder names
+        # its beneficiary, and the identity resolver proves a name is this
+        # session's own; only an exact match adopts the handover, so a
+        # bystander's init cannot take a live claim it was never minted for.
+        _DISK_HOLDER="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:${_NODE_ID}" --json --no-roster 2>/dev/null \
           | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
         case "${_DISK_HOLDER:-}" in
-          spawn-handover:*) _HANDOVER_FLAGS="--handover-from ${_DISK_HOLDER}" ;;
+          spawn-handover:*)
+            # The same two rungs the identity resolver trusts: the spawn-time
+            # name export first, then the registry binding whoami exposes.
+            _SELF_NAME="${FNO_WORKER_NAME:-}"
+            if [[ -z "$_SELF_NAME" ]]; then
+              _SELF_NAME="$(fno whoami --json 2>/dev/null \
+                | sed -n 's/.*"worker_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            fi
+            if [[ -n "${_SELF_NAME:-}" && "${_DISK_HOLDER}" == "spawn-handover:${_SELF_NAME}" ]]; then
+              _HANDOVER_FLAGS="--handover-from ${_DISK_HOLDER}"
+            fi
+            ;;
         esac
       fi
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an

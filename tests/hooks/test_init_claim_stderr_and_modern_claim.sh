@@ -202,13 +202,14 @@ GNID_D="$(graph_node_id_of "$STATE_D")"
   || fail "(d): expected graph_node_id 'ab-1100b0b0' from the relocated graph, got '${GNID_D}'"
 pass "(d): ab-id in a config-relocated graph resolves (not hard-coded to \$HOME/.fno)"
 
-# ── (e) x-7471 AC4-HP: spawn-handover pre-claim, env UNSET => disk fallback ──
+# ── (e) AC4-HP: spawn-handover pre-claim, env UNSET, name proven => fallback ──
 # The spawner's launch-window claim is the only claim on the node, but
 # FNO_NODE_CLAIM_HOLDER does not always reach the worker. init used to pass no
 # --handover-from and the ordinary acquire refused its own beneficiary
 # (measured live 2026-09-09: rc=1 against spawn-handover:<this session's own
-# worker>). The disk fallback names that holder instead.
-log "(e): spawn-handover claim + env unset => init acquires via the disk fallback"
+# worker>). The disk fallback supplies the holder VALUE, and the worker-name
+# env supplies the PROOF it is this session's own.
+log "(e): spawn-handover claim + env unset + own name => init acquires via the disk fallback"
 
 make_repo TMP_E
 _ALL_TMPS+=("$TMP_E")
@@ -223,6 +224,7 @@ HOME="${TMP_E}/home" fno agents claim acquire "node:tst-ho7471" \
 
 (cd "$TMP_E" && \
   HOME="${TMP_E}/home" \
+  FNO_WORKER_NAME="t-ho-worker" \
   TARGET_START=1 \
   TARGET_INPUT="tst-ho7471" \
   TARGET_LOCATION_OK="main-acknowledged" \
@@ -240,7 +242,38 @@ _LOCKED_BY_E="$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["ent
   || fail "(e): locked_by is empty; the stamp never ran (AC4-HP)"
 pass "(e): locked_by stamped (${_LOCKED_BY_E})"
 
-# ── (f) x-7471 control: a NON-handover holder on disk is never taken over ──
+# ── (g) a BYSTANDER's init never takes a launch-window claim minted for
+# another worker: the disk holder is published to every reader, so the value
+# alone is not proof. The name proven here names a DIFFERENT worker.
+log "(g): spawn-handover claim naming another worker + own name proven => no takeover"
+
+make_repo TMP_G
+_ALL_TMPS+=("$TMP_G")
+cat > "${TMP_G}/home/.fno/graph.json" <<'JSON'
+{"entries":[{"id":"tst-bystander","title":"bystander control node","session_id":null}]}
+JSON
+
+HOME="${TMP_G}/home" fno agents claim acquire "node:tst-bystander" \
+  --holder "spawn-handover:someone-elses-worker" --ttl 15m --pid-unavailable \
+  --reason "bystander stage" >/dev/null 2>&1 \
+  || fail "(g): staging the foreign launch-window claim failed"
+
+(cd "$TMP_G" && \
+  HOME="${TMP_G}/home" \
+  FNO_WORKER_NAME="this-worker" \
+  TARGET_START=1 \
+  TARGET_INPUT="tst-bystander" \
+  TARGET_LOCATION_OK="main-acknowledged" \
+  bash "$INIT" >/dev/null 2>&1) \
+  || fail "(g): init exited non-zero"
+
+_HOLDER_G="$(HOME="${TMP_G}/home" fno agents claim status "node:tst-bystander" --json 2>/dev/null \
+  | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+[[ "$_HOLDER_G" == "spawn-handover:someone-elses-worker" ]] \
+  || fail "(g): claim holder changed to '${_HOLDER_G}'; a bystander must never take a live claim minted for another worker"
+pass "(g): foreign launch-window claim untouched (holder=${_HOLDER_G})"
+
+# ── (f) control: a NON-handover holder on disk is never taken over ──
 log "(f): non-handover claim + env unset => ordinary acquire still refuses (no takeover)"
 
 make_repo TMP_F

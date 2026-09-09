@@ -320,7 +320,7 @@ def acquire(
             # The fall-through is the design; the silence was not. A declined
             # handover used to surface only as the ordinary acquire's "held
             # by <holder>", so a worker could not tell its own handover claim
-            # from a foreign one (x-7471).
+            # from a foreign one.
             typer.echo(f"handover declined: {refused.reason}", err=True)
         else:
             # The MODE decides, not the absence of an exception. A rebind that
