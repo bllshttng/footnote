@@ -215,7 +215,7 @@ def _duration_stats(values: list[float]) -> Optional[dict[str, float]]:
     }
 
 
-def _fold_usage(rows: list[dict[str, object]]) -> Optional[dict[str, object]]:
+def _fold_usage(rows: list[dict[str, object]]) -> Optional[list[dict[str, object]]]:
     """Sum usage by (source, unit) - distinct units never averaged together.
 
     ``None`` means no row in the cohort carried usage (unobserved, not zero).
@@ -300,7 +300,7 @@ def compare_cohorts(
             "fixture_rev_mismatch": bool(spec.fixture_rev) and revs not in ({spec.fixture_rev}, set()),
             "review_evidence": review_evidence,
             "review_findings": (
-                sum(r["review"].get("findings", 0) for r in review_rows)  # type: ignore[union-attr]
+                sum(r["review"].get("findings", 0) for r in review_rows)  # type: ignore[attr-defined]
                 if review_rows else None
             ),
             "usage": _fold_usage(scored),
