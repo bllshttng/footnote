@@ -74,7 +74,7 @@ enum Role {
     MuxTab(Vec<OsString>),
     /// (x-d865) `mux layout <get> ...`: dump the nested layout tree + geometry.
     MuxLayout(Vec<OsString>),
-    /// (x-8b51) `mux rows [--json]`: the one row-set receipt - the last
+    ///  `mux rows [--json]`: the one row-set receipt - the last
     /// derived `layout.agents` with the paint verdict per row.
     MuxRows(Vec<OsString>),
     /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its
@@ -241,12 +241,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // (x-d865) layout script porcelains, same carry-verbatim shape.
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
-            // (x-8b51) `mux rows [--json]`: the one row-set receipt. Takes no
-            // positional, so a bare `mux rows` is legal (never usage).
-            Some("rows") => match split_json(&args[2..]) {
-                Some((pos, _)) if pos.is_empty() => Role::MuxRows(args[2..].to_vec()),
-                _ => Role::MuxUsage,
-            },
+            // `mux rows [--json] [--session <name>]`: the one row-set
+            // receipt. No positional; the verb family parses its own flags.
+            Some("rows") => Role::MuxRows(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
             // (x-07c2, hidden) thread: drive the dedicated thread pane for a
             // row from outside the TUI - the door `fno agents attach` uses.

@@ -110,11 +110,11 @@ pub struct StoredMember {
     pub attach_id: String,
     #[serde(default)]
     pub tombstone: bool,
-    /// (x-8b51) Why the tombstone fired, when one did. A death claim written
+    ///  Why the tombstone fired, when one did. A death claim written
     /// from evidence names the evidence ("registry row exited", "recorded
     /// pid is gone", a churn arm's pane death); a reader checks the verdict
     /// instead of inferring it. `#[serde(default, skip_serializing_if)]`
-    /// keeps a pre-x-8b51 store readable and older stores compact.
+    /// keeps a pre-store readable and older stores compact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tombstone_reason: Option<String>,
     /// True while the live worker pane is intentionally off every visible
@@ -158,7 +158,7 @@ pub struct StoredMember {
     pub harness_session_id: Option<String>,
 }
 
-/// (x-8b51) The one declared member-to-row join, stated here because the
+///  The one declared member-to-row join, stated here because the
 /// store holds BOTH identity keys and they disagree member to member: nine of
 /// ten overlapping members join by full `harness_session_id`, the tenth by
 /// `attach_id` against the row's short id. One function, so every caller that
@@ -2441,7 +2441,7 @@ mod tests {
 
     #[test]
     fn member_joins_row_prefers_the_full_session_id_then_the_short_id() {
-        // (x-8b51) The declared join, both keys: a member carrying a full
+        //  The declared join, both keys: a member carrying a full
         // harness session id joins on it and ignores the short ids; a member
         // without one joins by attach id against the row's short id; an
         // id-less member joins nothing.

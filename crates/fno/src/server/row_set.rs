@@ -1,4 +1,4 @@
-//! (x-8b51) Which rows exist in the mux UI, and what each row's paint
+//! Which rows exist in the mux UI, and what each row's paint
 //! verdict is. The row-set derivation and its receipt live here, named by
 //! the question they answer; the file they left is shrink-only under the
 //! file-budget gate. The module is a child of `server`, so the private
@@ -359,18 +359,18 @@ impl Core {
                 }
             }
         }
-        // 3. (x-8b51) Tombstone members DECORATE the row their registry entry
+        // 3.  Tombstone members DECORATE the row their registry entry
         //    already produced; they no longer mint rows of their own. The old
         //    synthesized `cc-<attach_id>` row was the third row-set reader the
         //    two stores could disagree through: a member joining no registry
         //    row was evidence of nothing, yet it rendered a ghost under its
         //    (live) squad. The registry is the one row-set source now:
         //    a tombstoned member joining an EXITED row marks that row dimmed
-        //    + dismissable (still the x-8f11 US4 affordance, under the row's
+        //    + dismissable (still the dimmed dismissable affordance, under the row's
         //    real name); a member joining a LIVE row never dims it (fact beats
         //    a stale tombstone - the liveness kill criterion); a member joining
-        //    nothing renders nothing (a stale member; x-0d08's retirement path
-        //    removes it at restore).
+        //    nothing renders nothing (a stale member; the member-retirement
+        //    path removes it at restore).
         for (&sid, members) in &self.squad_members {
             if self.session.squad(sid).is_none() {
                 continue;
@@ -392,12 +392,22 @@ impl Core {
                 if !a.exited {
                     continue;
                 }
-                if let Some(row) = out.iter_mut().find(|r| r.name == a.name) {
+                if let Some(row) = out.iter_mut().find(|r| {
+                    // Match the produced row by the same session identity the
+                    // join used, never by name alone: exited and live
+                    // generations can share a display name, and dimming the
+                    // live one is the liveness kill criterion.
+                    r.name == a.name
+                        && r.harness_session_id.as_deref() == a.harness_session_id.as_deref()
+                }) {
                     row.tombstone = true;
                     // The dismiss affordance needs the attach target; exited
                     // rows clear it on the wire (attach-catalog gate), so the
                     // member's copy rides in here.
                     row.attach_id = Some(m.attach_id.clone());
+                    // The dead member renders under the squad its membership
+                    // persisted, not wherever the registry row's cwd points.
+                    row.squad = Some(sid);
                 }
             }
         }
@@ -491,7 +501,7 @@ impl Core {
         out
     }
 
-    /// (x-8b51) The `fno mux rows` receipt: `agent_rows` trimmed to the
+    ///  The `fno mux rows` receipt: `agent_rows` trimmed to the
     /// row-set facts, each decorated with the server's paint verdict. The
     /// verdict names what the SERVER knows: a `no_pane_reason` text, the
     /// tombstone marker, or `None` (would paint; a non-paint on screen is a

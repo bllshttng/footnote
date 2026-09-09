@@ -40,7 +40,7 @@ impl Drop for RestoreRegistryRowsGuard {
     }
 }
 
-// (x-8b51) The attach-ids the restore walk may treat as POSITIVELY dead
+//  The attach-ids the restore walk may treat as POSITIVELY dead
 // (a claimed-live status their own recorded pid falsifies, claude rows).
 // In tests, `RESTORE_STALE_IDS` overrides the file, same posture as
 // `RESTORE_REGISTRY_ROWS`: a unit test cannot populate the real registry,

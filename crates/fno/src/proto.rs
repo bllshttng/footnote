@@ -312,7 +312,7 @@ fn default_true() -> bool {
 /// the stop leg on an Unmeasured row; floor stays 58.
 /// v75 (x-7649): `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
 /// the exact-session retirement op; floor stays 58.
-/// v76 (x-8b51): `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
+/// v76 : `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
 /// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor
 /// stays 58.
 pub const PROTO_VERSION: u32 = 76;
@@ -714,7 +714,7 @@ pub enum ControlVerb {
         #[serde(default)]
         workers: bool,
     },
-    /// (x-8b51) The one row-set receipt: the server's last-published
+    ///  The one row-set receipt: the server's last-published
     /// `layout.agents`, one [`AgentRowReceipt`] per row ->
     /// [`ServerMsg::AgentRowsReceipt`]. The instrument behind
     /// `fno mux rows`: a row present here but absent on screen is a client
@@ -1278,7 +1278,7 @@ pub struct AgentRow {
     pub reach: Reach,
 }
 
-/// (v76, x-8b51) One row of the `fno mux rows` receipt: the facts a row-set
+/// (v76, ) One row of the `fno mux rows` receipt: the facts a row-set
 /// reader needs, trimmed from [`AgentRow`]. `pane: None` is paneless (the
 /// substrate the field names); `reason` is the server's paint verdict -
 /// `None` means "would paint; any non-paint on screen is a client-side fold",
@@ -2202,7 +2202,7 @@ pub enum ServerMsg {
     /// Answer to [`ControlVerb::LayoutGet`]: the nested tree + per-pane geometry
     /// for the requested scope (Locked Decision 5).
     LayoutTree { squads: Vec<SquadLayout> },
-    /// Answer to [`ControlVerb::AgentRowsGet`] (x-8b51): the row-set receipt.
+    /// Answer to [`ControlVerb::AgentRowsGet`] : the row-set receipt.
     AgentRowsReceipt { rows: Vec<AgentRowReceipt> },
     /// Answer to [`ControlVerb::PaneWhere`]: where an `fno_id` lives right now.
     /// The multi-tab / multi-pane shape is mirroring-ready (one id can host
@@ -4102,7 +4102,7 @@ mod tests {
         // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
         // version never moves backwards whichever branch lands first.
         // v75 (x-7649) took 75; floor stays 58.
-        // v76 (x-8b51) took 76; floor stays 58.
+        // v76  took 76; floor stays 58.
         assert_eq!(PROTO_VERSION, 76);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT

@@ -833,7 +833,7 @@ enum CoreMsg {
         agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
-    /// (x-8b51) The `fno mux rows` receipt: the row set exactly as the
+    ///  The `fno mux rows` receipt: the row set exactly as the
     /// server last derived it, decorated with the paint verdicts. The
     /// registry rows ride in from the router's off-loop read (the LayoutGet
     /// pattern); `None` is a read failure, never zero rows.
@@ -8182,7 +8182,7 @@ impl Core {
         let known_attach_ids: Option<HashSet<String>> = registry_rows
             .as_ref()
             .map(|rows| rows.iter().filter_map(|r| r.attach_id.clone()).collect());
-        // (x-8b51) The tombstone evidence sets, read from the SAME parse.
+        //  The tombstone evidence sets, read from the SAME parse.
         // Revival joins a tombstoned member to a non-terminal registry row
         // (declared join, both keys); death joins it to a terminal row or a
         // positively falsified pid (claude rows only, `stale_live_attach_ids`).
@@ -8207,10 +8207,10 @@ impl Core {
             .unwrap_or_default();
         let stale_ids: HashSet<String> = crate::restore_gate::stale_live_attach_ids_for_restore();
         let mut retired_members_total = 0usize;
-        // (x-8b51) Members whose tombstone a live registry row falsified -
+        //  Members whose tombstone a live registry row falsified -
         // the false deaths this bug wrote. Counted for the one-line notice.
         let mut revived_members_total = 0usize;
-        // (x-8b51) Members kept without death evidence (not provably live,
+        //  Members kept without death evidence (not provably live,
         // not provably dead). Counted for the one-line notice.
         let mut kept_unknown_members = 0usize;
         for ps in squads {
@@ -8258,7 +8258,7 @@ impl Core {
             // later persist reuses its store entry instead of minting a new one.
             let restore_key = ps.key.clone();
             for m_orig in &ps.members {
-                // (x-8b51) A tombstone against a session the registry
+                //  A tombstone against a session the registry
                 // currently calls live is a FALSE death: the walk lifts it and
                 // the cleared clone takes the live path below, so every push
                 // (worker keep or plain re-attach) persists tombstone: false
@@ -8489,7 +8489,7 @@ impl Core {
                     idle_workers += 1;
                     continue;
                 }
-                // (x-8b51) A tombstone is a death claim, so it is written only
+                //  A tombstone is a death claim, so it is written only
                 // from evidence of death: a terminal registry status or a
                 // positively falsified pid. The complement of `live` proves
                 // nothing - an unreadable registry, a row this snapshot never
@@ -8997,7 +8997,7 @@ impl Core {
         if churn {
             if let Some(mm) = members.iter_mut().find(|m| m.attach_id == attach_id) {
                 mm.tombstone = true;
-                // (x-8b51) A pane death is a real observed event, so the
+                //  A pane death is a real observed event, so the
                 // churn arm keeps tombstoning - it just names why now.
                 mm.tombstone_reason = Some("member pane died".into());
             }
@@ -13740,7 +13740,7 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::AgentRowsGet { agents, reply } => {
-                // (x-8b51) The receipt is the row set AS DERIVED, plus the
+                //  The receipt is the row set AS DERIVED, plus the
                 // paint verdict per row. Never an empty-success: with no
                 // in-memory rows AND an unreadable registry, the refusal says
                 // so instead of a zero-row receipt.
@@ -16934,7 +16934,7 @@ mod tests {
 
     #[test]
     fn agent_rows_tombstoned_member_decorates_its_row_instead_of_minting_one() {
-        // AC3-HP (x-8b51): one registry row + one tombstoned member that
+        // AC3-HP: one registry row + one tombstoned member that
         // joins it -> exactly ONE row, the registry row, decorated dimmed +
         // dismissable under the member's squad. The old synthesized
         // `cc-<id>` row was the ghost-minter this rewrite removes.
@@ -16985,9 +16985,9 @@ mod tests {
 
     #[test]
     fn agent_rows_never_renders_a_member_that_joins_no_row() {
-        // AC3-EDGE (x-8b51): a tombstoned member joining NO registry row by
-        // either key renders nothing. It is a stale member; x-0d08's
-        // retirement path removes it at restore. Never a synthesized ghost.
+        // AC3-EDGE: a tombstoned member joining NO registry row by
+        // either key renders nothing. It is a stale member; the member-retirement
+        // path removes it at restore. Never a synthesized ghost.
         let mut core = empty_core();
         core.session_name = "main".into();
         core.agents = vec![];
@@ -17026,7 +17026,7 @@ mod tests {
 
     #[test]
     fn agent_rows_never_dims_a_live_row_behind_a_stale_tombstone() {
-        // The liveness kill criterion (x-8b51): a tombstoned member whose
+        // The liveness kill criterion : a tombstoned member whose
         // registry row is LIVE must never dim that row. The stale tombstone
         // is invisible here (restore lifts it with a notice); the live row
         // renders alive.
@@ -17071,6 +17071,68 @@ mod tests {
             "a live row is never dimmed behind a stale tombstone"
         );
         assert!(!live_row.exited, "the live row renders alive");
+    }
+
+    #[test]
+    fn agent_rows_decorates_the_joined_generation_not_a_name_twin() {
+        // Review round 1, P1: exited and live generations can share a display
+        // name. The decoration must match the produced row by the same
+        // session identity the join used, and must never dim the live twin.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        let mut exited = exited_claude_row("gen-twin", None);
+        exited.exited = true;
+        exited.attach_id = Some("c0ffee01".into());
+        exited.harness_session_id = Some("sess-old".into());
+        let mut live = exited_claude_row("gen-twin", None);
+        live.exited = false;
+        live.attach_id = Some("c0ffee02".into());
+        live.harness_session_id = Some("sess-new".into());
+        core.agents = vec![exited, live];
+        core.session.add_squad(
+            1,
+            vec!["/repo".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(10),
+                focus: 10,
+            },
+        );
+        core.squad_members.insert(
+            1,
+            vec![crate::squad_store::StoredMember {
+                attach_id: "c0ffee01".into(),
+                tombstone: true,
+                tombstone_reason: Some("member pane died".into()),
+                detached: false,
+                tab_name: None,
+                cwd: None,
+                worker: None,
+                harness: None,
+                harness_session_id: Some("sess-old".into()),
+            }],
+        );
+        let rows = core.agent_rows();
+        let dead_row = rows
+            .iter()
+            .find(|r| r.harness_session_id.as_deref() == Some("sess-old"))
+            .expect("the exited generation renders");
+        assert!(
+            dead_row.tombstone,
+            "the joined exited generation is decorated"
+        );
+        assert_eq!(dead_row.attach_id.as_deref(), Some("c0ffee01"));
+        assert_eq!(dead_row.squad, Some(1), "decoration keeps the stored squad");
+        let live_row = rows
+            .iter()
+            .find(|r| r.harness_session_id.as_deref() == Some("sess-new"))
+            .expect("the live generation renders");
+        assert!(
+            !live_row.tombstone,
+            "the live name-twin is never dimmed behind the stale tombstone"
+        );
     }
 
     #[test]
@@ -23849,7 +23911,7 @@ mod tests {
 
     #[test]
     fn agent_rows_tombstoned_members_render_through_their_registry_row_only() {
-        // (x-8b51, supersedes the x-8f11 cc- synthesis) A tombstoned member
+        // supersedes the synthesized cc- ghost A tombstoned member
         // joining NO registry row renders NOTHING (never a synthesized
         // ghost); a re-paned id renders pane-hosted, never doubled.
         let mut core = empty_core();

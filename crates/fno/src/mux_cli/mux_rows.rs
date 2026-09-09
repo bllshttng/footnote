@@ -1,4 +1,4 @@
-//! (x-8b51) The `fno mux rows` porcelain: the one row-set receipt. Prints
+//!  The `fno mux rows` porcelain: the one row-set receipt. Prints
 //! the row set the server last derived, each row carrying the server's
 //! paint verdict. Named by the question it answers: what rows exist, and
 //! why would a row not paint.
@@ -7,7 +7,7 @@ use std::ffi::OsString;
 
 use super::{run_on_existing_server, take_common_flags, ControlVerb, EXIT_OK, EXIT_USAGE};
 
-/// `fno mux rows [--json]` (x-8b51): the one row-set receipt. Prints the
+/// `fno mux rows [--json]` : the one row-set receipt. Prints the
 /// row set the server last derived, each row carrying the paint verdict.
 /// With no server, run_on_existing_server refuses naming the session
 /// (never an empty success that reads as zero rows).
