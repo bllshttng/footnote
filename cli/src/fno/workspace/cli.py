@@ -22,10 +22,8 @@ cli.add_typer(_worktree_app, name="worktree")
 def reap_state_files_cmd(apply: bool = typer.Option(False, "--apply"), json_out: bool = typer.Option(False, "--json", "-J")) -> None:
     """Age-reap expendable state files without retiring agent rows."""
     import subprocess
-
     from fno._subprocess_util import propagate_returncode
     from fno.rust_binary import find_dev_binary, resolve_binary
-
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.echo("fno agents workspace reap: the fno-agents binary was not found; run `fno doctor update --rust`.", err=True)
