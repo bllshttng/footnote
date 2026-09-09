@@ -953,6 +953,11 @@ def status(
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
+        workers = info.get("roster_workers") or []
+        engaged = [worker for worker in workers if not _really_finished(worker)]
+        if engaged:
+            info["worked_by"] = [worker["name"] for worker in engaged]
+            info["basis"] = "live-worker"
         unresolved = info.get("roster_rows_unresolved", 0)
         if info.get("roster_unresolved_candidates"):
             # An unresolved row whose worktree names THIS node is an
