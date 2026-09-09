@@ -22,6 +22,15 @@
 //! is the record it already made; this pass's outcome is in the summary).
 //! A history deletion never happens: the transcript survives, resume still
 //! opens it.
+//!
+//! The scope (`agents.reap.roster_scope`) names the population that may
+//! retire, as an operator setting: `off` retires nothing, `provenanced`
+//! (the default) is the chain above, `all` widens to rows fno itself
+//! spawned (sessions or registry provenance) whose work is open. One rule
+//! sits under every value: a row that resolves to no fno node is never
+//! retirable at any scope. An operator session names no fno node, so a
+//! hand-started session is unreachable by construction, not by default
+//! value, and a wrong config cannot reach it.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -140,6 +149,7 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
 pub fn run(
     home: &crate::paths::AgentsHome,
     grace_secs: i64,
+    scope: crate::agents_config::RosterScope,
     dry_run: bool,
     roster: &ClaudeAgentsSnapshot,
     registry: &[RegistryEntry],
@@ -218,6 +228,14 @@ pub fn run(
                 .push(judgement(&ident, None, "owned by an fno row".into(), false));
             continue;
         }
+        // Scope off retires nothing and judges nothing: no graph read, no
+        // transcript probe.
+        if scope == crate::agents_config::RosterScope::Off {
+            summary
+                .kept
+                .push(judgement(&ident, None, "roster scope off".into(), false));
+            continue;
+        }
         // The synthetic identity: the roster row's own fields, shaped like
         // the registry entry the removal cascade and the store index read.
         // Built through the sanctioned constructor and then specialized -
@@ -239,60 +257,47 @@ pub fn run(
         let sid = entry.harness_session_id.as_deref().unwrap_or("").trim();
         let verdict = provenance_verdict(&entry, sid, graph, hits.as_deref());
         let node = verdict.route.node.clone();
-        // A hold (conflict or PR contradiction) names itself.
+        // A hold (conflict or PR contradiction) names itself, and stays a
+        // keep at every scope: contested truth is not a scope question.
         if let Some(hold) = &verdict.hold {
             summary
                 .kept
                 .push(judgement(&ident, node, hold.as_str().to_string(), false));
             continue;
         }
-        match &verdict.work {
-            WorkState::AllDone { nodes } => {
-                // The quiet gate: an unresolved transcript is never quiet,
-                // and the age rides the reason so a keep is auditable.
-                let age = transcript_age_s(hits.as_deref(), now);
-                match age {
-                    None => summary.kept.push(judgement(
-                        &ident,
-                        node,
-                        "transcript unresolved".into(),
-                        false,
-                    )),
-                    Some(age) if age <= grace_secs => summary.kept.push(judgement(
-                        &ident,
-                        node,
-                        format!("active: transcript written {age}s ago"),
-                        false,
-                    )),
-                    Some(_) => {
-                        let basis = format!(
-                            "every named node done: {} (via {})",
-                            nodes.join(", "),
-                            verdict
-                                .route
-                                .source
-                                .map(|s| s.as_str())
-                                .unwrap_or("sessions")
-                        );
-                        if dry_run {
-                            summary.retired.push(judgement(&ident, node, basis, true));
-                            continue;
-                        }
-                        let outcome = remove(&entry);
-                        if outcome.satisfies_applied() {
-                            summary.retired.push(judgement(&ident, node, basis, true));
-                            write_receipt(home, &entry, &outcome);
-                        } else {
-                            summary.refused.push((
-                                ident.clone(),
-                                format!(
-                                    "the native removal did not confirm ({})",
-                                    outcome.as_str()
-                                ),
-                            ));
-                        }
-                    }
-                }
+        // The basis names why the row may retire. `all` widens the
+        // population to rows fno ITSELF spawned (the sessions join or the
+        // registry) whose work is open; a name pattern or a transcript
+        // mention is exactly how a hand-started operator session acquires a
+        // phantom node, so weak provenance keeps even at `all`.
+        // NoProvenance keeps at EVERY scope: an operator session names no
+        // fno node, so this keep is by construction, not by default value.
+        let basis: String = match &verdict.work {
+            WorkState::AllDone { nodes } => format!(
+                "every named node done: {} (via {})",
+                nodes.join(", "),
+                verdict
+                    .route
+                    .source
+                    .map(|s| s.as_str())
+                    .unwrap_or("sessions")
+            ),
+            WorkState::Open { node: n, status }
+                if scope == crate::agents_config::RosterScope::All
+                    && matches!(
+                        verdict.route.source,
+                        Some(crate::node_route::NodeSource::Sessions)
+                            | Some(crate::node_route::NodeSource::Registry)
+                    ) =>
+            {
+                format!(
+                    "open work {n} {status} at roster scope all (via {})",
+                    verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                )
             }
             WorkState::Open { node: n, status } => {
                 summary.kept.push(judgement(
@@ -301,6 +306,7 @@ pub fn run(
                     format!("open work: {n} {status}"),
                     false,
                 ));
+                continue;
             }
             WorkState::NoProvenance => {
                 summary.kept.push(judgement(
@@ -309,6 +315,40 @@ pub fn run(
                     crate::gc::KeepReason::NoProvenance.as_str().to_string(),
                     false,
                 ));
+                continue;
+            }
+        };
+        // The quiet gate: an unresolved transcript is never quiet, and the
+        // age rides the reason so a keep is auditable.
+        let age = transcript_age_s(hits.as_deref(), now);
+        match age {
+            None => summary.kept.push(judgement(
+                &ident,
+                node,
+                "transcript unresolved".into(),
+                false,
+            )),
+            Some(age) if age <= grace_secs => summary.kept.push(judgement(
+                &ident,
+                node,
+                format!("active: transcript written {age}s ago"),
+                false,
+            )),
+            Some(_) => {
+                if dry_run {
+                    summary.retired.push(judgement(&ident, node, basis, true));
+                } else {
+                    let outcome = remove(&entry);
+                    if outcome.satisfies_applied() {
+                        summary.retired.push(judgement(&ident, node, basis, true));
+                        write_receipt(home, &entry, &outcome);
+                    } else {
+                        summary.refused.push((
+                            ident.clone(),
+                            format!("the native removal did not confirm ({})", outcome.as_str()),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -337,6 +377,7 @@ fn write_receipt(home: &crate::paths::AgentsHome, entry: &RegistryEntry, outcome
 pub fn roster_reap(
     home: &crate::paths::AgentsHome,
     grace_secs: i64,
+    scope: crate::agents_config::RosterScope,
     dry_run: bool,
 ) -> RosterReapSummary {
     let roster = crate::claude_roster::read_all_agents_union();
@@ -345,6 +386,7 @@ pub fn roster_reap(
     run(
         home,
         grace_secs,
+        scope,
         dry_run,
         &roster,
         &registry.entries,
@@ -358,6 +400,7 @@ pub fn roster_reap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents_config::RosterScope;
     use crate::state::RegistryEntry;
     use std::collections::HashMap;
 
@@ -424,6 +467,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[],
@@ -451,6 +495,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[entry],
@@ -472,6 +517,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[],
@@ -492,6 +538,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[],
@@ -517,6 +564,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[],
@@ -536,6 +584,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &ClaudeAgentsSnapshot::unknown("claude exited 1"),
             &[],
@@ -557,6 +606,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             false,
             &roster(rows),
             &[],
@@ -604,6 +654,7 @@ mod tests {
         let summary = run(
             &no_home(),
             900,
+            RosterScope::Provenanced,
             true,
             &roster(rows),
             &[],
@@ -614,6 +665,225 @@ mod tests {
         );
         assert_eq!(summary.retired.len(), 1);
         assert_eq!(summary.deduped, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- Scope. The knob names the population that may retire;
+    // no scope reaches a row with no provenance. ---
+
+    // THE law under every setting: a session with no fno node is never a
+    // retire candidate. At `off` the sweep does not even judge the row, so
+    // the reason names the scope; at `provenanced` and `all` it names the
+    // missing provenance.
+    #[test]
+    fn no_provenance_row_is_never_a_candidate_at_any_scope() {
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
+        let scopes = [RosterScope::Off, RosterScope::Provenanced, RosterScope::All];
+        for scope in scopes {
+            let summary = run(
+                &no_home(),
+                900,
+                scope,
+                true,
+                &roster(rows.clone()),
+                &[],
+                &|| Some(GraphRead::default()),
+                &|_| None,
+                crate::daemon::now_epoch_secs(),
+                &|_| CascadeOutcome::NotApplicable,
+            );
+            assert!(
+                summary.retired.is_empty(),
+                "scope {scope:?} retired a no-provenance row: {summary:?}"
+            );
+            let reason = &summary.kept[0].reason;
+            if scope == RosterScope::Off {
+                assert!(reason.contains("roster scope off"), "{summary:?}");
+            } else {
+                assert!(reason.contains("no provenance"), "{summary:?}");
+            }
+        }
+    }
+
+    // The default is the stated contract, not an accident: a provenanced,
+    // done, quiet row retires.
+    #[test]
+    fn provenanced_scope_retires_a_done_quiet_row() {
+        let dir = tmpdir("scope-default");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(summary.retired[0].reason.contains("every named node done"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // `all` is exercised beyond the default - but only for rows fno itself
+    // spawned. A row whose open node was resolved by NAME (a pattern match,
+    // exactly how a hand-started session acquires a phantom node) stays
+    // kept even at `all`; the same open row resolved by the sessions join
+    // retires.
+    #[test]
+    fn all_scope_keeps_a_name_provenanced_open_node_row() {
+        let dir = tmpdir("scope-all-weak");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-aaaa".into(), "in_progress".into());
+        let at_all = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows.clone()),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(at_all.retired.is_empty(), "{at_all:?}");
+        assert!(at_all.kept[0].reason.contains("open work"), "{at_all:?}");
+        // The same row retires at the default too - done work needs no
+        // spawn provenance beyond the cascade - so this is `all`-only
+        // slack, not a default change.
+        g.statuses.insert("x-aaaa".into(), "done".into());
+        let at_default = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(at_default.retired.len(), 1, "{at_default:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The `all` widening fires for a sessions-provenanced open row: the
+    // reverse join names the session, its node is open, the transcript is
+    // quiet past the grace.
+    #[test]
+    fn all_scope_retires_a_spawn_provenanced_open_node_row() {
+        let dir = tmpdir("scope-all-sessions");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-aaaa".into(), "in_progress".into());
+        g.index
+            .insert("sid-1".into(), vec![("x-aaaa".into(), "do".into())]);
+        let at_all = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows.clone()),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(at_all.retired.len(), 1, "{at_all:?}");
+        assert!(
+            at_all.retired[0].reason.contains("roster scope all"),
+            "{at_all:?}"
+        );
+        assert!(
+            at_all.retired[0].reason.contains("via sessions"),
+            "{at_all:?}"
+        );
+        // The identical world is kept at the default: this is the widening.
+        let at_default = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(at_default.retired.is_empty(), "{at_default:?}");
+        assert!(
+            at_default.kept[0].reason.contains("open work"),
+            "{at_default:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // `off` keeps even a fully eligible row, and names the scope.
+    #[test]
+    fn off_scope_keeps_a_fully_eligible_row() {
+        let dir = tmpdir("scope-off");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Off,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        assert!(
+            summary.kept[0].reason.contains("roster scope off"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // A hold (PR contradiction here) stays a keep at `all`: contested truth
+    // is not a scope question.
+    #[test]
+    fn hold_stays_kept_at_all_scope() {
+        let dir = tmpdir("scope-hold");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let g = GraphRead {
+            statuses: HashMap::from([("x-aaaa".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("x-aaaa".to_string(), (Some("open".to_string()), 0))]),
+            ..Default::default()
+        };
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        assert!(
+            summary.kept[0].reason.contains("pr state contradicts"),
+            "{summary:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

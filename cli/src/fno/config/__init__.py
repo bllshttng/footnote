@@ -68,7 +68,7 @@ from fno.config._evals import EvalsBlock
 # test already imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
 from fno.config._loader import _settings_key as _settings_key
-from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
+from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, SweepKeys
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
@@ -2372,11 +2372,8 @@ class AgentsBlock(SweepKeys):
     # non-default here changes both the idle tick and `fno agents reap`.
     # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
     retire_grace_s: int = Field(default=900, ge=0)
-    # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
-    # this window in the same GC sweep that writes new ones; the Pydantic
-    # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
-    # be read is kept, never deleted on a failed read.
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
+    reap: ReapBlock = Field(default_factory=ReapBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults.

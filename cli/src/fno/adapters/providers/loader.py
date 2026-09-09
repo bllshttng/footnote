@@ -271,6 +271,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "orphan_reap_after_seconds",
         "profiles",
         "provider_limits",
+        "reap",
         "reap_receipts",
         "retire_grace_s",
         "silence_deadline_seconds",
