@@ -100,8 +100,7 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     """Load, deep-merge, and cache the settings for one declaration ``key``:
     every existing candidate read and deep-merged, highest priority winning
     per key. Raises ValidationError on invalid values; warns unknown keys.
-    Key contract: docs/path-config.md.
-    """
+    Key contract: docs/path-config.md."""
     from fno.config import (
         SettingsModel,
         _aliased_layers,

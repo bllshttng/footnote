@@ -1690,8 +1690,7 @@ def _grid_lane_for(
     One seam: tests monkeypatch this name, and a caller reaching past it
     bypasses every patch. A decline surfaces the chain's terminal verbatim,
     never refusing (Locked 10). Route and account ride beside harness/model
-    as one row fact. Contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
+    as one row fact. Contract: docs/architecture/backlog-graph-verb-contracts.md"""
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None, None, None
     try:
