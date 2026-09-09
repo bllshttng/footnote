@@ -226,9 +226,8 @@ class SpawnAlreadyRunning(RuntimeError):
 
 
 class SpawnError(RuntimeError):
-    """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable.
-    A gate refusal (exit 75-81) carries ``exit_code`` plus the gate's own refusal
-    sentence in ``detail``; :func:`gate_refusal` reads them."""
+    """``fno agents spawn`` failed re-dispatchably. A gate refusal (75-81) also
+    carries ``exit_code`` plus the gate's own refusal sentence in ``detail``."""
 
     def __init__(self, message: str, exit_code: Optional[int] = None, detail: str = ""):
         super().__init__(message)
@@ -250,12 +249,9 @@ class SpawnQueueRefused(SpawnError):
 #: every caller equally; 81 is a registry no spawn can pass. Imported by name,
 #: never a numeric range: a rename must break loudly.
 _GATE_REFUSAL_REASONS = {
-    EXIT_QUEUE_TIMEOUT: "capacity-refused",
-    EXIT_NO_WAIT: "capacity-refused",
-    EXIT_RAM_REFUSED: "capacity-refused",
-    EXIT_PROVIDER_CAP: "capacity-refused",
-    EXIT_LOAD_REFUSED: "capacity-refused",
-    EXIT_KING_SHARE: "capacity-refused",
+    EXIT_QUEUE_TIMEOUT: "capacity-refused", EXIT_NO_WAIT: "capacity-refused",
+    EXIT_RAM_REFUSED: "capacity-refused", EXIT_PROVIDER_CAP: "capacity-refused",
+    EXIT_LOAD_REFUSED: "capacity-refused", EXIT_KING_SHARE: "capacity-refused",
     EXIT_REGISTRY_SCHEMA: "gate-unavailable",
 }
 
@@ -271,19 +267,18 @@ class GateRefusal:
 
 
 def _gate_refusal_detail(stderr: str) -> str:
-    """The gate's own refusal sentence: the LAST ``spawn-gate:`` line (the gate
-    warns before its verdict, so the first line may name an unrelated condition);
-    stderr head as fallback."""
+    """The gate's refusal sentence: the LAST ``spawn-gate:`` line (the gate warns
+    before its verdict); stderr head as fallback."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
     gate_lines = [ln for ln in lines if ln.startswith("spawn-gate:")]
     return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
-    """A :class:`GateRefusal` when ``exc`` is a machine-scoped gate refusal, else
-    None (the caller keeps its ``failed`` verdict). The ``spawn-gate:`` marker is
-    REQUIRED provenance: ``_codex_create_path`` propagates a provider crash's raw
-    exit verbatim, so the number alone cannot prove the machine refused."""
+    """A :class:`GateRefusal` for a machine-scoped gate refusal, else None. The
+    ``spawn-gate:`` marker is REQUIRED provenance: ``_codex_create_path``
+    propagates a provider crash's raw exit, so the number alone cannot prove
+    the machine refused."""
     code = getattr(exc, "exit_code", None)
     if not isinstance(code, int):
         return None
