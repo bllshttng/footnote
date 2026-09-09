@@ -55,6 +55,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, node)| json!({"id": id, "node": node}))
             .collect();
+        let planning_unclosed: Vec<Value> = summary
+            .kept_planning_unclosed
+            .iter()
+            .map(|(id, node)| json!({"id": id, "node": node}))
+            .collect();
         let triples = |rows: &Vec<(String, String, String)>| -> Vec<Value> {
             rows.iter()
                 .map(|(id, a, b)| json!({"id": id, "detail_a": a, "detail_b": b}))
@@ -83,6 +88,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_pr_contradicts": triples(&summary.kept_pr_contradicts),
                 "kept_open_work": open_work,
                 "kept_open_do_row": open_do,
+                "kept_planning_unclosed": planning_unclosed,
                 "kept_active": active,
                 "kept_transcript_unresolved": summary.kept_transcript_unresolved,
                 "kept_graph_unreadable": summary.kept_graph_unreadable,
@@ -161,6 +167,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (id, node) in &summary.kept_open_do_row {
         out.push_str(&format!("  kept {id} (open do row on done node: {node})\n"));
+    }
+    for (id, node) in &summary.kept_planning_unclosed {
+        out.push_str(&format!(
+            "  kept {id} (planning assignment never closed by this session: {node})\n"
+        ));
     }
     for (id, age_s) in &summary.kept_active {
         out.push_str(&format!(

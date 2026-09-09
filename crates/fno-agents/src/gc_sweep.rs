@@ -80,6 +80,10 @@ pub struct GcSummary {
     /// contradicts - an open additional PR, or a recorded merge_status that
     /// is not `merged`.
     pub kept_pr_contradicts: Vec<(String, String, String)>,
+    /// `(id, node)`: the node reads planning-complete but THIS session's own
+    /// blueprint/think row on it carries no `ended_at` - the completion
+    /// belongs to an earlier assignment, never to this worker (x-5aef).
+    pub kept_planning_unclosed: Vec<(String, String)>,
     /// `(id, node, status)`: a named node is not done; the first open one.
     pub kept_open_work: Vec<(String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
@@ -137,6 +141,11 @@ pub struct GraphRead {
     /// confirm step reads positive PR-state evidence from it; a missing
     /// merge_status is recorded as unrecorded, never asserted unmerged.
     pub pr_state: HashMap<String, (Option<String>, usize)>,
+    /// Lowercased session id -> the node ids where THIS session's own
+    /// `blueprint` or `think` sessions[] row carries a non-empty `ended_at`
+    /// (x-5aef task 1.2). The positive marker the planner's own close
+    /// writes; its absence means this assignment never finished.
+    pub closed_planning: HashMap<String, std::collections::HashSet<String>>,
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -149,8 +158,8 @@ pub(crate) struct RetireOrder {
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
-/// sweep files them under `stop_refused` / `kept_no_receipt`, the merge
-/// trigger under its `kept` list.
+/// sweep files them under `stop_refused` / `kept_no_receipt` /
+/// `kept_open_do_row`, the merge trigger under its `kept` list.
 pub(crate) enum RetireRefusal {
     /// The harness stop did not confirm.
     StopRefused(String),
@@ -158,6 +167,11 @@ pub(crate) enum RetireRefusal {
     NativeRemoval(String),
     /// No resumable receipt could be staged.
     NoReceipt(String),
+    /// An open do row names this session on a node: an obligation that
+    /// opened between the decision and the effects. Checked BEFORE any
+    /// effect fires, because a held session whose process was already
+    /// stopped is not held at all - it is dead (the codex P1 on PR 1637).
+    GraphObligation(String),
 }
 
 /// What one commit actually wrote. `retired_names` is the removal truth: a
@@ -216,6 +230,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
+    let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
     let mut pr_state: HashMap<String, (Option<String>, usize)> = HashMap::new();
     for entry in &entries {
@@ -267,7 +282,25 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 phases
                     .entry(sid.to_ascii_lowercase())
                     .or_default()
-                    .push(phase);
+                    .push(phase.clone());
+            }
+            // The planner's own close receipt (x-5aef task 1.2): a
+            // blueprint/think row carrying a non-empty `ended_at` is a
+            // finished assignment. `fno backlog session close` stamps it,
+            // and Blueprint's finish gate refuses to complete without
+            // reading it back - presence binds the completion to THIS
+            // session's own work, never to an earlier assignment on the
+            // same node.
+            if (phase == "blueprint" || phase == "think")
+                && row
+                    .get("ended_at")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            {
+                closed_planning
+                    .entry(sid.to_ascii_lowercase())
+                    .or_default()
+                    .insert(node_id.to_string());
             }
         }
     }
@@ -275,6 +308,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         index,
         open_do,
         phases,
+        closed_planning,
         statuses,
         pr_state,
     })
@@ -772,6 +806,12 @@ pub(crate) fn run(
         // name it a planner (or whose dispatch label is the bp- shape) gets
         // its every named node's status checked as a set; any node still at
         // `idea` (the plan never landed) or similar holds the row.
+        // x-5aef task 1.2 binds the verdict to the CURRENT assignment: the
+        // statuses come paired with their node ids, and the set of nodes
+        // THIS session closed (its own blueprint/think row carrying a
+        // non-empty ended_at) rides beside them. A quiet replanning worker
+        // dispatched onto a node a previous blueprint moved to `ready`
+        // inherits no completion it did not write.
         let is_planning = graph
             .phases
             .get(&sid.to_ascii_lowercase())
@@ -782,16 +822,20 @@ pub(crate) fn run(
                 graph
                     .index
                     .get(&sid.to_ascii_lowercase())
-                    .map(|named| {
-                        named
-                            .iter()
-                            .map(|(_, status)| status.clone())
-                            .collect::<Vec<_>>()
-                    })
+                    .cloned()
                     .unwrap_or_default(),
             )
         } else {
             None
+        };
+        let planning_closed = if is_planning {
+            graph
+                .closed_planning
+                .get(&sid.to_ascii_lowercase())
+                .map(|set| set.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
         let row = GcRow {
             origin: e.origin.clone(),
@@ -802,6 +846,7 @@ pub(crate) fn run(
             worktree_clean: None,
             branch_merged: None,
             planning,
+            planning_closed,
             confirm_hold,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
@@ -823,6 +868,9 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
+                }
+                Some(KeepReason::PlanningUnclosed { node }) => {
+                    summary.kept_planning_unclosed.push((id, node))
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
                 // policy ran; they cannot arrive here.
@@ -867,6 +915,7 @@ pub(crate) fn run(
             }
         }
         if let Err(refusal) = stage_session_retirement(
+            home,
             e,
             ledger.as_deref(),
             dry_run,
@@ -879,6 +928,7 @@ pub(crate) fn run(
                     summary.stop_refused.push((id, reason))
                 }
                 RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
+                RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
             }
             continue;
         }
@@ -1023,18 +1073,24 @@ pub(crate) fn run(
 }
 
 /// The SESSION half of one retirement, shared by the scheduled sweep and the
-/// merge trigger so exactly one sequence exists: confirm the stop, apply the
-/// native ACTIVE-SURFACE removal, stage the resumable receipt carrying both
-/// as typed effects.
+/// merge trigger so exactly one sequence exists: build and PERSIST the
+/// resumable receipt first, then confirm the stop, then apply the native
+/// ACTIVE-SURFACE removal, appending each typed effect as it lands
+/// (x-5aef task 1.1). Preserve-before-effects: a crash after an effect has
+/// run leaves a receipt on disk naming it, instead of a removal nothing
+/// recorded.
 ///
 /// The stop refusal keeps the row for retry, and so does a `failed` or `kept`
 /// (unverified) native outcome: a retirement applies only when every
-/// applicable effect positively confirmed (or measured not-applicable).
+/// applicable effect positively confirmed (or measured not-applicable). A
+/// refusal path still rewrites the receipt it staged, so the on-disk record
+/// carries the effect that refused.
 /// DRY-RUN stops nothing and applies nothing - a rehearsal that killed the
 /// worker it rehearsed retiring would be the destructive run wearing a dry
 /// flag - but it still stages the receipt, so the rehearsal reports the same
 /// holds the real run would.
 pub(crate) fn stage_session_retirement(
+    home: &AgentsHome,
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
     dry_run: bool,
@@ -1042,42 +1098,112 @@ pub(crate) fn stage_session_retirement(
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
 ) -> Result<(), RetireRefusal> {
-    let stopped = if dry_run { true } else { stop_confirmed(e) };
+    let ledger = ledger_rows
+        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
+    // The obligation re-check runs HERE, before any effect: an open do row
+    // naming this session that opened since the decision means fresh work
+    // was assigned, and stopping the session would kill it while the commit
+    // gate "holds" a corpse. One graph read per staged row; staging only
+    // happens on rows already classified would-retire, so steady state pays
+    // nothing. The commit-level re-check remains as the second belt for the
+    // effects-to-registry-drop span, where holding is harmless.
+    if !dry_run {
+        if let Some(graph) = read_graph_entries(home) {
+            let sid = e
+                .harness_session_id
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if let Some(nodes) = graph.open_do.get(&sid) {
+                if let Some(node) = nodes.first().cloned() {
+                    return Err(RetireRefusal::GraphObligation(node));
+                }
+            }
+        }
+    }
+    // The record precedes the effects: a receipt that cannot be built or
+    // persisted refuses BEFORE the harness is touched, so no effect ever
+    // fires without its recovery record already on disk (AC3-EDGE).
+    let mut receipt = match build_reap_receipt(e, ledger) {
+        Ok(receipt) => receipt,
+        Err(reason) => return Err(RetireRefusal::NoReceipt(reason)),
+    };
+    if dry_run {
+        receipts.insert(e.name.clone(), receipt);
+        return Ok(());
+    }
+    if let Err(err) = write_reap_receipt(home, &receipt) {
+        return Err(RetireRefusal::NoReceipt(format!(
+            "receipt did not persist: {err}"
+        )));
+    }
+    // Effect 1: the confirmed stop of the held process.
+    let stopped = stop_confirmed(e);
+    receipt
+        .effects
+        .push(crate::gc_native::stop_outcome_effect(stopped));
     if !stopped {
+        let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
             "the stop did not confirm; row kept for retry".into(),
         ));
     }
-    // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
-    // codex's session index, cursor-agent's worker servers - through the
-    // same cascade `rm` walks, typed outcome recorded.
-    let mut effects: Vec<EffectRecord> = Vec::new();
-    if !dry_run {
-        let outcome = surface_removal(e);
-        let applied = outcome.satisfies_applied();
-        effects.push(outcome.effect_record("active-surface"));
-        if !applied {
-            return Err(RetireRefusal::NativeRemoval(
-                "the native active-surface removal did not confirm".into(),
-            ));
-        }
+    // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent
+    // list, codex's session index, cursor-agent's worker servers - through
+    // the same cascade `rm` walks, typed outcome recorded.
+    let outcome = surface_removal(e);
+    let applied = outcome.satisfies_applied();
+    receipt
+        .effects
+        .push(outcome.effect_record("active-surface"));
+    if !applied {
+        let _ = write_reap_receipt(home, &receipt);
+        return Err(RetireRefusal::NativeRemoval(
+            "the native active-surface removal did not confirm".into(),
+        ));
     }
-    let ledger = ledger_rows
-        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
-    match build_reap_receipt(e, ledger) {
-        Ok(mut receipt) => {
-            receipt.effects = effects;
-            receipts.insert(e.name.clone(), receipt);
-            Ok(())
-        }
-        Err(reason) => Err(RetireRefusal::NoReceipt(reason)),
+    // Effect 3: the resumability evidence, measured off the receipt itself.
+    receipt.effects.push(resume_evidence_effect(&receipt));
+    let _ = write_reap_receipt(home, &receipt);
+    receipts.insert(e.name.clone(), receipt);
+    Ok(())
+}
+
+/// The resume-evidence op, measured off the staged receipt: the resume
+/// tokens are present AND at least one located transcript exists on disk.
+/// A `failed` outcome does not hold the row (the session is already
+/// stopped); it marks the receipt unverifiable so the gate refuses it
+/// rather than certifying a retirement nothing can recover (AC6-EDGE).
+pub(crate) fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
+    let transcript_exists = receipt.native_locator.as_ref().is_some_and(|loc| {
+        loc.get("transcripts")
+            .and_then(Value::as_array)
+            .is_some_and(|paths| {
+                paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|p| std::path::Path::new(p).exists())
+            })
+    });
+    let confirmed = !receipt.resume_argv.is_empty() && transcript_exists;
+    EffectRecord {
+        op: "resume-evidence".into(),
+        outcome: if confirmed {
+            "confirmed-removed".into()
+        } else {
+            "failed".into()
+        },
+        detail: None,
+        at: crate::daemon::now_rfc3339_like(),
     }
 }
 
 /// The WRITE half of a retirement set, shared by the scheduled sweep and the
-/// merge trigger: persist every receipt, drop the rows under one registry
-/// write guarded by `created_at`, then account and emit only for the names
-/// the write really removed.
+/// merge trigger: re-check the graph obligation under the commit, persist
+/// every receipt, drop the rows under one registry write guarded by
+/// `created_at`, then account and emit only for the names the write really
+/// removed.
 ///
 /// `caller` names the emitter's error op so a failed write says which door it
 /// came through. `to_retire` is drained of every order whose receipt refused
@@ -1093,6 +1219,51 @@ pub(crate) fn commit_retirements(
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> CommitReport {
     let mut report = CommitReport::default();
+    // The obligation re-check (x-5aef task 1.3): between the decision and
+    // this write, a node can gain an OPEN do row naming one of these
+    // sessions - the decision's evidence is stale by exactly the age of the
+    // graph read. One extra read per commit, and a commit only happens when
+    // rows are actually retiring, so steady state pays nothing. A failed
+    // re-read keeps every row: a read that cannot answer is not evidence
+    // the obligation is gone.
+    match read_graph_entries(home) {
+        None => {
+            for order in to_retire.values() {
+                report.kept_no_receipt.push((
+                    order.id.clone(),
+                    "graph unreadable at commit; every row kept".to_string(),
+                ));
+            }
+            to_retire.clear();
+            return report;
+        }
+        Some(graph) => {
+            let held: Vec<(String, String)> = to_retire
+                .iter()
+                .filter_map(|(name, _)| {
+                    let entry = entries.iter().find(|e| &e.name == name)?;
+                    let sid = entry
+                        .harness_session_id
+                        .as_deref()?
+                        .trim()
+                        .to_ascii_lowercase();
+                    graph
+                        .open_do
+                        .get(&sid)
+                        .and_then(|nodes| nodes.first().cloned())
+                        .map(|node| (name.clone(), node))
+                })
+                .collect();
+            for (name, node) in held {
+                if let Some(order) = to_retire.remove(&name) {
+                    report.kept_no_receipt.push((
+                        order.id,
+                        format!("graph obligation opened after the decision: {node}"),
+                    ));
+                }
+            }
+        }
+    }
     // Persist every receipt BEFORE the write drops its row: the ordering IS
     // the losslessness. A receipt that will not write holds its row for the
     // next sweep instead.

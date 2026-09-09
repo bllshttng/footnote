@@ -226,16 +226,26 @@ fn run_all_agents_command() -> Result<ClaudeCommandOutput, String> {
 /// ambient root (whatever `CLAUDE_CONFIG_DIR` the process already carries);
 /// `Some(dir)` pins the dir, which is how an isolated account's rows become
 /// visible to a reader that would otherwise never see them.
-fn run_all_agents_command_in(
-    config_dir: Option<&std::path::Path>,
-) -> Result<ClaudeCommandOutput, String> {
+/// The exact argv the roster snapshot shells out with, built here so the
+/// regression test can assert on it without spawning. A duplicated
+/// `.args(...)` chain here once issued `claude agents --json --all agents
+/// --json --all`, which exits 1 and read every snapshot as Unknown - the
+/// regression test exists because this line is exactly the kind a second
+/// chain slips back into.
+fn all_agents_command(config_dir: Option<&std::path::Path>) -> std::process::Command {
     let mut command = std::process::Command::new("claude");
     if let Some(dir) = config_dir {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
+    command.args(["agents", "--json", "--all"]);
+    command
+}
+
+fn run_all_agents_command_in(
+    config_dir: Option<&std::path::Path>,
+) -> Result<ClaudeCommandOutput, String> {
+    let mut command = all_agents_command(config_dir);
     let mut child = command
-        .args(["agents", "--json", "--all"])
-        .args(["agents", "--json", "--all"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -641,6 +651,32 @@ impl ClaudeRoster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // x-9419: the roster snapshot shells out with EXACTLY
+    // [agents, --json, --all]. A duplicated .args chain once issued
+    // `claude agents ... agents --json --all`, which the CLI refuses with
+    // exit 1, so every snapshot read Unknown, claude_row_provably_absent
+    // was permanently false, and no claude-harness row was ever reapable.
+    // Asserting the BUILT ARGV (not a snapshot) is the point: a snapshot
+    // test passes on any machine where claude is absent.
+    #[test]
+    fn the_agents_snapshot_argv_is_not_duplicated() {
+        let command = all_agents_command(None);
+        assert_eq!(command.get_program().to_string_lossy(), "claude");
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "agents".to_string(),
+                "--json".to_string(),
+                "--all".to_string()
+            ],
+            "the roster shellout argv must be exactly [agents, --json, --all]: {argv:?}"
+        );
+    }
 
     // A 2-worker roster in the confirmed live shape (extra keys present, to prove
     // they are ignored).

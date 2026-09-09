@@ -54,6 +54,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
         index,
         open_do: open,
         phases: std::collections::HashMap::new(),
+        closed_planning: std::collections::HashMap::new(),
         statuses,
         pr_state,
     })
@@ -1153,8 +1154,313 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
     let body = std::fs::read_to_string(&receipts[0]).unwrap();
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     let effects = value["effects"].as_array().expect("effects recorded");
-    assert_eq!(effects[0]["op"], "active-surface");
-    assert_eq!(effects[0]["outcome"], "confirmed-removed");
+    let by_op: std::collections::BTreeMap<String, String> = effects
+        .iter()
+        .map(|e| {
+            (
+                e["op"].as_str().unwrap_or_default().to_string(),
+                e["outcome"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_op.get("native-stop").map(String::as_str),
+        Some("confirmed-removed"),
+        "the confirmed stop is named before the surface removal: {by_op:?}"
+    );
+    assert_eq!(
+        by_op.get("active-surface").map(String::as_str),
+        Some("confirmed-removed"),
+        "the native active-surface outcome must be named: {by_op:?}"
+    );
+    assert!(
+        by_op.contains_key("resume-evidence"),
+        "the resumability evidence op must be present: {by_op:?}"
+    );
+}
+
+/// x-5aef AC3-HP, proved at the seam: when the surface removal RUNS, the
+/// staged receipt already exists on disk. A crash after the effect then
+/// leaves a record of a removal that already happened - the
+/// preserve-before-effects ordering this file's other tests only see the
+/// outcome of.
+#[test]
+fn the_receipt_is_on_disk_before_the_effects_fire() {
+    use crate::daemon::CascadeOutcome;
+
+    let home = tmp_home("gc-stage-before-effects");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let dir = home.root().join("store");
+    std::fs::create_dir_all(&dir).unwrap();
+    let quiet = quiet_transcript(&dir, "q.jsonl", 2 * 3600);
+    let graph = graph_read(&[("s-order", "N1", "done")], &[]);
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "orderw".into();
+        e.short_id = "orderw".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-order".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let home_for_seam = home.root().parent().unwrap().to_path_buf();
+    let receipts_dir_for_seam = home.root().join("reap-receipts");
+    let probing_surface = move |e: &state::RegistryEntry| {
+        let _ = e;
+        // The probe IS the assertion: when the removal fires, the receipt
+        // is already persisted. A probe that cannot read the dir is a
+        // failed assertion, never a vacuous pass.
+        let staged = std::fs::read_dir(&receipts_dir_for_seam)
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false);
+        assert!(
+            staged,
+            "the receipt must be on disk before the effect fires"
+        );
+        CascadeOutcome::Removed
+    };
+    let q1 = quiet.clone();
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![q1.clone()]),
+        &|_| true,
+        &probing_surface,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let _ = home_for_seam; // the state root, named for the failure reader
+}
+
+/// x-5aef AC3-EDGE: a row whose receipt cannot be built refuses BEFORE any
+/// effect fires - no stop seam call, no surface seam call, no receipt on
+/// disk, row kept under kept_no_receipt.
+#[test]
+fn a_row_without_a_buildable_receipt_refuses_before_any_effect() {
+    use crate::daemon::CascadeOutcome;
+
+    let home = tmp_home("gc-no-receipt-refuses-first");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let dir = home.root().join("store");
+    std::fs::create_dir_all(&dir).unwrap();
+    let quiet = quiet_transcript(&dir, "q.jsonl", 2 * 3600);
+    let graph = graph_read(&[("s-norc", "N1", "done")], &[]);
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "norcw".into();
+        e.short_id = "norcw".into();
+        e.origin = Some("spawn".into());
+        // A harness with no capability row builds no receipt: the Unknown
+        // case in build_reap_receipt's gate.
+        e.harness = Some("harness-no-contract".into());
+        e.harness_session_id = Some("s-norc".into());
+        e.created_at = "2026-01-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let stop_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let surface_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let stop_for_seam = std::rc::Rc::clone(&stop_calls);
+    let surface_for_seam = std::rc::Rc::clone(&surface_calls);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &move |_| {
+            stop_for_seam.set(stop_for_seam.get() + 1);
+            true
+        },
+        &move |_| {
+            surface_for_seam.set(surface_for_seam.get() + 1);
+            CascadeOutcome::Removed
+        },
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert_eq!(
+        stop_calls.get(),
+        0,
+        "no effect may fire when the receipt cannot be built"
+    );
+    assert_eq!(
+        surface_calls.get(),
+        0,
+        "no effect may fire when the receipt cannot be built"
+    );
+    assert!(
+        summary.kept_no_receipt.iter().any(|(id, _)| id == "norcw"),
+        "{:?}",
+        summary.kept_no_receipt
+    );
+    assert!(
+        !home.root().join("reap-receipts").exists()
+            || std::fs::read_dir(home.root().join("reap-receipts"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true),
+        "no receipt may land for a row the gate refused before staging"
+    );
+}
+
+/// x-5aef AC6-EDGE at the stage seam: a session whose native transcript
+/// cannot be located records `resume-evidence` as `failed`. The row still
+/// retires (the session is already stopped), and the receipt is what the
+/// verifier will refuse rather than certify.
+#[test]
+fn a_row_without_a_located_transcript_records_failed_resume_evidence() {
+    use crate::daemon::CascadeOutcome;
+
+    let home = tmp_home("gc-resume-evidence-failed");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let dir = home.root().join("store");
+    std::fs::create_dir_all(&dir).unwrap();
+    let quiet = quiet_transcript(&dir, "q.jsonl", 2 * 3600);
+    let graph = graph_read(
+        &[("s-nores-0000-0000-0000-000000000000", "N1", "done")],
+        &[],
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "noresw".into();
+        e.short_id = "noresw".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-nores-0000-0000-0000-000000000000".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let confirming = |_e: &state::RegistryEntry| CascadeOutcome::Removed;
+    let q1 = quiet.clone();
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![q1.clone()]),
+        &|_| true,
+        &confirming,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let receipts: Vec<std::path::PathBuf> = std::fs::read_dir(home.root().join("reap-receipts"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&receipts[0]).unwrap()).unwrap();
+    let effects = value["effects"].as_array().expect("effects recorded");
+    let resume = effects
+        .iter()
+        .find(|e| e["op"] == "resume-evidence")
+        .expect("resume-evidence recorded");
+    assert_eq!(
+        resume["outcome"], "failed",
+        "no located transcript: the op must read failed, not confirmed: {effects:?}"
+    );
+}
+
+/// x-5aef AC4-HP/AC4-EDGE over the PRODUCTION graph read: two bp- workers,
+/// both named on a node at `ready`, both quiet past grace. Only the one
+/// whose own blueprint row carries `ended_at` retires; the other keeps with
+/// the unclosed node named. This is the quiet-replanner trap: a previous
+/// blueprint moved the node to ready, and the completion must not be
+/// inherited by a worker that never closed its assignment.
+#[test]
+fn a_planner_retires_only_on_its_own_closed_assignment() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let planning_row = |sid: &str, ended: Option<&str>| {
+        let mut row = json!({
+            "phase": "blueprint",
+            "harness": "codex",
+            "session_id": sid,
+            "started_at": "2026-09-01T00:00:00Z",
+        });
+        if let Some(at) = ended {
+            row["ended_at"] = json!(at);
+        }
+        row
+    };
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-4hp",
+            "status": "ready",
+            "sessions": [
+                planning_row("planner-unclosed", None),
+                planning_row("planner-closed", Some("2026-09-02T00:00:00Z")),
+            ],
+        }]),
+    );
+    for (name, sid) in [
+        ("bp-x-4hp-a", "planner-unclosed"),
+        ("bp-x-4hp-b", "planner-closed"),
+    ] {
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.short_id = name.into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some(sid.into());
+            e.created_at = "2026-09-01T00:00:00Z".into();
+            r.entries.push(e);
+        })
+        .unwrap();
+    }
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-4hp-b", "{:?}", summary.retired);
+    assert!(
+        summary
+            .kept_planning_unclosed
+            .iter()
+            .any(|(id, node)| id == "bp-x-4hp-a" && node == "x-4hp"),
+        "{:?}",
+        summary.kept_planning_unclosed
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "bp-x-4hp-a"),
+        "the unclosed planner keeps its row"
+    );
 }
 
 #[test]
@@ -3208,4 +3514,233 @@ fn the_shipped_dry_run_shell_plans_the_settle() {
         before,
         std::fs::read(dir.path().join("graph.json")).unwrap()
     );
+}
+
+/// x-5aef AC5, hard version (the codex P1 on PR 1637): an open do row that
+/// opened after the decision must hold the row BEFORE the effects fire. The
+/// decision seam answers done-and-quiet; the real graph carries an open do
+/// row naming this session. The stop and surface seams COUNT their calls,
+/// proving the effects never fired; the row keeps under kept_open_do_row
+/// with the node named. A held session whose process was already stopped is
+/// not held at all - it is dead.
+#[test]
+fn a_graph_obligation_opened_after_the_decision_holds_before_the_effects() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    // The real graph: an open do row for this session on x-new - the
+    // obligation that "opens after the decision".
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-new",
+            "status": "ready",
+            "sessions": [open_do_row("codex", "s-commit")],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "commitw".into();
+        e.short_id = "commitw".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-commit".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let stop_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let surface_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let stop_for_seam = std::rc::Rc::clone(&stop_calls);
+    let surface_for_seam = std::rc::Rc::clone(&surface_calls);
+    // The decision seam: done, no open do row - the stale evidence.
+    let graph = graph_read(&[("s-commit", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &move |_| {
+            stop_for_seam.set(stop_for_seam.get() + 1);
+            true
+        },
+        &move |_| {
+            surface_for_seam.set(surface_for_seam.get() + 1);
+            CascadeOutcome::Removed
+        },
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert_eq!(stop_calls.get(), 0, "the stop must never fire");
+    assert_eq!(
+        surface_calls.get(),
+        0,
+        "the surface removal must never fire"
+    );
+    assert!(
+        summary
+            .kept_open_do_row
+            .iter()
+            .any(|(id, node)| id == "commitw" && node == "x-new"),
+        "{:?}",
+        summary.kept_open_do_row
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "commitw"),
+        "the row survives"
+    );
+}
+
+/// The commit gate as the SECOND belt: with the pre-effects re-check passed
+/// (no open do row at stage time on the real graph), a receipt staged by a
+/// direct stage call is not counted when the graph re-read at commit finds
+/// the obligation. This is the only way to observe the stage-to-commit span
+/// in a test: drive commit_retirements directly.
+#[test]
+fn the_commit_gate_drops_an_order_whose_obligation_opened() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-late",
+            "status": "ready",
+            "sessions": [open_do_row("codex", "s-late")],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "latew".into();
+        e.short_id = "latew".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-late".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let mut entry = &state::RegistryEntry::default();
+    let entries = state::load_registry(&home.registry_json()).unwrap();
+    entry = entries.entries.first().unwrap();
+    let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+    receipt.effects = vec![crate::gc_native::stop_outcome_effect(true)];
+    let mut receipts = std::collections::BTreeMap::new();
+    receipts.insert(entry.name.clone(), receipt);
+    let order = gc_sweep::RetireOrder {
+        id: "latew".into(),
+        basis: "test".into(),
+        created_at: entry.created_at.clone(),
+        tree: crate::gc::TreeAction::None,
+        worktree: None,
+    };
+    let mut to_retire = std::collections::BTreeMap::new();
+    to_retire.insert(entry.name.clone(), order);
+    let report = gc_sweep::commit_retirements(
+        &home,
+        &emitter,
+        "test",
+        std::slice::from_ref(entry),
+        &mut to_retire,
+        &receipts,
+        &|_| None,
+    );
+    assert!(report.retired.is_empty(), "{:?}", report.retired);
+    assert!(
+        report
+            .kept_no_receipt
+            .iter()
+            .any(|(id, reason)| id == "latew"
+                && reason.contains("graph obligation opened after the decision: x-late")),
+        "{:?}",
+        report.kept_no_receipt
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "latew"),
+        "the row survives the commit gate"
+    );
+}
+
+/// x-5aef AC6-HP, the archived-session RECORD journey. The receipt is
+/// built through the real capability table and persisted to the store;
+/// the session's original cwd is then DELETED; resolution by exact
+/// session id still yields the resume tokens and a locator naming a
+/// transcript that exists and reads back. The verifier, given this
+/// session as its expected cohort, certifies the retirement - so a pass
+/// means the record journey, not merely a file on disk.
+///
+/// Ceiling, stated plainly: this proves the RECORD survives cwd deletion
+/// and resolves; it does NOT launch `claude --resume` and assert the
+/// native harness reopened the session. Nothing in CI can.
+#[test]
+fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
+    let (dir, home) = staged_graph_home();
+    let store = dir.path().join("native-store");
+    std::fs::create_dir_all(&store).unwrap();
+    let transcript = store.join("journey-0000-0000-0000-000000000000.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let cwd = dir.path().join("proj-gone");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut e = state::RegistryEntry::default();
+    e.name = "journeyw".into();
+    e.short_id = "journeyw".into();
+    e.origin = Some("spawn".into());
+    e.harness = Some("claude".into());
+    e.harness_session_id = Some("journey-0000-0000-0000-000000000000".into());
+    e.cwd = cwd.to_string_lossy().to_string();
+    e.created_at = "2026-09-01T00:00:00Z".into();
+    // The record: built through the REAL capability table (resume form
+    // rendered, locator staged), then localized to the fixture store the
+    // way the harness's own index resolves a live session.
+    let mut receipt = crate::receipt::build_reap_receipt(&e, None).unwrap();
+    receipt.native_locator = Some(json!({ "transcripts": [transcript.to_string_lossy()] }));
+    receipt.effects = vec![
+        crate::gc_native::stop_outcome_effect(true),
+        crate::daemon::CascadeOutcome::Removed.effect_record("active-surface"),
+        crate::gc_sweep::resume_evidence_effect(&receipt),
+    ];
+    receipt.writer_build = Some(crate::gc_verify::current_build());
+    crate::receipt::write_reap_receipt(&home, &receipt).unwrap();
+
+    // The journey: the original cwd is gone; resolution by session id.
+    std::fs::remove_dir_all(&cwd).unwrap();
+    assert!(crate::resume_receipt::maybe_hint_preserved_session(
+        &home,
+        "journey-0000-0000-0000-000000000000"
+    ));
+    // The data the resolution prints: resume tokens and a live transcript.
+    let resolved =
+        crate::receipt::read_reap_receipt(&crate::receipt::reap_receipt_path(&home, &receipt))
+            .unwrap();
+    assert!(
+        !resolved.resume_argv.is_empty(),
+        "resume tokens survive: {resolved:?}"
+    );
+    assert!(transcript.exists(), "the located transcript still exists");
+    let body = std::fs::read_to_string(&transcript).unwrap();
+    assert!(body.contains("\"type\""), "the transcript reads back");
+
+    // The gate, given this session as its cohort, certifies the record.
+    let report = crate::gc_verify::verify(
+        &home,
+        24 * 3600,
+        &["journey-0000-0000-0000-000000000000".to_string()],
+    );
+    assert!(report.passes(), "{:?}", report.problems);
+    assert!(report.missing.is_empty());
 }
