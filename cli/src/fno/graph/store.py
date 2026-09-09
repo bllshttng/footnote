@@ -807,6 +807,15 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
+    from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
+
+    claimed = set(live_claimed_node_ids(strict=True))
+    try:
+        worked = set(live_worked_node_ids())
+    except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
+        print(f"worked overlay degraded: {exc}", file=sys.stderr)
+        worked = set()
+    params["claimed"] = sorted(claimed | worked)
     if entries is not None:
         params["entries"] = entries
     from fno import paths as _paths
