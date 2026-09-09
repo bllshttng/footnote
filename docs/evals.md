@@ -67,7 +67,7 @@ A **lane** is a NAME joined against the existing `config.routing.models` invento
 
 - `requested_lane` / `requested_harness` / `requested_model` / `requested_effort`: what was asked for.
 - `observed_harness` / `observed_model` / `observed_model_basis` / `observed_effort` / `observed_session_id`: what the agent registry says actually ran. This is read back after the worker spawns, never re-derived. x-8975/x-1bd0 already resolved and recorded it.
-- `lane_status`: `ok`, `substituted`, or `unavailable`. Capacity serving a different harness than requested is `substituted` and is excluded from the requested lane's cohort - never folded in as if it were a sample of it. A refused spawn is `unavailable`, and no model is graded as the requested one.
+- `lane_status`: `ok`, `substituted`, or `unavailable`. When capacity serves a different harness than requested, the run is `substituted`. A comparison excludes it from the requested lane's cohort - it is never folded in as if it were a sample of that lane. A refused spawn is `unavailable`, and no model is graded as the requested one.
 - `experiment_id`: the `--cohort` id, the join key a comparison groups on.
 
 A row missing `experiment_id` or `requested_lane` is legacy/unattributed. However it is grouped, it can never join a cohort's score.
@@ -84,9 +84,9 @@ A row missing `experiment_id` or `requested_lane` is legacy/unattributed. Howeve
 }
 ```
 
-`fno doctor evals report --cohort-spec cohorts.json [--json]` folds each declared cohort's `ok`-status rows. It reports sample count, `pass_at_1`, `pass_k`, and a duration distribution. When a row carries `usage`, it folds the amount by source and unit. It reports a `review_evidence` verdict too: `observed` when every scored row carries review, `partial`, or `unobserved`. Missing evidence never reads as clean or zero-cost - `usage` is `None`, not `0`, when nothing reported it. A predeclared `fixture_rev` that the observed rows do not match is flagged `fixture_rev_mismatch`. More than one observed revision is `mixed_fixture_revisions`. Neither ever becomes a silent like-for-like claim.
+`fno doctor evals report --cohort-spec cohorts.json [--json]` folds each declared cohort's `ok`-status rows. It reports sample count, `pass_at_1`, `pass_k`, and a duration distribution. A row carrying `usage` folds its amount by source and unit. It also reports a `review_evidence` verdict. If every scored row carries review, the verdict is `observed`. If only some do, it is `partial`. If none do, it is `unobserved`. Missing evidence never reads as clean or zero-cost - `usage` is `None`, not `0`, when nothing reported it. A predeclared `fixture_rev` that the observed rows do not match is flagged `fixture_rev_mismatch`. More than one observed revision is `mixed_fixture_revisions`. Neither ever becomes a silent like-for-like claim.
 
-`promotion_criteria` scores exactly one candidate against one baseline. It returns `recommended` plus the `reasons` blocking it when false. A reason names a missing cohort, a regression against baseline, an unmet `min_pass_at_1`, a fixture mismatch, or unobserved review evidence when `require_review` is set. This is a recommendation only. It never edits `config.routing.models`, `agents.profiles`, or any production lane order. Promotion stays a separate, reviewed act, exactly like `fno doctor evals graduate`.
+`promotion_criteria` scores exactly one candidate against one baseline. It returns `recommended` plus any `reasons` that block it. A blocking reason names a missing cohort, a regression against baseline, an unmet `min_pass_at_1`, or a fixture mismatch. Setting `require_review` adds one more: unobserved review evidence. This is a recommendation only. It never edits `config.routing.models`, `agents.profiles`, or any production lane order. Promotion stays a separate, reviewed act, exactly like `fno doctor evals graduate`.
 
 Whatever caller has that evidence attaches `usage` and `review` - a real delivery's ledger/scoreboard row, folded in separately. The eval runner itself never invents a review verdict or a spend number. Its only success marker is the task's own mechanical grade.
 
