@@ -4631,7 +4631,7 @@ def cmd_watchdog(
         # Every non-skipped outcome emits: the `outcome` field carries which
         # one it was, so no list here decides what is worth recording.
         wd.emit_event(
-            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+            wd.outcome_event(outcome),
             {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
              "outcome": outcome},
         )

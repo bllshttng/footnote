@@ -1191,6 +1191,10 @@ def publish_report(
         },
     )
 
+    unknown = [
+        dim for dim in DIMENSIONS
+        if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
+    ]
     wd.emit_event(
         "watchdog_unfinished_work_scan",
         {
@@ -1201,11 +1205,7 @@ def publish_report(
                 for dim in DIMENSIONS
                 if payload["counts"][dim] is not None
             },
-            "unknown_dimensions": [
-                dim
-                for dim in DIMENSIONS
-                if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
-            ],
+            "unknown_dimensions": unknown,
             "warnings": payload["warnings"],
         },
     )
@@ -1226,34 +1226,37 @@ def publish_report(
                 },
             )
 
-    # The mail gate refuses an incomplete scan as not-the-news; the durable
-    # question lane holds the same line: a partial finding set never asks.
-    if not snapshot.complete:
-        note("watchdog escalation withheld: incomplete scan")
-    else:
-        try:
-            from fno.agents.stale_escalate import escalate_unfinished
-            from fno.carveout.core import resolve_carveout_root, resolve_session_id
-            from fno.paths import resolve_repo_root
+    # An incomplete scan escalates what it DID reach and names what it did
+    # not. Withholding the whole ask was permanent, not transient: a fetch
+    # against a deleted worktree root fails on every future run too, so a
+    # fleet with one dead root escalated nothing ever again while stdout
+    # kept listing the findings and the exit code stayed 0.
+    try:
+        from fno.agents.stale_escalate import escalate_unfinished
+        from fno.carveout.core import resolve_carveout_root, resolve_session_id
+        from fno.paths import resolve_repo_root
 
-            try:
-                session_id = resolve_session_id(resolve_repo_root())
-            except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
-                session_id = None
-            outcome, qid = escalate_unfinished(
-                list(snapshot.findings),
-                root=resolve_carveout_root(),
-                session_id=session_id,
-                cwd=Path.cwd(),
+        try:
+            session_id = resolve_session_id(resolve_repo_root())
+        except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
+            session_id = None
+        outcome, qid = escalate_unfinished(
+            list(snapshot.findings),
+            root=resolve_carveout_root(),
+            session_id=session_id,
+            cwd=Path.cwd(),
+            unknown_dimensions=unknown,
+        )
+        if outcome == "none":
+            note("watchdog escalation: no unfinished-work findings")
+        else:
+            note(
+                f"watchdog escalation: {outcome} {qid} "
+                f"({len(snapshot.findings)} finding(s)"
+                + (f", incomplete: {', '.join(unknown)}" if unknown else "")
+                + ")"
             )
-            if outcome == "none":
-                note("watchdog escalation: no unfinished-work findings")
-            else:
-                note(
-                    f"watchdog escalation: {outcome} {qid} "
-                    f"({len(snapshot.findings)} finding(s))"
-                )
-        except Exception as exc:  # noqa: BLE001 - named, never fatal to the report
-            note(f"watchdog escalation failed: {exc}")
+    except Exception as exc:  # noqa: BLE001 - named, never fatal to the report
+        note(f"watchdog escalation failed: {exc}")
 
     return payload

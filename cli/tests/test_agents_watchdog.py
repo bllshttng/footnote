@@ -1011,7 +1011,9 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
     outcome, detail = apply_verdict(
         v, lanes="all", cwd="/tmp/r1", failover_fn=returning("rotated-no-worker")
     )
-    assert outcome == "refused"
+    # The provider rotated, so the fleet changed: a refusal here reads
+    # "nothing happened" and leaves the rotation unattended.
+    assert outcome == watchdog.PARTIAL
     assert "no replacement spawned" in detail and "Re-check" in detail
     assert "left as-is" not in detail
 
@@ -4191,9 +4193,12 @@ def test_claim_view_without_a_state_word_reads_unknown_not_excluded():
     assert snap.dimensions[uw.KIND_STARTED].state == uw.UNKNOWN_DIM
 
 
-def test_publish_withholds_the_durable_question_on_an_incomplete_scan(
-    tmp_path, monkeypatch
-):
+def test_publish_escalates_what_an_incomplete_scan_reached(tmp_path, monkeypatch):
+    """An incomplete scan escalates the findings it DID reach and names the
+    dimensions it could not. Withholding the whole ask was permanent, not
+    transient: the common cause is a deleted worktree root whose fetch fails
+    on every future run, so the lane went mute forever while stdout kept
+    printing the findings under exit 0."""
     import fno.paths as paths_mod
 
     monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
@@ -4203,10 +4208,13 @@ def test_publish_withholds_the_durable_question_on_an_incomplete_scan(
     )
     from fno.agents import stale_escalate as _se
 
-    called = []
-    monkeypatch.setattr(
-        _se, "escalate_unfinished", lambda f, **kw: called.append(1) or ("recorded", "q")
-    )
+    called: list[dict] = []
+
+    def _record(findings, **kw):
+        called.append({"findings": list(findings), **kw})
+        return ("recorded", "q-1")
+
+    monkeypatch.setattr(_se, "escalate_unfinished", _record)
 
     snap = uw.classify(
         _uw_obs(graph_ok=False, nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)])
@@ -4216,8 +4224,24 @@ def test_publish_withholds_the_durable_question_on_an_incomplete_scan(
     uw.publish_report(
         snap, source="manual", now_s=NOW_1840, mail_to="", log=notes.append
     )
-    assert called == []
-    assert any("incomplete scan" in note for note in notes)
+    assert len(called) == 1
+    assert uw.KIND_STARTED in called[0]["unknown_dimensions"]
+    assert any("incomplete:" in note for note in notes)
+
+
+def test_incomplete_question_text_names_the_unread_dimensions():
+    from fno.agents import stale_escalate as se
+
+    finding = uw.Finding(
+        kind=uw.KIND_DIRTY,
+        subject="/tmp/w1",
+        basis="dirty and ownerless",
+        clear_command="fno agents workspace worktree cleanup",
+    )
+    text = se.question_text([finding], "k1", [uw.KIND_STARTED])
+    assert "INCOMPLETE" in text and uw.KIND_STARTED in text
+    # A complete scan says nothing about completeness.
+    assert "INCOMPLETE" not in se.question_text([finding], "k1")
 
 
 def test_manual_report_and_tick_share_one_fleet_scope(monkeypatch):
@@ -4273,3 +4297,72 @@ def _receipt_row(**over):
         setattr(row, k, v)
     return row
 
+
+def test_outcome_event_never_files_a_half_landed_action_as_a_refusal():
+    """watchdog_refused reads "declined to act". A partial outcome changed the
+    fleet - a rotated provider, a stopped session - so filing it there logs it
+    as if nothing happened, and the reader who trusts that leaves it
+    unattended. One fold so three emit sites cannot disagree."""
+    assert watchdog.outcome_event("applied") == "watchdog_applied"
+    assert watchdog.outcome_event(watchdog.PARTIAL) == "watchdog_partial"
+    assert watchdog.outcome_event("refused") == "watchdog_refused"
+    assert watchdog.outcome_event("held") == "watchdog_refused"
+
+
+def test_watchdog_partial_is_a_declared_event_type():
+    """The emitted type must exist in the schema or emit_event swallows it
+    and the lane writes nothing at all."""
+    from pathlib import Path
+
+    import yaml
+
+    from fno import events as events_mod
+
+    schema = yaml.safe_load(
+        (Path(events_mod.__file__).parent / "schema.yaml").read_text()
+    )
+    names = {e["name"] for e in schema["event_types"]}
+    assert {"watchdog_applied", "watchdog_partial", "watchdog_refused"} <= names
+
+
+def test_unfinished_mail_gate_mails_an_incomplete_scan(tmp_path, monkeypatch):
+    """A withheld incomplete scan reads "retry next sweep", but a deleted
+    worktree root fails the same way forever. The digest names every unread
+    dimension, so the mail carries its own shortfall."""
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "_last_unfinished_signature", lambda: "")
+    sent: list[str] = []
+    monkeypatch.setattr(
+        watchdog,
+        "_send_machine_report",
+        lambda to, body, runner=None: sent.append(body) or (True, "sent"),
+    )
+
+    # Incomplete AND carrying findings: the dimension that read is the news,
+    # the dimension that did not is the caveat.
+    finding = uw.Finding(
+        kind=uw.KIND_DIRTY,
+        subject="/tmp/w1",
+        basis="dirty and ownerless",
+        clear_command="fno agents workspace worktree cleanup",
+    )
+    snap = uw.Snapshot(
+        generated_at="2026-08-16T18:40:00Z",
+        findings=(finding,),
+        dimensions={
+            uw.KIND_STARTED: uw.DimensionState(uw.UNKNOWN_DIM, 0, "graph unreadable"),
+            uw.KIND_DONE_AHEAD: uw.DimensionState(uw.UNKNOWN_DIM, 0, "graph unreadable"),
+            uw.KIND_DIRTY: uw.DimensionState(uw.MEASURED, 1, None),
+            uw.KIND_PR: uw.DimensionState(uw.UNKNOWN_DIM, 0, "graph unreadable"),
+        },
+        warnings=("started_free_claim: graph unreadable",),
+        complete=False,
+    )
+    assert snap.complete is False and snap.findings
+    ok, receipt, stamp = watchdog.unfinished_mail_gate(snap, "someone")
+    assert ok, receipt
+    assert len(sent) == 1
+    assert f"{uw.KIND_STARTED}={uw.UNKNOWN_DIM}" in sent[0]
+    assert stamp == uw.snapshot_signature(snap)

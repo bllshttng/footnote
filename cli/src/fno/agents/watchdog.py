@@ -2736,9 +2736,18 @@ def unfinished_mail_gate(
 ) -> tuple[bool, str, str]:
     """``(ok, receipt, unfinished_signature_to_stamp)`` for the report path:
     the same push-not-pull change gate :func:`mail_gate` gives the verdict
-    path, keyed on finding identity instead of session rows. An incomplete
-    snapshot is never mailed as though it were the news: the gate stays armed
-    against the last digest actually delivered so the next sweep retries."""
+    path, keyed on finding identity instead of session rows.
+
+    An incomplete snapshot IS mailed. Withholding it read as "retry next
+    sweep", but the common cause is a worktree root that was deleted, which
+    fails the same way forever, so the lane went permanently mute while its
+    findings kept printing to stdout under exit 0. The digest names every
+    unread dimension and its warning, so the reader sees the shortfall.
+
+    The change gate keys on finding identity alone, so a later COMPLETE scan
+    finding exactly the same set sends nothing: the caveat is never retracted
+    by mail. That is the cheaper half of the trade - keying completeness into
+    the signature would re-mail an unchanged finding set on every flip."""
     from fno.agents.unfinished_work import snapshot_digest, snapshot_signature
 
     if not to:
@@ -2748,8 +2757,6 @@ def unfinished_mail_gate(
         return True, "no findings, nothing to say", signature
     if signature == _last_unfinished_signature():
         return True, "unchanged since the last sweep, not mailed", signature
-    if not snapshot.complete:
-        return False, "incomplete scan, not mailed", _last_unfinished_signature()
     ok, receipt = _send_machine_report(to, snapshot_digest(snapshot), runner=runner)
     stamp = signature if ok else _last_unfinished_signature()
     return ok, receipt, stamp
@@ -2830,6 +2837,22 @@ LANES = {"wake": frozenset({WAKE, SILENCE}), "all": frozenset({WAKE, REROUTE, SI
 #: for, so nothing was attempted and there is nothing to report. Every other
 #: outcome is news. See :func:`apply_verdict` for why surface is the default.
 SKIPPED = "skipped"
+
+#: The action HALF landed: the fleet changed and the verdict did not finish.
+#: A caller must surface it, and it is never a refusal - `watchdog_refused`
+#: reads "declined to act", so a rotated provider or a stopped session logged
+#: under it is logged as if nothing happened.
+PARTIAL = "partial"
+
+#: Outcome word -> event name. Anything not named here is a true refusal:
+#: nothing changed. Keep this the ONE fold, so a third emit site cannot
+#: disagree with the first two about what an outcome means.
+_OUTCOME_EVENTS = {"applied": "watchdog_applied", PARTIAL: "watchdog_partial"}
+
+
+def outcome_event(outcome: str) -> str:
+    """The events.jsonl type for an ``apply_verdict`` outcome word."""
+    return _OUTCOME_EVENTS.get(outcome, "watchdog_refused")
 
 
 class RotationBudget:
@@ -2951,15 +2974,16 @@ def _apply_reroute(
         # either - that word is the lane skip, and callers drop it. The
         # provider HAS rotated, which a reader must see.
         return (
-            "partial",
+            PARTIAL,
             f"failover rotated, replacement not spawned, human notified ({v.basis})",
         )
     if outcome == "rotated-no-worker":
         # The receipt must not claim the session is untouched: on this path
         # the stop and the node-claim force-release may ALREADY have run
         # before the spawn failed. Name what is certain and what to check.
+        # PARTIAL, not refused: the provider rotated, so the fleet changed.
         return (
-            "refused",
+            PARTIAL,
             f"failover rotated but no replacement spawned ({v.basis}). The "
             "old session may already be stopped and its claim force-released. "
             "Re-check the row before acting on it",
