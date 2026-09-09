@@ -215,8 +215,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `law set`, the direct operator writer baselined in this PR.
     # +1 for `inbox law set`, the mounted spelling present on current main.
     # Bumped to the live count at rebase time, not a round number.
-    # +2 for `king faq add` and `king faq list` (x-9e1e), the king FAQ verb.
-    assert len(leaves) <= 131
+    # king faq add/list (x-9e1e) added no leaves here: they live under the
+    # collapsed `agents` group (mapped-count only), not the top-level `king`
+    # hidden alias.
+    assert len(leaves) <= 129
     assert "fno-agents" in leaves
 
 

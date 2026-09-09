@@ -101,8 +101,6 @@ king cancel
 king done
 king drain
 king escalate
-king faq add
-king faq list
 king init
 king manifest-path
 king shape
