@@ -194,7 +194,9 @@ def discovery(repo, skills_root, plugin_cache):
     print(f"{'name':<22} {'verdict':<18} {'source-digest':<18} loaded-from")
     for r in rows:
         cache_dig = cache_digs.get(r.name)
-        if r.name not in sources:
+        if r.name not in sources and r.alias:
+            verdict, loaded = "alias-only", f"{r.source} via {r.alias}"
+        elif r.name not in sources:
             verdict, loaded = "plugin-only", str(plugin.skills_dir / r.name) if plugin else "-"
         elif plugin and cache_dig is not None and cache_dig != r.digest and r.owner == "footnote":
             verdict = "stale-cache"

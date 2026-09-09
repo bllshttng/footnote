@@ -111,6 +111,11 @@ if command -v codex >/dev/null 2>&1; then
     FAIL=1
   else
     # Same resolver + same inventory as setup.sh: one engine, no drift.
+    # python3 stays an optional dep: without it the inventory is unmeasured,
+    # not failed.
+    if ! command -v "${FNO_PYTHON:-python3}" >/dev/null 2>&1; then
+      echo "  [warn] ${FNO_PYTHON:-python3} unavailable; skill inventory unmeasured"
+    else
     if [[ -n "${CODEX_PLUGIN_CACHE:-}" ]]; then
       CACHE_ARGS=(--cache "$CODEX_PLUGIN_CACHE")
     else
@@ -163,6 +168,7 @@ if command -v codex >/dev/null 2>&1; then
     fi
     if [[ "$FOREIGN" -gt 0 ]]; then
       echo "  [info] $FOREIGN foreign link(s) exposed; ./scripts/setup.sh --provider codex curates them (restore lines are printed)"
+    fi
     fi
   fi
 else

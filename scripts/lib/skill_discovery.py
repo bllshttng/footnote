@@ -23,7 +23,8 @@ DEFAULT_PLUGIN_CACHE = "~/.codex/plugins/cache"
 # The growth-studio pack is Footnote's own; it names no foreign skill today.
 # A future explicit dependency is added here, never re-derived from names.
 PRESERVE = frozenset()
-PLACEHOLDER_MARKERS = ("todo", "tbd", "{{", "placeholder", "<+")
+PLACEHOLDER_MARKERS = ("{{", "placeholder", "<+")
+PLACEHOLDER_WORDS = ("todo", "tbd")
 
 
 @dataclass
@@ -62,8 +63,7 @@ def find_installed_plugin(cache_root: Path) -> Plugin | None:
         if not manifest.is_file():
             continue
         try:
-            import json as _json
-            data = _json.loads(manifest.read_text())
+            data = json.loads(manifest.read_text())
         except (OSError, ValueError):
             continue
         rel = data.get("skills")
@@ -79,7 +79,11 @@ def find_installed_plugin(cache_root: Path) -> Plugin | None:
 
 
 def _version_key(version: str) -> tuple:
-    return tuple(int(p) if p.isdigit() else p for p in re.split(r"[.]", version))
+    # Digit-or-not per part keeps prerelease suffixes comparable, never
+    # mixed-type (an int/str tuple comparison would raise TypeError).
+    return tuple(
+        (1, int(p)) if p.isdigit() else (0, p) for p in re.split(r"[.]", version)
+    )
 
 
 def source_skills(repo_root: Path) -> dict[str, Path]:
@@ -126,7 +130,9 @@ def metadata_problems(md_path: Path, canonical: str | None = None) -> list[str]:
             problems.append("description empty")
         elif all(ch in ">-*_" or ch.isspace() for ch in d):
             problems.append(f"description is punctuation ({d!r})")
-        elif any(marker in d.lower() for marker in PLACEHOLDER_MARKERS):
+        elif any(marker in d.lower() for marker in PLACEHOLDER_MARKERS) or any(
+            re.search(rf"\b{w}\b", d.lower()) for w in PLACEHOLDER_WORDS
+        ):
             problems.append(f"description carries placeholder text ({d[:40]!r})")
     if canonical is not None:
         name = data.get("name")
@@ -147,7 +153,7 @@ def inventory(repo_root: Path, skills_root: Path, plugin: Plugin | None) -> list
     plugin_names = set()
     if plugin is not None:
         plugin_names = {p.name for p in plugin.skills_dir.iterdir() if (p / "SKILL.md").is_file()}
-    links: dict[str, Path] = {}
+    links: list[tuple[str, Path]] = []
     if skills_root.is_dir():
         for child in sorted(skills_root.iterdir()):
             if child.is_symlink():
@@ -156,28 +162,31 @@ def inventory(repo_root: Path, skills_root: Path, plugin: Plugin | None) -> list
                     if name.startswith(prefix):
                         name = name[len(prefix):]
                         break
-                links[name] = child
-    names = sorted(set(sources) | plugin_names | set(links))
+                links.append((name, child))
+    names = sorted(set(sources) | plugin_names | {n for n, _ in links})
     rows: list[Entry] = []
     for name in names:
-        alias = links.get(name)
-        alias_status, alias_note = _alias_health(alias, name, sources)
-        statuses = [s for s in (alias_status, ) if s not in ("ok", "absent")]
-        if name in plugin_names and alias is not None and alias_status != "broken":
-            statuses.append("duplicate")
-        src = str(alias.resolve()) if alias and alias_status != "broken" else None
-        digest = sha256_file(Path(src) / "SKILL.md") if src else None
-        owner = "footnote"
-        if alias is not None and alias_status != "broken":
-            owner = link_owner(alias, repo_root)
-        if not statuses:
-            if plugin is not None and name not in plugin_names and alias is None:
-                statuses.append("absent-from-plugin")
-            else:
-                statuses.append("ok")
-        status = statuses[0]
-        note = "; ".join(filter(None, [alias_note] + statuses[1:]))
-        rows.append(Entry(name, str(alias) if alias else None, src, digest, owner, status, note))
+        linked = [p for n, p in links if n == name]
+        if not linked:
+            linked = [None]
+        for alias in linked:
+            alias_status, alias_note = _alias_health(alias, name, sources)
+            statuses = [s for s in (alias_status, ) if s not in ("ok", "absent")]
+            if name in plugin_names and alias is not None and alias_status != "broken":
+                statuses.append("duplicate")
+            src = str(alias.resolve()) if alias and alias_status != "broken" else None
+            digest = sha256_file(Path(src) / "SKILL.md") if src else None
+            owner = "footnote"
+            if alias is not None and alias_status != "broken":
+                owner = link_owner(alias, repo_root)
+            if not statuses:
+                if plugin is not None and name not in plugin_names and alias is None:
+                    statuses.append("absent-from-plugin")
+                else:
+                    statuses.append("ok")
+            status = statuses[0]
+            note = "; ".join(filter(None, [alias_note] + statuses[1:]))
+            rows.append(Entry(name, str(alias) if alias else None, src, digest, owner, status, note))
     return rows
 
 

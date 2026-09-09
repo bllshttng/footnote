@@ -1,7 +1,7 @@
 """Integration tests for skill discovery membership and source selection.
 
-x-cf6d: one intentional skill source per harness; unrelated local exposure
-curated without deleting shared sources; discovery metadata diagnosed.
+One intentional skill source per harness; unrelated local exposure curated
+without deleting shared sources; discovery metadata diagnosed.
 
 AC1-HP: installed plugin + aliases -> exactly one selected source, named.
 AC1-EDGE: development checkout, no plugin, setup twice -> usable, idempotent.
@@ -228,6 +228,13 @@ def test_metadata_problems_name_exact_reasons() -> None:
         placeholder.mkdir()
         (placeholder / "SKILL.md").write_text("---\nname: ingest-template\ndescription: TODO fill this in\n---\n")
         assert any("placeholder" in p for p in sd.metadata_problems(placeholder / "SKILL.md", "ingest-template"))
+
+        # Only a standalone todo/tbd reads as a placeholder; a word that
+        # merely contains the letters ("autodocs") stays clean.
+        autodocs = Path(td) / "autodocs-skill"
+        autodocs.mkdir()
+        (autodocs / "SKILL.md").write_text("---\nname: autodocs-skill\ndescription: Opinionated autodocs generator\n---\n")
+        assert sd.metadata_problems(autodocs / "SKILL.md", "autodocs-skill") == []
 
 
 def test_doctor_reports_unusable_metadata_not_ready(repo: Path, env: dict) -> None:

@@ -165,7 +165,7 @@ max_iterations = 40
 provider = "gemini"
 # provider: coderabbit | claude | codex
 EOF
-  echo "Created $SETTINGS_FILE — edit directly or run /setup"
+  echo "Created $SETTINGS_FILE - edit directly or run /setup"
 fi
 
 case "$PROVIDER" in
