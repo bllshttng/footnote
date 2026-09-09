@@ -153,7 +153,7 @@ def test_load_gate_decision_admits_a_box_the_fleet_does_not_own(monkeypatch):
 
 def test_check_load_ceiling_refuses_over_the_shared_decision(monkeypatch, capsys):
     """The gate keeps refusing through the same decision the preview reads:
-    one implementation, two consumers, no threshold table to drift (x-5e6f)."""
+    one implementation, two consumers, no threshold table to drift."""
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
     monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
@@ -1087,7 +1087,7 @@ class TestRunGate:
         ) in capsys.readouterr().err
 
     def test_operator_origin_unstamped_row_is_silent(self, monkeypatch, capsys):
-        """x-5e6f: a hand-started session can never carry a spawn-time provider
+        """A hand-started session can never carry a spawn-time provider
         stamp; warning about it on every gate read taught nobody anything and
         rode stderr ahead of real refusals."""
         row = AgentEntry(

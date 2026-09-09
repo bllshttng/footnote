@@ -200,7 +200,7 @@ def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
 
 
 def test_load_gate_row_reports_refuse_from_the_shared_decision(monkeypatch):
-    """x-5e6f: the load row renders the gate's own verdict with its numbers.
+    """The load row renders the gate's own verdict with its numbers.
     The old "over trigger; attribution decides" text never predicted an exit
     79, and a king was sent looking at the wrong symptom because of it."""
     from types import SimpleNamespace
@@ -234,7 +234,7 @@ def test_load_gate_row_reports_refuse_from_the_shared_decision(monkeypatch):
 
 
 def test_preview_stops_when_the_load_gate_would_refuse(monkeypatch):
-    """x-5e6f: the dry run passed every gate at load 255/120 while the real
+    """The dry run passed every gate at load 255/120 while the real
     spawn exited 79. The preview now reads the gate's own decision."""
     _lane_fill_world(monkeypatch, [_ready_node("x-win")])
     from fno.agents import spawn_gate

@@ -392,7 +392,7 @@ def test_spawn_failure_releases_reservation(iso, monkeypatch):
 
 
 def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
-    """x-5e6f: the recorded error for a failed dispatch must contain the
+    """The recorded error for a failed dispatch must contain the
     refusal. Head-capture of a stderr whose head is advisory recorded the
     warning and cut the refusal; the budgets made it permanent. Every assert
     below fails against the old error[:200]/error[:120] capture."""

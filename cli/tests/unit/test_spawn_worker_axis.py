@@ -228,7 +228,7 @@ def test_codex_target_spelling_survives_an_unreadable_verb_roster(monkeypatch):
     )
 
 
-# --- the failure capture (x-5e6f) -------------------------------------------
+# --- the failure capture ----------------------------------------------------
 
 
 def test_failed_spawn_captures_the_refusal_tail(monkeypatch):

@@ -1346,8 +1346,8 @@ _LOAD_REFUSAL_REASONS = frozenset(
 
 def load_gate_decision(
     max_load_per_cpu: float,
-    hard_max_load_per_cpu: float = 40.0,
     max_fleet_cpu_share: float = 0.5,
+    hard_max_load_per_cpu: float = 40.0,
     prefetched: object = _NOT_PREFETCHED,
 ) -> Optional[tuple[str, str, dict]]:
     """What the load gate would decide, as one (reason, message, event) triple.
@@ -1481,8 +1481,8 @@ def _check_load_ceiling(
     """
     decision = load_gate_decision(
         max_load_per_cpu,
-        hard_max_load_per_cpu,
         max_fleet_cpu_share,
+        hard_max_load_per_cpu,
         prefetched,
     )
     if decision is None:
