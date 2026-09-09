@@ -84,7 +84,7 @@ Pane, parent and king are a live lookup against the roster, joined on the exact 
 
 The deep link is this view's footer ACTION, not the gesture that opened it. Inspecting attaches and resumes nothing on its own.
 
-Enter resolves from the same evidence the footer named. For a row seated in a pane it sends `FocusPane`. Pane ids allocate from zero, so pane 0 is a real seat and the check is an equality against the `Option`. For a live paneless row it sends `AttachAgent` on portal 0. For a `session_reaped` row it hands over the receipt's verbatim resume line, because a removal is a normal outcome with a recovery path rather than an error.
+Enter resolves from the same evidence the footer named. For a row seated in a pane it sends `FocusPane`. Pane ids allocate from zero, so pane 0 is a real seat and the check is an equality against the `Option`. For a live paneless row it sends `AttachAgent` on portal 0. For a `session_reaped` row it hands over the receipt's verbatim resume line. A removal is a normal outcome with a recovery path, not an error.
 
 ## Deploy rule
 
