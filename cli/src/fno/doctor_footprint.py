@@ -216,15 +216,56 @@ class AttributionGap:
 
 
 def _pidless_route(row: Any) -> str | None:
-    """Name the route that can resolve this pidless row, or None.
+    """Name the bg-socket route that can resolve this pidless row, or None.
 
-    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id, while a codex first-8 collides, so its handle has no accepting route here.
+    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id. A codex row's route is the rollout-fd oracle, which answers through a different map and is partitioned separately in `_live_root_pids`; returning None here sends it there, not to the gap.
     """
     if getattr(row, "short_id", None):
         return "bg-socket"
     if str(getattr(row, "harness", "")) == "claude" and getattr(row, "harness_session_id", None):
         return "bg-socket"
     return None
+
+
+def _row_is_advancing(row: Any) -> bool:
+    """Whether this row carries positive transcript evidence of advancing.
+
+    x-9958 Task 2. The one derivation is `classify_progress` - `advancing` on
+    `transcript-turn` means a working/watching reading whose measured
+    transcript age is inside STALE_ATTENTION_S - so this asks the shared
+    classifier over the row's own identity instead of growing a second
+    progress reader. Never raises: an unreadable probe proves nothing and the
+    row stays judged by the witness, which fails closed to a gap.
+    """
+    try:
+        from types import SimpleNamespace
+
+        from fno.agents import session_truth
+        from fno.agents.reachability import ADVANCING, classify_progress, classify_reachability
+
+        known = SimpleNamespace(
+            agent=getattr(row, "harness", None),
+            session_id=getattr(row, "harness_session_id", None),
+            cwd=getattr(row, "cwd", "") or "",
+        )
+        truth = session_truth.resolve_session_truth(
+            str(getattr(row, "name", "") or ""),
+            resolve=lambda _handle: (known, []),
+        )
+        state = truth.get("state")
+        age_s = truth.get("last_activity_age_s")
+        reach = classify_reachability(truth_state=state, age_s=age_s, falsifier=None)
+        prog = classify_progress(
+            truth_state=state,
+            reachability=reach.verdict,
+            observed_model=truth.get("observed_model"),
+            harness=getattr(row, "harness", None),
+            route_settings_path=getattr(row, "route_settings_path", None),
+            last_activity_age_s=age_s,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable probe never voids or clears
+        return False
+    return prog.verdict == ADVANCING
 
 
 def _claim_witness(name: str) -> str | None:
@@ -352,10 +393,59 @@ def _live_root_pids(
         unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
         routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
+        # x-9958 Task 3: a codex thread row carries a session id whose rollout
+        # fd names its process, so it has an accepting route even though the
+        # claude short-id oracle cannot answer for it. Resolved rows attribute
+        # like any root; unresolved ones fall back to the gap path below.
+        codex_keys = [
+            (str(getattr(row, "harness_session_id", "") or ""), row)
+            for row in unrouted_rows
+            if str(getattr(row, "harness", "")) == "codex"
+            and getattr(row, "harness_session_id", None)
+        ]
+        resolved_codex_ids: set[int] = set()
+        if codex_keys:
+            codex_pids: dict[str, int] = {}
+            if deadline is None or time.monotonic() < deadline:
+                from fno.agents.session_procs import codex_rollout_pid_map
+
+                codex_pids = codex_rollout_pid_map(
+                    {sid for sid, _row in codex_keys},
+                    timeout=(
+                        5.0
+                        if deadline is None
+                        else max(0.01, deadline - time.monotonic())
+                    ),
+                )
+            for sid, row in codex_keys:
+                pid = codex_pids.get(sid)
+                if pid is None:
+                    continue  # an unanswered oracle proves nothing: gap path
+                root_live = _root_pid_is_live(pid, None)
+                if root_live is None:
+                    return roots, "worker root liveness unavailable"
+                if not root_live:
+                    return roots, "worker root liveness unavailable"
+                roots.add(pid)
+                resolved_codex_ids.add(id(row))
         # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
         # only while a witness says the cost is real; past it all stay gaps.
+        # x-9958 Task 2: a row showing positive transcript progress is a live
+        # worker whose pid no route can see, never an unattributable process.
+        # It drops out of the gap set and the reading stands as an undercount:
+        # an undercount is recoverable, a void is not. One live codex thread
+        # otherwise forced every king's spawn gate onto raw machine load for
+        # the worker's whole life (fleet 33 percent, refused at raw 121.6 vs
+        # the 120.0 trigger).
+        unresolved_rows = [
+            row for row in unrouted_rows if id(row) not in resolved_codex_ids
+        ]
+        advancing_ids = {id(row) for row in unresolved_rows if _row_is_advancing(row)}
         fleet_unrouted = [
-            row for row in unrouted_rows if _unrouted_row_costs_fleet(row, deadline)
+            row
+            for row in unresolved_rows
+            if id(row) not in advancing_ids
+            and _unrouted_row_costs_fleet(row, deadline)
         ]
         gap_labels = sorted(
             f"{getattr(row, 'name', '?')} "
