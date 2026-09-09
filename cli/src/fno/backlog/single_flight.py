@@ -1,12 +1,9 @@
 """One in flight per backlog arm scope (advance, reconcile).
 
-A run slower than the arms' fixed interval stacked the next fire on top of
-itself, each copy making the store slower for the rest. The latch lives
-inside the commands, so every parent is covered: daemon drains, merge paths,
-groom legs, SessionStart hooks, orphans. A second invocation for an in-flight
-scope reports `held` and exits 0: a skipped tick is correct behavior when the
-previous tick is still running. The instrument is a claim, the same store
-`fno agents claim status` reads.
+The lock is native (`fno-agents flight-acquire` / `flight-release`); this
+module is the shim the two backlog verbs call. A second invocation for an
+in-flight scope reports `held` and exits 0: a skipped tick is correct
+behavior when the previous tick is still running.
 """
 
 from __future__ import annotations
@@ -14,24 +11,15 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import time
+import subprocess
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 import typer
 
-from fno.claims import (
-    ClaimHeldByOther,
-    acquire_claim,
-    claim_status,
-    force_release_claim,
-    release_claim,
-)
-from fno.claims.io import claim_path, claims_dir, claims_root_for, encode_key, read_claim_file
-from fno.claims.core import RECOVERY_LOCK_SUFFIX
-from fno.mutex import acquire_dir_mutex, release_dir_mutex
+from fno.claims.io import claims_root_for
+from fno.rust_binary import resolve_binary
 
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
 FLIGHT_TTL_MS = 30 * 60 * 1000
@@ -63,7 +51,10 @@ class FlightGate:
 
     def release(self) -> None:
         try:
-            release_claim(self.key, self.holder, root=claims_root_for(self.key))
+            _flight_verb(
+                "flight-release",
+                [self.key, "--holder", self.holder, "--claims-root", str(claims_root_for(self.key))],
+            )
         except Exception:
             pass  # the TTL plus the pid probe retire it; never mask the work's outcome
 
@@ -81,63 +72,46 @@ class FlightHeld:
         return {"held": True, "requests": self.requests, "holder": self.holder, "held_for_s": self.held_for_s}
 
 
-def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
-    """Take the gate, or report it held. The holder is unique per invocation:
-    an identical holder reads as an idempotent re-acquire."""
-    root = claims_root_for(key)
+def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld | None:
+    """Take the gate, or report it held; None when the lock itself is
+    unavailable (no fno-agents binary, or one older than the verb): the
+    caller proceeds ungated, the pre-gate behavior. The holder is unique per
+    invocation, and the RECLAIM of a dead holder is native: the holder here
+    is a one-shot subprocess, so the transcript-liveness basis the claims
+    layer prefers for node claims is the wrong policy and the verb probes the
+    pid itself."""
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            f"warning: single-flight gate unavailable for {key} (no fno-agents binary); "
+            "proceeding ungated",
+            err=True,
+        )
+        return None
     holder = f"single-flight:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    try:
-        acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
+    receipt = _flight_verb("flight-acquire", [
+        key,
+        "--scope", scope,
+        "--ttl-ms", str(FLIGHT_TTL_MS),
+        "--holder", holder,
+        "--pid", str(os.getpid()),
+        "--claims-root", str(claims_root_for(key)),
+    ])
+    if receipt is None:
+        return None
+    if receipt.get("acquired"):
         return FlightGate(key=key, holder=holder)
-    except ClaimHeldByOther:
-        pass
-    dead_holder = _dead_holder_id(key)
-    if dead_holder is not None:
-        # A killed run must not hold the scope shut for the TTL. The drop is
-        # double-checked under the claim's own recovery mutex (the same one
-        # acquire_claim's stale recovery takes), so two waiters that saw the
-        # same dead holder cannot drop a live replacement's claim: whoever
-        # wins the mutex re-reads, and a changed or live holder stops the
-        # release. A new acquirer racing in afterwards simply wins the fresh
-        # create and this invocation reports held against it.
-        cpath = claim_path(key, root=root)
-        token = None
-        still_dead = False
-        try:
-            token = acquire_dir_mutex(cpath.with_name(cpath.name + RECOVERY_LOCK_SUFFIX), 5.0, poll_s=0.02)
-            if token is not None:
-                still_dead = (
-                    read_claim_file(cpath).holder == dead_holder
-                    and _dead_holder_id(key) == dead_holder
-                )
-        except Exception:
-            still_dead = False
-        finally:
-            if token is not None:
-                release_dir_mutex(cpath.with_name(cpath.name + RECOVERY_LOCK_SUFFIX), token)
-        if still_dead:
-            force_release_claim(
-                key, "single-flight holder process is gone", root=root,
-                holding_recovery_lock=True,
-            )
-            try:
-                acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
-                return FlightGate(key=key, holder=holder)
-            except ClaimHeldByOther:
-                pass
-    status = claim_status(key, root=root)
-    acquired_at = status.get("acquired_at") or 0
     return FlightHeld(
         key=key,
-        holder=str(status.get("holder") or "unknown"),
-        held_for_s=max(0, int(time.time() * 1000 - acquired_at) // 1000),
-        requests=_count_held_request(key),
+        holder=str(receipt.get("holder") or "unknown"),
+        held_for_s=int(receipt.get("held_for_s") or 0),
+        requests=int(receipt.get("requests") or 0),
     )
 
 
 def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | None:
-    """Fail open: a gate that cannot run returns None and the caller proceeds
-    ungated. The verbs this guards promise "always exits 0"."""
+    """acquire_flight, fail-open on the unexpected: a raise here would break
+    the verbs this guards, and their contract is "always exits 0"."""
     try:
         return acquire_flight(key, scope=scope)
     except Exception as exc:  # noqa: BLE001 - fail open, never break the verb
@@ -145,39 +119,26 @@ def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | No
         return None
 
 
-def _dead_holder_id(key: str) -> Optional[str]:
-    """The holder string when its recorded pid is provably dead, else None.
-    The claims layer reads a holder live through its session transcript,
-    right for a node claim, wrong for a gate on a subprocess: here the holder
-    pid IS the holder. Unreadable probes alive; the TTL retires it."""
-    try:
-        claim = read_claim_file(claim_path(key, root=claims_root_for(key)))
-    except Exception:
-        return None
-    pid = claim.pid
-    if not pid:
+def _flight_verb(verb: str, argv: list[str]) -> Optional[dict]:
+    """Run one binary-direct flight verb and parse its JSON receipt; None on
+    any failure (an old binary without the verb, spawn trouble, a gate-side
+    error), which the caller treats as fail-open."""
+    binary = resolve_binary()
+    if binary is None:
         return None
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return claim.holder
-    except OSError:
+        proc = subprocess.run(
+            [str(binary), verb, *argv],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    return None
-
-
-def _count_held_request(key: str) -> int:
-    """Append one held request and return the running count (report-only;
-    the read-back can over-count by one; a lost write returns 0)."""
+    if proc.returncode != 0:
+        return None
     try:
-        path = claims_dir(claims_root_for(key)) / f"{encode_key(key)}.held-requests"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(f"{int(time.time() * 1000)} {os.getpid()}\n")
-        with open(path, encoding="utf-8") as fh:
-            return sum(1 for line in fh if line.strip())
-    except OSError:
-        return 0
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
 
 
 def report_held(held: FlightHeld, verb: str, *, json_out: bool, extra: Optional[dict] = None) -> None:

@@ -9370,11 +9370,9 @@ def cmd_advance(
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        # One in flight per mission (x-ef2c): the gate lives in
-        # single_flight.advance_flight_scope. The key uses the CANONICAL id,
-        # so `--epic <short>` and `--epic <full>` are one scope, not two.
-        # --stop is a control action, not a converge, and never queues behind
-        # its own drain.
+        # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
+        # both spellings of an epic are one scope. --stop is a control action
+        # and never queues behind its own drain.
         canonical_epic = epic
         try:
             from fno.graph._intake import _find_node
