@@ -148,6 +148,26 @@ RC=$?
   && pass "oversized FAQ payload is truncated to the byte budget" \
   || fail "oversized-FAQ rc=$RC payload=${OUT:0:200}"
 
+# 7d. The truncation cut is UTF-8-safe: a multi-byte character straddling the
+#     4000-byte boundary must not survive as a raw split byte. A raw `head -c`
+#     cut there landed a lone/invalid UTF-8 byte in the JSON payload.
+python3 -c "
+prefix = 'Q: big?\nA: '
+s = prefix + ('x' * 3988) + (chr(0xe9) * 20) + '\n---\n'
+import sys
+sys.stdout.write(s)
+" > "$KING_FAQ_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+# A raw byte-boundary cut through this exact character lands a lone/invalid
+# UTF-8 byte that json.dumps can only represent as an escaped lone surrogate
+# (\udcXX, the D800-DFFF range) - grep for that escape rather than just
+# json-parsing, since Python's own json.load tolerates a lone surrogate and
+# would report the payload valid either way.
+[[ $RC -eq 0 ]] && ! printf '%s' "$OUT" | grep -qE '\\ud[89a-f][0-9a-f]{2}' \
+  && pass "UTF-8-straddling truncation carries no lone-surrogate escape" \
+  || fail "UTF-8-straddling truncation rc=$RC leaked a lone surrogate: ${OUT:0:200}"
+
 # 7. Byte budget: the brief is paid on every compaction of every king.
 BRIEF_BYTES="$(wc -c < "$BRIEF" 2>/dev/null | tr -d ' ')"
 [[ -n "$BRIEF_BYTES" && "$BRIEF_BYTES" -le "$BRIEF_MAX_BYTES" ]] \
