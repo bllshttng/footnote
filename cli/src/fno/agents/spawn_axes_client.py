@@ -1,7 +1,6 @@
-"""Transport for the ``spawn-axes`` verb: the route-slot shape. One JSON
-payload in, one parsed JSON answer out. A missing, failing or malformed
-answer raises :class:`SpawnAxesUnavailable` - a named refusal, never a
-silent spawn, exactly the posture route-slot set."""
+"""Transport for the ``spawn-axes`` verb: one JSON payload in, one parsed
+answer out; a missing or failing owner raises SpawnAxesUnavailable - a
+named refusal, never a silent spawn."""
 
 from __future__ import annotations
 

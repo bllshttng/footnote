@@ -1998,8 +1998,7 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
-# The routing schema blocks live in routing_blocks (the config hub is over
-# the file budget and shrink-only); re-exported for every reader.
+# The routing schema block lives in routing_blocks (the hub is shrink-only).
 from fno.config.routing_blocks import RoutingBlock as RoutingBlock  # noqa: E402
 
 

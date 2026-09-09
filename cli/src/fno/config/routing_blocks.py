@@ -1,9 +1,5 @@
-"""The routing schema block: the routing block itself.
-
-The config hub (``fno.config``) is over the file budget and shrink-only;
-this lives here by the same ruling that moved the spawn-defaults blocks to
-``spawn_blocks``. Re-exported from ``fno.config`` for every reader.
-"""
+"""The routing schema block; the config hub is shrink-only. Re-exported
+from ``fno.config`` for every reader."""
 
 from typing import Any
 

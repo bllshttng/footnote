@@ -338,8 +338,8 @@ def routing_for(node: Optional[dict]) -> dict:
         return {"chain": [], "candidate": None, "inputs": {}, "routing": "unarmed", "skipped": []}
     from fno import route_resolve
 
-    # An unplanned node bills the planning tier at the spawn seam, so the floor
-    # is applied here too or the two dispatch doors price one node differently.
+    # An unplanned node bills planning at the spawn seam; the preview
+    # reports the same floor.
     role = None if (node.get("plan_path") or "").strip() else "planning"
     inputs = {
         "difficulty": node.get("difficulty"),

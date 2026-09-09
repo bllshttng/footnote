@@ -55,7 +55,7 @@ def _opencode_serve_spawn(
     argv = [
         str(binary),
         "spawn",
-        # Straight after the verb so it never lands inside the fence below.
+        # Straight after the verb, never inside the fence below.
         _defaults_applied_marker(),
         "--name",
         name,
