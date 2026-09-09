@@ -2014,6 +2014,8 @@ pub struct MutateOutcome {
     /// that preserves them named.
     pub dropped: usize,
     pub backup: Option<String>,
+    /// Best-effort shadow failures are visible without failing the JSON publish.
+    pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
@@ -2104,6 +2106,8 @@ pub fn locked_mutate(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
+    let mut shadow_before = pre_normalized.clone();
+    canonicalize_entries(&mut shadow_before);
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2233,11 +2237,15 @@ pub fn locked_mutate(
         use sha2::Digest as _;
         format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
     };
+    let shadow_warning = crate::graph_sqlite::shadow_sync(path, &shadow_before, &entries, &version)
+        .err()
+        .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
 
     Ok(MutateOutcome {
         entries,
         dropped,
         backup: backup.map(|p| p.display().to_string()),
+        shadow_warning,
         closure_releases,
         is_canonical,
         version,

@@ -79,6 +79,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-st
 # (a JSON string field) or WS control frames; base64 keeps the transport
 # text-safe without a bespoke escape scheme.
 base64 = "0.22"
+rusqlite = { version = "0.37", features = ["bundled"] }
 # Drive (Wave 4): WebSocket upgrade on the supervisor socket after the
 # `agent.drive` JSON-RPC ack (LD21: tokio-tungstenite standard handshake).
 tokio-tungstenite = "0.29"

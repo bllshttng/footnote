@@ -1225,6 +1225,7 @@ fn outcome_json(outcome: &graph_store::MutateOutcome) -> Value {
         "entries": outcome.entries,
         "dropped": outcome.dropped,
         "backup": outcome.backup,
+        "shadow_warning": outcome.shadow_warning,
         "closure_releases": outcome
             .closure_releases
             .iter()

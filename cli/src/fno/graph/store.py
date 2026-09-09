@@ -1117,6 +1117,8 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     path = Path(path)
     dropped = outcome["dropped"]
     backup = outcome["backup"]
+    if warning := outcome.get("shadow_warning"):
+        print(f"Warning: {warning}", file=sys.stderr)
     if dropped > 0:
         where = (
             f"prior content is preserved in {Path(backup).name}"
