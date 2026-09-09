@@ -994,9 +994,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
     pre = None
     if not force and installed_bin is not None and subtree is not None:
-        pre = _component_verdict(
-            source, subtree, installed_bin.parent, installed_bin, include_mux=False
-        )
+        pre = _component_verdict(source, subtree, installed_bin.parent, installed_bin,
+                                 include_mux=False)
     if pre is not None and pre.get("converged"):
         typer.echo(
             f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]}"
