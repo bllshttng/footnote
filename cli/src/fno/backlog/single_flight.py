@@ -17,12 +17,21 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 import typer
 
-from fno.claims import ClaimHeldByOther, acquire_claim, claim_status, force_release_claim, release_claim
+from fno.claims import (
+    ClaimHeldByOther,
+    acquire_claim,
+    claim_status,
+    force_release_claim,
+    release_claim,
+)
 from fno.claims.io import claim_path, claims_dir, claims_root_for, encode_key, read_claim_file
+from fno.claims.core import RECOVERY_LOCK_SUFFIX
+from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
 FLIGHT_TTL_MS = 30 * 60 * 1000
@@ -34,13 +43,14 @@ def advance_flight_key(epic: Optional[str]) -> str:
     return f"flight:backlog-advance:epic:{epic}" if epic else "flight:backlog-advance"
 
 
-def reconcile_flight_key(*, node: Optional[str], pr_number: Optional[int]) -> str:
-    """A full sweep owns the graph; a --pr-number/--node pass owns one PR's
-    closure and never queues behind an unrelated sweep."""
+def reconcile_flight_key(*, node: Optional[str], pr_number: Optional[int], repo: Optional[str] = None) -> str:
+    """A full sweep owns the graph; a --pr-number pass owns ONE repo's PR (two
+    repos can carry the same number); a --node pass owns one node id, which is
+    globally unique."""
     if node:
         return f"flight:backlog-reconcile:node:{node}"
     if pr_number is not None:
-        return f"flight:backlog-reconcile:pr:{pr_number}"
+        return f"flight:backlog-reconcile:pr:{repo or 'unresolved'}:{pr_number}"
     return "flight:backlog-reconcile"
 
 
@@ -81,15 +91,37 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
         return FlightGate(key=key, holder=holder)
     except ClaimHeldByOther:
         pass
-    if _holder_process_is_dead(key):
-        # A killed run must not hold the scope shut for the TTL; a new
-        # acquirer may win the dropped claim, and then this one reports held.
-        force_release_claim(key, "single-flight holder process is gone", root=root)
+    dead_holder = _dead_holder_id(key)
+    if dead_holder is not None:
+        # A killed run must not hold the scope shut for the TTL. The drop is
+        # double-checked under the claim's own recovery mutex (the same one
+        # acquire_claim's stale recovery takes), so two waiters that saw the
+        # same dead holder cannot drop a live replacement's claim: whoever
+        # wins the mutex re-reads, and a changed or live holder stops the
+        # release. A new acquirer racing in afterwards simply wins the fresh
+        # create and this invocation reports held against it.
+        cpath = claim_path(key, root=root)
+        token = None
+        still_dead = False
         try:
-            acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
-            return FlightGate(key=key, holder=holder)
-        except ClaimHeldByOther:
-            pass
+            token = acquire_dir_mutex(cpath.with_name(cpath.name + RECOVERY_LOCK_SUFFIX), 5.0, poll_s=0.02)
+            if token is not None:
+                still_dead = (
+                    read_claim_file(cpath).holder == dead_holder
+                    and _dead_holder_id(key) == dead_holder
+                )
+        except Exception:
+            still_dead = False
+        finally:
+            if token is not None:
+                release_dir_mutex(cpath.with_name(cpath.name + RECOVERY_LOCK_SUFFIX), token)
+        if still_dead:
+            force_release_claim(key, "single-flight holder process is gone", root=root)
+            try:
+                acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
+                return FlightGate(key=key, holder=holder)
+            except ClaimHeldByOther:
+                pass
     status = claim_status(key, root=root)
     acquired_at = status.get("acquired_at") or 0
     return FlightHeld(
@@ -110,24 +142,25 @@ def acquire_flight_open(key: str, *, scope: str) -> FlightGate | FlightHeld | No
         return None
 
 
-def _holder_process_is_dead(key: str) -> bool:
-    """Probe the holder pid directly: the claims layer reads a holder live
-    through its session transcript, right for a node claim, wrong for a gate
-    on a subprocess. Unreadable probes alive; the TTL retires it."""
+def _dead_holder_id(key: str) -> Optional[str]:
+    """The holder string when its recorded pid is provably dead, else None.
+    The claims layer reads a holder live through its session transcript,
+    right for a node claim, wrong for a gate on a subprocess: here the holder
+    pid IS the holder. Unreadable probes alive; the TTL retires it."""
     try:
         claim = read_claim_file(claim_path(key, root=claims_root_for(key)))
     except Exception:
-        return False
+        return None
     pid = claim.pid
     if not pid:
-        return False
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return True
+        return claim.holder
     except OSError:
-        return False
-    return False
+        return None
+    return None
 
 
 def _count_held_request(key: str) -> int:
@@ -172,7 +205,7 @@ def advance_flight_scope(epic: Optional[str], *, json_out: bool) -> Iterator[boo
 
 
 def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_number: Optional[int],
-                   once: Callable[[], None]) -> None:
+                   repo: Optional[str] = None, once: Callable[[], None]) -> None:
     """cmd_reconcile's entry: the mutual-exclusion refusal (a bad invocation
     is refused even while the scope is held), the dry-run bypass (--dry-run
     mutates nothing and stays readable mid-sweep), then the gate."""
@@ -186,7 +219,11 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
     if dry_run:
         once()
         return
-    with _flight_scope(reconcile_flight_key(node=node, pr_number=pr_number), "reconcile",
+    if pr_number is not None and repo is None:
+        from fno.graph._reconcile import resolve_current_repo_slug
+
+        repo = resolve_current_repo_slug(str(Path.cwd())) or "unresolved"
+    with _flight_scope(reconcile_flight_key(node=node, pr_number=pr_number, repo=repo), "reconcile",
                        "backlog reconcile", json_out, None) as ok:
         if ok:
             once()

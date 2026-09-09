@@ -9371,9 +9371,21 @@ def cmd_advance(
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
         # One in flight per mission (x-ef2c): the gate lives in
-        # single_flight.advance_flight_scope. --stop is a control action, not
-        # a converge, and never queues behind its own drain.
-        scope_cm = nullcontext(True) if stop else advance_flight_scope(epic, json_out=json_out)
+        # single_flight.advance_flight_scope. The key uses the CANONICAL id,
+        # so `--epic <short>` and `--epic <full>` are one scope, not two.
+        # --stop is a control action, not a converge, and never queues behind
+        # its own drain.
+        canonical_epic = epic
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _epic_node = _find_node(read_graph(_graph_path()), epic)
+            if _epic_node and _epic_node.get("id"):
+                canonical_epic = _epic_node["id"]
+        except Exception:  # noqa: BLE001 - an unreadable graph keys on the raw arg
+            pass
+        scope_cm = nullcontext(True) if stop else advance_flight_scope(canonical_epic, json_out=json_out)
         with scope_cm as ok:
             if not ok:
                 return
