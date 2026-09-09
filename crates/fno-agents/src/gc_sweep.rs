@@ -2097,7 +2097,7 @@ mod tests {
             &|_| false,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
-            &|_| {},
+            &|_| None,
         )
     }
 
