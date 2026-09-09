@@ -1962,6 +1962,16 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
             let _ = std::fs::remove_file(old);
         }
     }
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for legacy in entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            {
+                let _ = std::fs::remove_file(legacy.path());
+            }
+        }
+    }
     Some(backup)
 }
 
@@ -2397,6 +2407,47 @@ mod tests {
     fn empty_containers_stay_inline_like_python() {
         let v = json!({"a": [], "b": {}});
         assert_eq!(to_python_json(&v), "{\n  \"a\": [],\n  \"b\": {}\n}");
+    }
+
+    #[test]
+    fn create_backup_prunes_legacy_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(&graph, b"current graph").unwrap();
+
+        let legacy_one = root.path().join("graph.json.bak.20240101T000000000000");
+        let legacy_two = root.path().join("graph.json.bak.20240102T000000000000");
+        std::fs::write(&legacy_one, b"legacy one").unwrap();
+        std::fs::write(&legacy_two, b"legacy two").unwrap();
+
+        let retained_dir = root.path().join("backups");
+        std::fs::create_dir(&retained_dir).unwrap();
+        let retained = retained_dir.join("graph.json.bak.retained");
+        std::fs::write(&retained, b"retained bytes").unwrap();
+        let unrelated = root.path().join("other.json.bak.20240101T000000000000");
+        std::fs::write(&unrelated, b"unrelated bytes").unwrap();
+
+        let legacy_count = || {
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("graph.json.bak.")
+                })
+                .count()
+        };
+        assert_eq!(legacy_count(), 2, "positive control for legacy siblings");
+
+        let created = create_backup(&graph).expect("new retained backup");
+
+        assert_eq!(legacy_count(), 0);
+        assert_eq!(created.parent(), Some(retained_dir.as_path()));
+        assert_eq!(std::fs::read(&created).unwrap(), b"current graph");
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained bytes");
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated bytes");
     }
 
     #[test]
