@@ -373,6 +373,17 @@ pub fn run_distress_scan(args: &[String]) -> i32 {
     0
 }
 
+/// `FNO_LOOPCHECK_FNO_BIN` is process-global; `cargo test` runs unit tests
+/// on multiple threads by default, so two tests mutating it concurrently
+/// (here and in loopcheck.rs) can hand each other's stub answer to the
+/// wrong call. Every test that sets this var holds this lock across the
+/// set/run/restore section.
+#[cfg(test)]
+pub(crate) fn fno_bin_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +653,7 @@ mod tests {
         // paths call: no `last_assistant_message` (the agy/opencode/codex
         // shape), so the transcript reader supplies the tag, and the caller's
         // harness lands on the envelope.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
@@ -709,6 +721,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         // control lives in THIS run: the tag-free variant is asserted
         // against the row the tagged fixture already proved it can write,
         // never as an absence on its own.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();
