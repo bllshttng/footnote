@@ -26,6 +26,19 @@ def dedupe_key(stalled_ids: "list[str]") -> str:
 MAX_LISTED_IDS = 20
 
 
+def _stalled_subject(stalled_ids: "list[str]") -> str:
+    """The shared "N board row(s) nothing is clearing: ..." clause, capped
+    at MAX_LISTED_IDS - used by both the operator question and the
+    presiding-king mail (x-3ecf)."""
+    ids = sorted(set(stalled_ids))
+    if not ids:
+        return "a board the king could not read"
+    shown = ", ".join(ids[:MAX_LISTED_IDS])
+    if len(ids) > MAX_LISTED_IDS:
+        shown += f", and {len(ids) - MAX_LISTED_IDS} more"
+    return f"{len(ids)} board row(s) nothing is clearing: {shown}"
+
+
 def question_text(
     stalled_ids: "list[str]",
     key: str,
@@ -46,14 +59,7 @@ def question_text(
     telling the operator a live king "has exited" hands it the double-crown
     recommendation. ``None`` (unreadable) reads as dead, naming the reason.
     """
-    ids = sorted(set(stalled_ids))
-    if ids:
-        shown = ", ".join(ids[:MAX_LISTED_IDS])
-        if len(ids) > MAX_LISTED_IDS:
-            shown += f", and {len(ids) - MAX_LISTED_IDS} more"
-        subject = f"{len(ids)} board row(s) nothing is clearing: {shown}"
-    else:
-        subject = "a board the king could not read"
+    subject = _stalled_subject(stalled_ids)
     if live:
         closing = (
             "It is still reigning and holding these rows, so decide whether to "
@@ -174,11 +180,7 @@ def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> b
     fno_bin = shutil.which("fno")
     if not fno_bin:
         return False
-    ids = sorted(set(stalled_ids))
-    shown = ", ".join(ids[:MAX_LISTED_IDS]) if ids else "a board it could not read"
-    if len(ids) > MAX_LISTED_IDS:
-        shown += f", and {len(ids) - MAX_LISTED_IDS} more"
-    subject = f"{len(ids)} board row(s) nothing is clearing: {shown}" if ids else shown
+    subject = _stalled_subject(stalled_ids)
     message = (
         f"A crown under yours stopped on {subject}. Reason given: {reason}. "
         "It presides over territory yours contains - check on it before this reaches the operator."
