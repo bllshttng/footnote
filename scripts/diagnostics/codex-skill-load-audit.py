@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import tempfile
+from pathlib import Path
 
 SKILL_MSG = re.compile(r"<skill>\s*<name>([a-zA-Z0-9:_-]+)</name>")
 SKILL_PATH = re.compile(r"skills/[a-z0-9-]+/SKILL\.md")
@@ -167,16 +168,69 @@ def self_check():
     return failures
 
 
+def discovery(repo, skills_root, plugin_cache):
+    """Compare actually exposed names and resolved content per canonical skill.
+
+    Distinguishes the three surfaces a name can load from: the installed
+    plugin's cache copy (a generated distribution bundle), a project alias
+    symlink (resolves to source), and the source skills/ tree itself. A
+    stale cache is named with its digest gap and the supported repair;
+    a private cache is never repaired here (docs/HARNESSES.md).
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    import skill_discovery as sd
+
+    repo, skills_root, plugin_cache = Path(repo), Path(skills_root), Path(plugin_cache)
+    plugin = sd.find_installed_plugin(plugin_cache.expanduser())
+    sources = sd.source_skills(repo)
+    rows = sd.inventory(repo, skills_root, plugin)
+    cache_digs: dict[str, str] = {}
+    if plugin is not None:
+        for p in sorted(plugin.skills_dir.iterdir()):
+            if (p / "SKILL.md").is_file():
+                cache_digs[p.name] = sd.sha256_file(p / "SKILL.md") or "-"
+    print(f"repo: {repo}")
+    print(f"plugin: {plugin.path if plugin else 'none'}")
+    print(f"{'name':<22} {'verdict':<18} {'source-digest':<18} loaded-from")
+    for r in rows:
+        cache_dig = cache_digs.get(r.name)
+        if r.name not in sources:
+            verdict, loaded = "plugin-only", str(plugin.skills_dir / r.name) if plugin else "-"
+        elif plugin and cache_dig is not None and cache_dig != r.digest and r.owner == "footnote":
+            verdict = "stale-cache"
+            loaded = f"{plugin.skills_dir / r.name} (cache {cache_dig} != source {r.digest}); repair: reinstall via the supported flow (docs/HARNESSES.md)"
+        elif r.alias:
+            verdict = "one-source(alias)" if r.status == "ok" else r.status
+            loaded = f"{r.source} via {r.alias}"
+        elif plugin and r.name in cache_digs:
+            verdict, loaded = "one-source(plugin)", str(plugin.skills_dir / r.name)
+        else:
+            verdict, loaded = "unexposed", "-"
+        print(f"{r.name:<22} {verdict:<18} {r.digest or '-':<18} {loaded}")
+    print()
+    print("other harness discovery (claude, opencode, ...): unmeasured - this audit reads codex surfaces only")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="*", help="rollout .jsonl files (overrides --date)")
     ap.add_argument("--date", help="YYYY-MM-DD; scans ~/.codex/sessions/YYYY/MM/DD/")
     ap.add_argument("--hour-from", type=int, default=0, help="only files at/after this local hour")
     ap.add_argument("--self-check", action="store_true", help="run synthetic classifier checks")
+    ap.add_argument("--discovery", action="store_true", help="compare exposed skill names and content against source")
+    ap.add_argument("--repo", help="repository root whose skills/ tree is the source of truth")
+    ap.add_argument("--skills-root", help="project discovery root holding the alias links")
+    ap.add_argument("--plugin-cache", default="~/.codex/plugins/cache", help="codex plugin cache root (read-only)")
     args = ap.parse_args()
 
     if args.self_check:
         sys.exit(1 if self_check() else 0)
+
+    if args.discovery:
+        if not (args.repo and args.skills_root):
+            ap.error("--discovery needs --repo and --skills-root")
+        discovery(args.repo, args.skills_root, args.plugin_cache)
+        return
 
     if args.files:
         paths = args.files

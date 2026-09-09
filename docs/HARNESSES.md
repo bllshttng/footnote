@@ -91,6 +91,18 @@ agy 1.1.16 stages installed plugins at `~/.gemini/config/plugins/<name>/`, not t
 
 The root `plugin.json` validates against a published schema with `additionalProperties: false` over `name` and `description`, so the manifest can carry no version and no permissions block; permissions live only in `~/.gemini/antigravity-cli/settings.json`, and `scripts/release/sync-version.sh` accordingly leaves the root manifest out of `JSON_MANIFESTS` while tracking every other release manifest.
 
+## Codex skill discovery
+
+Codex reads project skills from one discovery root (default `.agents/skills`, recorded in `.fno/codex-skills-root`) and reads the installed plugin from `~/.codex/plugins/cache/footnote/fno/<version>/`. Both advertise the same canonical skill names, so exactly one of them must be the selected source per name; `scripts/setup.sh --provider codex` enforces that choice and `scripts/doctor.sh` audits it through the same engine (`scripts/lib/skill_discovery.py`).
+
+Setup resolves the mode from `--skills-source`: `auto` (default) picks the installed plugin when a usable one is present and development aliases otherwise; `installed` makes the plugin the single source and reports any source skill the plugin does not ship as a gap; `development` links `skills/*` as `plugin--fno--<name>` aliases and prints the source tree and revision. `--skills-root` still overrides the discovery root, and a bootstrap without the plugin keeps working.
+
+Setup also curates the root: symlinks pointing outside this repository are removed with a printed restore line, while real directories, links into `skills/`, and the explicit growth-studio dependencies (today: none, the pack names no foreign skill) are preserved. Shared sources are never deleted; curation removes only this project's exposure.
+
+Doctor reports `broken` (dangling link), `stale` (link target has no `SKILL.md`), `duplicate` (name exposed by both plugin and alias) as failures, and `unavailable` (malformed YAML, empty or placeholder description) as a warning whose fix belongs to the owning project. `--inventory` prints every entry with alias path, resolved source, and content digest. The full-metadata checks need a `python3` with pyyaml; set `FNO_PYTHON` to an interpreter that has it.
+
+`python3 scripts/diagnostics/codex-skill-load-audit.py --discovery --repo . --skills-root .agents/skills` compares actually exposed names and resolved content per skill, distinguishes source files from the plugin's generated distribution bundle, and names a stale cache with its digest gap and the supported repair. It covers codex only; other harness discovery is reported as unmeasured. A stale cache is repaired by reinstalling the plugin through its supported flow, never by editing the private plugin cache in place. Removed links restore with the `ln -sfn` lines setup printed, or by rerunning setup with `--skills-source development`.
+
 ## Official CLI documentation
 
 | CLI | Docs |
