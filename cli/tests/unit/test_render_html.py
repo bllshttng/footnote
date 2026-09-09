@@ -1148,120 +1148,84 @@ def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
     assert "var ALL = counts(NODES);" not in local
 
 
-# --- the court section (x-52d2): crowns joined to their scope, local board only
+# --- the court section (x-52d2): a runtime-written fragment, spliced between
+# --- the local board's markers
 
 
-def _stub_court(monkeypatch, crowns) -> None:
-    import fno.agents.court as court_mod
+_COURT_FRAGMENT = (
+    '<section class="court"><h2>Court</h2>'
+    '<details class="crown"><summary>e-1 · L2 · king-a792 · agree yes</summary>'
+    '<div class="crown-body"><div class="crown-counts">2 nodes: '
+    'in_progress 1, ready 1 (0 not listed)</div>'
+    '<table class="crown-nodes"><thead><tr><th>node</th><th>status</th>'
+    "<th>worker</th><th>pr</th><th>sessions</th></tr></thead><tbody>"
+    "<tr><td>x-child01</td><td>in_progress</td><td>tgt-x1</td><td>#1178</td>"
+    "<td>s-child</td></tr>"
+    "</tbody></table></div></details></section>"
+)
 
-    monkeypatch.setattr(
-        court_mod,
-        "gather_court",
-        lambda rows=None, *, entries=None: {"crowns": crowns},
-    )
+
+def _set_court_fragment(monkeypatch, tmp_path: Path, content: str | None) -> None:
+    from fno.graph import _constants
+
+    if content is None:
+        monkeypatch.setitem(vars(_constants), "COURT_SECTION_HTML", tmp_path / "absent.html")
+        return
+    fragment = tmp_path / "court-section.html"
+    fragment.write_text(content, encoding="utf-8")
+    monkeypatch.setitem(vars(_constants), "COURT_SECTION_HTML", fragment)
 
 
-def test_local_dashboard_carries_the_court_section_with_scope_nodes(
+def test_local_board_splices_the_court_fragment_between_its_markers(
     tmp_path: Path, monkeypatch
 ):
-    """AC6-LOCAL: every live crown renders with its active nodes, their
-    workers, PRs and session ids - folded from the entries the render
-    already held, never a second graph read."""
-    _stub_court(
-        monkeypatch,
-        [
-            {
-                "holder": "king-a792",
-                "level": 2,
-                "scope": "e-1",
-                "status": "busy",
-                "agree": True,
-                "reason": None,
-                "crown_source": "both",
-                "manifest_session": "king-session",
-            },
-            {
-                "holder": "king-119e",
-                "level": 2,
-                "scope": "e-2",
-                "status": "live",
-                "agree": False,
-                "reason": "'e-2' status is 'done' (terminal)",
-                "crown_source": "row",
-                "manifest_session": "s-119e",
-            },
-        ],
-    )
-    entries = [
-        _entry("e-1", type="epic", status="in_progress"),
-        _entry(
-            "x-child01",
-            parent="e-1",
-            status="in_progress",
-            pr_number=1178,
-            session_id="s-child",
-        ),
-    ]
+    """AC6-LOCAL: the fragment the runtime wrote renders between the board's
+    court markers, holder names and session ids included."""
+    _set_court_fragment(monkeypatch, tmp_path, _COURT_FRAGMENT)
     out = tmp_path / "graph.html"
 
-    render_graph_html(entries, out)
+    render_graph_html([_entry("e-1", type="epic", status="in_progress")], out)
 
     text = out.read_text()
+    assert "court:begin" in text and "court:end" in text
     assert 'class="court"' in text
     assert "king-a792" in text
     assert "x-child01" in text
     assert "s-child" in text
     assert "#1178" in text
-    # The disagreeing crown folds to unresolved (e-2 is not in the graph) and
-    # says so instead of rendering an empty table.
-    assert "court-disagree" in text
-    assert "scope fold: unresolved" in text
+    begin = text.index("court:begin")
+    end = text.index("court:end")
+    assert 'class="court"' in text[begin:end]
 
 
-def test_a_disagreeing_crown_with_a_fodable_scope_shows_marker_and_reason(
+def test_local_board_without_a_fragment_renders_empty_markers(
     tmp_path: Path, monkeypatch
 ):
-    """AC6-DISAGREE: the disagreement marker and the reason text render inline
-    on the crown's own row."""
-    _stub_court(
-        monkeypatch,
-        [
-            {
-                "holder": "king-119e",
-                "level": 2,
-                "scope": "e-1",
-                "status": "live",
-                "agree": False,
-                "reason": "'e-1' status is 'done' (terminal)",
-                "crown_source": "row",
-                "manifest_session": "s-119e",
-            }
-        ],
-    )
-    entries = [_entry("e-1", type="epic", status="done")]
+    """No fragment yet (the runtime has not run): markers render empty and the
+    board is complete - an absence is stated, never faked."""
+    _set_court_fragment(monkeypatch, tmp_path, None)
     out = tmp_path / "graph.html"
 
-    render_graph_html(entries, out)
+    render_graph_html([_entry("x-1")], out)
 
     text = out.read_text()
-    assert "court-disagree" in text
-    assert "agree no" in text
-    assert "status is" in text and "terminal" in text
+    assert "<!-- court:begin --><!-- court:end -->" in text
+    assert 'class="court"' not in text
 
 
-def test_public_dashboard_never_carries_the_court_section(
+def test_public_board_never_carries_markers_or_a_court_section(
     tmp_path: Path, monkeypatch
 ):
-    """AC6-PUBLIC: a published snapshot holds no court section, no holder name
-    and no session id - the local gate refuses the read entirely."""
-    import fno.agents.court as court_mod
+    """AC6-PUBLIC: a published snapshot holds no markers, no court section,
+    no holder name and no session id."""
+    import fno.graph._constants as constants
 
+    def _never():
+        raise AssertionError("court fragment read on a public render")
+
+    monkeypatch.setitem(vars(constants), "COURT_SECTION_HTML", _never)
     from fno.graph.render_html import _dashboard_html
 
-    def _never(*a, **k):
-        raise AssertionError("court read reached a public render")
-
-    monkeypatch.setattr(court_mod, "gather_court", _never)
     entries = [
         _entry(
             "x-child01",
@@ -1273,21 +1237,28 @@ def test_public_dashboard_never_carries_the_court_section(
 
     document = _dashboard_html(entries, title="fno Backlog", local=False)
 
+    assert "court:begin" not in document
     assert 'class="court"' not in document
     assert "king-a792" not in document
     assert "s-child" not in document
 
 
-def test_a_raising_court_read_still_writes_the_board(tmp_path: Path, monkeypatch):
-    """AC6-RAISE: the section runs inside the post-mutation renderer, so any
-    fault in it degrades to no section - the document and the mutation
-    complete either way."""
-    import fno.agents.court as court_mod
+def test_a_raising_fragment_read_still_writes_the_board(
+    tmp_path: Path, monkeypatch
+):
+    """AC6-RAISE: the splice runs inside the post-mutation renderer, so a
+    fault reading the fragment degrades to no section - the document and the
+    mutation complete either way."""
+    import fno.graph._constants as constants
 
-    def _raise(*a, **k):
-        raise RuntimeError("court exploded")
+    class _ExplodingPath:
+        def is_file(self):
+            return True
 
-    monkeypatch.setattr(court_mod, "gather_court", _raise)
+        def read_text(self, *a, **k):
+            raise OSError("court fragment exploded")
+
+    monkeypatch.setitem(vars(constants), "COURT_SECTION_HTML", _ExplodingPath())
     entries = [_entry("x-1", project="alpha")]
     out = tmp_path / "graph.html"
 
@@ -1296,3 +1267,26 @@ def test_a_raising_court_read_still_writes_the_board(tmp_path: Path, monkeypatch
     text = out.read_text()
     assert 'class="court"' not in text
     assert 'id="board"' in text
+
+
+def test_a_disagreeing_fragment_renders_its_marker(tmp_path: Path, monkeypatch):
+    """AC6-DISAGREE: the disagreement marker and the reason text land in the
+    document the way the runtime wrote them."""
+    fragment = (
+        '<section class="court"><details class="crown court-disagree">'
+        "<summary>e-1 · L2 · king-119e · agree no"
+        " - &#x27;e-1&#x27; status is &#x27;done&#x27; (terminal)</summary>"
+        '<div class="crown-body"><span class="crown-note">'
+        "scope fold: unresolved - ghost</span></div></details></section>"
+    )
+    _set_court_fragment(monkeypatch, tmp_path, fragment)
+    out = tmp_path / "graph.html"
+
+    render_graph_html([_entry("e-1", type="epic", status="done")], out)
+
+    text = out.read_text()
+    assert "court-disagree" in text
+    assert "agree no" in text
+    assert "terminal" in text
+
+

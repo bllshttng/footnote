@@ -1465,50 +1465,6 @@ def live_worker(node_id: str) -> Optional[str]:
     return None
 
 
-def live_workers(node_ids: Optional[list[str]] = None) -> dict[str, Optional[str]]:
-    """Node id -> holder for every live/suspect ``node:<id>`` claim, in ONE
-    native verdict batch.
-
-    The per-key read (:func:`live_worker`) pays one liveness verdict per
-    call; a fold over a whole court's active rows needs the same answer for
-    many keys at once. ``node_ids`` limits the sweep to those ids and
-    stat-filters to the lockfiles that exist, so a readout over 100+ active
-    rows pays one subprocess for the handful of live claims instead of one
-    per row. Same worker definition as ``live_worker``: suspect counts, and
-    any fault in the claims subsystem degrades to an empty map so a display
-    read never raises.
-    """
-    from .io import claims_dir, encode_key, global_claims_root
-    from .verdict import claim_verdicts
-
-    try:
-        root = global_claims_root()
-        if node_ids is None:
-            rows = claim_verdicts(prefix="node:", root=root)
-        else:
-            # One readdir, not one stat per id: the fold asks after 100+ ids
-            # and the claims dir holds a handful of lockfiles.
-            present = {p.name for p in claims_dir(root).iterdir()}
-            keys = [
-                key
-                for key in (f"node:{i}" for i in node_ids)
-                if f"{encode_key(key)}.lock" in present
-            ]
-            if not keys:
-                return {}
-            # Same bound as the court orphan sweep: a wedged binary must not
-            # hang the renderer that calls the fold after every graph
-            # mutation. TimeoutExpired degrades to the empty map below.
-            rows = claim_verdicts(keys=keys, root=root, timeout=30.0)
-    except Exception:  # noqa: BLE001 - display read, same contract as live_worker
-        return {}
-    return {
-        str(row["key"]).removeprefix("node:"): row.get("holder")
-        for row in rows.values()
-        if isinstance(row, dict) and row.get("state") in ("live", "suspect")
-    }
-
-
 def _list_claims_impl(
     *,
     prefix: Optional[str] = None,

@@ -25,15 +25,6 @@ from fno.agents.crown import (
 from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
 
-def _id_index(entries: list[dict]) -> dict[str, dict]:
-    """Graph entries keyed by id - the one builder agreement and fold share."""
-    return {
-        entry["id"]: entry
-        for entry in entries
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
-    }
-
-
 def _agreement(
     level: Optional[int], scope: Optional[str], by_id: Optional[dict[str, dict]]
 ) -> tuple[Optional[bool], Optional[str]]:
@@ -202,19 +193,14 @@ def find_presiding_crown(
     return None
 
 
-def gather_court(
-    rows: Optional[list] = None, *, entries: Optional[list[dict]] = None
-) -> dict[str, Any]:
+def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
     ``rows`` overrides the live registry read for callers that already hold
-    it (tests). ``entries`` overrides the graph read for callers that already
-    hold it (the ``--nodes`` fold and the HTML court section): building the
-    id index from them skips ``_graph_index`` entirely, so one read serves
-    agreement and fold together. An unreadable REGISTRY nulls ``crowns`` and
-    every summary count rather than reporting an empty court: a caller
-    gating on ``summary.disagreements == 0`` must not read a healthy fleet
-    from a read that saw nothing.
+    it (tests). An unreadable REGISTRY nulls ``crowns`` and every summary
+    count rather than reporting an empty court: a caller gating on
+    ``summary.disagreements == 0`` must not read a healthy fleet from a read
+    that saw nothing.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
@@ -238,10 +224,7 @@ def gather_court(
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
     # One graph parse for every rung; ``None`` (unreadable) is not "nothing here".
-    if entries is None:
-        by_id = _graph_index()
-    else:
-        by_id = _id_index(entries)
+    by_id = _graph_index()
     crowns: list[dict[str, Any]] = []
     held_scopes: list[str] = []
     for row in live_rows:
@@ -305,111 +288,65 @@ def gather_court(
     }
 
 
-def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
+def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
     """Fold each crown's scope nodes onto its row as ``scope_nodes``, in place.
 
-    Pure over rows the caller already read: never a second graph read. The
-    resolver is injected from the crown row's own
-    ``level``/``scope`` because ``gather_court`` already adjudicated that
-    scope (``agree``) - re-validating inside ``compile_scope_ids`` would buy
-    nothing and re-read the graph (measured 9.5-13.4 s through the keeper).
-
-    ``scope_nodes`` is ``{"status": "ok", "total", "counts", "nodes",
-    "omitted"}`` or ``{"status": "unresolved", "reason"}``. ``omitted`` is
-    always present on an ok fold: a crown whose active list is empty must
-    read as "N nodes, none active", never as "nothing here".
+    The fold lives in the native binary (`fno-agents court-fold`): it reads
+    graph.json and the claims dir itself, compiles scopes with the rules the
+    board's collector applies, and names workers through the same native
+    claim verdicts `claim sweep` uses, so a fold and the claims surface
+    cannot disagree about who holds a node. Python passes the crowns
+    `gather_court` already adjudicated and reads the answer back; any fault -
+    a stale binary, an unreadable graph, a timeout - marks the crown
+    unresolved rather than rendering an empty table.
     """
-    from fno.claims.core import live_workers
-    from fno.graph.statuses import ACTIVE_STATUSES
-    from fno.king.scope import compile_scope_ids
+    import json as _json
+    import subprocess
+
+    from fno.paths import graph_json
+    from fno.rust_binary import resolve_binary
 
     if not crowns:
         return
-    by_id = _id_index(entries)
-    # Counts render in lifecycle order; a status outside the vocabulary keeps
-    # its place at the end rather than vanishing from the line.
-    count_order = [
-        "in_progress", "in_review", "ready", "blocked", "design",
-        "idea", "deferred", "done", "superseded",
-    ]
-    # Pass 1: compile every crown and collect the active ids the worker read
-    # will name.
-    compiled: list[tuple[dict[str, Any], list[dict], Optional[dict[str, Any]]]] = []
-    active_ids: list[str] = []
     for crown in crowns:
         scope = crown.get("scope")
-        level = crown.get("level")
-        if not (isinstance(scope, str) and scope.strip()) or level is None:
-            compiled.append((
-                crown,
-                [],
-                {
-                    "status": "unresolved",
-                    "reason": "the row carries no scope or no crown level",
-                },
-            ))
-            continue
-        try:
-            ids = compile_scope_ids(
-                scope, entries, resolve=lambda _m, level=level, scope=scope: (level, scope)
-            )
-        except (ValueError, KeyError) as exc:
-            compiled.append((crown, [], {"status": "unresolved", "reason": str(exc)}))
-            continue
-        members = [by_id[i] for i in sorted(ids) if i in by_id]
-        active_ids.extend(
-            str(e["id"]) for e in members if e.get("status") in ACTIVE_STATUSES
+        if not (isinstance(scope, str) and scope.strip()) or crown.get("level") is None:
+            crown["scope_nodes"] = {
+                "status": "unresolved",
+                "reason": "the row carries no scope or no crown level",
+            }
+    payload = [
+        {"scope": c.get("scope"), "level": c.get("level")}
+        for c in crowns
+        if "scope_nodes" not in c
+    ]
+    if not payload:
+        return
+    try:
+        binary = resolve_binary()
+        if binary is None:
+            raise OSError("the fno-agents binary was not found")
+        proc = subprocess.run(
+            [str(binary), "court-fold", "--graph", str(graph_json()),
+             "--crowns-json", _json.dumps(payload), "--format", "json"],
+            capture_output=True, text=True, check=False, timeout=30,
         )
-        compiled.append((crown, members, None))
-    # Pass 2: ONE verdict batch, stat-filtered to the lockfiles that exist;
-    # the per-key read pays one native verdict each and measured 1.7 s over
-    # 122 active rows.
-    workers = live_workers(list(dict.fromkeys(active_ids)))
-    for crown, members, error in compiled:
-        if error is not None:
-            crown["scope_nodes"] = error
-            continue
-        counts: dict[str, int] = {}
-        for entry in members:
-            status = str(entry.get("status") or "unknown")
-            counts[status] = counts.get(status, 0) + 1
-        rows = []
-        for entry in members:
-            if entry.get("status") not in ACTIVE_STATUSES:
-                continue
-            sessions: list[str] = []
-            for raw in entry.get("sessions") or []:
-                sid = raw.get("session_id") if isinstance(raw, dict) else raw
-                if sid and sid not in sessions:
-                    sessions.append(sid)
-            for raw in (
-                [entry.get("session_id")]
-                + list(entry.get("cost_sessions") or [])
-                + [entry.get("locked_by_harness_session")]
-            ):
-                if raw and raw not in sessions:
-                    sessions.append(raw)
-            rows.append(
-                {
-                    "id": entry.get("id"),
-                    "slug": entry.get("slug") or "",
-                    "status": str(entry.get("status") or ""),
-                    "worker": workers.get(str(entry["id"])),
-                    "pr_number": entry.get("pr_number"),
-                    "sessions": sessions,
-                }
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or f"exit {proc.returncode}")
+        scope_nodes = _json.loads(proc.stdout)["scope_nodes"]
+    except Exception as exc:  # noqa: BLE001 - a failed fold is stated, never a crash
+        for crown in crowns:
+            crown.setdefault(
+                "scope_nodes",
+                {"status": "unresolved", "reason": f"the fold could not run: {exc}"},
             )
-        ordered = {k: counts[k] for k in count_order if k in counts}
-        ordered.update(
-            {k: counts[k] for k in sorted(counts) if k not in ordered}
+        return
+    for crown in crowns:
+        scope = crown.get("scope")
+        crown["scope_nodes"] = scope_nodes.get(
+            scope,
+            {"status": "unresolved", "reason": "the fold answered no row for this scope"},
         )
-        crown["scope_nodes"] = {
-            "status": "ok",
-            "total": len(members),
-            "counts": ordered,
-            "nodes": rows,
-            "omitted": len(members) - len(rows),
-        }
 
 
 def crowned_sessions(rows: list) -> set[str]:
@@ -467,23 +404,15 @@ def _fold_lines(e: dict[str, Any]) -> list[str]:
 def render_court(as_json: bool, nodes: bool = False) -> str:
     """The full render: table + conflicts + summary, or its JSON mirror.
 
-    ``nodes`` folds each crown's scope into its row (``fold_scope_nodes``) off
-    the ONE graph read this render performs; a failed read is stated in the
-    output rather than rendered as a court of empty scopes.
+    ``nodes`` folds each crown's scope into its row (``fold_scope_nodes``,
+    the native read); a fold that cannot run marks the crown unresolved
+    rather than rendering an empty table.
     """
     import json
 
-    entries = None
-    if nodes:
-        from fno.tracker.metadata import read_entries
-
-        try:
-            entries = read_entries("agents.court")
-        except Exception:  # noqa: BLE001 - stated below, never a crash
-            entries = None
-    court = gather_court(entries=entries)
-    if nodes and entries is not None and court["crowns"]:
-        fold_scope_nodes(court["crowns"], entries)
+    court = gather_court()
+    if nodes and court["crowns"]:
+        fold_scope_nodes(court["crowns"])
     if as_json:
         return json.dumps(court, indent=2, sort_keys=True)
 
@@ -500,11 +429,6 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
             lines.extend(_fold_lines(e))
     else:
         lines = [header] + [_fmt_row(e) for e in court["crowns"]]
-    if nodes and entries is None:
-        lines.append(
-            "\nscope fold skipped: the graph read for the fold failed; "
-            "crown rows carry no scope nodes rather than empty ones."
-        )
     for c in court["conflicts"]:
         holders = ", ".join(c["holders"])
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
@@ -520,3 +444,60 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
     if s.get("sweep_ran") is False:
         lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
     return "\n".join(lines)
+
+
+def register_court_command(app) -> None:
+    """Attach the court command to the agents app. The body lives here, next
+    to the read it serves; the composition stays on the CLI surface."""
+    import typer
+
+    @app.command("court", hidden=True)
+    def cmd_court(
+        json_output: bool = typer.Option(
+            False, "--json", "-J", help="Emit JSON instead of the table."
+        ),
+        nodes: bool = typer.Option(
+            False,
+            "--nodes",
+            "-n",
+            help=(
+                "Fold each crown's scope nodes into its row: counts by status "
+                "for the whole scope, plus a row per active node with its "
+                "worker, PR and session ids."
+            ),
+        ),
+        update_board: bool = typer.Option(
+            False,
+            "--update-board",
+            help=(
+                "Refresh the local board's court section from this read and "
+                "exit; no table or JSON is printed."
+            ),
+        ),
+    ) -> None:
+        """The whole court: every live crown, its scope, its holder, its
+        grantor, and whether the registry and the graph agree - the read that
+        answers "did the coronations work" without trusting the absence of a
+        disagreement.
+
+        Exit 0 always: this is a read, and a caller gates on the JSON keys
+        (``agree``, ``summary.disagreements``, ``summary.unknowns``, and
+        ``conflicts``), not the process status.
+
+        ``conflicts`` belongs in that list and is not derivable from the
+        counts. Two live rows holding one territory are each individually
+        corroborated by the graph, so both report ``agree: true`` and the
+        summary reads zero disagreements while the fleet has two kings over
+        one scope. A caller that gates on the counts alone reads that as a
+        healthy court, which is the precise failure this command exists to
+        end.
+        """
+        if update_board:
+            from fno.agents.court_html import update_board
+
+            update_board()
+            return
+
+        from fno.agents.court import render_court
+
+        print(render_court(json_output, nodes=nodes))

@@ -1020,251 +1020,125 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     assert adopted in spawn_gate.census().crowned_sessions
 
 
-# --- the scope fold (x-52d2): one readout joining crowns to scope nodes
+# --- the scope fold (x-52d2): the native fold, relayed onto the crown rows
 
 
-def test_entries_seam_skips_the_second_graph_read(tmp_path: Path, monkeypatch) -> None:
-    """AC4-HP: entries handed in build the id index, ``_graph_index`` is never
-    called, and the court still reads as readable."""
-    import fno.agents.court as court_mod
-    from fno.agents.court import gather_court
+def _stub_court_fold(monkeypatch, tmp_path: Path, scope_nodes: dict, fail: bool = False) -> None:
+    """A stub fno-agents binary that answers `court-fold` from a canned
+    scope_nodes map and court-orphans from an empty list (the fold tests pin
+    the RELAY, not the fold computation; court_fold.rs pins that)."""
+    import stat
 
-    _prepare(
+    script = tmp_path / "fno-agents"
+    body = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"NODES = {scope_nodes!r}\n"
+        f"FAIL = {repr(bool(fail))}\n"
+        "REIGN = json.dumps({'crowned': True, 'scope': 'x', 'shape': 'pass',\n"
+        "    'manifest_session': 's', 'registry_session': 's', 'live': True,\n"
+        "    'split': False, 'unknown_reason': None, 'crown_on_manifest': False})\n"
+        "if 'court-fold' in sys.argv:\n"
+        "    if FAIL:\n"
+        "        sys.exit(3)\n"
+        "    print(json.dumps({'scope_nodes': NODES}), end='')\n"
+        "    sys.exit(0)\n"
+        "if 'court-orphans' in sys.argv:\n"
+        "    print('[]', end='')\n"
+        "    sys.exit(0)\n"
+        "print(REIGN, end='')\n"
+    )
+    script.write_text(body, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+
+
+def test_the_fold_lands_on_the_crown_rows(tmp_path: Path, monkeypatch) -> None:
+    """The fold answer keys on scope and lands on every crown that names it;
+    a crown the fold answered nothing for reads unresolved, never missing."""
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(
         monkeypatch,
         tmp_path,
-        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        {
+            "e-1": {
+                "status": "ok",
+                "total": 2,
+                "counts": {"in_progress": 1, "ready": 1},
+                "nodes": [{"id": "x-1", "slug": "", "status": "in_progress",
+                           "worker": "w1", "pr_number": 3, "sessions": ["s1"]}],
+                "omitted": 0,
+            }
+        },
     )
-    monkeypatch.setattr(
-        court_mod,
-        "_graph_index",
-        lambda: (_ for _ in ()).throw(AssertionError("second graph read")),
-    )
-
-    court = gather_court(
-        entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}]
-    )
-
-    assert court["graph_readable"] is True
-    assert court["crowns"][0]["agree"] is True
-
-
-def test_without_entries_the_read_and_unreadable_contract_are_unchanged(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """AC4-EDGE: the default path answers exactly as before the seam - a
-    readable graph agrees, an unreadable one stays None with a reason."""
-    from fno.agents.court import gather_court
-    from fno.tracker import metadata
-
-    _prepare(
-        monkeypatch,
-        tmp_path,
-        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
-        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
-    )
-    assert gather_court()["graph_readable"] is True
-    assert gather_court()["crowns"][0]["agree"] is True
-
-    monkeypatch.setattr(
-        metadata,
-        "read_entries",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")),
-    )
-    court = gather_court()
-    assert court["graph_readable"] is False
-    assert court["crowns"][0]["agree"] is None
-
-
-def test_fold_counts_whole_scope_and_lists_active_rows_only() -> None:
-    """AC3-HP: counts cover every scope member, ``nodes`` only ACTIVE_STATUSES
-    rows, and ``omitted`` is stated, never implied."""
-    from fno.agents.court import fold_scope_nodes
-    from fno.graph.statuses import ACTIVE_STATUSES
-
-    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
-    entries = [
-        {"id": "e-1", "type": "epic", "status": "ready"},
-        {"id": "x-1", "parent": "e-1", "status": "in_progress"},
-        {"id": "x-2", "parent": "e-1", "status": "in_review"},
-        {"id": "x-3", "parent": "e-1", "status": "done"},
-        {"id": "x-4", "parent": "e-1", "status": "idea"},
+    crowns = [
+        {"holder": "king", "level": 2, "scope": "e-1"},
+        {"holder": "gone-king", "level": 2, "scope": "x-dede", "status": "manifest-only"},
     ]
 
-    fold_scope_nodes(crowns, entries)
+    fold_scope_nodes(crowns)
 
-    sn = crowns[0]["scope_nodes"]
-    assert sn["status"] == "ok"
-    assert sn["total"] == 5
-    assert sum(sn["counts"].values()) == sn["total"]
-    assert set(sn["counts"]) == {"ready", "in_progress", "in_review", "done", "idea"}
-    assert [r["id"] for r in sn["nodes"]] == ["e-1", "x-1", "x-2"]
-    assert all(r["status"] in ACTIVE_STATUSES for r in sn["nodes"])
-    assert sn["omitted"] == sn["total"] - len(sn["nodes"]) == 2
+    assert crowns[0]["scope_nodes"]["status"] == "ok"
+    assert crowns[0]["scope_nodes"]["nodes"][0]["pr_number"] == 3
+    assert crowns[1]["scope_nodes"]["status"] == "unresolved"
 
 
-def test_fold_of_a_project_rung_needs_no_epic_containment(
+def test_a_half_crown_resolves_locally_without_the_binary(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC3-PROJ: a rung-1 crown folds to every node whose canonical project
-    matches; a node under no epic is still in the scope."""
-    from fno.agents.court import fold_scope_nodes
-
-    _prepare(monkeypatch, tmp_path, [])
-    crowns = [{"holder": "king", "level": 1, "scope": "alpha"}]
-    entries = [
-        {"id": "a-1", "project": "alpha", "status": "in_progress"},
-        {"id": "a-2", "project": "alpha", "status": "done"},
-        {"id": "b-1", "project": "beta", "status": "in_progress"},
-    ]
-
-    fold_scope_nodes(crowns, entries)
-
-    sn = crowns[0]["scope_nodes"]
-    assert sn["status"] == "ok"
-    assert sn["total"] == 2
-    assert [r["id"] for r in sn["nodes"]] == ["a-1"]
-    assert sn["omitted"] == 1
-
-
-def test_an_uncompilable_scope_reads_unresolved_never_an_empty_table() -> None:
-    """AC3-UNRESOLVED: a scope naming no epic in the graph states why it could
-    not fold; ``nodes`` is absent rather than an empty list that reads as
-    "nothing here"."""
-    from fno.agents.court import fold_scope_nodes
-
-    crowns = [{"holder": "king", "level": 2, "scope": "ghost"}]
-
-    fold_scope_nodes(crowns, [{"id": "e-1", "type": "epic", "status": "ready"}])
-
-    sn = crowns[0]["scope_nodes"]
-    assert sn["status"] == "unresolved"
-    assert "ghost" in sn["reason"]
-    assert "nodes" not in sn
-
-
-def test_a_half_crown_folds_unresolved_with_a_reason() -> None:
     """A scope-less or level-less crown rules no territory; the fold says so
-    per row instead of crashing or printing an empty table."""
+    per row without paying a subprocess."""
     from fno.agents.court import fold_scope_nodes
 
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
     crowns = [
         {"holder": "half", "level": None, "scope": "alpha"},
         {"holder": "scopeless", "level": 1, "scope": ""},
     ]
 
-    fold_scope_nodes(crowns, [{"id": "a-1", "project": "alpha", "status": "ready"}])
+    fold_scope_nodes(crowns)
 
     for crown in crowns:
         assert crown["scope_nodes"]["status"] == "unresolved"
-        assert crown["scope_nodes"]["reason"]
+        assert "no scope or no crown level" in crown["scope_nodes"]["reason"]
 
 
-def test_a_manifest_only_crown_folds_like_any_other() -> None:
-    """A manifest-only crown carries scope and level, so its scope folds too -
-    the operator's question covers crowns whose row is gone."""
-    from fno.agents.court import fold_scope_nodes
-
-    crowns = [
-        {
-            "holder": "gone-king",
-            "level": 2,
-            "scope": "e-1",
-            "status": "manifest-only",
-        }
-    ]
-    entries = [
-        {"id": "e-1", "type": "epic", "status": "ready"},
-        {"id": "x-1", "parent": "e-1", "status": "in_progress"},
-    ]
-
-    fold_scope_nodes(crowns, entries)
-
-    sn = crowns[0]["scope_nodes"]
-    assert sn == {
-        "status": "ok",
-        "total": 2,
-        "counts": {"in_progress": 1, "ready": 1},
-        "nodes": [
-            {
-                "id": "e-1",
-                "slug": "",
-                "status": "ready",
-                "worker": None,
-                "pr_number": None,
-                "sessions": [],
-            },
-            {
-                "id": "x-1",
-                "slug": "",
-                "status": "in_progress",
-                "worker": None,
-                "pr_number": None,
-                "sessions": [],
-            },
-        ],
-        "omitted": 0,
-    }
-
-
-def test_session_ids_union_once_in_field_order() -> None:
-    """AC3-SESSIONS: sessions[].session_id, then session_id, cost_sessions and
-    locked_by_harness_session - each id once, first occurrence wins."""
-    from fno.agents.court import fold_scope_nodes
-
-    crowns = [{"holder": "king", "level": 1, "scope": "alpha"}]
-    entries = [
-        {
-            "id": "a-1",
-            "project": "alpha",
-            "status": "in_progress",
-            "sessions": [{"session_id": "s1"}, {"session_id": "s2"}],
-            "session_id": "s3",
-            "cost_sessions": ["s4", "s2"],
-            "locked_by_harness_session": "s5",
-        }
-    ]
-
-    fold_scope_nodes(crowns, entries)
-
-    assert crowns[0]["scope_nodes"]["nodes"][0]["sessions"] == [
-        "s1", "s2", "s3", "s4", "s5",
-    ]
-
-
-def test_fold_runs_over_the_whole_court_in_under_half_a_second_and_reads_no_graph(
+def test_a_failed_fold_marks_crowns_unresolved_never_empty(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC3-PERF: the fold is bounded by the entries in hand - zero graph reads
-    (a second read costs 9-13 s through the keeper) and under 0.5 s on the
-    2,394-row graph this node measured."""
-    import time
-
-    import fno.agents.court as court_mod
+    """A fold that cannot run (stale binary, unreadable graph) is stated per
+    crown - the rows never render as empty scopes."""
     from fno.agents.court import fold_scope_nodes
 
-    _prepare(monkeypatch, tmp_path, [])
-    monkeypatch.setattr(
-        court_mod,
-        "_graph_index",
-        lambda: (_ for _ in ()).throw(AssertionError("fold read the graph")),
-    )
-    crowns = [
-        {"holder": "k1", "level": 2, "scope": "e-1"},
-        {"holder": "k2", "level": 1, "scope": "alpha"},
-    ]
-    entries = [{"id": f"n-{i}", "status": "done"} for i in range(2394)]
-    entries += [
-        {"id": "e-1", "type": "epic", "status": "in_progress"},
-        {"id": "a-1", "project": "alpha", "status": "ready", "pr_number": 7},
-    ]
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
 
-    start = time.monotonic()
-    fold_scope_nodes(crowns, entries)
-    elapsed = time.monotonic() - start
+    fold_scope_nodes(crowns)
 
-    assert elapsed < 0.5
-    assert crowns[0]["scope_nodes"]["nodes"][0]["id"] == "e-1"
-    assert crowns[1]["scope_nodes"]["nodes"][0]["pr_number"] == 7
+    sn = crowns[0]["scope_nodes"]
+    assert sn["status"] == "unresolved"
+    assert "could not run" in sn["reason"]
+
+
+def test_a_missing_binary_marks_crowns_unresolved(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.court import fold_scope_nodes
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    crowns = [{"holder": "king", "level": 2, "scope": "e-1"}]
+
+    fold_scope_nodes(crowns)
+
+    assert crowns[0]["scope_nodes"]["status"] == "unresolved"
+
+
+def test_empty_court_folds_to_nothing(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.court import fold_scope_nodes
+
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
+    fold_scope_nodes([])  # no crowns, no subprocess, no raise
 
 
 def test_nodes_flag_folds_json_and_moves_no_existing_key(
@@ -1278,10 +1152,19 @@ def test_nodes_flag_folds_json_and_moves_no_existing_key(
         monkeypatch,
         tmp_path,
         [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
-        graph_entries=[
-            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
-            {"id": "x-1", "parent": "e-1", "status": "in_progress", "pr_number": 3},
-        ],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {
+            "e-1": {
+                "status": "ok", "total": 1, "counts": {"ready": 1},
+                "nodes": [{"id": "e-1", "slug": "", "status": "ready",
+                           "worker": None, "pr_number": 7, "sessions": []}],
+                "omitted": 0,
+            }
+        },
     )
 
     before = json.loads(render_court(as_json=True))
@@ -1295,25 +1178,33 @@ def test_nodes_flag_folds_json_and_moves_no_existing_key(
         assert plain_view == plain
     sn = after["crowns"][0]["scope_nodes"]
     assert sn["status"] == "ok"
-    assert [r["pr_number"] for r in sn["nodes"]] == [None, 3]
+    assert [r["pr_number"] for r in sn["nodes"]] == [7]
 
 
 def test_nodes_table_adds_the_fold_block_and_the_plain_table_is_untouched(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC5-COMPAT: without the flag the table renders exactly as before, fold
-    block included in neither; with it the counts line and active rows appear
-    under their crown."""
+    """AC5-COMPAT: without the flag the table renders exactly as before; with
+    it the counts line and active rows appear under their crown."""
     from fno.agents.court import render_court
 
     _prepare(
         monkeypatch,
         tmp_path,
         [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
-        graph_entries=[
-            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
-            {"id": "x-1", "parent": "e-1", "status": "in_progress"},
-        ],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {
+            "e-1": {
+                "status": "ok", "total": 1, "counts": {"ready": 1},
+                "nodes": [{"id": "e-1", "slug": "", "status": "ready",
+                           "worker": "tgt-e1", "pr_number": 7, "sessions": ["s-e1"]}],
+                "omitted": 0,
+            }
+        },
     )
 
     plain = render_court(as_json=False)
@@ -1321,42 +1212,41 @@ def test_nodes_table_adds_the_fold_block_and_the_plain_table_is_untouched(
     assert "SESSIONS" not in plain
 
     folded = render_court(as_json=False, nodes=True)
-    assert "2 nodes: in_progress 1, ready 1   (0 not listed)" in folded
-    assert "NODE" in folded and "SESSIONS" in folded
-    assert "x-1" in folded
+    assert "1 node: ready 1   (0 not listed)" in folded
+    assert "SESSIONS" in folded
+    assert "tgt-e1" in folded
+    assert "#7" in folded
 
 
-def test_a_failed_read_under_the_flag_is_stated_and_the_table_survives(
+def test_a_failed_fold_names_the_crown_not_an_empty_scope(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC5-READFAIL: an unreadable graph says the fold was skipped and still
-    prints the crown table - never crowns rendered as empty scopes."""
+    """AC5-READFAIL: a fold that cannot run says so on the crown's own row -
+    never crowns rendered as empty scopes."""
     from fno.agents.court import render_court
-    from fno.tracker import metadata
 
     _prepare(
         monkeypatch,
         tmp_path,
         [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
     )
-    monkeypatch.setattr(
-        metadata,
-        "read_entries",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")),
-    )
+    _stub_court_fold(monkeypatch, tmp_path, {}, fail=True)
 
     text = render_court(as_json=False, nodes=True)
 
-    assert "scope fold skipped" in text
+    assert "scope fold: unresolved" in text
     assert "king" in text
     assert "not listed" not in text
     payload = json.loads(render_court(as_json=True, nodes=True))
-    assert all("scope_nodes" not in c for c in payload["crowns"])
+    assert all(
+        c["scope_nodes"]["status"] == "unresolved" for c in payload["crowns"]
+    )
 
 
-def test_the_flag_pays_one_read_not_two(tmp_path: Path, monkeypatch) -> None:
-    """AC5-PERF (the part a unit test can pin): -n performs the same single
-    graph read the plain render performs; the fold reads nothing."""
+def test_the_flag_pays_no_extra_python_graph_read(tmp_path: Path, monkeypatch) -> None:
+    """AC5-PERF (the part a unit test pins): the fold rides the native binary,
+    so -n performs the same single python graph read the plain render does."""
     from fno.agents.court import render_court
     from fno.tracker import metadata
 
@@ -1365,6 +1255,12 @@ def test_the_flag_pays_one_read_not_two(tmp_path: Path, monkeypatch) -> None:
         tmp_path,
         [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
         graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    _stub_court_fold(
+        monkeypatch,
+        tmp_path,
+        {"e-1": {"status": "ok", "total": 1, "counts": {"ready": 1},
+                 "nodes": [], "omitted": 1}},
     )
     calls: list = []
     real = metadata.read_entries
@@ -1379,3 +1275,5 @@ def test_the_flag_pays_one_read_not_two(tmp_path: Path, monkeypatch) -> None:
     assert len(calls) == 1
     render_court(as_json=False, nodes=True)
     assert len(calls) == 2
+
+
