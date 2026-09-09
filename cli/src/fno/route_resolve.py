@@ -330,17 +330,24 @@ _DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
 
 
 def _declared_rows(settings: object) -> dict[str, Any]:
-    """The CONFIG-declared rows exactly (never the built-in fallback)."""
+    """The CONFIG-declared rows exactly (never the built-in fallback). Rows
+    arrive as pydantic models or mappings; reads go through ``_field`` so
+    both shapes survive (x-947c: the Mapping filter dropped every model row)."""
     try:
         models = getattr(getattr(settings, "routing", None), "models", None) or []
-        rows = [r for r in models if isinstance(r, Mapping)]
+        rows = [r for r in models if r is not None]
     except Exception:  # noqa: BLE001 - an unreadable config reads as empty
         return {}
-    return {
-        name: {"name": name, **{f: str(r.get(f, "") or "").strip() for f in _DECLARED_FIELDS}}
-        for r in rows
-        if (name := str(r.get("name", "") or "").strip())
-    }
+    out: dict[str, Any] = {}
+    for r in rows:
+        name = str(_field(r, "name", "") or "").strip()
+        if not name:
+            continue
+        out[name] = {
+            "name": name,
+            **{f: str(_field(r, f, "") or "").strip() for f in _DECLARED_FIELDS},
+        }
+    return out
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:

@@ -55,6 +55,38 @@ def test_config_only_model_resolves_for_its_band():
     assert any("grid candidate opencode/qwen" in step for step in chain)
 
 
+def test_declared_rows_read_the_real_loader_models(tmp_path, monkeypatch):
+    """x-947c: routing.models arrives from the loader as pydantic rows, not
+    mappings; _declared_rows must read them, never drop them at a Mapping
+    filter. Drives the REAL loader over a config file - no hand-built dict."""
+    from fno.config import load_settings
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "[[routing.models]]\n"
+        'name = "zai-flash"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'route = "zai/glm-5.3-flash[1m]"\n'
+        'account = "zai"\n'
+        'band = "medium"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    rows = rr._declared_rows(load_settings())
+    assert rows["zai-flash"] == {
+        "name": "zai-flash",
+        "harness": "claude",
+        "model": "glm-5.3-flash[1m]",
+        "route": "zai/glm-5.3-flash[1m]",
+        "account": "zai",
+        "band": "medium",
+        "effort": "",
+    }
+
+
 def test_grid_candidate_carries_route_and_account():
     """AC2-HP (x-b545): the grid leg's candidate carries the declared row's
     route and account, the same facts the lane leg always emitted. A routeless
