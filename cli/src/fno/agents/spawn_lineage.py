@@ -1,13 +1,8 @@
 """What a spawn records about the node it launched.
 
-Three questions, three fields, and only the first two were ever written:
-``source_session_id`` is who DISCOVERED a node, ``sessions[]`` is who WORKED
-it, ``spawned_by_session`` is who LAUNCHED it. This module holds the writers
-for the launch half and the capture they share, so the seam lives in one file
-rather than split across the two largest modules in the tree.
-
-``dispatch`` and ``cli`` both re-export the names they used to define, so every
-existing import site and every test that patches one keeps working.
+``dispatch`` and ``cli`` re-export the names they used to define, so every
+import site and every test that patches one keeps working. The fields and how
+to read a null are in docs/architecture/node-provenance.md.
 """
 from __future__ import annotations
 
@@ -255,24 +250,11 @@ def _stamp_spawned_session_row(
 def _stamp_launch_edge(node: "str | None") -> None:
     """Record WHO LAUNCHED this node's worker, on the node itself (x-5c25).
 
-    The graph declares `spawned_by_session` / `spawned_by_harness` /
-    `spawned_by_cwd`, `fno backlog provenance` reads them back, and until this
-    stamp nothing wrote them: 0 of 2356 nodes carried one, flat zero in every
-    cohort. The registry row carries the same triple, but a row is reaped and a
-    node is durable, so the launch edge has to live on the node too.
-
-    This is the sibling of :func:`_stamp_spawned_session_row`, which answers a
-    different question with a different field. sessions[] is who WORKED the
-    node; source_session_id is who DISCOVERED it; this is who LAUNCHED it. The
-    three routinely differ: of 506 nodes carrying both a source_session_id and
-    a worked session, the filer is not among the workers in 428, so no existing
-    field can be copied into this one.
-
-    Refuses rather than half-writes. No node, no write. No proven parent
-    session, no write: the registry row and its `agent_spawned` event already
-    record the absence with its reason, and a triple with a null session on a
-    durable node would assert a launch nobody can trace. Never overwrites an
-    existing edge, because launch is the FIRST launch. Never raises.
+    The sibling of :func:`_stamp_spawned_session_row`, which records who WORKED
+    it. Refuses rather than half-writes: no node, no write; no proven parent
+    session, no write; never overwrites an existing edge, because launch is the
+    FIRST launch. Never raises. Why, and how to read a null, are in
+    docs/architecture/node-provenance.md.
     """
     if not node:
         return
