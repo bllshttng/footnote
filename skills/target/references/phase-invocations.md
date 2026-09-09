@@ -31,7 +31,7 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 
 | Phase | Condition | Skill |
 |-------|-----------|-------|
-| 1. Plan | idea OR no 00-INDEX.md | `fno:plan` |
+| 1. Plan | idea OR no plan bound yet | `fno:plan` |
 | 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`) |
 | 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
@@ -63,7 +63,7 @@ This check applies to the review, validate, ship, external, and docs phases — 
 
 ## Linear Status Sync (optional - requires linear plugin)
 
-If the linear plugin is installed and the plan has a `linear:` field in 00-INDEX.md, sync status at phase transitions:
+If the linear plugin is installed and the plan's frontmatter has a `linear:` field, sync status at phase transitions:
 - `/execute waves` start sets "In Progress"
 - After `/review` syncs progress
 - After `/pr create` adds PR link comment
