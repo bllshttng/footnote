@@ -8,7 +8,7 @@ A retirement is one sequence shared by the scheduled sweep and the merge trigger
 
 The durable record comes first. The receipt is built from the registry row and the harness capability table. It is written to disk BEFORE any effect fires, and each effect appends its typed record and rewrites it. A crash after an effect leaves a receipt naming what happened, instead of a removal nothing recorded. A receipt that cannot be built or persisted refuses the retirement before the harness is touched, and the row is kept.
 
-The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. The planning lane adds a gate of its own. A planner row retires only when its own blueprint/think `sessions[]` entry carries `ended_at`. That field is the positive marker `fno backlog session close` writes. It stops a quiet replanning worker from inheriting a completion an earlier assignment wrote. Under the commit, the graph is re-read. Any session that has gained an open do row is held before the registry write.
+The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. The planning lane adds a gate of its own. A planner row retires only after its own blueprint/think `sessions[]` entry carries `ended_at`. That field is the positive marker `fno backlog session close` writes. It stops a quiet replanning worker from inheriting a completion an earlier assignment wrote. Under the commit, the graph is re-read. Any session that has gained an open do row is held before the registry write.
 
 ## The receipt and its required ops
 
