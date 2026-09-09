@@ -371,24 +371,9 @@ _RECEIPT_TYPES = {
 }
 
 
-def _live_worker(node_id: str) -> Optional[str]:
-    """The holder of a live/suspect ``node:<id>`` claim, else None.
-
-    A suspect claim (TTL-unexpired, pid dead) still belongs to its session, so
-    it counts as a worker here (). Routes through the global claims root
-    that node ids key on, so it reads the same lockfile the dispatcher wrote.
-    """
-    from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
-
-    key = f"node:{node_id}"
-    try:
-        info = claim_status(key, root=claims_root_for(key))
-    except Exception:  # noqa: BLE001 - a status read must never crash the table
-        return None
-    if info.get("state") in ("live", "suspect"):
-        return info.get("holder")
-    return None
+# Moved to fno.claims.core (x-52d2): court.py needs it and must not import a
+# typer CLI module to reach it.
+from fno.claims.core import live_worker as _live_worker  # noqa: E402
 
 
 def _epic_events(children: list[dict]) -> list[dict]:
