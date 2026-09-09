@@ -330,3 +330,103 @@ def test_how_to_guides_has_no_retired_config_gate():
     text = _skill("skills/ship-docs/references/how-to-guides.md")
     assert "config.docs" not in text
     assert "/setup --full" not in text
+
+
+# ---- wave 4: seeded cases grade the graders (AC4-HP) -------------------------
+# The graders above pass on the real files; these cases prove they DISCRIMINATE.
+# A prohibited action or a false completion, seeded as a fragment, must fail the
+# same grading logic the real files pass; the authorized twin must pass it.
+
+
+def _grade_confirm_prose(text: str) -> bool:
+    """Helper-based confirmation: the skill obeys confirm_required, keeps the
+    always opt-in, and never restates caveat-confirms or degrade-to-always."""
+    hard = text[text.index("Hard rules") :]
+    return (
+        "confirm-decision.sh" in hard
+        and "confirm_required" in hard
+        and "always confirms under" not in text
+        and "degrades to `always`" not in text
+        and "confirm even the free lane" in text
+    )
+
+
+def _grade_triage_fences(text: str) -> bool:
+    """Pre-approval triage: no mutating fence before the approval boundary,
+    and the approved apply path still exists after it."""
+    boundary = text.index("Present to user")
+    before = [b for off, b in _fences(text) if off < boundary]
+    after = [b for off, b in _fences(text) if off > boundary]
+    return not any(
+        c in b for b in before for c in ("fno backlog update", "triage apply")
+    ) and any("triage apply" in b for b in after)
+
+
+def _grade_review_guard(text: str) -> bool:
+    """Explicit PR targeting: the guard branches on the resolved target."""
+    return 'if [ -z "$REVIEW_TARGET" ]' in text and "gh pr view" in text
+
+
+def _grade_reign_arm(text: str) -> bool:
+    """Supported harness wake: one capability branch; codex arms nothing native."""
+    arm = text[text.index("## Arm the beat") :]
+    return "Branch once on what the harness supports" in arm and "arm nothing native" in arm
+
+
+def _grade_flat_verify(text: str) -> bool:
+    """Failed verification repaired in scope; CI green never substitutes."""
+    return (
+        "REPAIR it and re-run" in text
+        and "neither substitutes for the configured review count" in text
+    )
+
+
+def test_seeded_prohibited_cases_fail_the_graders():
+    bad_confirm = "# x\n\nHard rules (non-negotiable)\n\na caveat always confirms under `auto`; a failed read degrades to `always`.\n"
+    assert not _grade_confirm_prose(bad_confirm)
+    bad_triage = (
+        "reason first.\n\n```bash\nfno backlog update ab-1 --priority p1\n```\n\n"
+        "then Present to user via AskUserQuestion.\n"
+    )
+    assert not _grade_triage_fences(bad_triage)
+    assert not _grade_review_guard("bare guard: plain diff check with no target branch")
+    assert not _grade_reign_arm("## Arm the beat\n\nArm six Monitors on every harness.")
+    assert not _grade_flat_verify("If any verification fails, stop and report what failed.")
+
+
+def test_seeded_authorized_cases_pass_the_graders():
+    good_confirm = (
+        "Hard rules (non-negotiable)\n\nObey `confirm-decision.sh` and follow its "
+        "`confirm_required` field; `always` is the cautious opt-in: confirm even "
+        "the free lane.\n"
+    )
+    assert _grade_confirm_prose(good_confirm)
+    good_triage = (
+        "Present to user via AskUserQuestion.\n\n```bash\n"
+        "fno backlog triage apply /tmp/triage-cleaned.json\n```\n"
+    )
+    assert _grade_triage_fences(good_triage)
+    assert _grade_review_guard(
+        'if [ -z "$REVIEW_TARGET" ]; then gh pr view <n> --json headRefName; fi'
+    )
+    assert _grade_reign_arm(
+        "## Arm the beat\n\nBranch once on what the harness supports.\n"
+        "Codex: arm nothing native; the wake arm is the beat.\n"
+    )
+    assert _grade_flat_verify(
+        "REPAIR it and re-run within the bound; neither substitutes for the "
+        "configured review count."
+    )
+
+
+def test_eval_bank_declares_the_workflow_authority_regression_grade():
+    import yaml
+
+    bank = yaml.safe_load(
+        (REPO_ROOT / "evals" / "bank" / "workflow-authority-regression.yaml").read_text()
+    )
+    assert bank["tier"] == "regression"
+    grades = bank["grade"]
+    assert grades, "positive control: the bank entry must carry a grade leg"
+    commands = " ".join(g["command"] for g in grades)
+    assert "test_workflow_authority_contract" in commands
