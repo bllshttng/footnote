@@ -361,8 +361,7 @@ def test_seed_lane_widens_k_so_low_score_family_is_not_evicted_by_noise(tmp_path
     # A wider floor also widens how many candidates clear it. If the seed lane
     # kept the node lane's k=5 cap, five higher-scoring but unrelated
     # candidates could fill every slot and evict the one low-score candidate
-    # the floor widening exists to recover - reported by external review
-    # (chatgpt-codex-connector, PR #1647).
+    # the floor widening exists to recover.
     from fno.think_inspect import build_receipt
 
     repo = tmp_path / "repo"

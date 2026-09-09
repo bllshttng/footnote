@@ -97,7 +97,7 @@ def test_similar_nodes_default_and_explicit_high_floor_unchanged():
 def test_epic_candidates_floor_reaches_scorer_like_similar_nodes():
     # epic_candidates gets the same caller-narrowed floor similar_nodes has,
     # so a domain-less seed probe's epic rollup is not silently under-recalled
-    # while its duplicate list is (chatgpt-codex-connector, PR #1647).
+    # while its duplicate list is.
     epic = _node("epic1", title="alpha bravo charlie", type="epic")
     probe = _node("probe", title="alpha delta echo foxtrot golf")
     assert R.epic_candidates(probe, [epic]) == []  # default floor: still clamped
