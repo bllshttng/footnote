@@ -4,8 +4,8 @@ opencode is a pane-hosted provider (``READABLE_PROVIDERS``): fno never
 drives it through a Python ask adapter, so this module carries only what
 ``fno agents rm`` needs to reason about opencode's session store.
 
-**There is no record-only teardown for opencode, so ``rm`` does not
-attempt one.** Verified against opencode v1.14.50:
+**No CLI verb deletes an opencode session record on its own, so ``rm``
+attempts no deletion.** Verified against opencode v1.14.50:
 
 - ``opencode db`` opens the store READ-ONLY -- a ``delete`` is rejected
   with "attempt to write a readonly database" (exit 1). It is a query
@@ -35,10 +35,20 @@ announces a one-time sqlite migration on first run and writes nothing to
 any of those paths. This module follows the binary's observed behavior,
 not the page.
 
-That makes opencode teardown irreversible destruction of conversation
+That makes opencode DELETION irreversible destruction of conversation
 history, which is a different act from the index-record cleanup ``rm``
 performs for codex. ``rm`` therefore drops the registry row only and
 says so, leaving the deletion to a deliberate operator command.
+
+There IS a history-preserving op, and it is not a CLI verb. ``PATCH
+/session/{id}`` on a running ``opencode serve``, with body
+``{"time":{"archived":<epoch_ms>}}``, stamps the session archived: the
+record and every message row survive, and only the active listing drops
+it. That is what opencode's own web UI archive command sends. The
+retirement sweep uses it (``crates/fno-agents/src/gc_native.rs``), bound
+to the version it was measured at. ``rm`` does not, and the difference is
+deliberate: a retirement is the end of a worker's life, and an ``rm`` is
+an operator taking one row out of a registry.
 
 :func:`is_session_id` stays because callers still validate ids, and the
 constant below is the message ``rm`` prints so the wording lives with
