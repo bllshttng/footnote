@@ -1033,8 +1033,12 @@ mod tests {
         assert_eq!(rows[1].pid, None);
     }
 
+    fn alternate_account_env_lock() -> &'static std::sync::Mutex<()> {
+        crate::claims::test_env_lock()
+    }
+
     fn with_alt_account_config(test: impl FnOnce(PathBuf)) {
-        let _guard = crate::claims::test_env_lock()
+        let _guard = alternate_account_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let root = std::env::temp_dir().join(format!(
@@ -1056,12 +1060,18 @@ mod tests {
         .unwrap();
         let previous = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
         std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", root.join("settings.toml"));
-        test(root.join("claude-alt"));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test(root.join("claude-alt"));
+        }));
         match previous {
             Some(value) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value),
             None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
         }
         std::fs::remove_dir_all(root).ok();
+        drop(_guard);
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]
@@ -1113,24 +1123,33 @@ mod tests {
 
     #[test]
     fn alternate_account_tests_share_the_crate_environment_lock() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
         let shared = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (sent, received) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            with_alt_account_config(|_| sent.send(()).unwrap());
-        });
-        assert!(
-            received.recv_timeout(Duration::from_millis(50)).is_err(),
-            "the helper bypassed the crate-wide environment lock"
-        );
+        let attempt = alternate_account_env_lock().try_lock();
+        assert!(matches!(attempt, Err(std::sync::TryLockError::WouldBlock)));
         drop(shared);
-        received
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the helper did not resume after the shared lock released");
-        worker.join().unwrap();
+    }
+
+    #[test]
+    fn alternate_account_tests_restore_environment_after_panic() {
+        let previous = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        let result = std::panic::catch_unwind(|| {
+            with_alt_account_config(|_| panic!("injected assertion failure"));
+        });
+        let observed = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        if observed != previous {
+            if let Some(path) = &observed {
+                if let Some(root) = std::path::Path::new(path).parent() {
+                    std::fs::remove_dir_all(root).ok();
+                }
+            }
+            match &previous {
+                Some(value) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value),
+                None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+            }
+        }
+        assert!(result.is_err(), "the injected panic did not run");
+        assert_eq!(observed, previous, "the helper leaked its environment");
     }
 }

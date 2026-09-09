@@ -908,6 +908,12 @@ pub fn classify_with_basis_and_exclusivity(
             // byte-for-byte today's verdict, which every pre-change claim and
             // the reaper counts the 1511 revert restored depend on.
             if rec.session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+                if rec.key.starts_with("node:")
+                    && is_same_machine(&rec.host, rec.machine_id.as_deref())
+                    && matches!(witness(rec), SessionLiveness::Absent)
+                {
+                    return (ClaimState::Stale, basis::SESSION_ABSENT);
+                }
                 if let Some(witness_basis) = session_live(witness) {
                     return (ClaimState::Live, witness_basis);
                 }
@@ -942,7 +948,10 @@ pub fn classify_with_basis_and_exclusivity(
             .filter(|session| !session.is_empty())
             .map(|_| witness(rec))
     });
-    if rec.key.starts_with("node:") && matches!(witnessed, Some(SessionLiveness::Absent)) {
+    if rec.key.starts_with("node:")
+        && is_same_machine(&rec.host, rec.machine_id.as_deref())
+        && matches!(witnessed, Some(SessionLiveness::Absent))
+    {
         return (ClaimState::Stale, basis::SESSION_ABSENT);
     }
     if live {
@@ -3589,6 +3598,34 @@ mod tests {
         assert_eq!(
             classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
             (ClaimState::Suspect, basis::PID_ABSENT)
+        );
+    }
+
+    #[test]
+    fn claim_session_absent_keeps_an_unexpired_offhost_claim_protected() {
+        let now = now_ms();
+        let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
+        rec.key = "node:x-offhost".into();
+        rec.host = "remote-host".into();
+        rec.machine_id = Some("remote-machine".into());
+        rec.pid_provenance = Some("ambient".into());
+        let witness: SessionWitness = &|_| SessionLiveness::Absent;
+        assert_eq!(
+            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
+            (ClaimState::Suspect, basis::OFFHOST)
+        );
+    }
+
+    #[test]
+    fn claim_session_absent_skips_unresolved_grace_after_expiry() {
+        let now = now_ms();
+        let mut rec = session_record(dead_pid() as i32, now - 1, Some(now - 1));
+        rec.key = "node:x-expired-absent".into();
+        rec.pid_provenance = Some("ambient".into());
+        let witness: SessionWitness = &|_| SessionLiveness::Absent;
+        assert_eq!(
+            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
+            (ClaimState::Stale, basis::SESSION_ABSENT)
         );
     }
 

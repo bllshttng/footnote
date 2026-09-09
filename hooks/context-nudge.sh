@@ -213,6 +213,7 @@ if command -v fno >/dev/null 2>&1; then
             UNLINKED_ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
+                    and ((.origin // "") != "operator")
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.status // "exited") != "exited"
@@ -224,6 +225,7 @@ if command -v fno >/dev/null 2>&1; then
             UNLINKED_ORPHAN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
+                    and ((.origin // "") != "operator")
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.status // "exited") != "exited"

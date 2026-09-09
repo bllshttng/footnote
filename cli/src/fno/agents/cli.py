@@ -3243,7 +3243,7 @@ def cmd_registry_json() -> None:
     Hooks (context-nudge.sh) need the stored crown + spawn-edge fields
     without the live-status enrichment that ``fno agents list`` lazy-starts the
     daemon for. Output is ``{"agents": [...]}`` with name / session ids /
-    status / crown fields / spawned_by_session per row - a file read via
+    status / crown fields / spawned_by_session / origin per row - a file read via
     load_registry, no daemon, so a Stop hook never stalls on a daemon start.
     """
     import json as _json
@@ -3259,6 +3259,7 @@ def cmd_registry_json() -> None:
             "crown_level": e.crown_level,
             "crown_scope": e.crown_scope,
             "spawned_by_session": e.spawned_by_session,
+            "origin": e.origin,
         }
         for e in load_registry()
     ]

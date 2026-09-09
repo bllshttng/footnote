@@ -160,6 +160,11 @@ write_registry_with_unlinked_child() {
       name:"unlinked-worker", harness:"claude", cwd:"/tmp", log_path:"/tmp/u",
       status:"live", short_id:"unlinked", spawned_by_session:null,
       crown_level:null, crown_scope:null
+    },
+    {
+      name:"operator-peer", harness:"claude", cwd:"/tmp", log_path:"/tmp/o",
+      status:"live", short_id:"operator-peer", spawned_by_session:null,
+      crown_level:null, crown_scope:null, origin:"operator"
     }
   ]}' > "$SBX/.fno/agents/registry.json"
 }
@@ -282,6 +287,7 @@ assert_contains "AC31: unlinked-only population blocks" "$OUT" '"decision":"bloc
 assert_contains "AC31: reports zero linked workers" "$OUT" 'Linked count: 0'
 assert_contains "AC31: names unlinked worker" "$OUT" 'unlinked-worker'
 assert_contains "AC31: reports ownership unknown" "$OUT" 'ownership unknown'
+assert_absent "AC31: excludes operator session" "$OUT" 'operator-peer'
 write_registry yes yes
 
 # === AC15: a carveout carrying the scope suppresses the orphan block ==========
