@@ -111,6 +111,13 @@ pub struct GcSummary {
     /// `(id, reason)`: the confirmed stop of the held process refused; the
     /// row stays in the registry and is retried next tick.
     pub stop_refused: Vec<(String, String)>,
+    /// `(id, reason)`: DRY RUN only. The row would retire on its policy
+    /// verdict, but no positive death evidence (terminal roster state, dead
+    /// pid) backs it, so whether a real run can confirm its stop is unknowable
+    /// without side effects. A dry run that counted these as retirable would
+    /// promise rows a real run then refuses (2026-09-08: dry promised nine,
+    /// real retired zero).
+    pub needs_live_stop: Vec<(String, String)>,
     /// `(id, reason)`: a retirement held because no resumable receipt could
     /// be staged. Unknown never removes - a removal the operator cannot undo
     /// needs at least the record of how to come back.
@@ -559,6 +566,39 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
     .unwrap_or(false)
 }
 
+/// Positive death evidence for a claude row, read off the `claude agents
+/// --json --all` snapshot. `Some(reason)` proves the session finished - the
+/// same standard rm's live gate accepts. A finished claude agent never
+/// leaves the roster; it stays listed with state `done`, so absence can
+/// never be the proof here. `blocked` is NOT terminal: the row may be
+/// rotated and resumed, so it holds.
+pub(crate) fn claude_death_reason(
+    e: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
+) -> Option<String> {
+    if e.harness_name() != "claude" {
+        return None;
+    }
+    let row_id = crate::daemon::claude_row_id(e)?;
+    let row = agents.find(&row_id)?;
+    if let Some(state) = row
+        .state
+        .as_deref()
+        .filter(|state| crate::claude_roster::is_terminal_roster_state(state))
+    {
+        return Some(format!("row {row_id} present, state {state}"));
+    }
+    if let Some(pid) = row.pid {
+        // ESRCH or nothing: a failed lookup is not death, so the verdict
+        // needs the existence-specific probe, not start_time's conflated
+        // None (two Nones also prove a persistent failure).
+        if crate::daemon::pid_is_gone(pid) {
+            return Some(format!("row {row_id} pid {pid} is gone"));
+        }
+    }
+    None
+}
+
 /// Stop a claude row's session before the row drops. The roster is the exited
 /// proof: a session the live roster no longer lists is already gone, and
 /// running `claude stop` on it would fail on every future sweep, wedging the
@@ -720,7 +760,10 @@ pub fn provenance_verdict(
 /// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
 /// `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a test
 /// stages the world; production wiring is [`crate::gc::gc_sweep`] /
-/// [`crate::gc::gc_sweep_dry_run`].
+/// [`crate::gc::gc_sweep_dry_run`]. `agents_read` is the same kind of seam
+/// for the `claude agents --json --all` snapshot: read at most once per
+/// sweep, lazily, only when a row actually reaches the stop gate - steady
+/// state keeps zero subprocesses on the hot path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     home: &AgentsHome,
@@ -732,6 +775,7 @@ pub(crate) fn run(
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
@@ -759,6 +803,10 @@ pub(crate) fn run(
     // never clobbered by a stale name-only decision (TOCTOU).
     let mut to_retire: std::collections::BTreeMap<String, RetireOrder> =
         std::collections::BTreeMap::new();
+    // The agents snapshot is read at most once per sweep, on the first row
+    // that reaches the stop gate - never on the empty/kept hot path.
+    let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
+        std::cell::RefCell::new(None);
 
     for e in &registry.entries {
         let id = row_handle(e);
@@ -914,19 +962,58 @@ pub(crate) fn run(
                 continue;
             }
         }
+        //
+        // Positive death evidence decides BEFORE any stop is attempted, off
+        // one lazy snapshot read per sweep (claude rows only: the evidence
+        // instrument is claude's roster). A finished claude agent never
+        // leaves the roster, so for it the stop's own absence-confirmation
+        // can never arrive; the evidence is the proof instead.
+        let death = if e.harness_name() == "claude" {
+            let mut memo = agents_memo.borrow_mut();
+            let snapshot = memo.get_or_insert_with(&agents_read);
+            claude_death_reason(e, snapshot)
+        } else {
+            None
+        };
+        // The 2026-09-08 shape (dry promised nine, real retired zero): a dry
+        // run never promises a claude stop it holds no evidence for.
+        if dry_run && death.is_none() && e.harness_name() == "claude" {
+            summary.needs_live_stop.push((
+                id,
+                "no terminal roster state and no dead pid; a dry run does not \
+                 promise a stop it cannot prove"
+                    .into(),
+            ));
+            continue;
+        }
+        // Death evidence satisfies the stop. It wraps the callee's seam here,
+        // in the caller that owns the snapshot, so the shared signature is
+        // untouched.
+        let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
         if let Err(refusal) = stage_session_retirement(
             home,
             e,
             ledger.as_deref(),
             dry_run,
-            stop_confirmed,
+            &stop_on_death,
             surface_removal,
             &mut receipts,
         ) {
             match refusal {
-                RetireRefusal::StopRefused(reason) | RetireRefusal::NativeRemoval(reason) => {
-                    summary.stop_refused.push((id, reason))
+                RetireRefusal::StopRefused(reason) => {
+                    // A claude row with no death evidence names the missing
+                    // evidence, not just the unconfirmed stop: the refusal
+                    // says what would have satisfied it.
+                    let reason = if death.is_none() && e.harness_name() == "claude" {
+                        "no death evidence (no terminal roster state, no dead pid) and the \
+                         stop did not confirm; row kept for retry"
+                            .into()
+                    } else {
+                        reason
+                    };
+                    summary.stop_refused.push((id, reason));
                 }
+                RetireRefusal::NativeRemoval(reason) => summary.stop_refused.push((id, reason)),
                 RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
                 RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
             }

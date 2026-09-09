@@ -31,8 +31,12 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
+mod rm_refusal_detail;
+mod roster_death;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
+use self::roster_death::claude_row_provably_absent;
+pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 mod list_rows;
 use self::list_rows::{attention_sort_key, handle_list};
 mod prune_outcome;
@@ -902,29 +906,6 @@ impl CascadeOutcome {
             Self::Removed | Self::NotApplicable => None,
         }
     }
-}
-
-fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
-    if !e.short_id.is_empty() {
-        return Some(e.short_id.clone());
-    }
-    e.harness_session_id
-        .as_deref()
-        .filter(|session_id| !session_id.is_empty())
-        .map(|session_id| session_id.chars().take(8).collect())
-}
-
-/// True only when a KNOWN roster snapshot was consulted and the row is not
-/// in it. A `None`/unknown snapshot proves nothing, so it is never absent on
-/// that basis alone. The single predicate both the pre-cascade live-gate and
-/// the cascade's own already-absent check apply, so "what counts as absent"
-/// cannot diverge between the two call sites.
-fn claude_row_provably_absent(
-    claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
-    row_id: Option<&str>,
-) -> bool {
-    claude_agents
-        .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
 }
 
 pub(crate) fn cascade_harness_session_result_with(
@@ -6975,12 +6956,14 @@ async fn handle_rm_with(
     // keeps it in the roster, and a pane row whose pane the probe cannot find
     // is provably gone because the pane is that row's ONE live ref. Anything
     // less than proof keeps refusing, and `--force` remains the only escape.
-    let row_state_terminal = claude_agents
+    // One death verdict for the whole gate, shared with the reaper: a claude
+    // row whose roster state is terminal, or whose roster pid is provably
+    // gone, is finished even though Claude keeps the row listed. The reaper
+    // accepts the same evidence - a merge cleanup whose stop cleared on it
+    // must not be refused by the very next `fno agents rm`.
+    let provably_gone = claude_agents
         .as_ref()
-        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
-        .and_then(|row| row.state.as_deref())
-        .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
-    let provably_gone = row_state_terminal
+        .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     if entry.status == AgentStatus::Live && !force && !provably_gone {
@@ -6988,48 +6971,24 @@ async fn handle_rm_with(
             .clone()
             .unwrap_or_else(|| "(no harness row id)".into());
         let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
-        let detail = if entry.harness_name() != "claude" {
-            format!(
-                "agent {name} is still live. Stop it with `fno agents stop {name}`; rm \
-                 proceeds on its own once the row is gone. Forcing it through orphans a \
-                 live process and spends the row's resume handle. If stop answers no_op \
-                 (no addressable session behind the row), the row cannot prove liveness \
-                 either way; the override for that case is documented in `fno agents rm \
-                 --help`, not here."
-            )
-        } else if harness_row_id.is_none() {
-            // claude_row_provably_absent short-circuits to `false` (not
-            // provably gone) whenever the row id is None, independent of the
-            // roster -- so presence was never actually checked here, and the
-            // roster_known branch's "is present in" claim plus its runnable
-            // `claude stop <row>` commands would both be false (self-review
-            // finding).
-            format!(
-                "agent {name} is still live, but it has no resolvable harness row id, so \
-                 its presence in `claude agents --json --all` cannot be checked. Stop it \
-                 with `fno agents stop {name}`; rm proceeds on its own once the row is \
-                 gone. Forcing it through spends the resume handle the row still holds. \
-                 If stop refuses or no-ops because the row has no addressable session, \
-                 the row cannot prove liveness either way; the override for that case is \
-                 documented in `fno agents rm --help`, not here."
-            )
-        } else if roster_known {
-            format!(
-                "agent {name} is still live. Its harness row {row} is present in \
-                 `claude agents --json --all`. Stop it with `fno agents stop {name}`; rm \
-                 proceeds on its own once that row is gone. Do not tear the row down by \
-                 hand: that spends the resume handle for nothing, and `fno agents rm` \
-                 makes the same call itself."
-            )
-        } else {
-            format!(
-                "agent {name} is still live, and its harness row {row}'s presence in \
-                 `claude agents --json --all` could not be confirmed (the roster read \
-                 failed). Retry once the roster is readable: rm re-reads it and proceeds \
-                 on its own when the row is provably gone. Forcing it through spends the \
-                 resume handle on unverified evidence."
-            )
-        };
+        let warnings = claude_agents
+            .as_ref()
+            .map(|snapshot| snapshot.warning_text())
+            .unwrap_or_default();
+        let row_present = harness_row_id.as_deref().is_some_and(|id| {
+            claude_agents
+                .as_ref()
+                .is_some_and(|snap| snap.find(id).is_some())
+        });
+        let detail = rm_refusal_detail::live_row_refusal(
+            &name,
+            &row,
+            entry.harness_name(),
+            harness_row_id.is_none(),
+            roster_known,
+            row_present,
+            &warnings,
+        );
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
     let harness_outcome = off_executor(|| {
@@ -10696,7 +10655,7 @@ mod tests {
             // states what forcing costs, and offers no override flag.
             let message = &response.error().unwrap().message;
             assert!(
-                message.contains("Retry once the roster is readable"),
+                message.contains("Retry once that read succeeds"),
                 "{}",
                 message
             );
@@ -11593,6 +11552,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
+    #[path = "rm_refusal.rs"]
+    mod rm_refusal;
 
     // The codex thread lane's spawn/registry/resume test family, moved
     // verbatim into its own module for the same reason as gc_receipts above:

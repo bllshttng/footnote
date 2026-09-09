@@ -130,8 +130,11 @@ require "$REPO_ROOT/crates/fno-agents/src/gemini_ask.rs" "the exchange finished"
 
 # --- 5. stop/rm livelock exits -------------------------------------------------
 DM="$REPO_ROOT/crates/fno-agents/src/daemon.rs"
-require "$DM" "If stop answers no_op" "rm(live): names the stop no_op dead end"
-require "$DM" "If stop refuses or no-ops" "rm(idless): names the stop dead end"
+# The two rm refusal texts live in the builder module the file-budget gate
+# moved them into; the stop_claude claim still lives in the handler.
+RR="$REPO_ROOT/crates/fno-agents/src/daemon/rm_refusal_detail.rs"
+require "$RR" "If stop answers no_op" "rm(live): names the stop no_op dead end"
+require "$RR" "If stop refuses or no-ops" "rm(idless): names the stop dead end"
 require "$DM" "stop-then-rm has no exit here" "stop_claude(idless): no false rm-clears claim"
 
 if [[ "$FAILURES" -gt 0 ]]; then

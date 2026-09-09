@@ -98,6 +98,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_shared_tree": pair(&summary.kept_shared_tree),
                 "kept_live_descendants": pair(&summary.kept_live_descendants),
                 "stop_refused": pair(&summary.stop_refused),
+                "needs_live_stop": pair(&summary.needs_live_stop),
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
                 "kept_receipts": pair(&summary.kept_receipts),
@@ -212,6 +213,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     for (id, reason) in &summary.stop_refused {
         out.push_str(&format!("  kept {id} (stop refused: {reason})\n"));
     }
+    for (id, reason) in &summary.needs_live_stop {
+        out.push_str(&format!("  held {id} (needs live stop: {reason})\n"));
+    }
     for (id, reason) in &summary.kept_no_receipt {
         out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));
     }
@@ -305,6 +309,7 @@ mod tests {
             "kept_shared_tree",
             "kept_live_descendants",
             "stop_refused",
+            "needs_live_stop",
             "kept_no_receipt",
             "expired_receipts",
             "kept_receipts",
