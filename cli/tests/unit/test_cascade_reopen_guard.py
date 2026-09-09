@@ -9,7 +9,7 @@ its own --force plus --reason ladder) does not. The sweeps:
   `_strandable_epic_ids`.
 - reconcile's PR-merged close (`cmd_reconcile`'s closeable partition) and the
   contained merge cascade `_cascade_close_contained` - guarded by
-  `_reopen_outranks_merge` / the same child-keyed predicate (x-b685). The
+  `_reopen_outranks_merge` / the same child-keyed predicate. The
   PR-merged leg reads no children, so the child-keyed guard alone never
   reached it: a container whose own PR shipped was re-closed on that evidence
   alone. Measured 2026-09-05 a node reopened with a written reason was
@@ -156,7 +156,7 @@ def test_contained_reopen_before_the_owner_close_is_stale():
 
 
 # ---------------------------------------------------------------------------
-# `_reopen_outranks_merge`: the merge-keyed twin (x-b685)
+# `_reopen_outranks_merge`: the merge-keyed twin
 # ---------------------------------------------------------------------------
 
 

@@ -8173,8 +8173,8 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
             continue
         if e.get("completed_at"):
             continue  # already closed (out of band, or a previous sweep)
-        # Same guard its sweep twin `_strandable_contained_ids` already applies
-        # (x-b685): a reopen postdating the owner's close holds; without it the
+        # Same guard its sweep twin `_strandable_contained_ids` already
+        # applies: a reopen postdating the owner's close holds; without it the
         # merge cascade re-closed a deliberately reopened contained child.
         if _reopen_outranks_child_closes(e, [unit]):
             continue
@@ -10205,7 +10205,7 @@ def cmd_reconcile(
                 "pr_url": record.pr_url,
             }
             # Reopen guard BEFORE the promise gate: a deliberate reopen
-            # postdating the merge holds (x-b685) - the PR-merged close leg
+            # postdating the merge holds - the PR-merged close leg
             # reads no children, so the child-keyed guard never reaches it.
             # Skipping here spends no gh round trip on a node already held, and
             # one filter covers the mutator and the --dry-run simulation,
