@@ -1426,9 +1426,7 @@ def inject_spawn_defaults(
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
         _role_route = (
-            bool(role) and bool(_role_resolves(role, settings, env))
-            if (cfg_model and not has_model)
-            else False
+            bool(role) and bool(_role_resolves(role, settings, env)) if cfg_model and not has_model else False
         )
         _target: Optional[str] = None
         _target_failed = False
@@ -1531,10 +1529,9 @@ def inject_spawn_defaults(
             raise SystemExit(2)
 
     def _seamed(name: str) -> Tuple[str, Optional[str]]:
-        """The post-resolution read for the three posture fields: the lane
-        first (a lane is a complete coordinate), then the verb's harness-keyed
-        answer, then the harness-blind scalars - field()'s order with the two
-        harness rungs spliced in above them."""
+        """Lane first (a lane is a complete coordinate), then the harness-keyed
+        answer, then the harness-blind scalars: field()'s order with the two
+        harness rungs spliced in above it."""
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
@@ -1732,13 +1729,9 @@ def _emit_defaults_applied(
     suppressed: Sequence[Tuple[str, str, str, str]],
     fingerprint: str = "",
 ) -> None:
-    """Journal the spawn_defaults_applied receipt through the route-slot verb.
-
-    ``scope`` is the caller's locals(): every config-resolved spawn axis as
-    ``(value, rung)``, empties included. Contract:
-    docs/architecture/role-based-model-routing.md. The call never raises; a
-    dead journal never bricks a valid launch.
-    """
+    """Journal the spawn_defaults_applied receipt (contract:
+    docs/architecture/role-based-model-routing.md). ``scope`` is the caller's
+    locals(); the call never raises - a dead journal never bricks a launch."""
     try:
         import os
 
@@ -1749,18 +1742,19 @@ def _emit_defaults_applied(
             from fno import paths
 
             path = str(paths.state_dir() / "events.jsonl")
-        axes = {}
-        for axis, value_key, rung_key in (
-            ("provider", "cfg_harness", "provider_rung"),
-            ("model", "cfg_model", "model_rung"),
-            ("effort", "cfg_effort", "effort_rung"),
-            ("substrate", "cfg_substrate", "substrate_rung"),
-            ("permission_mode", "cfg_permission", "permission_rung"),
-            ("route", "cfg_route", "route_rung"),
-            ("account", "cfg_account", "account_rung"),
-            ("pane_group", "cfg_pane_group", "pane_group_rung"),
-        ):
-            axes[axis] = (scope.get(value_key) or "", scope.get(rung_key))
+        axes = {
+            axis: (scope.get(value_key) or "", scope.get(rung_key))
+            for axis, value_key, rung_key in (
+                ("provider", "cfg_harness", "provider_rung"),
+                ("model", "cfg_model", "model_rung"),
+                ("effort", "cfg_effort", "effort_rung"),
+                ("substrate", "cfg_substrate", "substrate_rung"),
+                ("permission_mode", "cfg_permission", "permission_rung"),
+                ("route", "cfg_route", "route_rung"),
+                ("account", "cfg_account", "account_rung"),
+                ("pane_group", "cfg_pane_group", "pane_group_rung"),
+            )
+        }
         from fno.route_slot_client import route_slot_call
 
         route_slot_call({
@@ -1786,9 +1780,9 @@ def spawn_seam_marker() -> str:
 
 
 def routing_enforcement_state(settings: object = None) -> str:
-    """The marker verdict: the binary reads no config, so
-    ``--defaults-applied=<state>`` is its only record of the seam's decision.
-    Read failure degrades open; a strict seam refuses upstream."""
+    """The marker verdict: the config-blind binary's only record of the
+    seam's decision. Read failure degrades open; a strict seam refuses
+    upstream."""
     try:
         from fno.route_resolve import _routing_enforced
 

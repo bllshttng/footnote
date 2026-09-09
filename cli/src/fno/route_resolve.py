@@ -486,9 +486,8 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 
 def _slot_profiles_table(settings: object) -> dict[str, Any]:
-    """Every dispatched verb's slot as JSON: the strict owner picks the
-    EFFECTIVE work kind's slot from this table, so the request's own verb
-    never has to match it (a planless target rides the blueprint slot)."""
+    """Every dispatched verb's slot as JSON: the owner picks the EFFECTIVE
+    work kind's slot from this table (a planless target rides blueprint)."""
     out: dict[str, Any] = {}
     try:
         for verb in SLOT_VERBS:
