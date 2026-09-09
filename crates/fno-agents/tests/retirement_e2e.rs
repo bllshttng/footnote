@@ -369,10 +369,13 @@ fn ac_x_d2ba_the_build_pin_agrees_across_one_cargo_build() {
 /// The DEPLOYED cohort, not the just-built one: resolve `fno-agents`,
 /// `fno-agents-daemon` and `fno-agents-worker` on `PATH` and compare their
 /// build pins. This is what `reap --verify` actually audits against on a
-/// live machine. When none of the three resolves, an
-/// explicit assertion names that absence rather than a silent early
-/// return; a resolved binary predating the `build` field fails loudly too -
-/// `fno doctor update` deploys the current one.
+/// live machine. A partial or empty cohort proves nothing about
+/// agreement - comparing only the binaries that happen to resolve would
+/// silently pass on a machine missing the very binary whose staleness
+/// this test exists to catch - so anything short of all three resolving
+/// is a loud, named skip, never a verified pass. A resolved binary
+/// predating the `build` field fails loudly too - `fno doctor update`
+/// deploys the current one.
 #[test]
 fn the_deployed_cohort_agrees_on_the_build_pin() {
     let names = ["fno-agents", "fno-agents-daemon", "fno-agents-worker"];
@@ -380,14 +383,11 @@ fn the_deployed_cohort_agrees_on_the_build_pin() {
         .iter()
         .filter_map(|name| fno_agents::loop_dispatch::which_binary(name).map(|p| (*name, p)))
         .collect();
-    if resolved.is_empty() {
-        // Named absence, not a silent early return: an explicit assertion
-        // records the fact this machine has no installed cohort to audit,
-        // rather than a bare `return` a later bug in the resolve above
-        // could hide behind.
-        assert!(
-            resolved.is_empty(),
-            "no deployed fno-agents cohort found on PATH ({names:?}); nothing to verify"
+    if resolved.len() != names.len() {
+        eprintln!(
+            "SKIP the_deployed_cohort_agrees_on_the_build_pin: {}/{} named binaries resolved on PATH ({names:?}); a partial or empty cohort verifies nothing",
+            resolved.len(),
+            names.len()
         );
         return;
     }

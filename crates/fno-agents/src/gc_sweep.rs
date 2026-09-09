@@ -169,6 +169,10 @@ pub(crate) struct CommitReport {
     pub(crate) pruned: Vec<(String, String)>,
     pub(crate) prune_failed: Vec<(String, String)>,
     pub(crate) kept_no_receipt: Vec<(String, String)>,
+    /// `(row id, holder)`: a shared-cwd occupant not present in `run`'s
+    /// snapshot, but live in the registry under the commit lock. Merged
+    /// into `GcSummary::kept_shared_tree`.
+    pub(crate) kept_shared_tree: Vec<(String, String)>,
     pub(crate) retired_names: std::collections::BTreeSet<String>,
 }
 
@@ -1014,6 +1018,7 @@ pub(crate) fn run(
     summary.pruned = report.pruned;
     summary.prune_failed = report.prune_failed;
     summary.kept_no_receipt.extend(report.kept_no_receipt);
+    summary.kept_shared_tree.extend(report.kept_shared_tree);
     summary
 }
 
@@ -1118,7 +1123,35 @@ pub(crate) fn commit_retirements(
     }
     // Names actually removed under the lock (identity still matched), so the
     // emit + summary report only what really happened.
+    let retiring: std::collections::BTreeSet<String> = to_retire.keys().cloned().collect();
     let write = state::update_registry(&home.registry_json(), |r| {
+        // Revalidate shared-cwd occupancy against the registry as it
+        // stands right now, under the lock: `run`'s snapshot is
+        // stop-confirmation, receipt-write, and probe seconds old by the
+        // time a prune is about to fire, and a newly registered agent on
+        // that cwd is invisible to a check run against the old snapshot.
+        // The same-cwd tie among rows retiring THIS pass was already
+        // settled once in `run`; only a row NOT in `to_retire` counts as
+        // a fresh occupant here.
+        for order in to_retire.values_mut() {
+            if order.tree != TreeAction::Prune {
+                continue;
+            }
+            let Some(cwd) = &order.worktree else {
+                continue;
+            };
+            let occupant = r
+                .entries
+                .iter()
+                .filter(|other| &other.cwd == cwd && !retiring.contains(&other.name))
+                .min_by_key(|other| &other.name);
+            if let Some(occupant) = occupant {
+                order.tree = TreeAction::None;
+                report
+                    .kept_shared_tree
+                    .push((order.id.clone(), row_handle(occupant)));
+            }
+        }
         r.entries.retain(|e| {
             let Some(order) = to_retire.get(&e.name) else {
                 return true;
