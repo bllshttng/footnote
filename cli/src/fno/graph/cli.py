@@ -10121,10 +10121,10 @@ def cmd_reconcile(
             # worktree is a dead dir, and handing it to subprocess(cwd=) makes
             # the probe runner fail to launch - a fail-CLOSED refusal that would
             # hold the node open on every sweep forever.
-            gate_cwd = _effective_reconcile_cwd(
+            resolved_cwd = _effective_reconcile_cwd(
                 gate_node.get("cwd") or "", gate_node.get("project")
             )
-            gate_cwd = gate_cwd if os.path.isdir(gate_cwd) else None
+            gate_cwd: Optional[str] = resolved_cwd if os.path.isdir(resolved_cwd) else None
             # Reopen guard BEFORE the promise gate: a deliberate reopen
             # postdating the merge holds, and one filter covers the mutator
             # and the --dry-run simulation (both iterate this same list).
