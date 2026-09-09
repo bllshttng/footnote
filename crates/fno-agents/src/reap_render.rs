@@ -100,8 +100,12 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         );
     }
     let verb = if dry_run { "would retire" } else { "retired" };
+    // x-f55c: a rehearsal never calls prune_tree, so `pruned` here is a
+    // PROJECTION off TreeAction::Prune alone, never a confirmed removal -
+    // the verb must say so, the same way `retired` already does.
+    let prune_verb = if dry_run { "would prune" } else { "pruned" };
     let mut out = format!(
-        "{verb} {} row(s); pruned {} worktree(s)\n",
+        "{verb} {} row(s); {prune_verb} {} worktree(s)\n",
         summary.retired.len(),
         summary.pruned.len(),
     );
@@ -109,7 +113,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  {verb} {id} ({basis})\n"));
     }
     for (id, path) in &summary.pruned {
-        out.push_str(&format!("  pruned {id} (clean and merged: {path})\n"));
+        out.push_str(&format!("  {prune_verb} {id} (clean and merged: {path})\n"));
     }
     for (id, reason) in &summary.prune_failed {
         out.push_str(&format!("  prune failed {id} ({reason})\n"));
@@ -333,6 +337,22 @@ mod tests {
             "must not also say retired: {out}"
         );
         assert!(out.contains("(dry-run: no changes made)"));
+    }
+
+    #[test]
+    fn reap_dry_run_says_would_prune_not_pruned() {
+        // x-f55c: a rehearsal never confirms a removal - the `pruned` line
+        // must carry the same "would" verb the `retired` line already does.
+        let s = GcSummary {
+            pruned: vec![("a1".into(), "/tmp/wt".into())],
+            ..Default::default()
+        };
+        let dry = render_reap(&s, false, true);
+        assert!(dry.contains("would prune a1"), "{dry}");
+        assert!(!dry.contains("  pruned a1"), "must not say pruned: {dry}");
+        let live = render_reap(&s, false, false);
+        assert!(live.contains("  pruned a1"), "{live}");
+        assert!(!live.contains("would prune"), "{live}");
     }
 
     #[test]
