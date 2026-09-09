@@ -8150,101 +8150,13 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
     return freed
 
 
-def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
-    """Close every node that shipped inside ``node_id``'s PR.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._reconcile import _reopen_outranks_child_closes
-
-    unit = next(
-        (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
-        {},
-    )
-    pr = unit.get("pr_number")
-    where = f"PR #{pr}" if pr else "its PR"
-    note = (
-        f"auto-closed: shipped inside {node_id} ({where}); "
-        f"cost and session are recorded on {node_id}"
-    )
-
-    closed: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("contained_in") != node_id:
-            continue
-        if e.get("completed_at"):
-            continue  # already closed (out of band, or a previous sweep)
-        # Same guard its sweep twin `_strandable_contained_ids` already
-        # applies: a reopen postdating the owner's close holds; without it the
-        # merge cascade re-closed a deliberately reopened contained child.
-        if _reopen_outranks_child_closes(e, [unit]):
-            continue
-        nid = e.get("id")
-        if not isinstance(nid, str) or not nid:
-            continue  # unidentifiable row: nothing to report, nothing to close
-        _apply_completion_fields(e)
-        e["completion_note"] = note
-        closed.append(nid)
-    return closed
-
-
-def _strandable_contained_ids(entries: list[dict]) -> set[str]:
-    """Open nodes whose delivery unit is ALREADY done - closeable right now.
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._reconcile import _reopen_outranks_child_closes
-
-    by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
-    out: set[str] = set()
-    for e in entries:
-        if not isinstance(e, dict) or e.get("completed_at"):
-            continue
-        owner_id = e.get("contained_in")
-        if not isinstance(owner_id, str) or not owner_id:
-            continue
-        owner = by_id.get(owner_id)
-        nid = e.get("id")
-        # `.get`, not `e["id"]`: a row carrying contained_in but no id would
-        # raise KeyError, and this runs OUTSIDE any try/except in cmd_reconcile
-        # - so it would abort the whole sweep. Exactly the failure class as the
-        # SessionStart jq bug this same PR fixes; a read of untrusted graph rows
-        # must never be the thing that takes reconcile down.
-        if (
-            owner is not None
-            and owner.get("completed_at")
-            and isinstance(nid, str)
-            and nid
-            and not _reopen_outranks_child_closes(e, [owner])
-        ):
-            out.add(nid)
-    return out
-
-
-def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
-    """Close every node :func:`_strandable_contained_ids` names.
-
-    Grouped by owner so each node gets the same note the merge-time cascade
-    writes, naming its unit and that unit's PR.
-    """
-    # Hoisted: called inside the comprehension it re-ran once per entry, each
-    # pass rebuilding the whole by_id map - O(N^2) on a path reconcile fires at
-    # every SessionStart.
-    stranded = _strandable_contained_ids(entries)
-    if not stranded:
-        return []
-    owners = {
-        e.get("contained_in") for e in entries if isinstance(e, dict) and e.get("id") in stranded
-    }
-    closed: list[str] = []
-    for owner_id in sorted(o for o in owners if isinstance(o, str) and o):
-        closed.extend(_cascade_close_contained(entries, owner_id))
-    return closed
-
-
 # In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
+    _cascade_close_contained,
+    _strandable_contained_ids,
     _strandable_epic_ids,
     _sweep_close_done_epics,
+    _sweep_close_stranded_contained,
     _sweep_stamp_carried_sessions,
 )
 
