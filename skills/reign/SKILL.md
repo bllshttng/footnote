@@ -85,6 +85,7 @@ Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --j
 - open PR count
 - PRs with a free claim and no driver
 - blocked rows and what on
+- `blocked_child` rows: a child under this crown emitted `<help>` and nothing answered it inside the grace window - name the node, the session, and the age
 - capacity, as the PAIR: `fno doctor footprint`'s verdict and the spawn gate's own reading, with a `DISAGREE` marker when they differ. Measured one second apart, the two gave "fleet CPU 26.8 percent, fine" and "fleet CPU attribution unavailable, refusing to spawn". The verdict does not predict whether a lever fires; the gate is the thing that actually refuses.
 - live worker count
 - the oldest worker last-seen stamp

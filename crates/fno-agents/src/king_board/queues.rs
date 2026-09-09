@@ -1,11 +1,11 @@
-//! The operator lane parser and the twelve-queue board build (pure; no I/O).
+//! The operator lane parser and the thirteen-queue board build (pure; no I/O).
 use super::classify::{node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
-    SRC_CLAIMS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED,
-    TERMINAL_RUNGS,
+    SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
+    SRC_UNDISPATCHED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -65,7 +65,193 @@ pub(crate) fn parse_lane(path: &Path) -> Result<Vec<LaneItem>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Board construction: the twelve queues
+// Distress journal: the `blocked` rows distress.rs already writes
+// ---------------------------------------------------------------------------
+
+/// One `<help>` distress row a king board candidate reads: the fields
+/// `blocked_child` needs, pulled out of the raw envelope
+/// (`{ts, v, type, source, run, node, data: {reason, evidence}}`).
+pub(crate) struct BlockedRow {
+    pub(crate) ts: String,
+    pub(crate) session: String,
+    pub(crate) node: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) evidence: Option<String>,
+}
+
+/// Every `type: "blocked"` row in one journal file, oldest-line-first (the
+/// file is append-only). A missing file reads as an honest empty list - a
+/// king board with nothing blocked yet must not read as unreadable.
+pub(crate) fn read_blocked_rows(path: &Path) -> Result<Vec<BlockedRow>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // a corrupt line is skipped, never a whole-file refusal
+        };
+        if v.get("type").and_then(Value::as_str) != Some("blocked") {
+            continue;
+        }
+        let (Some(ts), Some(session)) = (s_str(&v, "ts"), s_str(&v, "run")) else {
+            continue; // the two fields every row this queue needs must be present
+        };
+        out.push(BlockedRow {
+            ts: ts.to_string(),
+            session: session.to_string(),
+            node: s_str(&v, "node").map(str::to_string),
+            reason: v
+                .pointer("/data/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            evidence: v
+                .pointer("/data/evidence")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
+/// Oldest-per-session rows, past their grace window, that closing (node in
+/// `TERMINAL_RUNGS`) and claim release (no current claim, or one in
+/// `DEAD_CLAIM_STATES`) do NOT already answer. Pure over already-fetched
+/// inputs, so a unit test needs no filesystem, subprocess, or clock -
+/// exactly the split `build_board` uses for every other queue's inputs.
+/// "Released" reads the CURRENT claim only: this scan carries no prior
+/// holder to diff against, so gone or dead-stated counts as released and
+/// still-live does not. Returns `(row, age_minutes)` - the survivors still
+/// need the ONE batched mail-answered check the caller makes.
+pub(crate) fn resolve_blocked_child_candidates(
+    rows: Vec<BlockedRow>,
+    claim_state_by_node: &HashMap<String, String>,
+    status_by_node: &HashMap<String, String>,
+    grace_minutes: i64,
+    now_s: i64,
+) -> Vec<(BlockedRow, i64)> {
+    // The writer already dedups an identical (run, reason) repeat, but a
+    // session can still carry more than one DISTINCT reason - the board
+    // shows the oldest, never one row per repeat.
+    let mut oldest_by_session: HashMap<String, BlockedRow> = HashMap::new();
+    for row in rows {
+        match oldest_by_session.get(&row.session) {
+            Some(existing) if existing.ts <= row.ts => {}
+            _ => {
+                oldest_by_session.insert(row.session.clone(), row);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (_session, row) in oldest_by_session {
+        let closed = row
+            .node
+            .as_deref()
+            .and_then(|n| status_by_node.get(n))
+            .map(|s| TERMINAL_RUNGS.contains(&s.as_str()))
+            .unwrap_or(false);
+        let claim_released = match row.node.as_deref().and_then(|n| claim_state_by_node.get(n)) {
+            None => true,
+            Some(state) => DEAD_CLAIM_STATES.contains(&state.as_str()),
+        };
+        if closed || claim_released {
+            continue;
+        }
+        let row_epoch = crate::tick_ledger::parse_rfc3339_unix(&row.ts)
+            .map(|s| s as i64)
+            .unwrap_or(now_s);
+        let age_minutes = (now_s - row_epoch) / 60;
+        if age_minutes < grace_minutes {
+            continue;
+        }
+        out.push((row, age_minutes));
+    }
+    out
+}
+
+/// `to == session && ts > cutoff` across the live bus log plus its rotated
+/// `.N` segments, oldest first - the mail-answered signal AC3-EDGE names.
+/// Read-only and mechanical (no rotation/locking, the writer's job), so it
+/// stays a native Rust read rather than a Python subprocess per Change 1's
+/// own file list.
+pub(crate) fn mail_answered_since(
+    live_log: &Path,
+    cutoffs: &HashMap<String, String>,
+) -> HashMap<String, bool> {
+    let mut answered: HashMap<String, bool> = cutoffs.keys().map(|s| (s.clone(), false)).collect();
+    for segment in bus_segments_oldest_first(live_log) {
+        let Ok(text) = std::fs::read_to_string(&segment) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (Some(to), Some(ts)) = (s_str(&v, "to"), s_str(&v, "ts")) else {
+                continue;
+            };
+            if cutoffs.get(to).is_some_and(|cutoff| ts > cutoff.as_str()) {
+                answered.insert(to.to_string(), true);
+            }
+        }
+    }
+    answered
+}
+
+/// Retained bus log segments oldest -> newest: rotated `.N` (high N first),
+/// then the live file - mirrors `bus/log.py::_segment_paths_oldest_first`.
+fn bus_segments_oldest_first(live: &Path) -> Vec<std::path::PathBuf> {
+    let mut rotated: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    if let (Some(parent), Some(name)) = (live.parent(), live.file_name()) {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let prefix = format!("{}.", name.to_string_lossy());
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if let Some(n) = fname
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    rotated.push((n, entry.path()));
+                }
+            }
+        }
+    }
+    rotated.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out: Vec<std::path::PathBuf> = rotated.into_iter().map(|(_, p)| p).collect();
+    if live.exists() {
+        out.push(live.to_path_buf());
+    }
+    out
+}
+
+/// The final blocked_child rows: every candidate the mail-answered check
+/// did NOT clear, rendered as the row shape the queue emits. Pure.
+pub(crate) fn filter_unanswered_by_mail(
+    candidates: Vec<(BlockedRow, i64)>,
+    mail_answered: &HashMap<String, bool>,
+    watchdog_verdicts: &HashMap<String, String>,
+) -> Vec<Value> {
+    candidates
+        .into_iter()
+        .filter(|(row, _)| !mail_answered.get(&row.session).copied().unwrap_or(false))
+        .map(|(row, age_minutes)| {
+            json!({
+                "id": row.node,
+                "session": row.session,
+                "reason": row.reason,
+                "evidence": row.evidence,
+                "age_minutes": age_minutes,
+                "watchdog_verdict": watchdog_verdicts.get(&row.session),
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Board construction: the thirteen queues
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Queue {
@@ -142,6 +328,14 @@ pub(crate) struct BoardInputs {
     pub(crate) needs: SourceRead,
     pub(crate) lane: SourceRead,
     pub(crate) undispatched: SourceRead,
+    /// Pre-computed blocked_child candidates: one row per session with an
+    /// unanswered `blocked` distress row past `blocked_child_grace_minutes`,
+    /// already carrying `id`/`session`/`reason`/`evidence`/`age_minutes`.
+    /// The answered/unanswered decision (mail, claim release, node closing)
+    /// happens during collection, where the claim/graph/mail sources it
+    /// needs already live; this queue only scope-filters and renders, the
+    /// same split `undispatched` uses for its Python-computed selection.
+    pub(crate) blocked_child: SourceRead,
     /// The graph entries (None = unreadable); one read shared with scope
     /// compile, undispatched classify, and claimed-node lookups.
     pub(crate) entries: Option<Vec<Value>>,
@@ -367,6 +561,25 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             unheld_rows.push(row);
         }
     }
+
+    // Blocked child: every row `blocked_child` collection already computed
+    // as unanswered-past-grace (mail, claim release, node closing all
+    // checked at collection time, where those sources live). This build
+    // only scope-filters - the same split `undispatched` uses for a
+    // Python-computed selection.
+    let blocked_child_rows: Vec<Value> = inputs
+        .blocked_child
+        .rows()
+        .into_iter()
+        .filter(|row| {
+            in_scope(
+                "blocked_child",
+                row.get("id").unwrap_or(&Value::Null),
+                row,
+                &mut out_of_scope,
+            )
+        })
+        .collect();
 
     // Operator lane.
     let lane_ok = inputs.lane.is_ok();
@@ -688,6 +901,16 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             None,
         ),
         queue(
+            "blocked_child",
+            SRC_DISTRESS.to_string(),
+            &inputs.blocked_child,
+            blocked_child_rows,
+            true,
+            "a child under this crown emitted <help> and nobody answered it inside the grace window - check on it, or mail it to unblock".to_string(),
+            "",
+            None,
+        ),
+        queue(
             "undriven_pr",
             SRC_PR_NODES.to_string(),
             &if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
@@ -908,5 +1131,183 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let items = parse_lane(&dir.path().join("absent.md")).unwrap();
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn a_missing_journal_is_an_empty_list_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = read_blocked_rows(&dir.path().join("absent.jsonl")).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn read_blocked_rows_reads_the_x_eb79_specimen_and_skips_other_types() {
+        // The Verification section's own replay: write a blocked row for
+        // x-eb79 into a fixture journal, read it back by name.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        std::fs::write(
+            &journal,
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "ts": "2026-09-08T00:00:00Z", "v": 1, "type": "blocked",
+                    "source": "target", "run": "cx-eb79-run", "node": "x-eb79",
+                    "data": {"reason": "worktree-init-blocked", "evidence": "Operation not permitted"},
+                }),
+                json!({"ts": "2026-09-08T00:01:00Z", "type": "other", "run": "cx-eb79-run"}),
+            ),
+        )
+        .unwrap();
+        let rows = read_blocked_rows(&journal).unwrap();
+        assert_eq!(rows.len(), 1, "the non-blocked row must not appear");
+        assert_eq!(rows[0].session, "cx-eb79-run");
+        assert_eq!(rows[0].node.as_deref(), Some("x-eb79"));
+        assert_eq!(rows[0].reason, "worktree-init-blocked");
+        assert_eq!(rows[0].evidence.as_deref(), Some("Operation not permitted"));
+    }
+
+    fn blocked(ts: &str, session: &str, node: &str) -> BlockedRow {
+        BlockedRow {
+            ts: ts.to_string(),
+            session: session.to_string(),
+            node: Some(node.to_string()),
+            reason: "stuck".to_string(),
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn a_closed_node_answers_without_a_mail_check() {
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-closed")];
+        let mut status = HashMap::new();
+        status.insert("x-closed".to_string(), "done".to_string());
+        let candidates =
+            resolve_blocked_child_candidates(rows, &HashMap::new(), &status, 30, 10_000_000_000);
+        assert!(
+            candidates.is_empty(),
+            "a done node must not need a mail spawn"
+        );
+    }
+
+    #[test]
+    fn a_stale_claim_answers_by_release_without_a_mail_check() {
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-released")];
+        let mut claims = HashMap::new();
+        claims.insert("x-released".to_string(), "stale".to_string());
+        let candidates =
+            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, 10_000_000_000);
+        assert!(
+            candidates.is_empty(),
+            "a released claim must not need a mail spawn"
+        );
+    }
+
+    #[test]
+    fn a_live_claim_inside_grace_is_not_yet_a_candidate() {
+        // ts is 10 minutes before now_s; grace is 30 minutes.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let row_epoch =
+            crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        let candidates =
+            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, row_epoch + 600);
+        assert!(
+            candidates.is_empty(),
+            "10 minutes old must not clear a 30-minute grace"
+        );
+    }
+
+    #[test]
+    fn a_live_claim_past_grace_is_a_candidate_for_the_mail_check() {
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let row_epoch =
+            crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            30,
+            row_epoch + 45 * 60,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1, 45);
+    }
+
+    #[test]
+    fn oldest_row_wins_when_a_session_carries_two_distinct_reasons() {
+        let rows = vec![
+            blocked("2026-09-08T01:00:00Z", "cx-1", "x-a"),
+            blocked("2026-09-08T00:00:00Z", "cx-1", "x-a"),
+        ];
+        let mut claims = HashMap::new();
+        claims.insert("x-a".to_string(), "live".to_string());
+        let now = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T02:00:00Z").unwrap() as i64;
+        let candidates = resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, now);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "one row per session, never one per reason"
+        );
+        assert_eq!(
+            candidates[0].0.ts, "2026-09-08T00:00:00Z",
+            "the OLDEST row wins"
+        );
+    }
+
+    #[test]
+    fn ac3_edge_mail_after_the_row_clears_the_candidate() {
+        let row = blocked("2026-09-08T00:00:00Z", "cx-1", "x-a");
+        let mut answered = HashMap::new();
+        answered.insert("cx-1".to_string(), true);
+        let out = filter_unanswered_by_mail(vec![(row, 45)], &answered, &HashMap::new());
+        assert!(
+            out.is_empty(),
+            "a session with mail after its row must not appear"
+        );
+    }
+
+    #[test]
+    fn ac3_edge_no_answer_still_names_the_row() {
+        let row = blocked("2026-09-08T00:00:00Z", "cx-1", "x-a");
+        let mut verdicts = HashMap::new();
+        verdicts.insert("cx-1".to_string(), "ghost".to_string());
+        let out = filter_unanswered_by_mail(vec![(row, 45)], &HashMap::new(), &verdicts);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["id"], "x-a");
+        assert_eq!(out[0]["session"], "cx-1");
+        assert_eq!(out[0]["age_minutes"], 45);
+        assert_eq!(
+            out[0]["watchdog_verdict"], "ghost",
+            "the queue surfaces the watchdog's own verdict rather than judging staleness itself"
+        );
+    }
+
+    #[test]
+    fn mail_answered_since_reads_a_rotated_segment_not_just_the_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("messages.jsonl");
+        std::fs::write(
+            live.with_extension("jsonl.1"),
+            format!("{}\n", json!({"to": "cx-1", "ts": "2026-09-08T21:00:00Z"})),
+        )
+        .unwrap();
+        std::fs::write(&live, "not json\n").unwrap();
+        let mut cutoffs = HashMap::new();
+        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
+        let answered = mail_answered_since(&live, &cutoffs);
+        assert_eq!(answered.get("cx-1"), Some(&true));
+    }
+
+    #[test]
+    fn mail_answered_since_a_missing_bus_reads_unanswered_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cutoffs = HashMap::new();
+        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
+        let answered = mail_answered_since(&dir.path().join("messages.jsonl"), &cutoffs);
+        assert_eq!(answered.get("cx-1"), Some(&false));
     }
 }

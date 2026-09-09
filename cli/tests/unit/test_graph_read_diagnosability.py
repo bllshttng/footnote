@@ -141,7 +141,7 @@ def test_non_list_entries_writes_the_bak_locked_mutate_advertises(tmp_path):
     # that .bak (an accurate recovery path, not a data-losing delete).
     g = _write(tmp_path / "graph.json", json.dumps({"entries": "oops"}))
     read_graph(g)  # triggers the corrupt handling that writes the .bak
-    assert g.with_suffix(".json.bak").exists()
+    assert (g.parent / "backups" / (g.name + ".bak")).exists()
 
 
 def test_strict_read_raises_on_non_list_entries_value(tmp_path):

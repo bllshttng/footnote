@@ -90,6 +90,24 @@ Claim state is deliberately not the authority here: claims are PID-anchored, so 
 Which node a worker is on resolves from its manifest first, since the runtime wrote it and a worker name is only a convention; the exception is a `think-` named worker, which writes no manifest but runs with `--cwd` on the node's canonical root, where an unrelated `/target` session's manifest can sit.
 Every probe failure (unreadable graph, unresolvable node, node-less thread) returns `None` and keeps the family-1 verdict, so the gate can only ever relax a `done`, never manufacture one.
 
+## Identity stores
+
+A session's identity has more than one answerer, and they disagree (a 2026-09-08 audit measured six stores answering the question with one unlocated). This section names every store the resolvers consult, with the exact reader.
+
+| Store | Reader | What it answers |
+|---|---|---|
+| `~/.claude/projects/<proj>/<uuid>.jsonl` | `_reachable_from_transcripts` (`cli/src/fno/agents/discover.py:2239`), directory from `default_projects_dir()` (`:125`) | Every claude session that ever ran under this HOME. The broadest source, no recency cutoff: staleness is what makes a session asleep rather than absent. |
+| `~/.fno/agents/registry.json` | `_reachable_from_registry` (`discover.py:2301`) via `fno.agents.registry.load_registry` | fno-adopted rows for every provider, including dead-pid and exited ones. |
+| `~/.claude/daemon/roster.json` | `_reachable_from_roster` (`discover.py:2353`), directory from `FNO_CLAUDE_DAEMON_DIR` | The claude daemon's own worker roster, including exited stamps. |
+| `node.sessions[]` in `~/.fno/graph.json` | `_reachable_from_graph` (`discover.py:2407`) via `fno.graph.load.load_graph` | The weakest source: a session proven to have existed for some phase of some node. |
+| Harness native stores (codex, opencode) | `_reachable_from_harness_stores` (`discover.py:2470`) via `fno.agents.store_fallback.complete_store_hits` | Codex threads and opencode storage the fno registry never adopted. |
+
+`resolve_reachable` (`discover.py:2486`) merges all five, keyed on `(harness, session_identity_key(sid))`. The first source to claim a key supplies its `source` label, later sources only fill a missing cwd. An ambiguity refusal lists every candidate uuid with the store that supplied it, on stderr since 2026-09-08. The refusal is diagnosable from its own transcript.
+
+`discover_live_sessions` (`discover.py:2606`) is the listing counterpart. It unions pid-file sidecars (`~/.claude/sessions`, from `default_sessions_dir()` at `discover.py:122`), the same transcript stores, daemon rosters, and the registry, then attaches family-1 truth per candidate. It answers "who is alive", never "does this token exist": the liveness gate deliberately drops asleep sessions, which is why the token resolvers also consult the durable stores.
+
+The 2026-09-05 incident this section closes: `fno agents mail send` refused session `01a06886-9405-74a1-8afd-5b67baf89604` as ambiguous while 0 of the registry's rows carried the id. A one-token refusal naming two candidates can only arise across sources. Two distinct identity keys matched one token, and the unlocated "sixth store" was `~/.claude/projects`, already the transcripts row above. The attribution line turns the next such refusal from a mystery into a reading.
+
 ## Mail boundary
 
 The codex app-server daemon must predate a codex session for live mail injection to reach it.

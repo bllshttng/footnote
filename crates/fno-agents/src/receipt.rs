@@ -268,16 +268,23 @@ fn model_provenance_of(e: &state::RegistryEntry) -> Option<serde_json::Value> {
 /// (x-a879): the receipt first, then the `registry_row_removed` event naming
 /// the row, the remover and the reason. A receipt that cannot be built or
 /// persisted still announces the removal (`receipt_staged: false`, the build
-/// error as `reason`): an unrecoverable removal that is announced is strictly
-/// better than a silent one, and refusing the write would turn an audit gap
-/// into an outage. Best-effort by contract - an emission failure never fails
-/// the write that triggered it.
+/// error as `reason`, the attempted harness-side outcome as `active_surface`):
+/// an unrecoverable removal that is announced is strictly better than a silent
+/// one, and refusing the write would turn an audit gap into an outage.
+/// Best-effort by contract - an emission failure never fails the write that
+/// triggered it.
 pub fn stage_removal_accounting(
     home: &AgentsHome,
     entry: &state::RegistryEntry,
     remover: &str,
     emitter: &crate::events::EventEmitter,
 ) {
+    // The active-surface outcome outlives the receipt write on purpose. The
+    // harness-side removal happens BEFORE that write, so a write that fails
+    // leaves the harness row already gone with no receipt on disk - the event
+    // is then the only durable record of it, and must name it. `None` means
+    // no attempt was made, never "attempted, outcome unknown".
+    let mut active_surface: Option<&'static str> = None;
     let (receipt_staged, reason) = match build_reap_receipt(entry, None) {
         Ok(mut receipt) => {
             // A receipt already on disk for this session was staged moments
@@ -288,9 +295,21 @@ pub fn stage_removal_accounting(
             if reap_receipt_path(home, &receipt).exists() {
                 (true, "receipt already staged for this session".to_string())
             } else {
+                // The door that dropped the row also removes the harness
+                // side, and its receipt records the attempt. The sweep's
+                // receipt already carries its own effects (left untouched
+                // above), so the sweep path never attempts twice.
+                let outcome = crate::gc_native::apply_active_surface_removal(entry);
+                active_surface = Some(outcome.as_str());
                 receipt.removed_by = Some(remover.to_string());
+                receipt
+                    .effects
+                    .push(outcome.effect_record("active-surface"));
                 match write_reap_receipt(home, &receipt) {
-                    Ok(()) => (true, "removed by an update_registry write".to_string()),
+                    Ok(()) => (
+                        true,
+                        format!("removed by an update_registry write ({})", outcome.as_str()),
+                    ),
                     Err(err) => (false, format!("receipt did not persist: {err}")),
                 }
             }
@@ -307,6 +326,7 @@ pub fn stage_removal_accounting(
             "remover": remover,
             "reason": reason,
             "receipt_staged": receipt_staged,
+            "active_surface": active_surface,
             "pid": std::process::id(),
         }),
     );
@@ -358,5 +378,40 @@ mod tests {
         expected.push("removed_by");
         expected.sort_unstable();
         assert_eq!(removal_keys, expected);
+    }
+
+    /// A receipt write that fails leaves the harness-side removal already
+    /// done and nothing on disk to say so. The event is then the only record,
+    /// so it must still name the active-surface outcome. The row is
+    /// `opencode`, whose cascade is `not-applicable` and shells out to
+    /// nothing, so the assertion measures the reporting, not a harness.
+    #[test]
+    fn a_failed_receipt_write_still_names_the_active_surface_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("agents");
+        std::fs::create_dir_all(&root).unwrap();
+        // A FILE where the receipt directory belongs: create_dir_all fails,
+        // so write_reap_receipt returns Err on a path nothing else touches.
+        std::fs::write(root.join("reap-receipts"), b"not a directory").unwrap();
+        let home = AgentsHome::at(&root);
+
+        let entry: state::RegistryEntry = serde_json::from_str(
+            r#"{"name":"wkE","short_id":"wkE-id","harness":"opencode","harness_session_id":"wkE-session","cwd":"/tmp/x","log_path":"/tmp/x.log","created_at":"2026-09-01T00:00:00Z","status":"live"}"#,
+        )
+        .unwrap();
+        let events = dir.path().join("events.jsonl");
+        let emitter = crate::events::EventEmitter::new(&events, "test");
+
+        stage_removal_accounting(&home, &entry, "test-remover", &emitter);
+
+        let line = std::fs::read_to_string(&events).unwrap();
+        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let data = &event["data"];
+        assert_eq!(event["type"], "registry_row_removed");
+        assert_eq!(data["receipt_staged"], false, "the write was made to fail");
+        assert_eq!(
+            data["active_surface"], "not-applicable",
+            "the removal that already happened is named even with no receipt"
+        );
     }
 }

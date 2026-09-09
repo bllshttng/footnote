@@ -74,6 +74,15 @@ pub(crate) fn autonomous_merge_enabled(cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `config.king.blocked_child_grace_minutes`, fail-safe to the documented
+/// default (30): an unreadable or non-integer config must never shrink the
+/// grace window a distressed child gets before the board surfaces it.
+pub(crate) fn blocked_child_grace_minutes(cwd: &Path) -> i64 {
+    crate::agents_config::config_lookup(cwd, &["king", "blocked_child_grace_minutes"])
+        .and_then(|v| v.as_integer())
+        .unwrap_or(30)
+}
+
 /// The {alias: canonical} project map from `work.workspaces.*.projects[]`
 /// (projects/resolve.py's cache builder). `Err` names why the map is absent so
 /// a scope spelling that is neither project nor epic can be refused with the

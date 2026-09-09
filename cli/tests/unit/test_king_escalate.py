@@ -160,3 +160,119 @@ def test_a_sessionless_escalation_records_without_an_asker(tmp_path: Path) -> No
     (question,) = read_open_questions(tmp_path)
 
     assert question.asker is None
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP (x-3ecf): king escalate resolves the presiding crown first
+# ---------------------------------------------------------------------------
+
+
+def _entry(name: str, **kw):
+    from fno.agents.registry import AgentEntry
+
+    harness = kw.pop("harness", "claude")
+    kw.setdefault("cwd", "/w")
+    kw.setdefault("harness_session_id", f"{name}-session")
+    return AgentEntry(name=name, log_path="", harness=harness, **kw)
+
+
+def _prepare_court(monkeypatch, tmp_path: Path, rows) -> None:
+    import json
+
+    from fno import paths
+    from fno.agents.registry import write_registry
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(rows)
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "x-epic", "type": "epic", "project": "fno", "status": "ready"}]}),
+        encoding="utf-8",
+    )
+
+
+def test_ac4_hp_a_live_l1_crown_presides_over_its_epic_set(tmp_path: Path, monkeypatch) -> None:
+    """An L2 crown over a scope an L1 crown's project contains: the L1
+    king's own entry comes back, named."""
+    from fno.king.escalate import resolve_presiding_king
+
+    _prepare_court(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("l2-king", status="busy", crown_level=2, crown_scope="x-epic"),
+            _entry("l1-king", status="busy", crown_level=1, crown_scope="fno"),
+        ],
+    )
+    presiding = resolve_presiding_king("l2-king-session")
+    assert presiding is not None
+    assert presiding["holder"] == "l1-king"
+
+
+def test_ac4_hp_no_higher_crown_reads_as_none(tmp_path: Path, monkeypatch) -> None:
+    """The converse: an L1 crown (already the top rung reachable here) has
+    nothing to escalate to, so the caller falls through to the operator."""
+    from fno.king.escalate import resolve_presiding_king
+
+    _prepare_court(
+        monkeypatch, tmp_path, [_entry("l1-king", status="busy", crown_level=1, crown_scope="fno")]
+    )
+    assert resolve_presiding_king("l1-king-session") is None
+
+
+def test_ac4_hp_an_unknown_session_falls_through_quietly(tmp_path: Path, monkeypatch) -> None:
+    from fno.king.escalate import resolve_presiding_king
+
+    _prepare_court(monkeypatch, tmp_path, [])
+    assert resolve_presiding_king("no-such-session") is None
+
+
+def test_ac4_hp_a_uuid_session_id_matches_case_insensitively(tmp_path: Path, monkeypatch) -> None:
+    """A UUID-family id differing only in case is still the caller's own row
+    (harness_identity.session_identity_key's own contract) - a raw string
+    comparison here would silently read every such call as uncrowned."""
+    from fno.king.escalate import resolve_presiding_king
+
+    stored = "aaaa1111-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    _prepare_court(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "l2-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="x-epic",
+                harness_session_id=stored,
+            ),
+            _entry("l1-king", status="busy", crown_level=1, crown_scope="fno"),
+        ],
+    )
+    presiding = resolve_presiding_king(stored.upper())
+    assert presiding is not None
+    assert presiding["holder"] == "l1-king"
+    assert resolve_presiding_king(None) is None
+
+
+def test_mail_presiding_king_is_false_with_no_fno_on_path(monkeypatch) -> None:
+    from fno.king.escalate import mail_presiding_king
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False
+
+
+def test_mail_presiding_king_true_only_on_a_zero_exit(monkeypatch) -> None:
+    from fno.king.escalate import mail_presiding_king
+
+    class _Proc:
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/fno")
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(0))
+    assert mail_presiding_king("l1-king", STALLED, "NoProgress") is True
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(1))
+    assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False

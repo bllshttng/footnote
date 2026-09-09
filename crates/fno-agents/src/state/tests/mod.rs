@@ -1617,6 +1617,16 @@ fn update_registry_accounts_for_a_removed_row() {
     assert_eq!(receipt["row_name"], "dropped");
     assert_eq!(receipt["removed_by"], event["data"]["remover"]);
     assert!(receipt["resume"].as_str().is_some_and(|s| !s.is_empty()));
+    // The door that dropped the row also attempts the harness side, and its
+    // receipt records the attempt as a typed active-surface effect - whatever
+    // outcome the probe reached, the attempt is never silent.
+    let effects = receipt["effects"].as_array().expect("effects recorded");
+    assert_eq!(effects.len(), 1, "one active-surface effect: {receipt}");
+    assert_eq!(effects[0]["op"], "active-surface");
+    assert!(
+        effects[0]["outcome"].is_string(),
+        "typed outcome recorded: {receipt}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -26,6 +26,16 @@ def dedupe_key(stalled_ids: "list[str]") -> str:
 MAX_LISTED_IDS = 20
 
 
+def _stalled_subject(stalled_ids: "list[str]") -> str:
+    ids = sorted(set(stalled_ids))
+    if not ids:
+        return "a board the king could not read"
+    shown = ", ".join(ids[:MAX_LISTED_IDS])
+    if len(ids) > MAX_LISTED_IDS:
+        shown += f", and {len(ids) - MAX_LISTED_IDS} more"
+    return f"{len(ids)} board row(s) nothing is clearing: {shown}"
+
+
 def question_text(
     stalled_ids: "list[str]",
     key: str,
@@ -46,14 +56,7 @@ def question_text(
     telling the operator a live king "has exited" hands it the double-crown
     recommendation. ``None`` (unreadable) reads as dead, naming the reason.
     """
-    ids = sorted(set(stalled_ids))
-    if ids:
-        shown = ", ".join(ids[:MAX_LISTED_IDS])
-        if len(ids) > MAX_LISTED_IDS:
-            shown += f", and {len(ids) - MAX_LISTED_IDS} more"
-        subject = f"{len(ids)} board row(s) nothing is clearing: {shown}"
-    else:
-        subject = "a board the king could not read"
+    subject = _stalled_subject(stalled_ids)
     if live:
         closing = (
             "It is still reigning and holding these rows, so decide whether to "
@@ -136,3 +139,53 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         root,
     )
     return ("recorded", qid)
+
+
+def resolve_presiding_king(session_id: "str | None") -> "dict | None":
+    """The crown above the escalating session's own, or None (x-3ecf AC4-HP)."""
+    if not session_id:
+        return None
+    try:
+        from fno.agents.court import find_presiding_crown, gather_court
+        from fno.agents.crown import _graph_index
+        from fno.agents.registry import load_registry
+        from fno.harness_identity import session_identity_key
+
+        needle = session_identity_key(session_id)
+
+        def _keyed(r: object) -> "str | None":
+            sid = getattr(r, "harness_session_id", None)
+            return session_identity_key(sid) if sid else None
+
+        own = next((r for r in load_registry() if _keyed(r) == needle), None)
+        if own is None or own.crown_level is None or not own.crown_scope:
+            return None
+        crowns = gather_court().get("crowns")
+        if not crowns:
+            return None
+        return find_presiding_crown(own.crown_scope, own.crown_level, crowns, _graph_index())
+    except Exception:  # noqa: BLE001 - a read failure falls through to the operator
+        return None
+
+
+def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> bool:
+    """True only on a confirmed send; any failure reads False."""
+    import shutil
+    import subprocess
+
+    fno_bin = shutil.which("fno")
+    if not fno_bin:
+        return False
+    subject = _stalled_subject(stalled_ids)
+    message = (
+        f"A crown under yours stopped on {subject}. Reason given: {reason}. "
+        "It presides over territory yours contains - check on it before this reaches the operator."
+    )
+    try:
+        proc = subprocess.run(
+            [fno_bin, "agents", "mail", "send", holder, message],
+            capture_output=True, timeout=15, check=False,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False

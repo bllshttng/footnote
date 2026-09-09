@@ -169,7 +169,7 @@ def test_a_mutation_announces_what_it_drops_and_keeps_a_backup(
 
     err = capsys.readouterr().err
     assert "malformed graph" in err, f"the write path dropped a row silently: {err!r}"
-    backups = list(tmp_path.glob("graph.json.bak*"))
+    backups = list(tmp_path.glob("backups/graph.json.bak*"))
     assert backups, "no backup left to recover the dropped row"
     # The message names the backup it actually made, not a generic promise: the
     # backup can fail, and saying "preserved" then would be a lie on the one run
