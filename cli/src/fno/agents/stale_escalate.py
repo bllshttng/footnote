@@ -50,11 +50,7 @@ def question_text(findings, key: str) -> str:
 
 
 def _ask_line(findings) -> str:
-    unique = _unique(findings)
-    if not unique:
-        return "fno agents watchdog"
-    first = unique[0]
-    return first.clear_command
+    return _unique(findings)[0].clear_command
 
 
 def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
@@ -73,6 +69,76 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
     return None
 
 
+#: Closers reconcile_channel mints. Mechanical, never a human verdict.
+_MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
+
+
+def _is_answer_close(rec: dict, qids: "set[str]") -> bool:
+    from fno.outstanding.core import QUESTION_CLOSED_EVENT
+
+    data = rec.get("data")
+    return (rec.get("type") == QUESTION_CLOSED_EVENT and isinstance(data, dict)
+            and str(data.get("question_id") or "") in qids and bool(data.get("answer")))
+
+
+def _is_reset(rec: dict, marker: str) -> bool:
+    data = rec.get("data")
+    return (
+        rec.get("type") == "operator_decision"
+        and isinstance(data, dict)
+        and str(data.get("subject") or "") == f"{marker}:reset"
+    )
+
+
+def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
+    """The id of the question carrying ``[<marker>:<key>]`` that a human
+    answered and no empty-set reset retired, else None."""
+    from fno.outstanding.core import read_answered_questions, read_question_events
+
+    needle = f"[{marker}:{key}]"
+    hit = next((q for q in read_answered_questions()
+                if needle in q.get("question", "")
+                and q.get("closed_by") not in _MECHANICAL_CLOSERS), None)
+    if hit is None:
+        return None
+    events = read_question_events()
+    answer_idx = max(
+        (i for i, rec in enumerate(events) if _is_answer_close(rec, {hit["id"]})),
+        default=-1,
+    )
+    if answer_idx < 0 or any(_is_reset(rec, marker) for rec in events[answer_idx + 1 :]):
+        return None
+    return hit["id"]
+
+
+def reset_answered(root: Path, *, marker: str) -> None:
+    """Record the empty-set episode boundary, lazily: only when an answer is pending reset."""
+    import secrets
+
+    from fno.events import operator_decision
+    from fno.outstanding.core import append_question_event, read_answered_questions, read_question_events
+
+    events = read_question_events()
+    answered_ids = {q["id"] for q in read_answered_questions() if f"[{marker}:" in q.get("question", "")}
+    last = max(
+        (i for i, rec in enumerate(events) if _is_answer_close(rec, answered_ids)),
+        default=-1,
+    )
+    if last < 0 or any(_is_reset(rec, marker) for rec in events[last + 1 :]):
+        return
+    reset_id = f"d-{secrets.token_hex(4)}"
+    append_question_event(
+        operator_decision(
+            decision_id=reset_id, question_id=reset_id,
+            decision="measured set empty; answer suppression resets",
+            subject=f"{marker}:reset", decided_by="fno agents question-fold",
+            origin="scheduler", authority_source="agent",
+            rationale="episode boundary, not an operator ruling", source="daemon",
+        ),
+        root,
+    )
+
+
 def escalate_unfinished(
     findings,
     *,
@@ -81,6 +147,7 @@ def escalate_unfinished(
     cwd: Path,
 ) -> "tuple[str, str]":
     if not findings:
+        reset_answered(root, marker=MARKER)
         return ("none", "")
 
     import secrets
@@ -93,6 +160,9 @@ def escalate_unfinished(
     existing = already_asked(root, key)
     if existing:
         return ("duplicate", existing)
+    answered = answered_question(root, key)
+    if answered:
+        return ("answered", answered)
 
     qid = f"q-{secrets.token_hex(4)}"
     append_question_event(

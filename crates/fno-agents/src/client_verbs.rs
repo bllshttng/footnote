@@ -2659,7 +2659,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             if let Err(reason) = crate::reentry::shell_account_binding(acct) {
                 eprintln!(
                     "fno agents resume: --account {acct:?} does not resolve: {reason}. \
-                     The row's recorded launch account stays the binding; restamp the row to re-bind."
+                     --account never re-binds an existing row; re-spawn the worker under the account you want."
                 );
                 return 13;
             }

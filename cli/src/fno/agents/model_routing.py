@@ -1130,6 +1130,44 @@ def load_sandbox_write_policy(path: str) -> dict[str, object]:
     return block
 
 
+# Tools a worker on a non-Anthropic endpoint must not be offered. Artifact
+# publishes through Anthropic's own backend, so a routed worker could never use
+# it, and claude 2.1.265 gave its input_schema a pattern holding \p{Cc}. z.ai
+# refuses any tools pattern with a \p{...} escape and answers 400 [1210] with no
+# field name, which killed every fresh interactive routed worker on turn one.
+FOREIGN_ENDPOINT_DENY_TOOLS = ("Artifact",)
+
+ANTHROPIC_API_HOST = "api.anthropic.com"
+
+
+def _base_url_host(base_url: str) -> str:
+    """The lowercased host of ``base_url``, or "" when there is none.
+
+    A bare authority like ``api.anthropic.com/v1`` carries no scheme, and
+    urlsplit reads the whole thing as a path, so give it one first.
+    """
+    from urllib.parse import urlsplit
+
+    base = base_url.strip()
+    if not base:
+        return ""
+    if "//" not in base:
+        base = "//" + base
+    return (urlsplit(base).hostname or "").lower()
+
+
+def _foreign_endpoint_tool_denies(env: Mapping[str, str]) -> list[str]:
+    """Tool denies this route needs, empty for Anthropic's own endpoint.
+
+    The host is parsed and matched whole. A substring test would clear
+    ``api.anthropic.com.proxy.example`` and refuse ``API.ANTHROPIC.COM``.
+    """
+    host = _base_url_host(str(env.get("ANTHROPIC_BASE_URL") or ""))
+    if not host or host == ANTHROPIC_API_HOST:
+        return []
+    return list(FOREIGN_ENDPOINT_DENY_TOOLS)
+
+
 def _write_settings_env_file(
     env: Mapping[str, str],
     sandbox: "Optional[Mapping[str, object]]" = None,
@@ -1153,6 +1191,9 @@ def _write_settings_env_file(
     payload_obj: dict[str, object] = {"env": dict(env)}
     if sandbox:
         payload_obj["sandbox"] = dict(sandbox)
+    deny = _foreign_endpoint_tool_denies(env)
+    if deny:
+        payload_obj["permissions"] = {"deny": deny}
     payload = json.dumps(payload_obj, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare

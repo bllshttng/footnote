@@ -133,6 +133,7 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
     };
     let now = chrono::Utc::now();
     let build = current_build();
+    let mut skipped_builds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -177,6 +178,11 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
         }
         let stamped = receipt.writer_build.as_deref().unwrap_or_default();
         if stamped != build {
+            skipped_builds.insert(if stamped.is_empty() {
+                "(unstamped)".to_string()
+            } else {
+                stamped.to_string()
+            });
             report.skipped.push(VerifyProblem {
                 receipt: name,
                 reason: format!(
@@ -230,11 +236,22 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
     // this exact output (523 checked, 0 verified, 0 problems) hid a build pin
     // that could never match, and reading it took a source dive.
     if report.verified.is_empty() && report.problems.is_empty() {
+        // Every in-window receipt read here was written by another build:
+        // name it and the remedy, since this string is the only thing an
+        // operator reads when the window is red.
+        let remedy = if skipped_builds.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ". Written by: {}. Run `fno doctor update` to deploy the current build ({build:?}).",
+                skipped_builds.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        };
         report.problems.push(VerifyProblem {
             receipt: format!("window of {since_secs}s"),
             reason: format!(
                 "no retirement by the current build to verify: {} receipt(s) read, \
-                 {} from another build, none stamped {build:?}",
+                 {} from another build, none stamped {build:?}{remedy}",
                 report.checked,
                 report.skipped.len()
             ),
@@ -326,6 +343,18 @@ mod tests {
             report.problems[0]
                 .reason
                 .contains("no retirement by the current build"),
+            "{:?}",
+            report.problems
+        );
+        // The window's own reason names the writer build and the remedy -
+        // the only thing an operator reads when this is red.
+        assert!(
+            report.problems[0].reason.contains("fno-agents 0.0.1"),
+            "{:?}",
+            report.problems
+        );
+        assert!(
+            report.problems[0].reason.contains("fno doctor update"),
             "{:?}",
             report.problems
         );

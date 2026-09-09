@@ -399,12 +399,6 @@ _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 
-# x-c393: how recent an inside_leg report must be for a worker to count as
-# "provably live" when a follow-up fails to route. Mirrors the Rust
-# PROVABLY_LIVE_WINDOW_SECS; `fno agents reconcile` (the `claude logs` probe) is
-# the eventual authority that orphans a genuinely dead worker.
-_PROVABLY_LIVE_WINDOW_SEC = 3600.0
-
 
 
 
@@ -3167,7 +3161,6 @@ class RmResult:
     reclaimed_bytes: Optional[int] = 0
 
 
-_DIRECTORY_BYTES_BUDGET_S = rm_directory_bytes.DIRECTORY_BYTES_BUDGET_S
 _directory_bytes = rm_directory_bytes.directory_bytes
 
 

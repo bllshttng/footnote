@@ -899,3 +899,36 @@ NO mission lifecycle - there is no activation record to keep in step and no
 completion to retire on, so the receipt never reports ``deactivated`` and
 the territory keeps draining while its workspace exists. ``mission`` on
 every receipt is the territory label (scope), falling back to the project.
+
+## Reopen holds against automatic closes
+
+A deliberate reopen (``fno backlog reopen --reason``) is human judgment; a
+close is machine evidence. An automatic sweep that discards the judgment
+without a word is the defect the reopen guards exist to end. Measured twice:
+a reopen carrying operator words was re-closed within two minutes, and no
+retry could hold it.
+
+Four close paths read a reopen; the deliberate verb (``cmd_done``, with its
+own ``--force`` plus ``--reason`` ladder) does not:
+
+- ``_cascade_close_parents`` and ``_sweep_close_done_epics`` key on the
+  CHILDREN's closes (``_reopen_outranks_child_closes``).
+- reconcile's PR-merged close leg keys on the MERGE
+  (``_reopen_outranks_merge``): it reads no children, so the child-keyed
+  guard never reached it.
+- the contained merge cascade keys on the merge when the closing PR's
+  ``merged_at`` is handed to it, and on the owner's historical close stamp
+  otherwise - the mutator stamps that field with reconcile's wall clock
+  moments before the call, so the merge is the evidence on that path.
+
+Expiry and ambiguity, in both directions. A reopen PREDATING its close
+evidence is stale and expires by itself: the node genuinely completed after
+the judgment was formed, so a later merge closes it again with no operator
+action. Because the record stamps the FIRST merged ref, a hold is expired
+only after the node's OTHER refs are checked for a merge postdating the
+reopen (``_merge_postdates_reopen``). An unreadable or unread stamp protects
+the human: the node stays held one more sweep and the next pass retries.
+Inside the locked close mutation the guard is re-checked against the live
+node, because ``closeable`` is a pre-lock snapshot and ``completed_at``
+reads None again the moment a reopen lands; a reopen the snapshot already
+considered and expired skips that recheck.

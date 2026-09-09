@@ -80,7 +80,7 @@ fn retire_sweep(
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (None, None),
-        &|_| {},
+        &|_| None,
     )
 }
 
@@ -94,8 +94,7 @@ fn staged_sweep(
     transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
     trees: &dyn Fn(&str) -> (Option<bool>, Option<bool>),
 ) -> GcSummary {
-    let pruned = std::cell::RefCell::new(Vec::new());
-    let summary = gc_sweep::run(
+    gc_sweep::run(
         home,
         emitter,
         grace_secs,
@@ -106,10 +105,8 @@ fn staged_sweep(
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|e| trees(&e.name),
-        &|e| pruned.borrow_mut().push(e.name.clone()),
-    );
-    let _ = pruned;
-    summary
+        &|e| Some(crate::daemon::PruneOutcome::Removed(e.cwd.clone())),
+    )
 }
 
 /// AC4-HP, the epic's VERIFICATION three-row marker. Row A is named on a
@@ -258,6 +255,269 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
     assert!(reg.entries.iter().any(|e| e.name == "row-a"));
 }
 
+/// A clean-and-merged worktree the callback could not remove reads as a
+/// prune ATTEMPT, not a prune SUCCESS: `Kept` never populates `pruned`, and
+/// `None` (no linked worktree) reads as its own reason. Neither ever
+/// duplicates into the other bucket.
+#[test]
+fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
+    let home = tmp_home("gc-prune-outcome");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "p.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut p = ask_row("row-p", None);
+        p.short_id = "rowp".into();
+        p.harness_session_id = Some("sess-p".into());
+        p.origin = Some("spawn".into());
+        p.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(wt.path()).unwrap();
+        std::fs::write(wt.path().join(".git"), "gitdir: /x/worktrees/p\n").unwrap();
+        p.cwd = wt.keep().to_string_lossy().into_owned();
+        r.entries.push(p);
+    })
+    .unwrap();
+    let graph = graph_read(&[("sess-p", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_| (Some(true), Some(true)),
+        &|_| {
+            Some(crate::daemon::PruneOutcome::Kept(
+                "git worktree remove failed: simulated".into(),
+            ))
+        },
+    );
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "rowp".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
+    );
+    assert!(summary.pruned.is_empty(), "{:?}", summary.pruned);
+    assert_eq!(
+        summary.prune_failed,
+        vec![(
+            "rowp".to_string(),
+            "git worktree remove failed: simulated".to_string()
+        )]
+    );
+}
+
+/// A shared worktree cwd: one row retires, the other is still live on it -
+/// the tree survives and the retiring row names the row still holding it.
+#[test]
+fn a_shared_worktree_survives_while_the_other_row_is_live() {
+    let home = tmp_home("gc-shared-tree-one-live");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "x.jsonl", 2 * 3600);
+    let wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(wt.path()).unwrap();
+    std::fs::write(wt.path().join(".git"), "gitdir: /x/worktrees/shared\n").unwrap();
+    let shared_cwd = wt.keep().to_string_lossy().into_owned();
+    state::update_registry(&home.registry_json(), |r| {
+        let mut x = ask_row("row-x", None);
+        x.short_id = "rowx".into();
+        x.harness_session_id = Some("sess-x".into());
+        x.origin = Some("spawn".into());
+        x.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        x.cwd = shared_cwd.clone();
+        r.entries.push(x);
+        // row-y stays: named on an open node, still live on the same tree.
+        let mut y = ask_row("row-y", None);
+        y.short_id = "rowy".into();
+        y.harness_session_id = Some("sess-y".into());
+        y.origin = Some("spawn".into());
+        y.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        y.cwd = shared_cwd.clone();
+        r.entries.push(y);
+    })
+    .unwrap();
+    let graph = graph_read(
+        &[("sess-x", "N1", "done"), ("sess-y", "N2", "in_review")],
+        &[],
+    );
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_| (Some(true), Some(true)),
+        &|_| {
+            Some(crate::daemon::PruneOutcome::Removed(
+                "must not be called".into(),
+            ))
+        },
+    );
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "rowx".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
+    );
+    assert!(summary.pruned.is_empty(), "{:?}", summary.pruned);
+    assert_eq!(
+        summary.kept_shared_tree,
+        vec![("rowx".to_string(), "rowy".to_string())]
+    );
+}
+
+/// Two rows sharing a worktree cwd both retire in the same pass: the tree
+/// goes exactly once, and `kept_shared_tree` names nobody.
+#[test]
+fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
+    let home = tmp_home("gc-shared-tree-both-retire");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let q1 = quiet_transcript(transcripts.path(), "x.jsonl", 2 * 3600);
+    let q2 = quiet_transcript(transcripts.path(), "y.jsonl", 2 * 3600);
+    let wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(wt.path()).unwrap();
+    std::fs::write(wt.path().join(".git"), "gitdir: /x/worktrees/shared2\n").unwrap();
+    let shared_cwd = wt.keep().to_string_lossy().into_owned();
+    state::update_registry(&home.registry_json(), |r| {
+        let mut x = ask_row("row-x", None);
+        x.short_id = "rowx".into();
+        x.harness_session_id = Some("sess-x".into());
+        x.origin = Some("spawn".into());
+        x.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        x.cwd = shared_cwd.clone();
+        r.entries.push(x);
+        let mut y = ask_row("row-y", None);
+        y.short_id = "rowy".into();
+        y.harness_session_id = Some("sess-y".into());
+        y.origin = Some("spawn".into());
+        y.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        y.cwd = shared_cwd.clone();
+        r.entries.push(y);
+    })
+    .unwrap();
+    let graph = graph_read(&[("sess-x", "N1", "done"), ("sess-y", "N2", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |e| match e.harness_session_id.as_deref() {
+            Some("sess-x") => Some(vec![q1.clone()]),
+            _ => Some(vec![q2.clone()]),
+        },
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_| (Some(true), Some(true)),
+        &|e| Some(crate::daemon::PruneOutcome::Removed(e.cwd.clone())),
+    );
+    assert_eq!(summary.pruned.len(), 1, "{:?}", summary.pruned);
+    assert!(
+        summary.kept_shared_tree.is_empty(),
+        "{:?}",
+        summary.kept_shared_tree
+    );
+}
+
+/// A parent row named as `spawned_by_session` by a live child is never
+/// retired, and no active-surface removal ever reaches it: `surface_removal`
+/// panics if the sweep calls it.
+#[test]
+fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
+    let home = tmp_home("gc-lineage-live-child");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "parent.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut parent = ask_row("row-parent", None);
+        parent.short_id = "rowparent".into();
+        parent.harness_session_id = Some("sess-parent".into());
+        parent.origin = Some("spawn".into());
+        r.entries.push(parent);
+        let mut child = ask_row("row-child", None);
+        child.short_id = "rowchild".into();
+        child.harness_session_id = Some("sess-child".into());
+        child.spawned_by_session = Some("sess-parent".into());
+        r.entries.push(child);
+    })
+    .unwrap();
+    let graph = graph_read(&[("sess-parent", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| panic!("active-surface removal must never run on a held parent"),
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert_eq!(
+        summary.kept_live_descendants,
+        vec![("rowparent".to_string(), "rowchild".to_string())]
+    );
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert!(reg.entries.iter().any(|e| e.name == "row-parent"));
+}
+
+/// Once the child row is gone, the same parent retires normally - the
+/// second half of the same acceptance pair.
+#[test]
+fn a_parent_retires_once_its_descendant_is_gone() {
+    let home = tmp_home("gc-lineage-child-gone");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "parent2.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut parent = ask_row("row-parent2", None);
+        parent.short_id = "rowparent2".into();
+        parent.harness_session_id = Some("sess-parent2".into());
+        parent.origin = Some("spawn".into());
+        r.entries.push(parent);
+    })
+    .unwrap();
+    let graph = graph_read(&[("sess-parent2", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "rowparent2".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
+    );
+    assert!(summary.kept_live_descendants.is_empty());
+}
+
 /// AC4-ERR, both arms: an unreadable graph keeps every row (never a
 /// retirement on a failed read), and a stop that does not confirm keeps
 /// the row under `stop_refused`.
@@ -287,7 +547,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty());
     assert_eq!(
@@ -313,7 +573,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &|e| e.name != "row-a",
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty());
     assert_eq!(
@@ -357,7 +617,7 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty());
     assert_eq!(
@@ -401,7 +661,7 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(
         summary.retired,
@@ -478,7 +738,7 @@ fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
                 (Some(true), Some(true))
             }
         },
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(summary.kept_operator, vec!["rowo".to_string()]);
     assert_eq!(summary.kept_crowned, vec!["rowk".to_string()]);
@@ -575,7 +835,7 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
 
     assert_eq!(
@@ -645,7 +905,7 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
 
     assert!(summary.retired.is_empty());
@@ -841,7 +1101,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         &|_| true,
         &refusing,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert!(summary.retired.is_empty(), "{:?}", summary.retired);
     assert!(
@@ -881,7 +1141,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         &|_| true,
         &confirming,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
     assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
     let receipts: Vec<String> = std::fs::read_dir(home.root().join("reap-receipts"))
@@ -1040,7 +1300,7 @@ fn a_row_reaps_only_after_its_receipt_is_durable() {
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
-        &|_| {},
+        &|_| None,
     );
 
     assert!(summary.retired.is_empty());
@@ -2551,7 +2811,7 @@ fn settle_then_run(
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
-            &|_| {},
+            &|_| None,
         );
         summary.settled_do_rows = planned
             .into_iter()
@@ -2571,7 +2831,7 @@ fn settle_then_run(
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
-            &|_| {},
+            &|_| None,
         );
         summary.settled_do_rows = settled
             .into_iter()

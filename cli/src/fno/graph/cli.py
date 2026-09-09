@@ -8150,94 +8150,13 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
     return freed
 
 
-def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
-    """Close every node that shipped inside ``node_id``'s PR.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    unit = next(
-        (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
-        {},
-    )
-    pr = unit.get("pr_number")
-    where = f"PR #{pr}" if pr else "its PR"
-    note = (
-        f"auto-closed: shipped inside {node_id} ({where}); "
-        f"cost and session are recorded on {node_id}"
-    )
-
-    closed: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("contained_in") != node_id:
-            continue
-        if e.get("completed_at"):
-            continue  # already closed (out of band, or a previous sweep)
-        nid = e.get("id")
-        if not isinstance(nid, str) or not nid:
-            continue  # unidentifiable row: nothing to report, nothing to close
-        _apply_completion_fields(e)
-        e["completion_note"] = note
-        closed.append(nid)
-    return closed
-
-
-def _strandable_contained_ids(entries: list[dict]) -> set[str]:
-    """Open nodes whose delivery unit is ALREADY done - closeable right now.
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._reconcile import _reopen_outranks_child_closes
-
-    by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
-    out: set[str] = set()
-    for e in entries:
-        if not isinstance(e, dict) or e.get("completed_at"):
-            continue
-        owner_id = e.get("contained_in")
-        if not isinstance(owner_id, str) or not owner_id:
-            continue
-        owner = by_id.get(owner_id)
-        nid = e.get("id")
-        # `.get`, not `e["id"]`: a row carrying contained_in but no id would
-        # raise KeyError, and this runs OUTSIDE any try/except in cmd_reconcile
-        # - so it would abort the whole sweep. Exactly the failure class as the
-        # SessionStart jq bug this same PR fixes; a read of untrusted graph rows
-        # must never be the thing that takes reconcile down.
-        if (
-            owner is not None
-            and owner.get("completed_at")
-            and isinstance(nid, str)
-            and nid
-            and not _reopen_outranks_child_closes(e, [owner])
-        ):
-            out.add(nid)
-    return out
-
-
-def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
-    """Close every node :func:`_strandable_contained_ids` names.
-
-    Grouped by owner so each node gets the same note the merge-time cascade
-    writes, naming its unit and that unit's PR.
-    """
-    # Hoisted: called inside the comprehension it re-ran once per entry, each
-    # pass rebuilding the whole by_id map - O(N^2) on a path reconcile fires at
-    # every SessionStart.
-    stranded = _strandable_contained_ids(entries)
-    if not stranded:
-        return []
-    owners = {
-        e.get("contained_in") for e in entries if isinstance(e, dict) and e.get("id") in stranded
-    }
-    closed: list[str] = []
-    for owner_id in sorted(o for o in owners if isinstance(o, str) and o):
-        closed.extend(_cascade_close_contained(entries, owner_id))
-    return closed
-
-
 # In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
+    _cascade_close_contained,
+    _strandable_contained_ids,
     _strandable_epic_ids,
     _sweep_close_done_epics,
+    _sweep_close_stranded_contained,
     _sweep_stamp_carried_sessions,
 )
 
@@ -10182,7 +10101,10 @@ def cmd_reconcile(
     promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
+        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state
+
         gated: list = []
+        reopen_expired: list[str] = []
         for record in closeable:
             # Distinct name from the rollup loop's `node_obj`: that loop assigns
             # `_find_node(...)` (dict | None), so reusing the name here would pin
@@ -10197,12 +10119,22 @@ def cmd_reconcile(
             # worktree is a dead dir, and handing it to subprocess(cwd=) makes
             # the probe runner fail to launch - a fail-CLOSED refusal that would
             # hold the node open on every sweep forever.
-            gate_cwd = _effective_reconcile_cwd(
+            resolved_cwd = _effective_reconcile_cwd(
                 gate_node.get("cwd") or "", gate_node.get("project")
             )
-            verdict = resolve_promise_evidence(
-                gate_node, cwd=gate_cwd if os.path.isdir(gate_cwd) else None
-            )
+            gate_cwd: Optional[str] = resolved_cwd if os.path.isdir(resolved_cwd) else None
+            # Reopen guard BEFORE the promise gate: a deliberate reopen
+            # postdating the merge holds, and one filter covers the mutator
+            # and the --dry-run simulation (both iterate this same list).
+            if _reopen_outranks_merge(gate_node, record.merged_at):
+                # Expiry first: the record stamps the FIRST merged ref, so a
+                # later ref merging after the reopen closes the node instead.
+                if not _merge_postdates_reopen(gate_node, skip_pr=record.pr_number, query=query_pr_merge_state, cwd=gate_cwd):
+                    promise_held.append((record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held"))
+                    continue
+                # Expired: the locked recheck covers only a NEWER reopen.
+                reopen_expired.append(record.node_id)
+            verdict = resolve_promise_evidence(gate_node, cwd=gate_cwd)
             if verdict.warning and not json_out:
                 # Named, not silent: reconcile is the unattended close path, so a
                 # gate that skipped itself must still leave a trace.
@@ -10371,6 +10303,21 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
+                    # Locked recheck of the reopen guard: closeable is a
+                    # pre-lock snapshot, so a reopen landing between the scan
+                    # and this transaction would re-close here.
+                    if (
+                        record.node_id not in reopen_expired
+                        and _reopen_outranks_merge(node_obj, record.merged_at)
+                    ):
+                        promise_held.append(
+                            (
+                                record.node_id,
+                                f"reopened after PR #{record.pr_number} merged",
+                                "reopen_held",
+                            )
+                        )
+                        continue
                     _apply_completion_fields(node_obj, merge_status="merged")
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
@@ -10429,7 +10376,7 @@ def cmd_reconcile(
                     # contained nodes deliberately get no auto-continue.
                     try:
                         contained_closed_acc.extend(
-                            _cascade_close_contained(entries, record.node_id)
+                            _cascade_close_contained(entries, record.node_id, merged_at=record.merged_at)
                         )
                     except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
                         contained_errors_acc.append(
@@ -10727,7 +10674,7 @@ def cmd_reconcile(
                 # [] in the --json payload - asserting no errors for a leg that
                 # never completed.
                 try:
-                    _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
+                    _sim_contained.extend(_cascade_close_contained(_sim, record.node_id, merged_at=record.merged_at))
                 except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
                     typer.echo(
                         f"warning: dry-run contained cascade for "
@@ -11001,6 +10948,7 @@ def cmd_reconcile(
             # PR whose plan promised work that has not all shipped.
             "promise_unmet": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unmet"],
             "promise_unknown": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unknown"],
+            "reopen_held": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "reopen_held"],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }

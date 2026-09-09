@@ -281,6 +281,22 @@ pub struct Inventory {
     /// `(source, reason)` for every source read that failed or was partial.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<(String, String)>,
+    /// How many of the claude transcript roots this machine declares were
+    /// actually readable when the census walked. `complete` is the root
+    /// coverage gate: a census that missed a configured root has not
+    /// enumerated the world, and the receipt must say so rather than let a
+    /// single-root read read as the whole truth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_coverage: Option<RootCoverage>,
+}
+
+/// The census's claude-root coverage, serialized into the sweep receipt for
+/// scripted probes to assert on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RootCoverage {
+    pub complete: bool,
+    pub enumerated: u64,
+    pub configured: u64,
 }
 
 /// The source readers, injected so tests stage the world. Each returns the
@@ -358,12 +374,36 @@ fn squads_path() -> PathBuf {
 /// paths, over `<uuid>.jsonl` filenames in every project dir. Stub artifacts
 /// (`<uuid>.orphaned-...`) are existence evidence for a KNOWN session, not
 /// identities of their own, so they never mint an inventory row.
+/// The production claude store walk: the ambient root plus every
+/// config-declared account's projects dir, deduped. A missing dir
+/// contributes zero files; the walk fails only when every root is
+/// unreadable.
 fn claude_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
-    let root = std::path::PathBuf::from(std::env::var("HOME").map_err(|_| "no HOME")?)
-        .join(".claude")
-        .join("projects");
-    let files =
-        index_tree(&root, 0).map_err(|_| format!("claude store unreadable: {}", root.display()))?;
+    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
+    let mut roots = vec![PathBuf::from(home).join(".claude").join("projects")];
+    for (_, dir) in crate::claude_roster::isolated_account_dirs() {
+        let projects = dir.join("projects");
+        if !roots.contains(&projects) {
+            roots.push(projects);
+        }
+    }
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut any_readable = false;
+    for root in &roots {
+        if let Ok(pair) = index_tree(root, 0) {
+            any_readable = true;
+            files.extend(pair);
+        }
+    }
+    if !any_readable {
+        return Err(format!(
+            "claude store unreadable: {}",
+            roots
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ));
+    }
     let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for (name, path) in files {
         let Some(stem) = name.strip_suffix(".jsonl") else {
@@ -576,6 +616,35 @@ pub fn census_with(home: &AgentsHome, readers: SourceReaders) -> Inventory {
     }
 
     inventory.sessions = by_key.into_values().collect();
+
+    // Root coverage rides every receipt: how many of the claude roots this
+    // machine declares were readable when the census walked. A missing dir
+    // contributes zero files (an account with no sessions yet is empty, not
+    // torn), so a root counts as enumerated iff its store dir is readable.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(home).join(".claude").join("projects"));
+    }
+    for (_, dir) in crate::claude_roster::isolated_account_dirs() {
+        let projects = dir.join("projects");
+        if !roots.contains(&projects) {
+            roots.push(projects);
+        }
+    }
+    let configured = roots.len() as u64;
+    // Readability, not existence: `is_dir` answers through the parent's
+    // stat and passes a mode-000 directory the census cannot actually list.
+    // The walk opens the dir, so the gate opens it too.
+    let enumerated = roots
+        .iter()
+        .filter(|r| std::fs::read_dir(r).is_ok())
+        .count() as u64;
+    inventory.root_coverage = Some(RootCoverage {
+        complete: enumerated == configured && configured > 0,
+        enumerated,
+        configured,
+    });
+
     inventory
 }
 

@@ -15,6 +15,45 @@ impl Core {
     /// carries reads as empty.
     pub(super) fn reload_members_from_store(&mut self) -> SquadReloadReceipt {
         let loaded = crate::squad_store::load();
+        // A member-only reload may adopt a generation only when every field
+        // the next full snapshot would write, except members, still matches.
+        // Otherwise it would authorize stale live topology over newer storage.
+        let live_topologies: HashMap<_, _> = self
+            .session
+            .squads
+            .iter()
+            .filter_map(|squad| {
+                let name = squad.name.clone().unwrap_or_default();
+                let key = if name.is_empty() {
+                    squad.key.clone()
+                } else {
+                    String::new()
+                };
+                let (tab_trees, active_tab) = self.stored_tab_trees(squad.id)?;
+                Some(((name, key), (squad.origins.clone(), tab_trees, active_tab)))
+            })
+            .collect();
+        let safe_generations = loaded.squads.iter().filter_map(|stored| {
+            let identity = (stored.name.clone(), stored.key.clone());
+            let (origins, tab_trees, active_tab) = live_topologies.get(&identity)?;
+            if origins != &stored.origins
+                || tab_trees != &stored.tab_trees
+                || Some(*active_tab) != stored.active_tab
+            {
+                return None;
+            }
+            let key = if stored.name.is_empty() {
+                format!("key:{}", stored.key)
+            } else {
+                format!("name:{}", stored.name)
+            };
+            loaded
+                .generations
+                .get(&key)
+                .copied()
+                .map(|value| (key, value))
+        });
+        self.store_generations.extend(safe_generations);
         let identities: HashMap<(String, String), Vec<_>> = loaded
             .squads
             .into_iter()

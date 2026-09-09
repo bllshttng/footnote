@@ -7370,18 +7370,10 @@ mod tests {
         );
     }
 
-    // -- kill-server escalation ladder (x-48a5) ------------------------------
-    //
-    // A kill-server against a healthy server proves nothing: every test
-    // starts from a broken state. The wedge is built in-process - a real
-    // listener on the session socket that accepts connections but never
-    // answers, which is the observed failure exactly (connect succeeds, the
-    // KillServer write succeeds, no answer ever comes).
+    // -- kill-server escalation ladder (x-48a5) ----------------------------
+    // A real listener accepts but never answers: the broken control channel.
 
-    /// Bind the wedged holder on `session`'s socket: a real `UnixListener`,
-    /// accepted on a thread that never reads or replies. The thread-local
-    /// test mux dir exists only as a path until something creates it (the
-    /// real server's bind does this via `ensure_private_dir`).
+    /// Bind a listener that accepts connections but never reads or replies.
     fn wedged_listener(session: &str) -> std::path::PathBuf {
         let sock = proto::socket_path(session).unwrap();
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
@@ -7400,24 +7392,27 @@ mod tests {
         sock
     }
 
-    /// Spawn a holder pid that ignores SIGTERM (or not, per `ignore_term`)
-    /// and outlives its spawning shell, so it is reparented to init: a child
-    /// of THIS test process would zombie after SIGKILL and keep answering
-    /// `kill(pid, 0)` until reaped, and the real mux server is never a child
-    /// of kill-server. An ignored disposition set before the `&` survives
-    /// into the backgrounded sleep.
-    fn orphan_holder(ignore_term: bool) -> u32 {
-        let trap = if ignore_term { "trap '' TERM; " } else { "" };
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("{trap}sleep 300 >/dev/null 2>&1 & echo $!"))
-            .stdout(std::process::Stdio::piped())
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .expect("holder pid")
+    /// Spawn an owned holder with an explicit SIGTERM disposition.
+    fn holder(ignore_term: bool) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        let disposition = if ignore_term {
+            libc::SIG_IGN
+        } else {
+            libc::SIG_DFL
+        };
+        let mut command = std::process::Command::new("sleep");
+        command.arg("300").stdout(std::process::Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                let mut signals = std::mem::zeroed();
+                libc::sigemptyset(&mut signals);
+                libc::sigaddset(&mut signals, libc::SIGTERM);
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut());
+                libc::signal(libc::SIGTERM, disposition);
+                Ok(())
+            });
+        }
+        command.spawn().unwrap()
     }
 
     fn alive(pid: u32) -> bool {
@@ -7428,7 +7423,9 @@ mod tests {
     fn kill_server_escalates_to_sigkill_when_sigterm_is_ignored() {
         let session = "w9";
         let sock = wedged_listener(session);
-        let pid = orphan_holder(true);
+        let holder = holder(true);
+        let pid = holder.id();
+        let reaper = std::thread::spawn(move || holder.wait_with_output().unwrap());
         std::fs::write(proto::pid_sidecar_path(&sock), pid.to_string()).unwrap();
         assert!(alive(pid), "holder live before the kill");
 
@@ -7436,6 +7433,7 @@ mod tests {
 
         assert_eq!(out.path, KillPath::Sigkill, "note: {}", out.note);
         assert_eq!(out.exit_code(), EXIT_OK);
+        reaper.join().unwrap();
         assert!(!alive(pid), "holder dead after SIGKILL");
         assert!(!sock.exists(), "socket unlinked");
         assert!(
@@ -7448,13 +7446,16 @@ mod tests {
     fn kill_server_stops_at_sigterm_when_the_holder_answers_it() {
         let session = "w3";
         let sock = wedged_listener(session);
-        let pid = orphan_holder(false);
+        let holder = holder(false);
+        let pid = holder.id();
+        let reaper = std::thread::spawn(move || holder.wait_with_output().unwrap());
         std::fs::write(proto::pid_sidecar_path(&sock), pid.to_string()).unwrap();
 
         let out = kill_server_inner(session, &sock);
 
         assert_eq!(out.path, KillPath::Sigterm, "note: {}", out.note);
         assert_eq!(out.exit_code(), EXIT_OK);
+        reaper.join().unwrap();
         assert!(!alive(pid), "holder died to SIGTERM");
         assert!(!sock.exists(), "socket unlinked");
     }
@@ -7468,7 +7469,6 @@ mod tests {
 
         assert_eq!(out.path, KillPath::Unrecoverable);
         assert_eq!(out.exit_code(), EXIT_ERROR);
-        // Nothing was signalled, nothing unlinked: the socket survives.
         assert!(sock.exists(), "refusal must not unlink");
         assert!(
             out.note.contains("kill -9"),
@@ -7486,11 +7486,9 @@ mod tests {
     fn kill_server_refuses_a_stale_sidecar_whose_pid_was_reused() {
         let session = "w5";
         let sock = wedged_listener(session);
-        let pid = orphan_holder(false);
-        // A start time that cannot match the live process at `pid`: proves
-        // the ladder checks identity, not merely "does something answer
-        // this pid" (x-48a5, a rebind whose sidecar rewrite failed can
-        // leave a stale pid that has since been reused).
+        let mut holder = holder(false);
+        let pid = holder.id();
+        // A mismatched start time proves the ladder checks process identity.
         std::fs::write(proto::pid_sidecar_path(&sock), format!("{pid}:1")).unwrap();
 
         let out = kill_server_inner(session, &sock);
@@ -7503,7 +7501,8 @@ mod tests {
             "refusal names the identity mismatch: {}",
             out.note
         );
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        holder.kill().unwrap();
+        holder.wait().unwrap();
     }
 
     // -- pane verb parsing (the socket-free grammar) -----------------------

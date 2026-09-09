@@ -226,6 +226,57 @@ fn ac2_edge_a_v1_receipt_reads_with_v2_fields_absent_not_invented() {
     assert!(receipt.effects.is_empty());
 }
 
+// --- native recovery after a wrapper failure --------------------------------
+
+#[test]
+fn wrapper_failure_recovery_names_harness_session_cwd_and_native_argv() {
+    // The wrapper-failure shape: the fno row is gone (no registry write at
+    // all here) and the checkout is gone too - only the native session and
+    // its receipt remain.
+    let home = temp_home("resume-hint-wrapper-failure");
+    let cwd_dir = std::env::temp_dir().join(format!(
+        "retirement-e2e-missing-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cwd_dir).unwrap();
+    let cwd = cwd_dir.to_string_lossy().into_owned();
+    let row = registry_row(
+        "wrapper-fail-row",
+        "claude",
+        "cccccccc-1111-2222-3333-444444444444",
+        &cwd,
+    );
+    let receipt = build_reap_receipt(&row, None).expect("a claude row builds a receipt");
+    fno_agents::receipt::write_reap_receipt(&home, &receipt).unwrap();
+    std::fs::remove_dir_all(&cwd_dir).unwrap();
+
+    let hint = fno_agents::resume_receipt::resume_hint(&home, &receipt.harness_session_id)
+        .expect("a staged receipt must produce a hint");
+    assert!(hint.contains("claude"), "{hint}");
+    assert!(hint.contains(&receipt.harness_session_id), "{hint}");
+    assert!(hint.contains(&cwd), "{hint}");
+    assert!(
+        !receipt.resume_argv.is_empty(),
+        "the capability table must have staged an argv"
+    );
+    for token in &receipt.resume_argv {
+        assert!(
+            hint.contains(token),
+            "argv token {token} missing from: {hint}"
+        );
+    }
+}
+
+#[test]
+fn resume_hint_is_none_and_silent_when_no_receipt_matches() {
+    let home = temp_home("resume-hint-no-match");
+    assert!(fno_agents::resume_receipt::resume_hint(&home, "no-such-session").is_none());
+}
+
 // --- assignment-link recovery -------------------------------------------------
 
 #[test]
@@ -291,7 +342,11 @@ fn assignment_recovery_joins_name_and_first_directive_against_the_graph() {
 /// 5-second gap. Every unit test passed, because each one wrote and read the
 /// stamp inside one process.
 #[test]
-fn ac_x_d2ba_the_build_pin_agrees_across_the_installed_bins() {
+fn ac_x_d2ba_the_build_pin_agrees_across_one_cargo_build() {
+    // `CARGO_BIN_EXE_*` names the bins THIS test run just built, not what a
+    // machine has deployed - agreement across one cargo build is still
+    // worth pinning, but it is a narrower claim than the deployed cohort
+    // below.
     let client = build_pin(env!("CARGO_BIN_EXE_fno-agents"));
     let daemon = build_pin(env!("CARGO_BIN_EXE_fno-agents-daemon"));
     let worker = build_pin(env!("CARGO_BIN_EXE_fno-agents-worker"));
@@ -309,6 +364,52 @@ fn ac_x_d2ba_the_build_pin_agrees_across_the_installed_bins() {
         client, worker,
         "client and worker disagree on the build pin"
     );
+}
+
+/// The DEPLOYED cohort, not the just-built one: resolve `fno-agents`,
+/// `fno-agents-daemon` and `fno-agents-worker` on `PATH` and compare their
+/// build pins. This is what `reap --verify` actually audits against on a
+/// live machine. A partial or empty cohort proves nothing about
+/// agreement - comparing only the binaries that happen to resolve would
+/// silently pass on a machine missing the very binary whose staleness
+/// this test exists to catch - so anything short of all three resolving
+/// is a loud, named skip, never a verified pass. A resolved binary
+/// predating the `build` field fails loudly too - `fno doctor update`
+/// deploys the current one.
+#[test]
+fn the_deployed_cohort_agrees_on_the_build_pin() {
+    let names = ["fno-agents", "fno-agents-daemon", "fno-agents-worker"];
+    let resolved: Vec<(&str, std::path::PathBuf)> = names
+        .iter()
+        .filter_map(|name| fno_agents::loop_dispatch::which_binary(name).map(|p| (*name, p)))
+        .collect();
+    if resolved.len() != names.len() {
+        eprintln!(
+            "SKIP the_deployed_cohort_agrees_on_the_build_pin: {}/{} named binaries resolved on PATH ({names:?}); a partial or empty cohort verifies nothing",
+            resolved.len(),
+            names.len()
+        );
+        return;
+    }
+    // A resolved-but-unpinned binary (predates the `build` field entirely)
+    // panics out of `build_pin` below, naming the missing key and the raw
+    // JSON - the exact AC11-HP live shape this task exists to surface.
+    let pins: Vec<(&str, String)> = resolved
+        .iter()
+        .map(|(name, path)| (*name, build_pin(&path.to_string_lossy())))
+        .collect();
+    let first = &pins[0].1;
+    assert!(
+        first.contains(" rev "),
+        "the deployed pin names no build rev: {first:?}"
+    );
+    for (name, pin) in &pins[1..] {
+        assert_eq!(
+            pin, first,
+            "{name} disagrees with {} on the deployed build pin",
+            pins[0].0
+        );
+    }
 }
 
 /// Read one bin's own build pin out of `version --json`.

@@ -6,6 +6,45 @@
 
 use super::*;
 
+#[test]
+fn retirement_cannot_launder_a_newer_topology_generation() {
+    let _scratch = StoreScratch::new("retire-session-topology-conflict");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    let member = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("retiring".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("session-retiring".into()),
+    };
+    core.squad_members.insert(1, vec![member.clone()]);
+    core.persist_stored("sq", "", &["/a".into()], &[member]);
+    let mut external = core.snapshot_squad(1).unwrap();
+    external.tab_trees[0].tab_name = Some("external-tree".into());
+    crate::squad_store::set_snapshots_if_generations(
+        &core.store_generations,
+        std::slice::from_ref(&external),
+    )
+    .unwrap();
+
+    let (reply_tx, _) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.handle_retire_session("codex".into(), "session-retiring".into(), reply_tx);
+    assert!(!core.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert_eq!(
+        squad.tab_trees[0].tab_name.as_deref(),
+        Some("external-tree")
+    );
+    assert!(squad.members[0].tombstone);
+}
+
 /// The operator's sequence: a squad holds two codex members; retiring one
 /// identity closes only its pane, tombstones only its member, leaves the
 /// sibling live, and a repeat retires nothing (idempotent, never an error).

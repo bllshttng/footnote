@@ -9,7 +9,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
     connect_with_retry, spawn_server, FakeClient, Scratch, ServerProc, ServerTermination,
@@ -43,6 +43,110 @@ fn restart(scratch: &Scratch, incumbent: ServerProc) -> Restarted {
         client,
         _old_server: termination,
     }
+}
+
+fn kill_server(
+    scratch: &Scratch,
+    mut incumbent: ServerProc,
+    client: &mut FakeClient,
+) -> ServerTermination {
+    let out = scratch
+        .command()
+        .args(["mux", "kill-server", "main"])
+        .output()
+        .expect("kill-server runs");
+    assert!(
+        out.status.success(),
+        "kill-server failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    client.wait_killed(10, |c| c.byes.iter().any(|r| r.contains("killed")));
+    let pid = incumbent.0.id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = incumbent.0.try_wait().expect("owned server status") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server must exit after kill-server"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !scratch.main_sock().exists(),
+        "kill-server must unlink the server socket"
+    );
+    ServerTermination { pid, status }
+}
+
+fn drive_named_three_pane_layout(client: &mut FakeClient, scratch: &Scratch) {
+    client.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
+    client.cmd(Command::NewSquad {
+        name: "w".into(),
+        origin: Some(scratch.home_cwd()),
+    });
+    client.wait_layout(10, "workspace w appears", |l| {
+        l.squads.iter().any(|s| s.name == "w")
+    });
+    client.cmd(Command::SplitH);
+    client.wait_layout(10, "first split lands", |l| {
+        l.squads
+            .iter()
+            .any(|s| s.name == "w" && s.tabs.len() == 1 && s.panes == 2)
+    });
+    let tab = client
+        .layout
+        .as_ref()
+        .and_then(|l| l.squads.iter().find(|s| s.name == "w"))
+        .and_then(|s| s.tabs.first())
+        .expect("workspace w has a tab")
+        .id;
+    client.cmd(Command::RenameTab {
+        tab,
+        name: "edit".into(),
+    });
+    client.wait_layout(10, "tab rename lands", |l| {
+        l.squads
+            .iter()
+            .any(|s| s.name == "w" && s.tabs.len() == 1 && s.tabs[0].name == "edit")
+    });
+    client.cmd(Command::SplitH);
+    client.wait_layout(10, "second split lands", |l| {
+        l.squads
+            .iter()
+            .any(|s| s.name == "w" && s.tabs.len() == 1 && s.tabs[0].name == "edit" && s.panes == 3)
+    });
+}
+
+fn assert_stored_three_pane_layout(scratch: &Scratch) {
+    let path = scratch.0.join("iso-agents/squads.json");
+    let raw = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("read captured layout at {}: {e}", path.display()));
+    let store: serde_json::Value = serde_json::from_slice(&raw).expect("captured layout is JSON");
+    let squad = store["squads"]
+        .as_array()
+        .and_then(|squads| squads.iter().find(|s| s["name"] == "w"))
+        .expect("captured store has squad w");
+    let trees = squad["tab_trees"]
+        .as_array()
+        .expect("squad w has captured tab trees");
+    assert_eq!(trees.len(), 1, "squad w must store exactly one tab");
+    assert_eq!(trees[0]["tab_name"], "edit", "stored tab name");
+    assert_eq!(
+        trees[0]["slots"].as_array().map(Vec::len),
+        Some(3),
+        "stored tree must contain all three pane slots"
+    );
+}
+
+fn assert_restored_three_pane_layout(client: &mut FakeClient) {
+    client.wait_layout(15, "workspace w restores exactly", |l| {
+        l.squads
+            .iter()
+            .any(|s| s.name == "w" && s.tabs.len() == 1 && s.tabs[0].name == "edit" && s.panes == 3)
+    });
 }
 
 #[test]
@@ -215,6 +319,60 @@ fn symptom_hand_split_survives_restart() {
         "the split topology must survive the restart (found {} panes)",
         w.panes
     );
+}
+
+#[test]
+fn symptom_kill_server_restores_the_exact_layout() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("kill-exact-layout");
+    let server = spawn_server(&scratch.main_sock(), &[]);
+    let mut client = attach_client(&scratch);
+    drive_named_three_pane_layout(&mut client, &scratch);
+
+    let _old = kill_server(&scratch, server, &mut client);
+    assert_stored_three_pane_layout(&scratch);
+    let _replacement = spawn_server(&scratch.main_sock(), &[]);
+    let mut restored = attach_client(&scratch);
+    assert_restored_three_pane_layout(&mut restored);
+}
+
+#[test]
+fn symptom_kill_server_captures_without_a_dirty_flag() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("kill-clean-layout");
+    let server = spawn_server(&scratch.main_sock(), &[]);
+    let mut client = attach_client(&scratch);
+    drive_named_three_pane_layout(&mut client, &scratch);
+
+    client.pump(Duration::from_secs(3));
+    let tab = client
+        .layout
+        .as_ref()
+        .and_then(|l| l.squads.iter().find(|s| s.name == "w"))
+        .and_then(|s| s.tabs.first())
+        .expect("workspace w has a tab")
+        .id;
+    client.cmd(Command::RenameTab {
+        tab,
+        name: "edit".into(),
+    });
+    client.pump(Duration::from_millis(500));
+    assert_stored_three_pane_layout(&scratch);
+    let store_path = scratch.0.join("iso-agents/squads.json");
+    let before = std::fs::metadata(&store_path)
+        .and_then(|m| m.modified())
+        .expect("captured layout has an mtime before kill");
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let _old = kill_server(&scratch, server, &mut client);
+    let after = std::fs::metadata(&store_path)
+        .and_then(|m| m.modified())
+        .expect("captured layout has an mtime after kill");
+    assert!(
+        after > before,
+        "clean topology must still be rewritten at teardown: before={before:?} after={after:?}"
+    );
+    assert_stored_three_pane_layout(&scratch);
 }
 
 #[test]

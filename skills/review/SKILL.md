@@ -120,13 +120,13 @@ Load [single-lane.md](references/single-lane.md) and execute it in full, in this
 
 ## Step 2p: prove-it mode (runtime evidence)
 
-The second thing you run after a code review: a different CLASS of evidence, with a stopping condition. Load [prove-it.md](references/prove-it.md) and execute it in full, in this context: drive the changed code at its real surface, push on it with at least one marked probe, capture the artifact's own output, and end with the terminal `fno-prove-it:` JSON line. Then validate the record:
+The second thing you run after a code review: a different CLASS of evidence, with a stopping condition. Load [prove-it.md](references/prove-it.md) and execute it in full, in this context: drive the changed code at its real surface, push on it with at least one marked probe, record every completion claim the report makes in `### Claims` with the command that proved it beside it, capture the artifact's own output, and end with the terminal `fno-prove-it:` JSON line. Then validate the record:
 
 ```bash
 bash "${SKILL_DIR}/scripts/validate-prove-it.sh" <report-file>
 ```
 
-The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
+The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and REFUSES a PASS whose `### Claims` section is missing or carries a claim row with no `CMD:` - an unproven claim is a claim nobody checked - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
 
 ## Step 2c: cleanup mode (apply-or-skip terminus)
 

@@ -69,6 +69,15 @@ impl ReentryTransition {
     fn requires_selection(self) -> bool {
         matches!(self, ReentryTransition::Recover)
     }
+
+    /// True for the arms that START a process. An attach joins a session that
+    /// is already running, keyed by the job's transport id, so it spends no
+    /// credential and cannot bill the wrong account. The account gate refuses
+    /// only where a launch could go to the wrong lane; refusing on attach
+    /// strands a job the caller can physically reach.
+    fn starts_a_process(self) -> bool {
+        !matches!(self, ReentryTransition::Attach)
+    }
 }
 
 /// The machine-readable re-entry plan. `argv` and `env` carry only ids and
@@ -356,9 +365,9 @@ pub fn resolve_reentry_with(
         .is_some_and(|p| !p.is_empty() && p != "anthropic");
     let launch_account = entry.launch_account.clone();
     let claude_config_dir = match launch_account.as_deref() {
-        None if routed || non_anthropic => {
+        None if transition.starts_a_process() && (routed || non_anthropic) => {
             return Err(format!(
-                "row {name:?} is {} and records no launch account; re-entering it would guess a namespace - restamp the row or re-spawn the worker",
+                "row {name:?} is {} and records no launch account; re-entering it would guess a namespace - re-spawn the worker",
                 if routed { "routed" } else { "on a non-Anthropic provider" }
             ))
         }
@@ -369,7 +378,7 @@ pub fn resolve_reentry_with(
             // carries, so a plan built here would launch WITHOUT the account's
             // key - the silent wrong-bill shape this module exists to close.
             // Refuse and name the remedy; the plan never guesses an overlay.
-            Ok(None) => {
+            Ok(None) if transition.starts_a_process() => {
                 return Err(format!(
                     "launch account {id:?} on row {name:?} rides an api-key lane with no config dir; \
                      its credential cannot ride a re-entry plan - re-enter under a config-dir lane \
@@ -377,6 +386,11 @@ pub fn resolve_reentry_with(
                 ))
             }
             Ok(dir) => dir,
+            // An account the store no longer resolves carries no dir to apply.
+            // An attach falls back to the default root and lets `claude
+            // attach` answer for the job itself; the plan keeps the recorded
+            // id as billing provenance.
+            Err(_) if !transition.starts_a_process() => None,
             Err(reason) => {
                 return Err(format!(
                     "launch account {id:?} recorded on row {name:?} no longer resolves: {reason}"
@@ -775,7 +789,7 @@ mod tests {
         let err = resolve_reentry_with(
             &reg(vec![e]),
             "glm",
-            ReentryTransition::Attach,
+            ReentryTransition::Resume,
             None,
             &binding_ok,
             &home,
@@ -783,6 +797,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no launch account"), "{err}");
+    }
+
+    #[test]
+    fn attach_resolves_past_a_routed_row_with_no_launch_account() {
+        // The same row the test above refuses on RESUME. An attach starts no
+        // process, so the namespace it would have guessed is never applied.
+        let (_tmp, home) = staged_home(&[]);
+        let dir = std::env::temp_dir().join("reentry-test-route-attach.json");
+        write_route(&dir, false);
+        let mut e = row("glm");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.provider = Some("zai".into());
+        e.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "glm",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "attach");
+        assert!(
+            !plan.env.contains_key("CLAUDE_CONFIG_DIR"),
+            "{:?}",
+            plan.env
+        );
     }
 
     #[test]
@@ -1009,7 +1053,7 @@ mod tests {
         let err = resolve_reentry_with(
             &reg(vec![e]),
             "orphan",
-            ReentryTransition::Attach,
+            ReentryTransition::Resume,
             None,
             &binding_ok,
             &home,
@@ -1019,6 +1063,62 @@ mod tests {
         assert!(
             err.contains("removed-acct") && err.contains("no longer resolves"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn attach_resolves_past_a_dead_account() {
+        // x-32f4: the operator's blocked portal press. The row's pinned
+        // account no longer resolves, but the job is running and the attach
+        // reaches it by transport id. The plan carries no namespace and keeps
+        // the recorded id as billing provenance.
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("king-119e-reaper");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("removed-acct".into());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "king-119e-reaper",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "attach");
+        assert_eq!(plan.launch_account, "removed-acct");
+        assert!(
+            !plan.env.contains_key("CLAUDE_CONFIG_DIR"),
+            "{:?}",
+            plan.env
+        );
+    }
+
+    #[test]
+    fn attach_still_carries_a_resolvable_config_dir() {
+        // The positive control for the two tests above: scoping the REFUSAL
+        // must not delete the BINDING. A resolvable account still names its
+        // namespace on attach, so a job under a non-default root is reachable.
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("pinned");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("makers".into());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "pinned",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/acct/makers/cfg")
         );
     }
 

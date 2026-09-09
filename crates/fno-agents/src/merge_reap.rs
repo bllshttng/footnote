@@ -444,7 +444,7 @@ fn run_request(
         &rows,
         &mut to_retire,
         &receipts,
-        &|_| {},
+        &|_| None,
     );
     kept.extend(
         report

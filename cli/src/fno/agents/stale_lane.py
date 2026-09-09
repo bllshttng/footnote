@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fno.agents.stale_escalate import already_asked, dedupe_key
+from fno.agents.stale_escalate import already_asked, answered_question, dedupe_key, reset_answered
 
 STALE_MARKER = "watchdog-stale"
 
@@ -74,8 +74,9 @@ def reconcile_channel(
 ) -> "tuple[str, str]":
     """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
     measured ``pairs``: same set is a duplicate, a changed set supersedes,
-    an empty set closes. ``question``/``ask`` are callables taking the
-    dedupe ``key``; outcome in ``none | duplicate | asked | closed``."""
+    an empty set closes, and a set a human already answered stays answered.
+    ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
+    ``none | duplicate | answered | asked | closed``."""
     key = dedupe_key(identities)
 
     if not pairs:
@@ -85,6 +86,7 @@ def reconcile_channel(
                 q.id, f"no {subject} rows remain at reconcile time", root,
                 lane=subject,
             )
+        reset_answered(root, marker=marker)
         return ("closed", open_qs[0].id) if open_qs else ("none", "")
 
     existing = already_asked(root, key, marker=marker)
@@ -94,6 +96,13 @@ def reconcile_channel(
                 _close_question(q.id, f"{subject} set changed; superseded by {existing}",
                                 root, lane=subject)
         return ("duplicate", existing)
+    answered = answered_question(root, key, marker=marker)
+    if answered:
+        for q in _open_questions(root, marker):
+            if q.id != answered:
+                _close_question(q.id, f"{subject} set changed; superseded by {answered}",
+                                root, lane=subject)
+        return ("answered", answered)
 
     import secrets
 
