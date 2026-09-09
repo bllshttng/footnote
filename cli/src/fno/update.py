@@ -996,13 +996,11 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # Freshness is proven by the binaries themselves via one native probe:
     # an absent, stale or unanswerable component falls through to cargo.
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
-    pre = (
-        _component_verdict(
+    pre = None
+    if not force and installed_bin is not None and subtree is not None:
+        pre = _component_verdict(
             source, subtree, installed_bin.parent, installed_bin, include_mux=False
         )
-        if not force and installed_bin is not None and subtree is not None
-        else None
-    )
     if pre is not None and pre.get("converged"):
         typer.echo(
             f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]}"
