@@ -1304,6 +1304,10 @@ def _mission_active_count() -> int:
     try:
         from fno import paths as _paths
         from fno.graph.store import read_graph
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            return 0
 
         entries = read_graph(_paths.graph_json())
         return sum(
