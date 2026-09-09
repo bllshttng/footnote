@@ -6310,6 +6310,26 @@ def _sender_provenance(
     )
 
 
+def _loud_sender_provenance(
+    from_name: str, provider_from: Optional[str], from_session: Optional[str]
+) -> None:
+    """Say it when sender provenance floors to nothing.
+
+    A from_name matching no registry row and no ambient identity ships an
+    envelope every reader renders as harness=unknown with no from_session.
+    Delivery still proceeds - an unattended note must not die for lack of an
+    attributable sender - but the miss is no longer silent.
+    """
+    if provider_from is not None or from_session is not None:
+        return
+    events.emit("sender_provenance_unknown", from_name=from_name)
+    print(
+        f"warning: sender {from_name!r} resolved to no registry row and no "
+        "ambient identity; envelope provenance degrades to unknown",
+        file=sys.stderr,
+    )
+
+
 # Poll budget for the mux lane's content confirm (node x-1904, change 3),
 # matched to the claude control.sock lane's default (crates/fno-agents/src/
 # mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
@@ -8208,6 +8228,7 @@ def _queue_durable_fallback(
         provider_from, from_session = _sender_provenance(
             _resolve_sender_entry(entries, from_name), from_name
         )
+        _loud_sender_provenance(from_name, provider_from, from_session)
         mail_ctx = _build_mail_ctx(
             from_name,
             from_session,
@@ -8658,6 +8679,7 @@ def dispatch_send(
             provider_from, from_session = _sender_provenance(
                 sender_entry, from_name, self_proof
             )
+            _loud_sender_provenance(from_name, provider_from, from_session)
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
@@ -9019,6 +9041,7 @@ def dispatch_send(
                 provider_from, from_session = _sender_provenance(
                     _resolve_sender_entry(timeout_entries, from_name), from_name
                 )
+                _loud_sender_provenance(from_name, provider_from, from_session)
                 timeout_recipient = canonical_handle(
                     timeout_entry.harness_session_id
                 )

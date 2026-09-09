@@ -628,6 +628,131 @@ def test_dispatch_send_keeps_unknown_for_unprovable_sender(
     assert "from_session=" not in envelope
 
 
+def test_dispatch_send_unresolvable_sender_miss_goes_loud(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A from_name no registry row and no self identity can prove must
+    SAY so. The silent floor is how from=fno harness=unknown envelopes shipped;
+    delivery still proceeds, but the miss is loud."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch as dispatch_mod
+
+    _register_claude_peer()
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_switchboard_exchange",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mail_inject_claude",
+        lambda _recipient, text, **_kwargs: True,
+    )
+
+    from fno.agents import events as events_mod
+
+    captured: list = []
+    orig_emit = events_mod.emit
+
+    def capture_emit(kind, **kw):
+        captured.append((kind, dict(kw)))
+        orig_emit(kind, **kw)
+
+    monkeypatch.setattr(events_mod, "emit", capture_emit)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="red",
+        message="anonymous sender",
+        provider=None,
+        cwd=cwd,
+        from_name="unregistered-sender",
+    )
+
+    assert result.delivery == "hosted"
+    assert any(
+        kind == "sender_provenance_unknown"
+        and kw.get("from_name") == "unregistered-sender"
+        for kind, kw in captured
+    ), f"sender_provenance_unknown not captured: {captured}"
+    err = capsys.readouterr().err
+    assert "unregistered-sender" in err
+    assert "provenance degrades to unknown" in err
+
+
+def test_dispatch_send_resolved_sender_stays_quiet(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Positive control: a registered sender never trips the loud miss."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.harness_identity import canonical_handle
+
+    sender_session = "abcd1234-1111-7222-8333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="sender-worker",
+                harness="claude",
+                harness_session_id=sender_session,
+                short_id=canonical_handle(sender_session),
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="33333333-3333-4333-8333-333333333333",
+                short_id="33333333",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_switchboard_exchange",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mail_inject_claude",
+        lambda _recipient, text, **_kwargs: True,
+    )
+
+    from fno.agents import events as events_mod
+
+    captured: list = []
+    orig_emit = events_mod.emit
+
+    def capture_emit(kind, **kw):
+        captured.append((kind, dict(kw)))
+        orig_emit(kind, **kw)
+
+    monkeypatch.setattr(events_mod, "emit", capture_emit)
+
+    from fno.agents.dispatch import dispatch_send
+
+    result = dispatch_send(
+        name="red",
+        message="registered sender",
+        provider=None,
+        cwd=tmp_path,
+        from_name=canonical_handle(sender_session),
+    )
+
+    assert result.delivery == "hosted"
+    assert not any(kind == "sender_provenance_unknown" for kind, _kw in captured)
+
+
 # ---------------------------------------------------------------------------
 # AC3-ERR: lock-timeout -> loud stderr, durable queue, exit 0
 # ---------------------------------------------------------------------------
