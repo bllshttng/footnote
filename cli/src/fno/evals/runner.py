@@ -18,10 +18,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fno.evals import history as _history
-from fno.evals.bank import LaneCoordinate, TaskSpec
+from fno.evals.bank import TaskSpec
 from fno.evals.grading import GradeOutcome, grade
 
 
@@ -29,10 +29,7 @@ from fno.evals.grading import GradeOutcome, grade
 class SpawnResult:
     ok: bool
     reason: str = ""
-    #: The minted worker name (x-fd52), set by the real default spawn so the
-    #: caller can read back its registry row. Empty when unset (an injected
-    #: test spawn never needs it).
-    worker_name: str = ""
+    worker_name: str = ""  # set on the real spawn; read back for observe()
 
 
 # spawn(prompt, workdir, timeout_s) -> SpawnResult
@@ -40,60 +37,37 @@ SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
 def _observe_worker(name: str) -> Optional[dict]:
-    """Real worker/session identity for eval history (x-fd52 AC1-HP).
-
-    Reads the ONE existing owner of "what actually got resolved" - the agent
-    registry row x-1bd0/x-8975 already write at spawn time - rather than
-    re-deriving harness/model/effort. Best-effort: an unreadable registry or
-    a row that never appears (name mismatch, already reaped) yields ``None``,
-    which the caller records as unobserved, never as a guess.
-    """
+    """Real worker identity from the registry row the spawn wrote; unreadable/missing reads as unobserved."""
     try:
         from fno.agents.registry import load_registry
-
         for entry in load_registry():
             if entry.name == name:
-                return {
-                    "harness": entry.harness,
-                    "provider": entry.provider,
-                    "model": entry.model,
-                    "model_basis": entry.model_basis,
-                    "effort": entry.effort,
-                    "route_provider_id": entry.route_provider_id,
-                    "account_record_id": entry.account_record_id,
-                    "harness_session_id": entry.harness_session_id,
-                }
-    except Exception:  # noqa: BLE001 - unreadable registry is "unobserved", not a crash
+                return {"harness": entry.harness, "model": entry.model,
+                        "model_basis": entry.model_basis, "effort": entry.effort,
+                        "harness_session_id": entry.harness_session_id}
+    except Exception:  # noqa: BLE001
         return None
     return None
 
 
-def _lane_evidence(
-    lane: Optional[LaneCoordinate], observed: Optional[dict]
-) -> dict[str, object]:
-    """Requested vs. observed configuration for one run (AC1-HP/AC1-EDGE).
-
-    ``substituted`` is explicit: capacity serving a different lane than
-    requested must be excluded from the requested-lane cohort (AC1-EDGE),
-    never silently folded in as if it were the requested lane's sample.
-    """
+def _lane_evidence(lane: Optional[Any], observed: Optional[dict]) -> dict[str, object]:
+    """Requested vs. observed config for one run; a harness/model mismatch is ``substituted``."""
     if lane is None:
         return {}
     fields: dict[str, object] = {
-        "requested_lane": lane.name,
-        "requested_harness": lane.harness,
-        "requested_model": lane.model,
-        "requested_effort": lane.effort,
+        "requested_lane": lane.name, "requested_harness": lane.harness,
+        "requested_model": lane.model, "requested_effort": lane.effort,
     }
     if observed is None:
         fields["lane_status"] = "unavailable"
         return fields
-    fields["observed_harness"] = observed.get("harness")
-    fields["observed_model"] = observed.get("model")
-    fields["observed_model_basis"] = observed.get("model_basis")
-    fields["observed_effort"] = observed.get("effort")
-    fields["observed_session_id"] = observed.get("harness_session_id")
-    substituted = bool(lane.harness) and observed.get("harness") != lane.harness
+    fields.update(
+        observed_harness=observed.get("harness"), observed_model=observed.get("model"),
+        observed_model_basis=observed.get("model_basis"), observed_effort=observed.get("effort"),
+        observed_session_id=observed.get("harness_session_id"),
+    )
+    substituted = (bool(lane.harness) and observed.get("harness") != lane.harness) or (
+        bool(lane.model) and observed.get("model") != lane.model)
     fields["substituted"] = substituted
     fields["lane_status"] = "substituted" if substituted else "ok"
     return fields
@@ -156,16 +130,11 @@ def _git_rev(repo_root: Path, ref: str) -> Optional[str]:
 
 def _default_spawn(
     prompt: str, workdir: Path, timeout_s: int, *,
-    provider: Optional[str] = None, lane: Optional[LaneCoordinate] = None,
+    provider: Optional[str] = None, lane: Optional[Any] = None,
 ) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
-
-    A non-zero exit, a missing binary, or a timeout is a *graded failure*
-    (SpawnResult.ok == False), never a crash of the sweep (AC3-ERR). A
-    requested *lane* names the coordinate; its harness wins over *provider*
-    (a lane is a complete coordinate, not a hint) and its model/effort/route
-    ride the existing spawn flags - never a new fno-owned model/effort enum.
-    """
+    A non-zero exit, missing binary, or timeout is a graded failure, never a
+    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*."""
     name = f"eval-{os.getpid()}-{int(time.time())}"
     cmd = [
         "fno", "agents", "spawn", "--name", name,
@@ -176,14 +145,10 @@ def _default_spawn(
     if harness:
         cmd += ["--harness", harness]
     if lane:
-        if lane.model:
-            cmd += ["--model", lane.model]
-        if lane.effort:
-            cmd += ["--effort", lane.effort]
-        if lane.route:
-            cmd += ["--route", lane.route]
-        if lane.account:
-            cmd += ["--account", lane.account]
+        for flag, val in (("--model", lane.model), ("--effort", lane.effort),
+                          ("--route", lane.route), ("--account", lane.account)):
+            if val:
+                cmd += [flag, val]
     # Behind `--` (fno's own click parser honors it, verified both
     # directions): a leading-flag seed must be the prompt positional.
     cmd += ["--", prompt]
@@ -268,25 +233,18 @@ def run_task(
     worker_provider: Optional[str] = None,
     variant: str = "baseline",
     variant_ref: Optional[str] = None,
-    lane: Optional[LaneCoordinate] = None,
+    lane: Optional[Any] = None,
     experiment_id: Optional[str] = None,
     observe: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per run.
 
-    Each run: fresh disposable worktree at the checkout ref -> optional
-    worker (skipped for a grade-only task) -> mechanical grade -> history row ->
-    worktree removed (Invariant: removed after grading). A worker-spawn failure
-    is recorded as a graded fail and the remaining repeats still run (AC3-ERR).
-
-    A requested *lane* (:func:`fno.evals.bank.resolve_lane`) is recorded as the
-    requested coordinate; when a worker actually ran, *observe* (default:
-    :func:`_observe_worker`, real registry read; injectable for tests) reads
-    back what was actually resolved, and a mismatch is tagged ``substituted``
-    (AC1-EDGE) rather than folded into the requested lane's cohort. A spawn
-    failure records ``unavailable`` and never grades a substitute model as the
-    requested one (AC1-ERR). *experiment_id* is an opaque cohort tag the
-    caller predeclares (wave 2's cohort report groups on it).
+    Each run: fresh disposable worktree -> optional worker (skipped for a
+    grade-only task) -> mechanical grade -> history row -> worktree removed.
+    A worker-spawn failure is a graded fail; the remaining repeats still run.
+    A requested *lane* is recorded as the requested coordinate; *observe*
+    (default _observe_worker) reads back what actually ran. *experiment_id*
+    is an opaque cohort tag recorded on the row.
     """
     if not VARIANT_RE.match(variant):
         raise ValueError(f"variant must match baseline|v<N>, got {variant!r}")
@@ -298,9 +256,7 @@ def run_task(
         raise ValueError(f"variant_ref is required when variant is {variant!r}")
     checkout_ref = variant_ref
 
-    # When no spawn is injected, bind the worker provider/lane into the
-    # default spawn so --provider/--lane actually route the headless worker
-    # (not just logged).
+    # No injected spawn: bind provider/lane so they actually route the worker.
     spawn_fn = spawn or (
         lambda p, w, t: _default_spawn(p, w, t, provider=worker_provider, lane=lane)
     )
