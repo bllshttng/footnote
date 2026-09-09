@@ -63,6 +63,25 @@ fn fno_agents_bin() -> PathBuf {
         .join("fno-agents")
 }
 
+/// The seeded registry must carry the schema version the binary under test
+/// stamps. A hardcoded number here goes stale on every schema bump, and the
+/// source-run binary then refuses to raise the file (SourceAheadSchemaBump),
+/// so the reap retires nothing. Read the single owner instead.
+fn registry_schema_version() -> u32 {
+    let toml = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("fno-agents")
+        .join("src")
+        .join("registry_schema.toml");
+    let text = std::fs::read_to_string(toml).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("version"))
+        .unwrap();
+    line.split('=').nth(1).unwrap().trim().parse().unwrap()
+}
+
 struct Fleet {
     dir: PathBuf,
 }
@@ -104,7 +123,7 @@ impl Fleet {
         std::fs::write(
             agents.join("registry.json"),
             format!(
-                r#"{{"schema_version": 29, "agents": [
+                r#"{{"schema_version": {}, "agents": [
                 {{"name": "{ROW1}",
                 "harness": "claude", "harness_session_id": "{U1}",
                 "short_id": "{S1}", "origin": "spawn", "status": "exited",
@@ -118,6 +137,7 @@ impl Fleet {
                 "harness": "claude", "harness_session_id": "{U4}",
                 "short_id": "{S4}", "origin": "spawn", "status": "exited",
                 "cwd": "{}", "created_at": "2026-09-01T00:00:00Z"}}]}}"#,
+                registry_schema_version(),
                 self.dir.join("work").display(),
                 self.dir.join("work").display(),
                 self.dir.join("work").display(),
