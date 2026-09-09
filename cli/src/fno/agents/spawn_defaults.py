@@ -1417,166 +1417,78 @@ def inject_spawn_defaults(
     # missing key refuses the spawn rather than silently billing the primary,
     # which is the invisible-billing shape this node exists to kill. account
     # forwards --account.
+    # The billing axes (route/account/model) are decided by the Rust owner
+    # (crates/fno-agents/src/spawn_axes.rs): one round trip over the projected
+    # facts returns the injections, receipts and skip reasons verbatim; this
+    # seam applies them. The decision strings have exactly one spelling.
     route_injected = False
-    if (
-        cfg_route
-        and not explicit_route
-        and not explicit_model_present
-        and not explicit_vendor_present
-        and grid_candidate is None
-    ):
-        inject += ["--route", cfg_route]
-        route_injected = True
-        from_config.append(("route", cfg_route, f"{route_rung}.route"))  # type: ignore[arg-type]
-    elif cfg_route:
-        # AC9-UI: config-sourced routing is never invisible. The account
-        # branch below already says this; the route axis is the one that
-        # bills, so a dropped route names which condition fired. The grid
-        # case is named before any --model read: a grid candidate excludes an
-        # explicit -m anyway (model_occupied would have stood it down).
-        if explicit_route:
-            why = "the caller passed --route"
-        elif explicit_vendor_present:
-            why = f"the caller passed --provider {explicit_vendor!r}"
-        elif grid_candidate is not None:
-            why = "the capacity grid chose a lane (" + ("; ".join(slot_chain) or "no reason recorded") + ")"
-        elif explicit_model_present:
-            why = "the caller passed --model"
-        else:
-            why = "no suppression reason recorded"
-        print(
-            f"fno agents spawn: route skipped ({why}); {route_rung}.route "
-            f"{cfg_route!r} NOT applied - this worker bills at the caller default",
-            file=err,
-        )
-        suppressed.append(("route", cfg_route, route_rung or "", why))
-    # route_present covers BOTH ways --route ends up in the final argv: injected
-    # from config just above, or already explicit on the caller's argv. Gating
-    # the model-suppression below on route_injected alone missed the explicit
-    # case - an operator-typed `--route zai/... ` with no `-m` still fell through
-    # to the config-model branch and injected `--model opus` alongside it, the
-    # exact route+model collision (five-opus-workers defect) this field exists
-    # to prevent.
-    route_present = route_injected or explicit_route
-    # Accounts are Claude-only (cmd_spawn rejects --account on any other
-    # harness), so a configured account must not follow an explicit non-Claude
-    # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
-    # would otherwise carry a Claude account into a spawn that can't use it and
-    # abort instead of cutting over.
-    if cfg_account and not grid_account_injected and not _flag_present(out[1:], "--account"):
-        prov = resolved_harness()
-        if prov == "claude":
-            inject += ["--account", cfg_account]
-            from_config.append(("account", cfg_account, f"{account_rung}.account"))  # type: ignore[arg-type]
-        else:
-            # AC9-UI: config-sourced routing is never invisible - a substrate/
-            # permission skip already warns here, so account must too rather than
-            # silently dropping the pin on a Claude-to-Codex cutover.
-            print(
-                f"fno agents spawn: account skipped (accounts are claude-only, "
-                f"resolved provider {prov!r}); {account_rung}.account "
-                f"{cfg_account!r} ignored",
-                file=err,
-            )
-            suppressed.append(
-                ("account", cfg_account, account_rung or "",
-                 f"accounts are claude-only; resolved provider {prov!r}")
-            )
+    if cfg_route or cfg_account or cfg_model:
+        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
-    if cfg_model and not has_model:
-        # The config model is suppressed when something else already owns the
-        # model: an injected route (route carries vendor/model), or a --role that
-        # resolves to a real route (the route owns the model via env). Either
-        # would collide with a config --model. An explicit -m already won via
-        # has_model, which short-circuited this whole branch.
-        if route_present:
-            print(
-                f"fno agents spawn: --route owns the model; not injecting "
-                f"{model_rung}.model {cfg_model!r}",
-                file=err,
-            )
-            suppressed.append(("model", cfg_model, model_rung or "", "--route owns the model"))
-        elif explicit_vendor_present:
-            # A bare explicit -P/--provider (vendor, no -m) already names the
-            # vendor half of a route; cmd_spawn pairs it with whatever --model
-            # reaches it. Injecting the config model here would pair a DIFFERENT
-            # vendor's model behind the explicit vendor (e.g. -P zai + injected
-            # --model opus -> route "zai/opus", an anthropic model at a zai
-            # endpoint) - the same invisible-billing shape the route/vendor
-            # collision guards above exist to kill, just on the model path
-            # instead of the route path.
-            print(
-                f"fno agents spawn: --provider {explicit_vendor!r} names a "
-                f"vendor; not injecting {model_rung}.model {cfg_model!r} "
-                "(add --model yourself to complete the route)",
-                file=err,
-            )
-            suppressed.append(
-                ("model", cfg_model, model_rung or "",
-                 f"--provider {explicit_vendor!r} names a vendor")
-            )
-        elif role and _role_resolves(role, settings, env):
-            # resolve_route is fail-SAFE: a protected role, a disabled block, an
-            # unconfigured lane, or a missing key all return None (spawn falls
-            # back to the primary model, where the config default still applies).
-            # Only a REAL route owns the model, so only then do we skip.
-            print(
-                f"fno agents spawn: --role {role!r} resolves to a route; leaving "
-                f"model to the route (not injecting {model_rung}.model "
-                f"{cfg_model!r})",
-                file=err,
-            )
-            suppressed.append(
-                ("model", cfg_model, model_rung or "",
-                 f"--role {role!r} resolves to a route")
-            )
-        else:
-            # A provider-less config model is scoped to the harness it was written
-            # for, but nothing on disk records which harness that was. Scope it to
-            # the HOME provider - the config provider, else the builtin default
-            # (claude, the same fallback resolve_dispatch_harness uses) - NOT the
-            # ambient harness. Inject only when the spawn's resolved TARGET equals
-            # that home: a codex spawn (explicit `-p codex` OR a codex-ambient
-            # session) must not inherit a claude model (it 400s after the round-trip);
-            # an explicit --model stays the supported cross-harness override. This
-            # never maps a model value to a provider (no catalog); it only scopes an
-            # UNqualified default the way the rest of dispatch scopes one.
+        _role_route = (
+            bool(role) and bool(_role_resolves(role, settings, env))
+            if (cfg_model and not has_model)
+            else False
+        )
+        _target: Optional[str] = None
+        _target_failed = False
+        if (
+            cfg_model
+            and not has_model
+            and not explicit_route
+            and not explicit_vendor_present
+            and not _role_route
+        ):
             from fno.dispatch_flags import resolve_dispatch_harness
 
-            home = cfg_harness or "claude"
             try:
-                if explicit_harness and explicit_harness.strip():
-                    target: Optional[str] = explicit_harness.strip()
-                elif cfg_harness:
-                    target = cfg_harness
-                else:
-                    target = resolve_dispatch_harness(None, env=env)[0]
+                _target = (
+                    explicit_harness.strip()
+                    if explicit_harness and explicit_harness.strip()
+                    else cfg_harness or resolve_dispatch_harness(None, env=env)[0]
+                )
             except Exception:
                 # Degrade open (AC5-FR): a resolution raise must never brick a
-                # spawn that would otherwise work. No target => no basis to inject.
-                print(
-                    "fno agents spawn: harness resolution failed; "
-                    "leaving model to the harness",
-                    file=err,
-                )
-                suppressed.append(
-                    ("model", cfg_model, model_rung or "", "harness resolution failed")
-                )
-                target = None
-            if target and target == home:
-                inject += ["--model", cfg_model]
-                from_config.append(("model", cfg_model, f"{model_rung}.model"))  # type: ignore[arg-type]
-            elif target:
-                print(
-                    f"fno agents spawn: config model {cfg_model!r} is scoped to "
-                    f"{home}; spawn resolves {target}, leaving model to the harness "
-                    f"(bind {model_rung}.provider to apply it cross-harness)",
-                    file=err,
-                )
-                suppressed.append(
-                    ("model", cfg_model, model_rung or "",
-                     f"scoped to {home}; spawn resolves {target}")
-                )
+                # spawn that would otherwise work. No target => no basis to
+                # inject; the owner composes the named message.
+                _target = None
+                _target_failed = True
+        try:
+            _axes = spawn_axes_call({
+                "route": {"value": cfg_route, "rung": route_rung},
+                "account": {"value": cfg_account, "rung": account_rung},
+                "model": {"value": cfg_model, "rung": model_rung},
+                "explicit_route": explicit_route,
+                "explicit_vendor_present": explicit_vendor_present,
+                "explicit_vendor": explicit_vendor or "",
+                "explicit_model_present": explicit_model_present,
+                "has_model": has_model,
+                "grid_candidate_present": grid_candidate is not None,
+                "slot_chain": slot_chain,
+                "grid_account_injected": grid_account_injected,
+                "account_flag_present": _flag_present(out[1:], "--account"),
+                "prov": (resolved_harness() or "") if cfg_account else "",
+                "role": role,
+                "role_resolves": _role_route,
+                "cfg_harness": cfg_harness or "",
+                "harness_target": _target,
+                "harness_target_failed": _target_failed,
+            })
+        except SpawnAxesUnavailable as _exc:
+            # Degrade open (AC5-FR), the seam's own stance for config-sourced
+            # fields: a missing owner must not brick an otherwise valid spawn.
+            print(
+                f"fno agents spawn: billing axes skipped (spawn-axes "
+                f"unavailable: {_exc})",
+                file=err,
+            )
+            _axes = {}
+        for _line in _axes.get("messages") or []:
+            print(_line, file=err)
+        inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
+        from_config.extend([tuple(e) for e in _axes.get("applied") or []])
+        suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
+        route_injected = bool(_axes.get("route_injected"))
 
     # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
     # round-trip answers effort/substrate/permission plus the ONE bundle and

@@ -79,6 +79,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
+    "spawn-axes",
     "fallback-chain",
     "state",
     "status",
@@ -326,6 +327,13 @@ async fn run(args: Vec<String>) -> i32 {
     // and read the answer back.
     if verb == "spawn-overlay" {
         return fno_agents::spawn_overlay::run_spawn_overlay(&args[1..]);
+    }
+
+    // `spawn-axes`: the billing axes of the spawn seam (route/account/model),
+    // decided in one place (see spawn_axes.rs doc). The Python front door
+    // projects the seam's facts and applies the returned plan verbatim.
+    if verb == "spawn-axes" {
+        return fno_agents::spawn_axes::run_spawn_axes(&args[1..]);
     }
 
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
