@@ -25,6 +25,15 @@ from fno.agents.crown import (
 from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
 
+def _id_index(entries: list[dict]) -> dict[str, dict]:
+    """Graph entries keyed by id - the one builder agreement and fold share."""
+    return {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
+    }
+
+
 def _agreement(
     level: Optional[int], scope: Optional[str], by_id: Optional[dict[str, dict]]
 ) -> tuple[Optional[bool], Optional[str]]:
@@ -232,12 +241,8 @@ def gather_court(
     if entries is None:
         by_id = _graph_index()
     else:
-        by_id = {
-            entry["id"]: entry
-            for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
-        }
-    entries: list[dict[str, Any]] = []
+        by_id = _id_index(entries)
+    crowns: list[dict[str, Any]] = []
     held_scopes: list[str] = []
     for row in live_rows:
         reading = crown_reading(row)
@@ -248,7 +253,7 @@ def gather_court(
                 # The half crown still HOLDS its territory; _conflicts counts it as a claim.
                 if isinstance(row.crown_scope, str) and row.crown_scope.strip():
                     held_scopes.append(row.crown_scope)
-                entries.append(
+                crowns.append(
                     {
                         "holder": row.name,
                         "level": row.crown_level,
@@ -262,7 +267,7 @@ def gather_court(
                 )
             continue
         agree, reason = _agreement(reading["level"], reading["scope"], by_id)
-        entries.append(
+        crowns.append(
             {
                 "holder": row.name,
                 "level": reading["level"],
@@ -278,19 +283,19 @@ def gather_court(
             held_scopes.append(reading["scope"])
 
     orphans, sweep_ran = _manifest_only_crowns(held_scopes)
-    entries.extend(orphans)
+    crowns.extend(orphans)
 
-    disagreements = sum(1 for e in entries if e["agree"] is False)
-    unknowns = sum(1 for e in entries if e["agree"] is None)
-    splits = sum(1 for e in entries if e["crown_source"] == "split")
+    disagreements = sum(1 for e in crowns if e["agree"] is False)
+    unknowns = sum(1 for e in crowns if e["agree"] is None)
+    splits = sum(1 for e in crowns if e["crown_source"] == "split")
     return {
-        "crowns": entries,
+        "crowns": crowns,
         "conflicts": _conflicts(live_rows),
         "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
             # total counts ROW crowns only: the census computes workers from it.
-            "total": len(entries) - len(orphans),
+            "total": len(crowns) - len(orphans),
             "manifest_only": len(orphans),
             "sweep_ran": sweep_ran,
             "disagreements": disagreements,
@@ -320,11 +325,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]], entries: list[dict]) -> None:
 
     if not crowns:
         return
-    by_id = {
-        entry["id"]: entry
-        for entry in entries
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]
-    }
+    by_id = _id_index(entries)
     # Counts render in lifecycle order; a status outside the vocabulary keeps
     # its place at the end rather than vanishing from the line.
     count_order = [
@@ -501,7 +502,7 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
         lines = [header] + [_fmt_row(e) for e in court["crowns"]]
     if nodes and entries is None:
         lines.append(
-            "\nscope fold skipped: the graph could not be read; "
+            "\nscope fold skipped: the graph read for the fold failed; "
             "crown rows carry no scope nodes rather than empty ones."
         )
     for c in court["conflicts"]:
