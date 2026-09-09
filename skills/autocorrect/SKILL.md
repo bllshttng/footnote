@@ -7,7 +7,7 @@ description: Self-improvement loop for the toolkit. Passive capture (git post-co
 
 The meta-improvement layer: passive capture, fresh-API review, human triage in 20 minutes per month.
 
-**Harness boundary:** the capture wiring is Claude-specific - the git post-commit hook, verifier wrapper paths, and watermarks live under `~/.claude/`, and the cron registers launchd jobs on this machine. On another harness only the manual `/autocorrect review` verb runs; the passive writers are absent, and the skill says so rather than pretending the loop is armed.
+**Harness boundary:** the capture wiring is Claude-specific. The git post-commit hook, verifier wrapper paths, and watermarks live under `~/.claude/`, and the cron registers launchd jobs on this machine. On another harness only the manual `/autocorrect review` verb runs. The passive writers are absent, and the skill says so rather than pretending the loop is armed.
 
 ## Three writers, one log, one consumer
 
@@ -39,7 +39,7 @@ All commands are thin wrappers over scripts in this plugin's `scripts/` director
 
 1. **The agent is never the capture surface.** All three writers are passive (git hooks, verifier wrappers, scheduled ingester). If you find yourself proposing an agent-direct write, you're holding the wrong end of the loop.
 2. **Single artifact.** Everything funnels through `~/.fno/corrections.log`. Three writers, one consumer. Resist the urge to add ad-hoc per-source logs.
-3. **Severity tiers, not frequency thresholds.** S0 fires immediately on a single event; S1 and S2 both roll up in the monthly review - the registered cron passes `--severity S1,S2` on the 1st, and that scheduler is the one cadence owner. The writer decides severity.
+3. **Severity tiers, not frequency thresholds.** S0 fires immediately on a single event. S1 and S2 both roll up in the monthly review. The registered cron passes `--severity S1,S2` on the 1st, and that scheduler is the one cadence owner. The writer decides severity.
 4. **Reviewer sees current full rule text, not just diffs.** Decisions are made against the rule as it stands today, not its history.
 5. **L1 -> L2 migration discipline.** Rules are a holding pen; verifiers are the destination. CONVERT-TO-VERIFIER patches MUST delete the rule text in the same commit they add the verifier. `autocorrect-triage.sh` surfaces this invariant.
 6. **The loop's success metric is patch volume decreasing.** Patch volume dropping is the goal, not a failure signal. The loop retires successfully when verifiers absorb every recurring correction class.

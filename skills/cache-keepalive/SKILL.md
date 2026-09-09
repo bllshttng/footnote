@@ -11,9 +11,9 @@ metadata:
 
 Schedules 4 pings via ScheduleWakeup to keep the prompt cache warm during idle periods. Self-terminates after ~18 minutes.
 
-**Capability gate.** The scheduler is Claude's ScheduleWakeup. When it is unavailable, report `schedule unavailable` and stop - never claim warmth and never substitute another timer (CronCreate fires new sessions and does not keep this cache warm).
+**Capability gate.** The scheduler is Claude's ScheduleWakeup. Without it, report `schedule unavailable` and stop. Never claim warmth. Never substitute another timer (CronCreate fires new sessions and does not keep this cache warm).
 
-**Warmth is measured, never assumed.** A scheduled ping re-reads cached context, which makes the context cache-ELIGIBLE; it does not prove a cache HIT. Warmth is proven only by usage data (`cache_read_input_tokens > 0` in the transcript's last assistant usage). Report `warmth unverified` unless that number proves a cache read, and report the measured numbers rather than a defined-true claim.
+**Warmth is measured, never assumed.** A scheduled ping re-reads cached context, which makes the context cache-ELIGIBLE. It does not prove a cache HIT. Warmth is proven only by usage data (`cache_read_input_tokens > 0` in the transcript's last assistant usage). Report `warmth unverified` unless that number proves a cache read. Report the measured numbers rather than a defined-true claim.
 
 ## Configuration
 
@@ -89,7 +89,7 @@ else:
 fi
 ```
 
-Pricing: resolve input and cache-read prices for the reported model from the provider's current pricing page at report time, and say the numbers were looked up then. Prices drift and were not independently measured here; when you cannot look them up, report `pricing unverified` and skip the cost comparison instead of quoting a stored literal.
+Pricing: resolve input and cache-read prices for the reported model from the provider's current pricing page at report time. Say the numbers were looked up then. Prices drift and were not independently measured here. Without a lookup, report `pricing unverified` and skip the cost comparison instead of quoting a stored literal.
 
 Calculate: uncached = TOTAL_CTX / 1M * input_price. cached = TOTAL_CTX / 1M * cache_read_price.
 
@@ -132,7 +132,7 @@ Output ONLY:
 Then:
 
 - **Pings 1-2:** Schedule next ping with ScheduleWakeup at 270s
-- **Ping 3:** Send the OS notification warning - the ONE sanctioned shell action during a ping - then schedule the final ping:
+- **Ping 3:** Send the OS notification warning (the one sanctioned shell action during a ping), then schedule the final ping:
   ```bash
   if [[ "$(uname)" == "Darwin" ]]; then
     osascript -e 'display notification "Return to your session or the cache will expire on next ping" with title "Cache Keepalive"' 2>/dev/null
@@ -140,7 +140,7 @@ Then:
     notify-send "Cache Keepalive" "Return to your session or the cache will expire on next ping" 2>/dev/null
   fi
   ```
-  If neither notifier exists, skip it silently; a missing notifier is not a keepalive failure.
+  If neither notifier exists, skip it silently. A missing notifier is not a keepalive failure.
 - **Ping 4:** Final warning, stop scheduling (let cache expire gracefully):
   ```
   [cache-keepalive] Ping 4/4 | final ping, cache protection ending. Type anything to continue working.
@@ -155,7 +155,7 @@ User input at any point naturally cancels the ScheduleWakeup loop. No explicit c
 
 - NEVER use CronCreate (fires new sessions, doesn't keep current cache warm)
 - NEVER more than 4 pings per activation
-- NEVER read files or run other tools during pings - the two exceptions are ScheduleWakeup itself and the ping-3 OS notification
+- NEVER read files or run other tools during pings. The two exceptions are ScheduleWakeup itself and the ping-3 OS notification
 - NEVER block user input (ScheduleWakeup yields to user naturally)
 - NEVER activate without project opt-in (when auto-activated via hook)
 - NEVER report "cache warm" without usage data proving a cache read

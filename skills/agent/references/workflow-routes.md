@@ -1,3 +1,5 @@
+<!-- style-exception: verbatim moves of provider, posture and observability prose from the style-exception'd agent/SKILL.md root; the plan requires authority statements to travel intact when compacting -->
+
 # Workflow routes (conditional recipes)
 
 Load this file only when the spawn is NOT a default claude pane build/seed: a named non-default provider or substrate, a model/effort/permission posture, or when observing a worker's state. The SKILL.md root carries the flow, the confirm policy, the hard rules, and the receipt contract; this file carries the per-provider and per-posture detail those triggers need.

@@ -13,7 +13,7 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
 
 ## The cycle
 
-1. **RED:** write ONE minimal test for the next acceptance criterion (one behavior per test, clear name, real assertions). Database and UI assertions only when the change actually has those surfaces.
+1. **RED:** write ONE minimal test for the next acceptance criterion (one behavior per test, clear name, real assertions). Only a change with those surfaces carries database and UI assertions.
 2. **Verify RED (mandatory):** run the test. It must FAIL - not error - because the behavior is missing, with the expected failure message. A test that passes immediately tests existing behavior: write a different test. A test that errors: fix the error until it fails correctly.
 3. **GREEN:** write the simplest code that passes. Nothing beyond what the test requires.
 4. **Verify GREEN (mandatory):** the test passes and the other tests still pass. Still failing? Fix the implementation, not the test.
@@ -22,11 +22,11 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
 
 ## Acceptance criteria become tests
 
-Each criterion from `/blueprint` maps to one named test: `AC1-HP` -> the happy path, `AC2-ERR` -> the error state, `AC3-UI` -> the visible change, `AC4-EDGE` -> the boundary.
+Each criterion from `/blueprint` maps to one named test. `AC1-HP` -> the happy path. `AC2-ERR` -> the error state. `AC3-UI` -> the visible change. `AC4-EDGE` -> the boundary.
 
 ## Recovery rule (code exists without a failing test)
 
-Delete the code you wrote for the behavior that has no failing test - it is unproven - and keep everything else: unrelated work, earlier green cycles, refactors. Then write the failing test that PROVES the behavior is missing (run it and watch it fail for the right reason) and re-implement minimally against it. "Keep it as reference" is deletion deferred; delete means delete. Exploration code is the same: delete it, start from the test.
+Delete the code you wrote for the unproven behavior (the one with no failing test) and keep everything else: unrelated work, earlier green cycles, refactors. Then write the failing test that PROVES the behavior is missing. Run it and watch it fail for the right reason, then re-implement minimally against it. "Keep it as reference" is deletion deferred. Delete means delete. Exploration code is the same: delete it, start from the test.
 
 ## In `/execute`
 
@@ -34,7 +34,7 @@ Per task: read the task -> load /tdd -> RED, verify, GREEN, verify, refactor, co
 
 ## Verification checklist
 
-Before marking the task complete: test written before implementation; watched it fail for the correct reason; minimal code to pass; all tests passing with clean output; edge cases covered; committed. A box you cannot check means the cycle was skipped - go back to RED.
+Before marking the task complete, check the six marks. Test first. Watched failure for the correct reason. Minimal code. All tests green with clean output. Edge cases covered. Committed. A box you cannot check means the cycle was skipped - go back to RED.
 
 ## Known Limitations and Deferred Work
 

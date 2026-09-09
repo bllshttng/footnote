@@ -42,12 +42,7 @@ If no frontend-craft executor is installed, plain execution is fine.
 
 ## 2. Execute Changes
 
-**Before each numbered change**, evaluate the plan's `kill_criteria:` block in
-its frontmatter (if present; that frontmatter is the parser's only source - a
-`## Kill Criteria` section in the body is invisible to it). If a predicate
-fires, stop, emit
-`<aborted reason="{name}">MISSION ABORTED: {reason}</aborted>`, and do
-NOT make further changes:
+**Before each numbered change**: the plan's `kill_criteria:` frontmatter block is the thing to evaluate (frontmatter only - the body never carries it). That frontmatter is the parser's only source - a `## Kill Criteria` section in the body is invisible to it. On a fired predicate, stop, emit `<aborted reason="{name}">MISSION ABORTED: {reason}</aborted>`, and make no further changes:
 
 ```bash
 PLAN_PATH="$1"   # the .md file path passed to /execute
@@ -75,13 +70,7 @@ Backward compat: plans without `kill_criteria:` frontmatter (most focused
 plans will not have one) return exit 0 (no abort). Malformed predicates
 log WARN to stderr and are skipped.
 
-**Session-project invariant:** a flat plan is single-project by construction.
-If a numbered change would edit a file **outside this session's project repo
-root**, STOP — do NOT `cd` into the other repo and edit it. Surface that work as
-a backlog node and spawn a worker into its project
-(`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`),
-or, if no node exists yet, report it so the user can `/blueprint` it. See
-[session-project-invariant.md](session-project-invariant.md).
+**Session-project invariant:** a flat plan is single-project by construction. If a numbered change targets a file **outside this session's project repo root**, STOP - do NOT `cd` into the other repo and edit it. Surface that work as a backlog node and spawn a worker into its project (`fno agents spawn --harness claude --cwd <root> --name "target-<node>" "/target <node>"`), or, if no node exists yet, report it so the user can `/blueprint` it. See [session-project-invariant.md](session-project-invariant.md).
 
 For each numbered change under `## Changes`:
 
@@ -100,7 +89,7 @@ Work sequentially through the numbered changes. If a change depends on a previou
 Run every step listed under `## Verification`:
 - Commands → execute and check output
 - Behavioral checks → verify manually or describe result
-- If a verification fails and the failure is in the plan's scope, REPAIR it and re-run the failed step - a fix-verify round per the change that broke it - while the plan's explicit iteration bound remains. When the bound is spent, or the failure is genuinely outside this plan's scope, stop and name the real blocker. A green CI run never substitutes for a failed local verification, and neither substitutes for the configured review count.
+- A failed verification in the plan's scope gets REPAIRED, and the failed step re-runs - a fix-verify round per the change that broke it - while the plan's explicit iteration bound remains. At a spent bound, or on a failure genuinely outside this plan's scope, stop and name the real blocker. A green CI run never substitutes for a failed local verification, and neither substitutes for the configured review count.
 
 ## 3b. Status-breakpoint emit (x-dbaf, best-effort)
 
@@ -164,6 +153,6 @@ Lightweight, not forced:
 
 ## Error Handling
 
-- **Change fails:** Repair it if the cause is in scope; otherwise stop, report which change failed and why. Don't continue blindly.
-- **Verification fails:** Repair and re-run within the plan's iteration bound; at the bound, report the specific step that failed and the real blocker.
+- **Change fails:** repair an in-scope cause. On any other cause, stop and report which change failed and why. Do not continue blindly.
+- **Verification fails:** repair and re-run within the plan's iteration bound. At the bound, report the specific step that failed and the real blocker.
 - **Plan unclear:** Ask the user rather than guessing. The plan should be self-contained, but if it's not, surface the ambiguity.

@@ -15,11 +15,11 @@ Load references as needed when writing guides:
 
 ## Step 0: Scope the Guides
 
-How-to guides run when the ship-docs work order requests them - there is no config gate (the retired doc keys are not in the schema; do not read or write them). The request supplies the audience roles and may override the directory.
+How-to guides run on a ship-docs work order that requests them. There is no config gate: the retired doc keys are not in the schema, so do not read or write them. The request supplies the audience roles. The request can also override the directory.
 
 ### Locate How-To Directory
 
-Default `docs/howto`; the request may override it.
+Default `docs/howto`. The request can override it.
 
 ```
 {how_to_path}/{role}/{feature}.md

@@ -15,7 +15,7 @@ hooks:
 
 # Audit Skill
 
-Analyze feature completeness from the configured perspectives, identify gaps, and record them in a bounded evidence artifact. Plan documents are written only when the run is authorized to produce them. The loop is bounded by the audit's own named unresolved questions, not by "nothing is missed".
+Analyze feature completeness from the configured perspectives, identify gaps, and record them in a bounded evidence artifact. Plan documents are written only on an authorized run. The loop is bounded by the audit's own named unresolved questions, not by "nothing is missed".
 
 ## Purpose
 
@@ -43,12 +43,12 @@ If the setup script sets a completion promise, read it and follow its instructio
 | `--output-dir PATH` | Where to write plan documents when the run is authorized to produce plans (default: from `.claude/settings.json` `plansDirectory`, or `config.plans.full_path`) |
 | `--perspectives LIST` | Comma-separated lens subset; the resolved list is the authority for "do not skip any" (default: all five - ux, pm, po, eng, integration) |
 
-## Skills, loaded only when their act runs
+## Skills, loaded for their own act
 
-- `/think` — load when the audit needs structured design exploration for a lens
-- `/blueprint` — load only when the run is authorized to produce plan documents
-- `/tdd` — load only when writing acceptance criteria for planned features
-- `/setup` — load only when cross-project workspace context is actually needed
+- `/think` — load for structured design exploration a lens needs
+- `/blueprint` — load for plan production on an authorized run
+- `/tdd` — load for acceptance-criteria writing on planned features
+- `/setup` — load for cross-project workspace context
 
 ## Process
 
@@ -82,7 +82,7 @@ Scan codebase and existing plans to build completeness matrix:
 
 ### 3. Multi-Perspective Gap Analysis
 
-Analyze from every lens in the resolved `--perspectives` set (default: all five, including Integration Coherence). Don't skip a lens the run resolved.
+Analyze from every lens in the resolved `--perspectives` set (default: all five, including Integration Coherence). Do not skip a lens the run resolved.
 
 #### UX Research Perspective
 
@@ -256,9 +256,9 @@ Advanced features:
 - Ratio forecasting
 ```
 
-### 5. Plan Documents (only when the run is authorized to produce them)
+### 5. Plan Documents (authorized runs only)
 
-A plain audit's deliverable is the evidence artifact: the completeness matrix, the gap lists, and the progress file. When the operator asked for plans too, use `/blueprint` per feature - the canonical blueprint writes ONE Markdown document per feature (single doc, locked frontmatter), never a phase folder of INDEX plus numbered files:
+A plain audit's deliverable is the evidence artifact: the completeness matrix, the gap lists, and the progress file. On an authorized run that also asked for plans, use `/blueprint` per feature. The canonical blueprint writes ONE Markdown document per feature (single doc, locked frontmatter), never a phase folder of INDEX plus numbered files:
 
 ```
 {plans_path}/sms-delivery.md      # one blueprint doc per feature
@@ -266,7 +266,7 @@ A plain audit's deliverable is the evidence artifact: the completeness matrix, t
 {plans_path}/staff-wizard.md
 ```
 
-File each audited gap as a backlog node (`fno backlog idea`) when the operator wants the gaps to become work; the audit itself does not create plans or nodes unless asked.
+On an operator request to turn gaps into work, file each audited gap as a backlog node (`fno backlog idea`). The audit itself does not create plans or nodes unless asked.
 
 ### 6. Loop Check
 
@@ -284,7 +284,7 @@ If ANY unchecked → Continue (bounded by --max-iterations)
 If ALL checked → Loop complete
 ```
 
-"Cover everything that exists" is not a finish line; the named questions the audit raised are.
+"Cover everything that exists" is not a finish line. The named questions the audit raised are.
 
 ## Progress File Format
 
@@ -321,19 +321,19 @@ After the audit loop completes:
 
 1. **Progress file** with analysis summary (`.fno/audit-progress.txt`)
 2. **Completeness matrix** in the progress file - the bounded evidence artifact
-3. **Plan documents** in the output directory, only when the run was authorized to produce plans (one blueprint doc per feature)
+3. **Plan documents** in the output directory on an authorized run (one blueprint doc per feature)
 
 ## Completion
 
-If a completion promise is set in `.fno/audit-loop.local.md`, you may ONLY output it when every unresolved question the audit named is answered, filed, or parked, within the iteration bound. Do not stop after one pass - and do not keep looping past the bound either: at the bound, report the named questions that remain.
+With a completion promise set in `.fno/audit-loop.local.md`, output it only after every question the audit named is answered, filed, or parked. Keep the output inside the iteration bound. Do not stop after one pass. Do not keep looping past the bound either. At the bound, report the named questions that remain.
 
 ## Key Principles
 
-- **Don't stop early** — Keep asking "what else?" within the iteration bound
+- **Do not stop early** — Keep asking "what else?" within the iteration bound
 - **All resolved perspectives** — the `--perspectives` set, five by default (UX, PO, PM, Eng, Integration Coherence)
 - **Trace journeys, not features** — A feature isn't "done" if users can't reach it
 - **Check the wiring** — Every component must be connected to something upstream AND downstream
-- **Grounded output** — the evidence artifact first; plan documents only when authorized
+- **Grounded output** — the evidence artifact first, plan documents only on an authorized run
 - **Testable stories** — Every planned feature gets acceptance criteria
 - **Priority grouping** — P1/P2/P3
 

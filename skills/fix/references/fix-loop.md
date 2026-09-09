@@ -1,3 +1,5 @@
+<!-- style-exception: verbatim move of the repair itinerary from the style-exception'd fix/SKILL.md root; category strategies and the metric travel intact -->
+
 # Fix mode body (the repair loop)
 
 Load only when mode `fix` is selected. The SKILL.md root carries the mode/target/guard/completion contract; this file is the itinerary that fulfills it.

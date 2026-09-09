@@ -1,3 +1,5 @@
+<!-- style-exception: verbatim moves of court wake-arm, lookup-ladder and retask doctrine from the style-exception'd king-for-a-day/SKILL.md root; specimens and measured numbers travel intact per the compaction contract -->
+
 # Workflow routes (court-mode operations)
 
 Load this file when running COURT mode - the deep operational recipes behind the court contracts in SKILL.md. The root carries the contract and the invariants; this file carries the decoded refusals, the lookup ladder, and the wake-arm doctrine. Pass-mode kings never need it.

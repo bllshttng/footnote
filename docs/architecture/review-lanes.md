@@ -508,9 +508,9 @@ That is a merge-authority decision, tracked separately.
 **A green PR whose only attestation is `self_attested` is covered. Merge it.**
 `self_attested` is not a hold condition and has never been one.
 
-**No spawned-reviewer lane.** Operator law d-384d967c (2026-09-05) retired the practice of spawning a separate session to review your own work: it wastes a lane unless the review crosses the harness or the model, so run the fno review lane inline, or hand the findings round to a subagent. A same-harness, same-model sibling session produces compliance, not independence - a different session id is a different session, never a different reviewer. The `other_session` origin a sibling mints is recorded honestly and reads exactly as the section above says: not independent. A non-self attestation comes from a review that genuinely crosses the harness or the model (the `peer` lane).
+**No spawned-reviewer lane.** Operator law d-384d967c (2026-09-05) retired the practice of spawning a separate session to review your own work. It wastes a lane unless the review crosses the harness or the model. Run the fno review lane inline, or hand the findings round to a subagent. A same-harness, same-model sibling session produces compliance, not independence. A different session id is a different session, never a different reviewer. The `other_session` origin a sibling mints is recorded honestly and reads exactly as the section above says: not independent. A non-self attestation comes from a review that genuinely crosses the harness or the model (the `peer` lane).
 
-What survives from the retired lane is mechanics, not advice. An attestation from ANY session lands in the shared journal: the freshness and branch-scope predicates read it wherever it was emitted, and two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
+What survives from the retired lane is mechanics, not advice. An attestation from ANY session lands in the shared journal. The freshness and branch-scope predicates read it wherever it was emitted. Two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
 
 A `--fix` that touches only documentation now carries rather than invalidates. The freshness rule is therefore not the reason this constraint stands. The tree-corruption specimens are.
 
@@ -524,14 +524,17 @@ The merge gate's pass condition is disposition-complete at the head, not clean. 
 
 The round budget is `config.review.max_rounds` (default 2). A round is one reviewed HEAD, counted across the whole life of the PR, so two verdicts at one unchanged head are one round. A pass is one round like any other and refunds nothing, though it still satisfies coverage. CI failures, lint failures and rebases are not rounds. A PR merges after one to three reviews and never waits for a clean round. The full statement, with the honest-limits contract, is [review-coverage-termination.md](review-coverage-termination.md). That contract covers what class-gating does and does not close, the CONFIRMED axis, and GitHub's per-identity limit.
 
-The inline lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author's review runs through a reviewer that crosses the model or the harness, so "different session" can mean "different model".
-The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the peer lane's value, an honest `other_session` from a genuinely different reviewer, is silently unreachable.
+The inline lane also buys cross-model review, which the king-mediated lane cannot. A GLM or codex author's review runs through a reviewer that crosses the model or the harness, so "different session" can mean "different model".
 
-The king-mediated lane (Lane 3) still cannot produce independence by construction: it fires the review verb at the worker's own prompt line, so the author runs and emits it.
-That lane produces compliance, not independence; only a review that crosses the harness or the model produces the latter.
+The identity scrub on every spawn substrate makes a cross-harness reviewer stamp its own session rather than the author's. Without it, the peer lane's honest `other_session` from a genuinely different reviewer is silently unreachable.
+
+The king-mediated lane (Lane 3) still cannot produce independence by construction. It fires the review verb at the worker's own prompt line, so the author runs and emits it.
+
+That lane produces compliance, not independence. Only a review that crosses the harness or the model produces the latter.
 
 Two workers held green PRs on 2026-08-07 waiting for a second attestation that no dispatched lane emitted then, and escalated to the operator to merge on their behalf; neither was blocked.
-The lane that did not exist for them is exactly the one d-384d967c retired: the answer was the peer lane, not a sibling session.
+
+The lane that did not exist for them is exactly the one d-384d967c retired. The answer was the peer lane, not a sibling session.
 
 No gate lands with the origin field.
 Producing a countable non-author attestation and gating on it are separate decisions; `self_attested` stays a recorded origin, never a hold condition.
