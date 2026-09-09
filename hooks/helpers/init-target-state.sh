@@ -1560,8 +1560,23 @@ PYEOF
       # requires. Unset (every hand-started or non-spawn run) => zero args and
       # an ordinary acquire, byte-for-byte as before.
       _HANDOVER_FLAGS=""
-      [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+      if [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]]; then
         _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
+      else
+        # x-7471: the env var is how the spawner proves the handover, but a
+        # spawned worker can reach init without it. The spawner's claim then
+        # reads as a foreign 15-minute lease and the ordinary acquire refuses
+        # its own beneficiary (measured live 2026-09-09: a fresh /target on
+        # x-7471 failed rc=1 against spawn-handover:<its own worker>). Fall
+        # back to the holder on disk: pass --handover-from only when the live
+        # claim is itself a spawn-handover, which keeps the blast radius on
+        # launch-window claims (the prefix is the whole grant).
+        _DISK_HOLDER="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:${_NODE_ID}" --json 2>/dev/null \
+          | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+        case "${_DISK_HOLDER:-}" in
+          spawn-handover:*) _HANDOVER_FLAGS="--handover-from ${_DISK_HOLDER}" ;;
+        esac
+      fi
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
