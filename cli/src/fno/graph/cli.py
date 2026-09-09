@@ -2934,27 +2934,16 @@ def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
     quiet: bool = typer.Option(
-        False,
-        "--quiet",
-        "-q",
-        help="Annotate silently: write the note and notify nobody.",
+        False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
-    Distinct from ``update --details`` (which REPLACES the rationale) and the
-    single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
-    entries. The status-fanout backlog-progress adapter stamps one per
-    ``task_done``/``run_summary`` through the store, so those machine stamps
-    never mail; it is also hand-runnable.
-
-    Delivery is the DEFAULT. A worker reads its node once, at dispatch, so a
-    note written after that reaches nobody unless the verb mails it: the node's
-    live claim holder, the holder of the node whose PR carries it, and the
-    crowned king of its epic each get a POINTER naming the node. ``--quiet`` is
-    the deliberate silent annotation. A forgotten flag then costs a redundant
-    mail, where a forgotten mail used to cost the finding.
+    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
+    verb mails a pointer to the node's holder, the owner's holder and the epic's
+    king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
+    fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
@@ -2984,56 +2973,21 @@ def cmd_note(
     else:
         typer.echo(f"noted {task_id}: {text}")
     if not quiet:
-        _deliver_note(task_id, text, entries=entries, to_stderr=json_output)
+        try:
+            from fno.graph.note_notify import deliver_note
 
-
-def _deliver_note(
-    task_id: str,
-    text: str,
-    *,
-    entries: "list | None" = None,
-    to_stderr: bool = False,
-) -> None:
-    """Mail the note's readers and print what happened. Never raises.
-
-    Every outcome is printed, including "nobody to reach". Silence here would be
-    indistinguishable from delivery, which is the defect the verb now closes.
-    A receipt that is not a delivery - ``notify FAILED``, ``notify UNCONFIRMED``
-    - goes to stderr wherever the receipts land, so a lost delivery stays visible
-    in a log that keeps the two streams apart.
-    """
-    try:
-        from fno.graph.note_notify import notify_note
-
-        receipts = notify_note(
-            task_id, text, graph_path=_graph_path(), entries=entries or None
-        )
-    except Exception as exc:  # noqa: BLE001 - the note is written; delivery is best-effort
-        typer.echo(f"notify FAILED {task_id}: {exc}", err=True)
-        return
-    if not receipts:
-        typer.echo(
-            f"notify: no holder, owner or king to reach for {task_id}",
-            err=to_stderr,
-        )
-        return
-    for receipt in receipts:
-        undelivered = receipt.startswith(("notify FAILED", "notify UNCONFIRMED"))
-        typer.echo(receipt, err=to_stderr or undelivered)
+            receipts = deliver_note(task_id, text, _graph_path(), entries or None)
+        except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
+            receipts = [(f"notify FAILED {task_id}: {exc}", True)]
+        for line, undelivered in receipts:
+            typer.echo(line, err=undelivered or json_output)
 
 
 def _warn_if_note_is_long(text: str) -> None:
-    """Advise on a long note. Never refuse one.
+    """Advise on a long note, never refuse one.
 
-    ``progress_notes`` stays uncapped on purpose. It is an agent's only
-    append-only surface on a node, because ``update --details`` REPLACES, and a
-    refusal that destroys measured evidence is the wrong instrument for what is
-    really a volume problem. So this names the count and the cheaper
-    alternative, and lets the note land.
-
-    The multiplier is blunt on purpose: four times the encounter cap fires on
-    the notes that are already a problem and stays quiet on ordinary ones.
-    ponytail: fixed multiplier, make it config if the noise floor moves.
+    Why uncapped, and why the blunt multiplier:
+    docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno import style
 
@@ -3097,10 +3051,7 @@ def cmd_encounter(
     session_id = session_id if isinstance(session_id, str) else None
     harness = getattr(identity, "harness", None)
     harness = harness if isinstance(harness, str) else None
-    # `--operator` is a declaration, not proof. An agent can pass it, but the
-    # record keeps the casting session's identity beside the operator key and
-    # this single-operator machine has no cryptographic operator identity worth
-    # inventing for this signal.
+    # `--operator` is a declaration, not proof; see the contract doc.
     if not as_operator and (not session_id or not harness):
         typer.echo(
             "Error: no provable session identity, so this encounter would not be "
@@ -3110,11 +3061,8 @@ def cmd_encounter(
         )
         raise typer.Exit(code=5)
 
-    # The same escapes every other rule 7 surface honors, because
-    # `docs/style-rules.md` states rule 7 inherits them and a surface that
-    # quietly opts out makes that sentence false. Note what is NOT escapable:
-    # evidence is still REQUIRED above, and identity is still proven above.
-    # The cap is a length policy; those two are the falsifiability contract.
+    # Rule 7's escapes, inherited per docs/style-rules.md. Evidence and identity
+    # stay required above: the cap is length policy, not the falsifiability one.
     if (
         os.environ.get("FNO_STYLE_ENFORCE") != "0"
         and not style.has_exception(evidence)
