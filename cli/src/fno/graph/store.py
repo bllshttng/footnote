@@ -572,7 +572,7 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "empty_field_update":
         raise ValueError(message)
     if kind == "conflict":
-        raise _Conflict()
+        raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
     raise RuntimeError(f"store error ({kind}): {message}")
@@ -1208,7 +1208,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         try:
             outcome = _commit_snapshot(client, snap, entries, plan_rungs)
             break
-        except _Conflict:
+        except _Conflict as conflict:
             _emit_graph_tx_event(
                 attempt=attempt + 1,
                 attempts_max=_TX_ATTEMPTS,
@@ -1217,6 +1217,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 graph_path=str(path),
             )
             if attempt == _TX_ATTEMPTS - 1:
+                detail = str(conflict)
+                if detail.startswith("graph conflict on "):
+                    raise RuntimeError(
+                        f"{detail} after {_TX_ATTEMPTS} attempts at {path}"
+                    ) from None
                 raise RuntimeError(
                     f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
                 ) from None
