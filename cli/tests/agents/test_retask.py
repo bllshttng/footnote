@@ -787,6 +787,26 @@ def test_run_retask_converts_mux_timeout_to_structured_refusal(monkeypatch):
     assert receipt["target_submit_confirmed"] is False
 
 
+def test_run_retask_converts_thread_viewport_transport_error_to_structured_refusal(monkeypatch):
+    """A resolve_thread_viewport failure must not escape run_retask as a bare exception."""
+    import fno.agents.retask as retask
+
+    row = _row(harness="claude", substrate="thread", mux=None, fno_id=None)
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+
+    receipt = retask.run_retask("bp-thread-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert "worker_has_no_thread_ref" in receipt["reason"]
+    assert receipt["target_submit_confirmed"] is False
+
+
 def test_run_retask_passes_live_osc_title_to_manifest_evaluator(monkeypatch):
     import fno.agents.retask as retask
 
