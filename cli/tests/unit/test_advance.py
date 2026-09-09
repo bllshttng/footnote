@@ -290,6 +290,34 @@ def test_live_worked_node_refuses_and_names_worker(monkeypatch):
     assert emitted[0][1]["worker"] == "bp-worker"
 
 
+def test_worked_authority_failure_refuses_dispatch(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "worked-authority-unavailable"
+    assert observation.block_reason == "worked-authority-unavailable"
+
+
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_advance_preserves_family2_refusal_reason(iso, monkeypatch, reason):
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)

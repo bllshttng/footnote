@@ -320,6 +320,7 @@ pub(crate) fn queue_json(q: &Queue) -> Value {
 pub(crate) struct BoardInputs {
     pub(crate) ready: SourceRead,
     pub(crate) claims: SourceRead,
+    pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     pub(crate) prs: SourceRead,
@@ -844,7 +845,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         queue(
             "unplanned",
             format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
-            &if inputs.ready.is_ok() && inputs.claims.is_ok() {
+            &if inputs.ready.is_ok() && inputs.claims.is_ok() && inputs.worked.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -853,6 +854,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.worked.error.clone())
                         .unwrap_or_default(),
                 )
             },

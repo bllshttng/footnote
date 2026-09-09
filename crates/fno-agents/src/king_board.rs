@@ -811,6 +811,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let inputs = BoardInputs {
         ready,
         claims,
+        worked,
         claimed_nodes,
         holder_activity,
         prs,
@@ -861,6 +862,7 @@ mod tests {
         BoardInputs {
             ready: ok_read(ready),
             claims: ok_read(claims),
+            worked: ok_read(Value::Array(Vec::new())),
             claimed_nodes: ok_read(claimed_nodes),
             holder_activity: HashMap::new(),
             prs: ok_read(Value::Array(Vec::new())),
@@ -889,6 +891,27 @@ mod tests {
             worked_node_ids(&read),
             HashSet::from(["x-live".to_string()])
         );
+    }
+
+    #[test]
+    fn unplanned_queue_is_unreadable_when_worked_source_fails() {
+        let mut inputs = inputs_with(
+            json!([{"id": "x-live", "priority": "p0", "plan_path": null}]),
+            json!([]),
+            json!([]),
+        );
+        inputs.worked = SourceRead::err("roster timeout");
+
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "unplanned")
+            .unwrap();
+        assert_eq!(queue["status"], "unreadable");
+        assert!(queue["rows"].as_array().unwrap().is_empty());
+        assert_eq!(queue["error"], "roster timeout");
     }
 
     #[test]

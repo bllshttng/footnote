@@ -197,6 +197,7 @@ class DispatchClaimObservation:
     truth_status: str
     action: str
     worker: str = ""
+    block_reason: Optional[str] = None
 
     @property
     def blocks_dispatch(self) -> bool:
@@ -204,6 +205,8 @@ class DispatchClaimObservation:
 
     @property
     def refusal_reason(self) -> Optional[str]:
+        if self.block_reason:
+            return self.block_reason
         if self.action == "blocked":
             return "already-claimed"
         return self.action if self.blocks_dispatch else None
@@ -1992,6 +1995,14 @@ def dispatch_lanes(
     native_verdicts = claim_verdicts(
         [key for node in selected for key in (f"node:{node['id']}", f"dispatch:{node['id']}")]
     )
+    worked_nodes: Optional[dict[str, list[str]]] = None
+    worked_error: Optional[str] = None
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+
+        worked_nodes = live_worked_node_ids(strict=True)
+    except Exception as exc:  # noqa: BLE001 - refuse the whole batch safely
+        worked_error = str(exc)
 
     canonical = _canonical_root()
     ev_path = events_path or _events_path(project_root or canonical)
@@ -2022,7 +2033,11 @@ def dispatch_lanes(
             # advance()/dispatch-node.sh path, which dedups on node:<id> +
             # dispatch:<id>. Guard with the same dispatch:<id> reservation.
             block_reason = _node_dispatch_block_reason(
-                node_id, str(root), native_verdicts=native_verdicts
+                node_id,
+                str(root),
+                native_verdicts=native_verdicts,
+                worked_nodes=worked_nodes,
+                worked_error=worked_error,
             )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
@@ -3044,6 +3059,8 @@ def _observe_node_claim(
     enforce_failure_limit: bool = True,
     emit: bool = True,
     native_info: Optional[dict] = None,
+    worked_nodes: Optional[dict[str, list[str]]] = None,
+    worked_error: Optional[str] = None,
 ) -> DispatchClaimObservation:
     """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
@@ -3063,17 +3080,18 @@ def _observe_node_claim(
     holder = info.get("holder") or "unknown"
     occupied = verdict in ("ours", "foreign_live")
     worker = ""
-    try:
-        from fno.graph.statuses import live_worked_node_ids
+    if worked_nodes is None and worked_error is None:
+        try:
+            from fno.graph.statuses import live_worked_node_ids
 
-        workers = live_worked_node_ids().get(node_id, [])
-        if workers:
-            occupied = True
-            worker = ", ".join(workers)
-    except Exception:
-        # The claim classifier remains the authoritative fallback when the
-        # additive worked overlay cannot be read.
-        pass
+            worked_nodes = live_worked_node_ids(strict=True)
+        except Exception as exc:  # noqa: BLE001 - refuse rather than fail open
+            worked_error = str(exc)
+    workers = (worked_nodes or {}).get(node_id, [])
+    if workers:
+        occupied = True
+        worker = ", ".join(workers)
+    block_reason = "worked-authority-unavailable" if worked_error else None
     dead_action = (
         None
         if occupied or not enforce_failure_limit
@@ -3081,7 +3099,7 @@ def _observe_node_claim(
     )
     action = (
         "blocked"
-        if occupied
+        if occupied or worked_error
         else dead_action
         if dead_action is not None
         else "redispatch"
@@ -3103,6 +3121,7 @@ def _observe_node_claim(
             # Session witness basis, only when the classifier reported one.
             **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
             **({"worker": worker} if worker else {}),
+            **({"block_reason": block_reason} if block_reason else {}),
         )
     if emit and claim_state in ("stale", "suspect"):
         message = (
@@ -3120,6 +3139,7 @@ def _observe_node_claim(
         truth_status=truth,
         action=action,
         worker=worker,
+        block_reason=block_reason,
     )
 
 
@@ -3128,6 +3148,8 @@ def _node_dispatch_block_reason(
     node_cwd: Optional[str] = None,
     *,
     native_verdicts: Optional[dict[str, dict]] = None,
+    worked_nodes: Optional[dict[str, list[str]]] = None,
+    worked_error: Optional[str] = None,
 ) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
     native_info = None
@@ -3135,7 +3157,13 @@ def _node_dispatch_block_reason(
         native_info = native_verdicts.get(f"node:{node_id}")
         if native_info is None:
             return "claim-verdict-unavailable"
-    observation = _observe_node_claim(node_id, node_cwd, native_info=native_info)
+    observation = _observe_node_claim(
+        node_id,
+        node_cwd,
+        native_info=native_info,
+        worked_nodes=worked_nodes,
+        worked_error=worked_error,
+    )
     if observation.blocks_dispatch:
         return observation.refusal_reason
     if _claim_is_live(f"dispatch:{node_id}", verdicts=native_verdicts):
