@@ -667,6 +667,8 @@ wake_debounce_seconds = 900
 wake_backstop_seconds = 1800
 # Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing.
 blocked_child_grace_minutes = 30
+# What a crowned court session may write through the king-delegation-guard hook: refuse (default) blocks source authorship and routes it to spawn/advance, warn prints the refusal on stderr and allows (adopt the guard mid-reign without a surprise), off silences the guard. An unknown value degrades to refuse.
+implementation_guard = "refuse"
 # The /loop interval a reign self-injects (default 30m). Fail-safe: a value that is not <digits>[smhd] degrades to 30m at load, never raises.
 checkin_interval = "30m"
 # The /loop prompt text a reign self-injects at each check-in (default: run the reign skill's check-in body, journal reign_checkin, print 'no change' when idle).
