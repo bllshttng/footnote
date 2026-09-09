@@ -773,12 +773,11 @@ def update_readiness(
         except (OSError, subprocess.SubprocessError, ValueError, TypeError):
             front_script = None
     running = sys.executable or None
-    same: Optional[bool] = None
-    if front_script and running:
-        try:
-            same = Path(front_script).resolve() == Path(running).resolve()
-        except OSError:
-            same = None
+    same = (
+        Path(front_script).resolve() == Path(running).resolve()
+        if front_script and running
+        else None
+    )
     return {
         "update_ready": update_ready,
         "installed_rev": installed_rev,
