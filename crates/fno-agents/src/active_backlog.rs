@@ -348,10 +348,15 @@ fn map_outcome(
             if tripped {
                 // Park by deferring the node in graph state (recoverable via
                 // `fno backlog undefer`), then reset the streak so a later
-                // undefer gives it a fresh failure_limit attempts.
+                // undefer gives it a fresh failure_limit attempts. Name what
+                // broke beside the count, so a capacity casualty does not read
+                // like five broken nodes. The `auto-failure:` sentinel prefix
+                // is load-bearing: graph/failure.py AUTO_FAILURE_SENTINEL
+                // matches by startswith.
                 let reason_str = format!(
-                    "auto-failure: {} consecutive failed drains",
-                    cfg.failure_limit
+                    "auto-failure: {} consecutive failed drains (last: {})",
+                    cfg.failure_limit,
+                    detail.chars().take(120).collect::<String>()
                 );
                 // Recorded, not asserted: `breaker.reset` below hands the node a
                 // fresh streak allowance either way, so a `parked` row claiming
@@ -2195,6 +2200,46 @@ mod tests {
         assert!(
             parked.contains("\"deferred\":false"),
             "a defer that exited non-zero must be recorded as not landed: {parked}"
+        );
+    }
+
+    #[test]
+    fn parked_defer_reason_names_the_last_failure() {
+        // x-c6fe AC8-UI: `auto-failure: 3 consecutive failed drains` named the
+        // drain and never the cause, so a capacity casualty read like five
+        // broken nodes. The reason carries the last failure detail beside the
+        // count; the `auto-failure:` sentinel prefix is unchanged so
+        // graph/failure.py's startswith matching keeps working.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-3333","decision":"failed","reason":"daemon unreachable"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        let defer_line = calls
+            .lines()
+            .find(|l| l.contains("backlog defer x-3333"))
+            .expect("exactly one defer at failure_limit=3");
+        assert!(
+            defer_line.contains("auto-failure: 3 consecutive failed drains"),
+            "sentinel prefix must survive: {defer_line}"
+        );
+        assert!(
+            defer_line.contains("(last: advance reported the spawn failed: daemon unreachable)"),
+            "the defer reason must name what broke: {defer_line}"
         );
     }
 
