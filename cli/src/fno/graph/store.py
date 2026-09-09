@@ -278,6 +278,8 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         f"store-{os.getpid()}",
         "--lock-timeout-secs",
         str(_LOCK_TIMEOUT_SECS),
+        "--read-source",
+        _graph_read_source(),
     ]
     try:
         from fno import paths as _paths
@@ -285,6 +287,7 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         argv.extend(["--events", str(_paths.project_events_json())])
     except Exception:
         pass
+    argv.extend(["--read-source", _graph_read_source()])
     if _is_canonical(path):
         argv.append("--canonical")
     proc = subprocess.Popen(
@@ -534,6 +537,38 @@ class _Keeper:
         the verb raises through ``request`` and every caller falls back."""
         return self.request("read_ids", {"ids": list(ids)})
 
+    def identify(self) -> dict:
+        stream = self._connect()
+        try:
+            stream.settimeout(self.read_timeout)
+            stream.sendall(bytes([_TAG_IDENTIFY]) + struct.pack("<I", 0))
+            header = _recv_exact(stream, 5)
+            if header[0] != _TAG_IDENTIFY_REPLY:
+                raise StoreUnavailable(STATE_SILENT, "keeper returned a non-identify frame")
+            body = _recv_exact(stream, struct.unpack_from("<I", header, 1)[0])
+            return json.loads(body)
+        finally:
+            stream.close()
+
+    def shutdown(self) -> None:
+        stream = self._connect()
+        try:
+            stream.settimeout(self.read_timeout)
+            stream.sendall(bytes([_TAG_SHUTDOWN]) + struct.pack("<I", 0))
+            _recv_exact(stream, 5)
+        finally:
+            stream.close()
+
+
+def _recv_exact(stream: socket.socket, length: int) -> bytes:
+    data = b""
+    while len(data) < length:
+        chunk = stream.recv(length - len(data))
+        if not chunk:
+            raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-frame")
+        data += chunk
+    return data
+
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     """A keeper connection for `path`, spawning the keeper when absent.
@@ -583,6 +618,45 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
             last = exc
             time.sleep(0.05)
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
+
+
+def identify_spawned_keepers() -> list[dict]:
+    """Identify reachable keepers spawned here plus the canonical seat."""
+    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
+    socks.add(store_socket_for(Path(GRAPH_JSON)))
+    rows: list[dict] = []
+    for sock in sorted(socks):
+        try:
+            rows.append(_Keeper(sock).identify())
+        except StoreUnavailable:
+            continue
+    return rows
+
+
+def restart_spawned_keepers() -> list[dict]:
+    """Restart identified keepers so a backend config flip takes effect."""
+    rows = identify_spawned_keepers()
+    for row in rows:
+        try:
+            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
+        except (KeyError, StoreUnavailable):
+            continue
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        alive: list[Path] = []
+        for row in rows:
+            graph = Path(row["graph"])
+            try:
+                _client_for(graph, spawn=False)._connect().close()
+                alive.append(graph)
+            except StoreUnavailable:
+                pass
+        if not alive:
+            break
+        time.sleep(0.05)
+    for row in rows:
+        _client_for(Path(row["graph"]))
+    return identify_spawned_keepers()
 
 
 def _raise_store_error(kind: str, message: str) -> None:
@@ -647,6 +721,15 @@ def _graph_commit_mode() -> str:
         return load_settings().graph.commit_mode
     except Exception:
         return "rows"
+
+
+def _graph_read_source() -> str:
+    try:
+        from fno.config import load_settings
+
+        return load_settings().graph.read_source
+    except Exception:
+        return "json"
 
 
 def _commit_snapshot(

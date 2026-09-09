@@ -41,6 +41,29 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    Json,
+    Sqlite,
+}
+
+impl ReadSource {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "json" => Ok(Self::Json),
+            "sqlite" => Ok(Self::Sqlite),
+            _ => Err(format!("--read-source must be json or sqlite, got {value:?}")),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
 pub(crate) const TAG_SHUTDOWN: u8 = 2;
@@ -55,7 +78,7 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
-/// [--canonical] [--lock-timeout-secs N]`.
+/// [--canonical] [--lock-timeout-secs N] [--read-source json|sqlite]`.
 pub struct KeeperConfig {
     pub sock: PathBuf,
     pub graph: PathBuf,
@@ -66,6 +89,7 @@ pub struct KeeperConfig {
     pub lock_timeout: Duration,
     /// Project journal receiving bounded write-gate aggregates.
     pub events: Option<PathBuf>,
+    pub read_source: ReadSource,
     /// Idle self-exit bound. A keeper is long-lived by design in production,
     /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
     /// a killed pytest worker above all - and one orphan per fixture graph
@@ -88,6 +112,7 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
     let mut canonical = false;
     let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
     let mut events = None;
+    let mut read_source = ReadSource::Json;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -108,6 +133,9 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                 events = Some(PathBuf::from(
                     it.next().ok_or("--events needs a value")?,
                 ))
+            }
+            "--read-source" => {
+                read_source = ReadSource::parse(it.next().ok_or("--read-source needs a value")?)?
             }
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -132,6 +160,7 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         canonical,
         lock_timeout,
         events,
+        read_source,
         idle_limit,
     })
 }
@@ -264,6 +293,7 @@ struct StoreState {
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
     gate_metrics: Mutex<GateMetrics>,
     events: Option<PathBuf>,
+    read_source: ReadSource,
 }
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
@@ -380,6 +410,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         snapshots: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
         events: cfg.events.clone(),
+        read_source: cfg.read_source,
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -391,6 +422,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         "graph": cfg.graph.display().to_string(),
         "session": cfg.session,
         "started_at": started_at,
+        "store_backend": cfg.read_source.name(),
     })
     .to_string()
     .into_bytes();
@@ -817,12 +849,19 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
     // Borrowed in both arms: a deep clone of the owned graph per ready call
     // would re-spend most of what the cache just saved.
     let cached;
+    let sqlite;
     let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
         Some(a) => a,
-        None => {
-            cached = cached_entries(state, false, false)?;
-            &cached
-        }
+        None => match state.read_source {
+            ReadSource::Json => {
+                cached = cached_entries(state, false, false)?;
+                &cached
+            }
+            ReadSource::Sqlite => {
+                sqlite = read_state(state, false, true)?;
+                &sqlite
+            }
+        },
     };
     match select(entries, &opts) {
         Ok(reply) => Ok(json!({
@@ -854,8 +893,17 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    let entries = cached_entries(state, keep_malformed, strict)?;
-    Ok(json!({ "entries": entries }))
+    match state.read_source {
+        ReadSource::Json => {
+            let entries = cached_entries(state, keep_malformed, strict)?;
+            Ok(json!({ "entries": entries }))
+        }
+        ReadSource::Sqlite => {
+            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+            let entries = read_state(state, keep_malformed, !strict)?;
+            Ok(json!({ "entries": entries }))
+        }
+    }
 }
 
 /// The by-id read: exact id-then-slug rows from the cache, in argument order,
@@ -877,8 +925,10 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let entries = cached_entries(state, false, false)?;
-    let mut overlaid = (*entries).clone();
+    let mut overlaid = match state.read_source {
+        ReadSource::Json => (*cached_entries(state, false, false)?).clone(),
+        ReadSource::Sqlite => read_state(state, false, true)?,
+    };
     graph_store::apply_readiness_overlay(&mut overlaid);
     let mut out = Vec::with_capacity(tokens.len());
     let mut missing = Vec::new();
@@ -889,6 +939,42 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
         }
     }
     Ok(json!({"entries": out, "missing": missing}))
+}
+
+fn read_state(
+    state: &StoreState,
+    keep_malformed: bool,
+    backup_on_corrupt: bool,
+) -> Result<Vec<Value>, StoreError> {
+    match state.read_source {
+        ReadSource::Json => graph_store::read_defaulted_opts(
+            &state.graph,
+            keep_malformed,
+            backup_on_corrupt,
+        ),
+        ReadSource::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
+            StoreError::Unreadable(
+                crate::graph_sqlite::database_path(&state.graph)
+                    .display()
+                    .to_string(),
+                error,
+            )
+        }),
+    }
+}
+
+fn state_version(state: &StoreState) -> Result<String, StoreError> {
+    match state.read_source {
+        ReadSource::Json => Ok(graph_store::file_content_version(&state.graph)),
+        ReadSource::Sqlite => crate::graph_sqlite::version(&state.graph).map_err(|error| {
+            StoreError::Unreadable(
+                crate::graph_sqlite::database_path(&state.graph)
+                    .display()
+                    .to_string(),
+                error,
+            )
+        }),
+    }
 }
 
 /// Pure transforms over client-shipped rows: the migration seam and the
@@ -928,15 +1014,17 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
 /// the bytes, and the keeper's serialized publish guarantees the reads never
 /// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
-    use std::io::Read as _;
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-    let mut file = std::fs::File::open(&state.graph)
-        .map_err(|e| StoreError::Unreadable(state.graph.display().to_string(), format!("{e}")))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let bytes = match state.read_source {
+        ReadSource::Json => std::fs::read(&state.graph).map_err(|error| {
+            StoreError::Unreadable(state.graph.display().to_string(), error.to_string())
+        })?,
+        ReadSource::Sqlite => graph_store::serialize_graph_file(&read_state(state, true, false)?)
+            .into_bytes(),
+    };
     Ok(json!({
         "bytes_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
-        "sha256": file_version(&state.graph),
+        "sha256": state_version(state)?,
     }))
 }
 
@@ -944,7 +1032,13 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     // One gate-held window for entries and digest both (cached_snapshot): a
     // commit publishing mid-begin waits, so a retrying writer's version never
     // names a file its entries did not come from.
-    let (version, entries) = cached_snapshot(state)?;
+    let (version, entries) = match state.read_source {
+        ReadSource::Json => cached_snapshot(state)?,
+        ReadSource::Sqlite => {
+            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+            (state_version(state)?, Arc::new(read_state(state, false, true)?))
+        }
+    };
     remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
@@ -976,11 +1070,6 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
         .find(|(stored, _)| stored == version)
         .map(|(_, entries)| entries.clone())
 }
-
-fn file_version(path: &std::path::Path) -> String {
-    graph_store::file_content_version(path)
-}
-
 fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let version = params
         .get("version")
@@ -1124,8 +1213,8 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         .write()
         .unwrap_or_else(|error| error.into_inner());
     let waited = waiting.elapsed();
-    let current_version = file_version(&state.graph);
-    let current = graph_store::read_defaulted(&state.graph, false)?;
+    let current_version = state_version(state)?;
+    let current = read_state(state, false, true)?;
     if current_version != base_version {
         let Some(base_entries) = stored_snapshot(state, base_version) else {
             return Err(CommitRowsError::Conflict(touched.into_iter().collect()));
@@ -2154,7 +2243,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             return Err(StoreError::Conflict);
         }
     }
-    let mut entries = graph_store::read_defaulted(&state.graph, false)?;
+    let mut entries = read_state(state, false, true)?;
     let op_result = apply_op(&mut entries, name, &p)?;
     let outcome = graph_store::locked_mutate(
         &state.graph,
@@ -2627,6 +2716,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             events: None,
+            read_source: ReadSource::Json,
             idle_limit: Some(Duration::from_millis(700)),
         };
         let handle = std::thread::spawn(move || run(cfg));
@@ -2667,6 +2757,7 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
+            read_source: ReadSource::Json,
         };
         let stale = json!({
             "name": "update_fields",
