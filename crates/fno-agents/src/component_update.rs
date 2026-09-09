@@ -128,15 +128,29 @@ pub struct VerdictReport {
     pub components: Vec<ComponentVerdict>,
 }
 
+/// Shell-quote a path for display inside a repair command, so a source
+/// checkout with spaces or metacharacters renders an executable command.
+fn shell_quote(path: &str) -> String {
+    let safe = !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+    if safe {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 fn repair_command(component: &str, req: &VerdictRequest) -> Option<String> {
     match component {
         PYTHON_TOOL => Some("fno doctor update".to_string()),
         MUX_FRONT_DOOR => Some(match &req.crates_mux_dir {
-            Some(dir) => format!("cargo install --path {dir} --bins"),
+            Some(dir) => format!("cargo install --path {} --bins", shell_quote(dir)),
             None => "fno doctor update --rust".to_string(),
         }),
         AGENTS_CLIENT | AGENTS_DAEMON | AGENTS_WORKER => Some(match &req.crates_agents_dir {
-            Some(dir) => format!("cargo install --path {dir} --bins"),
+            Some(dir) => format!("cargo install --path {} --bins", shell_quote(dir)),
             None => "fno doctor update --rust".to_string(),
         }),
         _ => None,
@@ -549,6 +563,17 @@ mod tests {
             effect_attempted: false,
             effect_ok: None,
         }
+    }
+
+    #[test]
+    fn repair_paths_with_metacharacters_are_shell_quoted() {
+        let mut r = req(vec![probe(AGENTS_CLIENT, Some("old"))]);
+        r.crates_agents_dir = Some("/src/my crates/fno-agents".to_string());
+        let v = verdict(&r).components.remove(0);
+        assert_eq!(
+            v.repair.as_deref(),
+            Some("cargo install --path '/src/my crates/fno-agents' --bins")
+        );
     }
 
     #[test]

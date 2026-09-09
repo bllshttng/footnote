@@ -634,10 +634,11 @@ def _component_convergence(
     from fno import update as _update
 
     cargo_bin = _cargo_bin_path()
+    # Probe the directory the RESOLVED binary lives in: on a wheel install with
+    # no cargo bin, ~/.cargo/bin is the wrong tree and would read all-missing.
+    bindir = Path(cargo_bin).parent if cargo_bin else Path(verdict_bin).parent
     report = _update._component_verdict(
-        src, subtree,
-        Path(cargo_bin).parent if cargo_bin else Path.home() / ".cargo" / "bin",
-        Path(verdict_bin),
+        src, subtree, bindir, Path(verdict_bin),
         python_tool={
             "rev": marker,
             "expected": _source_rev(src),
