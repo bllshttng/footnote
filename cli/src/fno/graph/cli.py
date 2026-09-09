@@ -8234,53 +8234,12 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
     return closed
 
 
-def _strandable_epic_ids(entries: list[dict]) -> set[str]:
-    """Open epics (parents) whose children are ALL done - closeable right now.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._reconcile import _reopen_outranks_child_closes
-
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("parent"), str):
-            children_by_parent.setdefault(e["parent"], []).append(e)
-    id_to_entry = {
-        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
-    out: set[str] = set()
-    for pid, kids in children_by_parent.items():
-        parent = id_to_entry.get(pid)
-        if (
-            parent is not None
-            and not parent.get("completed_at")
-            and all(k.get("completed_at") for k in kids)
-            and not _reopen_outranks_child_closes(parent, kids)
-        ):
-            out.add(pid)
-    return out
-
-
-def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
-    """Close every open epic whose children are all done (self-heal/migration).
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    id_to_entry = {
-        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
-    closed: list[str] = []
-    for _ in range(64):  # fixpoint, depth-capped against a malformed cycle
-        ready = _strandable_epic_ids(entries)
-        if not ready:
-            break
-        for pid in ready:
-            parent = id_to_entry.get(pid)
-            if parent is None or parent.get("completed_at"):
-                continue
-            _apply_completion_fields(parent)
-            if not parent.get("completion_note"):
-                parent["completion_note"] = _auto_closed_note(parent)
-            closed.append(pid)
-    return closed
+# In graph/_closures.py: this file is over the source budget.
+from fno.graph._closures import (  # noqa: E402
+    _strandable_epic_ids,
+    _sweep_close_done_epics,
+    _sweep_stamp_carried_sessions,
+)
 
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
@@ -10344,6 +10303,7 @@ def cmd_reconcile(
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
+    carried_stamped: list[str] = []
     contained_errors: list[dict] = []
     supersession_unverified: list[dict] = []
     # Blocked_by edges the sweep settled (): pruned to done blockers,
@@ -10382,6 +10342,8 @@ def cmd_reconcile(
         # is invisible to the SessionStart hook, which runs `reconcile --json`
         # and discards stderr.
         contained_errors_acc: list = []
+        # Reporting only: a repair nobody names reads as "nothing happened".
+        carried_stamped_acc: list = []
         supersession_unverified_acc: list[dict] = []
         blocked_by_settlement_acc: list[dict] = []
 
@@ -10517,6 +10479,21 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # AFTER both close sweeps: a node closed this pass is a
+                # passenger too. Guarded like them, for the same reason.
+                try:
+                    carried_stamped_acc.extend(_sweep_stamp_carried_sessions(entries))
+                except Exception as _cs_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append(
+                        {"owner": None, "stage": "carried-session-stamp",
+                         "error": str(_cs_exc)[:200]}
+                    )
+                    typer.echo(
+                        f"warning: the carried-session stamp failed: {_cs_exc}; "
+                        "nodes that shipped inside another node's PR still record "
+                        "no session (`fno backlog reconcile` retries next run)",
+                        err=True,
+                    )
                 # Same self-heal shape, and guarded the same way: a raise here
                 # would abort a sweep whose real job is closing merged PRs.
                 try:
@@ -10729,6 +10706,7 @@ def cmd_reconcile(
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
+        carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
     elif dry_run and (closeable or strandable or strandable_contained or status_drift):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
@@ -10786,6 +10764,10 @@ def cmd_reconcile(
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        try:  # a preview that omits a leg reads "in sync" where a run writes
+            carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
+        except Exception:  # noqa: BLE001 - a preview never raises
+            carried_stamped = []
 
     # W4 causal links: best-effort revert stamp, full sweep only. A merged
     # "Revert ..." PR referencing a PR carried by a graph node flips that
@@ -10997,6 +10979,7 @@ def cmd_reconcile(
             # (). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
+            "carried_stamped": carried_stamped,
             # Cascade/sweep and canonical-sync legs. In the payload because the
             # SessionStart hook reads --json and discards stderr: a leg whose
             # failure is unobservable is indistinguishable from one that never ran.
@@ -11043,6 +11026,7 @@ def cmd_reconcile(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not carried_stamped
         and not reverted_stamped
         and not promise_held
         and not promise_warnings
@@ -11096,6 +11080,9 @@ def cmd_reconcile(
                 f"{_lead} {len(contained_closed)} contained node(s) shipped "
                 f"inside {_whose} (cost stays on the delivery unit): " + ", ".join(contained_closed)
             )
+        if carried_stamped:
+            typer.echo(f"Recorded the shipping session on {len(carried_stamped)} node(s) "
+                       "carried in another node's PR: " + ", ".join(carried_stamped))
         if healed_epics:
             typer.echo(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
