@@ -294,7 +294,9 @@ def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
     names a machine-scoped gate condition, None when it is a node fault and
     the caller keeps its ``failed`` verdict."""
     code = getattr(exc, "exit_code", None)
-    reason = _GATE_REFUSAL_REASONS.get(code) if isinstance(code, int) else None
+    if not isinstance(code, int):
+        return None
+    reason = _GATE_REFUSAL_REASONS.get(code)
     if reason is None:
         return None
     return GateRefusal(
