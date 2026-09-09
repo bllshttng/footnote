@@ -80,6 +80,10 @@ pub struct GcSummary {
     /// contradicts - an open additional PR, or a recorded merge_status that
     /// is not `merged`.
     pub kept_pr_contradicts: Vec<(String, String, String)>,
+    /// `(id, node)`: the node reads planning-complete but THIS session's own
+    /// blueprint/think row on it carries no `ended_at` - the completion
+    /// belongs to an earlier assignment, never to this worker (x-5aef).
+    pub kept_planning_unclosed: Vec<(String, String)>,
     /// `(id, node, status)`: a named node is not done; the first open one.
     pub kept_open_work: Vec<(String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
@@ -137,6 +141,11 @@ pub struct GraphRead {
     /// confirm step reads positive PR-state evidence from it; a missing
     /// merge_status is recorded as unrecorded, never asserted unmerged.
     pub pr_state: HashMap<String, (Option<String>, usize)>,
+    /// Lowercased session id -> the node ids where THIS session's own
+    /// `blueprint` or `think` sessions[] row carries a non-empty `ended_at`
+    /// (x-5aef task 1.2). The positive marker the planner's own close
+    /// writes; its absence means this assignment never finished.
+    pub closed_planning: HashMap<String, std::collections::HashSet<String>>,
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -216,6 +225,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
+    let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
     let mut pr_state: HashMap<String, (Option<String>, usize)> = HashMap::new();
     for entry in &entries {
@@ -267,7 +277,25 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 phases
                     .entry(sid.to_ascii_lowercase())
                     .or_default()
-                    .push(phase);
+                    .push(phase.clone());
+            }
+            // The planner's own close receipt (x-5aef task 1.2): a
+            // blueprint/think row carrying a non-empty `ended_at` is a
+            // finished assignment. `fno backlog session close` stamps it,
+            // and Blueprint's finish gate refuses to complete without
+            // reading it back - presence binds the completion to THIS
+            // session's own work, never to an earlier assignment on the
+            // same node.
+            if (phase == "blueprint" || phase == "think")
+                && row
+                    .get("ended_at")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            {
+                closed_planning
+                    .entry(sid.to_ascii_lowercase())
+                    .or_default()
+                    .insert(node_id.to_string());
             }
         }
     }
@@ -275,6 +303,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         index,
         open_do,
         phases,
+        closed_planning,
         statuses,
         pr_state,
     })
@@ -772,6 +801,12 @@ pub(crate) fn run(
         // name it a planner (or whose dispatch label is the bp- shape) gets
         // its every named node's status checked as a set; any node still at
         // `idea` (the plan never landed) or similar holds the row.
+        // x-5aef task 1.2 binds the verdict to the CURRENT assignment: the
+        // statuses come paired with their node ids, and the set of nodes
+        // THIS session closed (its own blueprint/think row carrying a
+        // non-empty ended_at) rides beside them. A quiet replanning worker
+        // dispatched onto a node a previous blueprint moved to `ready`
+        // inherits no completion it did not write.
         let is_planning = graph
             .phases
             .get(&sid.to_ascii_lowercase())
@@ -782,16 +817,20 @@ pub(crate) fn run(
                 graph
                     .index
                     .get(&sid.to_ascii_lowercase())
-                    .map(|named| {
-                        named
-                            .iter()
-                            .map(|(_, status)| status.clone())
-                            .collect::<Vec<_>>()
-                    })
+                    .cloned()
                     .unwrap_or_default(),
             )
         } else {
             None
+        };
+        let planning_closed = if is_planning {
+            graph
+                .closed_planning
+                .get(&sid.to_ascii_lowercase())
+                .map(|set| set.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
         let row = GcRow {
             origin: e.origin.clone(),
@@ -802,6 +841,7 @@ pub(crate) fn run(
             worktree_clean: None,
             branch_merged: None,
             planning,
+            planning_closed,
             confirm_hold,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
@@ -823,6 +863,9 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
+                }
+                Some(KeepReason::PlanningUnclosed { node }) => {
+                    summary.kept_planning_unclosed.push((id, node))
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
                 // policy ran; they cannot arrive here.

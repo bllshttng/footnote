@@ -54,6 +54,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
         index,
         open_do: open,
         phases: std::collections::HashMap::new(),
+        closed_planning: std::collections::HashMap::new(),
         statuses,
         pr_state,
     })
@@ -1372,6 +1373,93 @@ fn a_row_without_a_located_transcript_records_failed_resume_evidence() {
     assert_eq!(
         resume["outcome"], "failed",
         "no located transcript: the op must read failed, not confirmed: {effects:?}"
+    );
+}
+
+/// x-5aef AC4-HP/AC4-EDGE over the PRODUCTION graph read: two bp- workers,
+/// both named on a node at `ready`, both quiet past grace. Only the one
+/// whose own blueprint row carries `ended_at` retires; the other keeps with
+/// the unclosed node named. This is the quiet-replanner trap: a previous
+/// blueprint moved the node to ready, and the completion must not be
+/// inherited by a worker that never closed its assignment.
+#[test]
+fn a_planner_retires_only_on_its_own_closed_assignment() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let planning_row = |sid: &str, ended: Option<&str>| {
+        let mut row = json!({
+            "phase": "blueprint",
+            "harness": "codex",
+            "session_id": sid,
+            "started_at": "2026-09-01T00:00:00Z",
+        });
+        if let Some(at) = ended {
+            row["ended_at"] = json!(at);
+        }
+        row
+    };
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-4hp",
+            "status": "ready",
+            "sessions": [
+                planning_row("planner-unclosed", None),
+                planning_row("planner-closed", Some("2026-09-02T00:00:00Z")),
+            ],
+        }]),
+    );
+    for (name, sid) in [
+        ("bp-x-4hp-a", "planner-unclosed"),
+        ("bp-x-4hp-b", "planner-closed"),
+    ] {
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.short_id = name.into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some(sid.into());
+            e.created_at = "2026-09-01T00:00:00Z".into();
+            r.entries.push(e);
+        })
+        .unwrap();
+    }
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-4hp-b", "{:?}", summary.retired);
+    assert!(
+        summary
+            .kept_planning_unclosed
+            .iter()
+            .any(|(id, node)| id == "bp-x-4hp-a" && node == "x-4hp"),
+        "{:?}",
+        summary.kept_planning_unclosed
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "bp-x-4hp-a"),
+        "the unclosed planner keeps its row"
     );
 }
 
