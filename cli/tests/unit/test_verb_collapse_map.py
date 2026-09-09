@@ -123,8 +123,11 @@ def test_map_covers_current_surface_once():
     # allocates `agents authorized-merge`, the merge/arm decision every merge
     # path asks through the single Python door (hidden verb): 580 -> 581.
     # x-9e1e allocates `agents king faq add` and `agents king faq list`, the
-    # king FAQ recipe-becomes-verb: 581 -> 583.
-    assert len(mapped) == 583, (
+    # king FAQ recipe-becomes-verb: 581 -> 583. Counted from the merged file,
+    # not taken from either side: this branch independently allocates
+    # `agents distress-verdicts`, the king board's watchdog-verdict lookup
+    # (hidden verb): 583 -> 584.
+    assert len(mapped) == 584, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
