@@ -37,10 +37,7 @@ from fno.harness_identity import claude_transport_short_id
 # and byte-parity with the Rust gate.
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
-#: The per-territory team cap refused the spawn (x-e221). Separate code from
-#: the machine cap so a caller can tell "the fleet is full" (queueable) from
-#: "this territory's team is ACROSS the line" (the other territories keep their
-#: headroom, and the territory refusal never queues).
+#: docs/architecture/coordination.md#per-territory-team-cap
 EXIT_TERRITORY_CAP = 82
 EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
@@ -1562,11 +1559,8 @@ def _check_king_share(
 
 
 def _territory_verdict(node: str) -> dict:
-    """The per-territory cap verdict for `node`, asked from the Rust gate.
-
-    One counting leg (crates/fno-agents territory fact set): Python passes the
-    node through the binary door and recomputes nothing. A binary or payload
-    fault reads as territory_unknown, never as headroom.
+    """The per-territory cap verdict for `node`. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
     """
     from fno.rust_binary import call_binary_json
 
@@ -1585,12 +1579,8 @@ def _territory_verdict(node: str) -> dict:
 
 
 def _check_territory_cap(node: Optional[str]) -> None:
-    """Refuse (never queue) when the node's territory is at its team cap.
-
-    The cap stays enforced under --force: force speaks for the MACHINE being
-    busy, never for one territory overrunning its team. Waiting cannot help -
-    the team is full where the caller is standing - so this refuses like the
-    provider cap.
+    """Refuse (never queue) at the team cap. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
     """
     if not node:
         return
@@ -1748,9 +1738,8 @@ def run_gate(
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also
         # bypasses the king share here, which _check_king_share's own refusal
-        # names where it matters. The per-territory team cap survives --force
-        # (x-e221): force speaks for the MACHINE being busy, never for one
-        # territory overrunning its team.
+        # names where it matters. Territory cap survives --force:
+        # docs/architecture/coordination.md#per-territory-team-cap
         if node:
             _check_territory_cap(node)
         _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")

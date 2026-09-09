@@ -219,6 +219,23 @@ a session whose gates are all false (it just started).
 
 Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its width from those same counters. It reads them through the same functions that `fno agents top` and `advance --explain` use. No two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second authority beside the real one. When the key is set, fno prints one deprecation line and ignores it. The key stays parseable for one release. Delete it from config.
 
+## Per-territory team cap
+
+`_territory_verdict` (`cli/src/fno/agents/spawn_gate.py`) asks the Rust gate
+for one node's territory verdict and recomputes nothing: Python passes the
+node through the binary door. A binary or payload fault reads as
+`territory_unknown`, never as headroom, since an unreadable verdict must
+never count as free capacity.
+
+`_check_territory_cap` refuses (never queues) when that verdict is
+`territory_cap`. The cap stays enforced under `--force`: force speaks for
+the machine being busy, never for one territory overrunning its team.
+Waiting cannot help, since the team is full where the caller is standing,
+so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP`
+(82) separates this from the machine-wide cap so a caller can tell "the
+fleet is full" (queueable) from "this territory's team is over the line"
+(the other territories keep their headroom).
+
 ## Selection-time enforcement (node claims)
 
 `node:<id>` claims are the cross-session mutex that stops two `/target`
