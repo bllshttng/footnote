@@ -340,8 +340,8 @@ pub fn run(
                 } else {
                     let outcome = remove(&entry);
                     if outcome.satisfies_applied() {
+                        write_receipt(home, &entry, &outcome, node.as_deref(), &basis);
                         summary.retired.push(judgement(&ident, node, basis, true));
-                        write_receipt(home, &entry, &outcome);
                     } else {
                         summary.refused.push((
                             ident.clone(),
@@ -358,18 +358,42 @@ pub fn run(
 /// Stage a reap receipt for a roster-only row this pass positively removed,
 /// unless an earlier retirement already staged one (its record is the
 /// record it made; this pass's fresh outcome is in the summary).
-fn write_receipt(home: &crate::paths::AgentsHome, entry: &RegistryEntry, outcome: &CascadeOutcome) {
-    let receipt = match crate::receipt::build_reap_receipt(entry, None) {
+fn write_receipt(
+    home: &crate::paths::AgentsHome,
+    entry: &RegistryEntry,
+    outcome: &CascadeOutcome,
+    node: Option<&str>,
+    basis: &str,
+) {
+    let receipt_staged = match crate::receipt::build_reap_receipt(entry, None) {
         Ok(mut receipt) => {
             if crate::receipt::reap_receipt_path(home, &receipt).exists() {
-                return;
+                true
+            } else {
+                receipt.removed_by = Some("roster-reap".to_string());
+                receipt.effects = vec![outcome.effect_record("active-surface")];
+                crate::receipt::write_reap_receipt(home, &receipt).is_ok()
             }
-            receipt.removed_by = Some("roster-reap".to_string());
-            receipt.effects = vec![outcome.effect_record("active-surface")];
-            let _ = crate::receipt::write_reap_receipt(home, &receipt);
         }
-        Err(_) => {}
+        Err(_) => false,
     };
+    let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+    let _ = emitter.emit(
+        "agent_row_reaped",
+        &serde_json::json!({
+            "short_id": entry.short_id,
+            "name": entry.name,
+            "node_id": node,
+            "session_id": entry.harness_session_id,
+            "termination_event": false,
+            "harness": entry.harness_name(),
+            "harness_session_id": entry.harness_session_id,
+            "basis": basis,
+            "resumable": receipt_staged,
+            "receipt_staged": receipt_staged,
+            "remover": "roster-reap",
+        }),
+    );
 }
 
 /// The production shell: enumeration, registry, graph, transcripts and the
@@ -617,6 +641,76 @@ mod tests {
         );
         assert!(summary.retired.is_empty());
         assert_eq!(summary.refused.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn roster_reap_emits_positive_event_for_confirmed_removal() {
+        let dir = tmpdir("event-confirmed");
+        let home = crate::paths::AgentsHome::at(dir.join("home"));
+        home.ensure_root().unwrap();
+        let transcript = quiet_transcript(&dir, "sid-event");
+        let rows = vec![row(
+            "feed1234",
+            Some("sid-event"),
+            Some("target-x-aaaa-event"),
+        )];
+        let summary = run(
+            &home,
+            900,
+            RosterScope::Provenanced,
+            false,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::Removed,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let event = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|event| {
+                event["type"] == "agent_row_reaped" && event["data"]["short_id"] == "feed1234"
+            })
+            .expect("confirmed roster removal must emit agent_row_reaped");
+        assert_eq!(event["data"]["remover"], "roster-reap");
+        assert!(event["data"]["basis"]
+            .as_str()
+            .is_some_and(|basis| basis.contains("every named node done")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn roster_reap_emits_no_reap_event_for_unconfirmed_removal() {
+        let dir = tmpdir("event-refused");
+        let home = crate::paths::AgentsHome::at(dir.join("home"));
+        home.ensure_root().unwrap();
+        let transcript = quiet_transcript(&dir, "sid-refused");
+        let rows = vec![row(
+            "fade5678",
+            Some("sid-refused"),
+            Some("target-x-aaaa-refused"),
+        )];
+        let summary = run(
+            &home,
+            900,
+            RosterScope::Provenanced,
+            false,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::Failed("injected refusal".into()),
+        );
+        assert!(summary.retired.is_empty());
+        assert_eq!(summary.refused.len(), 1);
+        assert!(summary.refused[0].1.contains("failed"));
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(!events.lines().any(|line| line.contains("fade5678")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
