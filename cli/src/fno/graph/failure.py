@@ -200,43 +200,14 @@ def _classify(raw: object) -> Optional[_Ev]:
     return None
 
 
-def consecutive_failures(node_id: str, events: Iterable[object]) -> int:
-    """Count consecutive failure events for ``node_id`` since the most recent
-    reset boundary, scanning newest -> oldest.
-
-    Reset boundaries are a success close (``node_closed{close=closed}``) or an
-    undefer (``node_undeferred``); node creation is the implicit floor because
-    no failure event can precede a node's existence. ``events`` is taken in file
-    order (the journal appends chronologically); only events for ``node_id``
-    are considered, and dispatch-refusals / unrelated events are ignored so they
-    neither inflate nor reset the streak.
-
-    A node with zero failure events yields 0 (Boundaries).
-    """
-    # Scan newest -> oldest, classifying on demand and stopping at the first
-    # reset boundary, so a node with thousands of older events is not fully
-    # classified just to read a short recent streak.
-    streak = 0
-    for raw in reversed(list(events)):
-        ev = _classify(raw)
-        if ev is None or ev.node_id != node_id:
-            continue
-        if ev.kind == "fail":
-            streak += 1
-        else:  # "reset"
-            break
-    return streak
-
-
-_ADVANCE_FAILED_TYPE = "advance_failed"
-
-
-def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
-    """Most recent ``advance_failed`` error inside the same window
-    ``consecutive_failures`` counts: newest -> oldest, stopping at the SAME
-    reset boundary, so the cause never outlives the streak it explains. A
-    window with no ``advance_failed`` error yields "" (bare reason kept).
-    """
+def _window_to_reset(node_id: str, events: Iterable[object]) -> list[tuple[object, Optional[_Ev]]]:
+    """The ONE streak window both readers walk: raw events for ``node_id``
+    newest -> oldest, stopping at the first reset boundary (a success close
+    or an undefer). advance_failed and unrelated events ride through so the
+    error reader can see them; the streak and its cause therefore cannot
+    diverge on where the window starts. ``events`` is file order (oldest
+    first); a node with no failure history yields an empty window."""
+    out: list[tuple[object, Optional[_Ev]]] = []
     for raw in reversed(list(events)):
         ev = _classify(raw)
         if ev is not None:
@@ -244,6 +215,29 @@ def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
                 continue
             if ev.kind == "reset":
                 break
+        out.append((raw, ev))
+    return out
+
+
+def consecutive_failures(node_id: str, events: Iterable[object]) -> int:
+    """Count consecutive failure events for ``node_id`` since the most recent
+    reset boundary (a success close or an undefer), scanning newest -> oldest.
+    Dispatch-refusals and unrelated events neither inflate nor reset the
+    streak; a node with zero failure events yields 0 (Boundaries)."""
+    return sum(
+        1 for _raw, ev in _window_to_reset(node_id, events) if ev is not None and ev.kind == "fail"
+    )
+
+
+_ADVANCE_FAILED_TYPE = "advance_failed"
+
+
+def last_advance_failed_error(node_id: str, events: Iterable[object]) -> str:
+    """Most recent ``advance_failed`` error inside the window
+    ``consecutive_failures`` counts, so the cause never outlives the streak
+    it explains. No error in the window yields "" (bare reason kept)."""
+    for raw, ev in _window_to_reset(node_id, events):
+        if ev is not None:
             continue  # a counted fail carries no advance_failed error
         if not isinstance(raw, dict) or raw.get("type") != _ADVANCE_FAILED_TYPE:
             continue

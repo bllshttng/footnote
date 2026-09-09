@@ -1689,14 +1689,12 @@ def _grid_lane_for(
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
 
-    On a decline the reason is the chain's own terminal, verbatim: rewording
-    it forks the receipt vocabulary. Receipts only, never refusing (Locked
-    10). Deliberately ONE function: tests monkeypatch this name, and a caller
-    that reached past it would bypass every patch. Placement and spawn both
-    compose verb ``target`` through here so the two agree on one lane. Route
-    and account ride beside harness and model because the row declares them
-    as one fact; without the account the worker launches under an ambient
-    account whose capacity never justified the pick.
+    On a decline the reason is the chain's own terminal, verbatim; receipts
+    only, never refusing (Locked 10). Deliberately ONE function: tests
+    monkeypatch this name, and a caller that reached past it would bypass
+    every patch; placement and spawn compose verb ``target`` through here.
+    Route and account ride beside harness and model because the row declares
+    them as one fact.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """

@@ -1093,10 +1093,8 @@ class FailureDefer:
     error: str = ""
 
     def reason(self) -> str:
-        """The deferred_reason: sentinel first (is_auto_failure_deferred and
-        the triage surfacing match the prefix), streak, then the spawn error
-        the drains actually died on. The error is capped at 200 at emission;
-        the slice keeps a legacy long row from growing the reason."""
+        """The deferred_reason: sentinel first (the prefix is load-bearing),
+        streak, then the truncated spawn error the drains died on."""
         from fno.graph.failure import AUTO_FAILURE_SENTINEL
 
         base = f"{AUTO_FAILURE_SENTINEL} {self.streak} consecutive failed attempts"
@@ -1111,12 +1109,10 @@ def detect_failure_defers(
     """Ready nodes whose consecutive-failure streak is ``>= threshold``.
 
     Mirrors ``detect_temp_leaks`` / ``detect_rescope_fixes``: a pure detector
-    that returns candidates (the CLI applies them under one lock). Candidates
-    are nodes ``fno backlog next`` would still pick (``status`` ready, not
-    already deferred) - the ones that burn an iteration on every walk. A node
-    below threshold, or at exactly ``N-1``, is excluded (Boundaries). The streak
-    is derived from the walker's events via ``failure.consecutive_failures``
-    (Locked Decision #4); a malformed row is skipped rather than aborting.
+    returning candidates the CLI applies under one lock - the nodes ``fno
+    backlog next`` would still pick, the ones that burn an iteration on every
+    walk. Below threshold, or at exactly ``N-1``, is excluded (Boundaries);
+    a malformed row is skipped rather than aborting.
     """
     from fno.graph.failure import consecutive_failures, last_advance_failed_error
 

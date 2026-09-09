@@ -17,11 +17,9 @@ if TYPE_CHECKING:
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
-    """Canonical root from a linked worktree's ``.git`` pointer, no subprocess
-    (the key runs on every load; see docs/path-config.md "Settings cache key").
-    None when ``.git`` is a real dir (this IS canonical) or unparseable, so
-    the canonical candidate is skipped - it contributes nothing, like a
-    missing file."""
+    """Canonical root from a linked worktree's ``.git`` pointer, no
+    subprocess; None when ``.git`` is a real dir (this IS canonical) or
+    unparseable, so the candidate contributes nothing (like a missing file)."""
     git_path = repo_root / ".git"
     if not git_path.is_file():
         return None
@@ -30,9 +28,8 @@ def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
     except OSError:
         return None
     for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("gitdir:"):
-            gitdir = line[len("gitdir:") :].strip()
+        if line.strip().startswith("gitdir:"):
+            gitdir = line.split(":", 1)[1].strip()
             idx = gitdir.find("/.git/worktrees/")
             if idx > 0:
                 return Path(gitdir[:idx])
@@ -40,10 +37,9 @@ def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
 
 
 def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
-    """``(path, mtime_ns, size)`` per existing settings candidate; OSError
-    contributes nothing. Locations are stated directly (never
-    ``_candidate_paths`` - it runs ``_ensure_migrated`` on every key
-    computation) and the canonical candidate comes from the already-resolved
+    """``(path, mtime_ns, size)`` per existing candidate; OSError contributes
+    nothing. Locations are stated directly - never ``_candidate_paths`` (it
+    runs ``_ensure_migrated``) - and the canonical candidate comes from the
     repo root's ``.git`` pointer, never a fresh subprocess."""
     from fno.config_io import _global_settings_path
 
@@ -77,15 +73,7 @@ def _settings_fingerprint(repo_root: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(fingerprint)
 
 
-def _settings_key() -> tuple[
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    str,
-    tuple[tuple[str, int, int], ...],
-]:
+def _settings_key() -> _SettingsKey:
     """Declaration (env overrides, HOME, repo root) + content fingerprint of
     the candidates; a same-key edit now reparses with no cache_clear. Full
     contract: docs/path-config.md "Settings cache key" (x-3d21 R5)."""
@@ -104,21 +92,20 @@ def _settings_key() -> tuple[
     )
 
 
+#: Declaration (five env/root strings) + the stat fingerprint tuple.
+_SettingsKey = tuple[
+    Optional[str], Optional[str], Optional[str], Optional[str], Optional[str],
+    str, tuple[tuple[str, int, int], ...],
+]
+
+
 @lru_cache(maxsize=8)
-def _load_settings_at(key: tuple[Optional[str], ...]) -> "SettingsModel":
-    """Load, deep-merge, and cache the settings for one declaration ``key``.
-
-    Every existing candidate is read and deep-merged, highest priority winning
-    key-by-key: $FNO_CONFIG (when set, the only candidate) ->
-    <worktree>/.fno/settings.yaml -> <canonical>/.fno/settings.yaml
-    -> ~/.fno/settings.yaml -> built-in defaults. See _candidate_paths for
-    the canonical (main worktree from `git worktree list`) step that lets a
-    linked worktree read shared config. A key absent from a higher-priority file
-    falls through to the next file down, so global can hold shared defaults
-    while each project sets only its deltas.
-
-    Raises ValidationError on invalid values (glob chars, PATH_MAX, etc.).
-    Emits WARNING for unknown keys.
+def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
+    """Load, deep-merge, and cache the settings for one declaration ``key``:
+    every existing candidate read and deep-merged, highest priority winning
+    per key (the candidate chain lives in ``_candidate_paths``). Raises
+    ValidationError on invalid values (glob chars, PATH_MAX, etc.); emits
+    WARNING for unknown keys. Key contract: docs/path-config.md.
     """
     from fno.config import (
         SettingsModel,
