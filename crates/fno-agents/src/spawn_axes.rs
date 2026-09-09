@@ -84,6 +84,8 @@ pub fn decide(payload: &Value) -> Value {
     let mut suppressed: Vec<Value> = Vec::new();
     let mut messages: Vec<String> = Vec::new();
     let mut route_injected = false;
+    let mut out_tail_append_empty = false;
+    let mut bundle_inject: Vec<Value> = Vec::new();
 
     // --- route ---------------------------------------------------------- //
     if !route.value.is_empty()
@@ -394,7 +396,117 @@ pub fn decide(payload: &Value) -> Value {
         }
     }
 
+    // --- pane group ----------------------------------------------------- //
+    // The placement judgment itself is the spawn-overlay verb's; this only
+    // decides what the seam does with its answer. An unavailable overlay
+    // degrades open with a named line, never failing the spawn.
+    let pane_group = axis(payload, "pane_group");
+    let tab_flag_present = flag(payload, "tab_flag_present");
+    if !pane_group.value.is_empty() && !tab_flag_present {
+        let pg_rung = payload
+            .get("pane_group_pg_rung")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if let Some(exc) = opt_str(payload, "pane_group_unavailable").filter(|s| !s.is_empty()) {
+            messages.push(format!(
+                "fno agents spawn: pane group skipped ({exc}); {pg_rung} ignored"
+            ));
+            suppressed.push(json!([
+                "pane_group",
+                pane_group.value,
+                pane_group.rung,
+                exc
+            ]));
+        } else {
+            let answer = payload
+                .get("pane_group_answer")
+                .cloned()
+                .unwrap_or(json!({}));
+            // The overlay's "inject" is a boolean or its suggested token
+            // list: any non-empty, non-false value means the group applies.
+            let injects = match answer.get("inject") {
+                Some(Value::Bool(b)) => *b,
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(Value::Null) | None => false,
+                Some(_) => true,
+            };
+            if injects {
+                inject.push(json!(["--tab", pane_group.value]));
+                applied.push(json!(["tab", pane_group.value, pg_rung]));
+            } else if let Some(skipped) = answer
+                .get("skipped")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                messages.push(skipped.to_string());
+                suppressed.push(json!([
+                    "pane_group",
+                    pane_group.value,
+                    pane_group.rung,
+                    skipped,
+                ]));
+            }
+        }
+    }
+
+    // --- harness bundle ------------------------------------------------- //
+    // The overlay's ONE bundle answer (lane args > profile harness overlay >
+    // defaults harness overlay, never concatenated) lands behind the --
+    // passthrough fence; a boundary the caller already typed displaces it.
+    let bundle_json = payload.get("bundle");
+    if bundle_json.map(|b| b.is_object()).unwrap_or(false)
+        && bundle_json
+            .as_ref()
+            .and_then(|b| b.get("displaced"))
+            .map(|d| !d.is_null())
+            .unwrap_or(false)
+    {
+        let displaced = bundle_json
+            .as_ref()
+            .and_then(|b| b.get("displaced"))
+            .unwrap();
+        let boundary = displaced
+            .get("boundary")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let rung = displaced.get("rung").and_then(Value::as_str).unwrap_or("");
+        messages.push(format!(
+            "fno agents spawn: harness args skipped (argv already carries a \
+             {boundary} passthrough); {rung} ignored"
+        ));
+    } else if let Some(tokens) = bundle_json
+        .as_ref()
+        .and_then(|b| b.get("tokens"))
+        .and_then(Value::as_array)
+    {
+        let token_strs: Vec<String> = tokens
+            .iter()
+            .map(|a| a.as_str().unwrap_or("").to_string())
+            .collect();
+        let rung = bundle_json
+            .as_ref()
+            .and_then(|b| b.get("rung"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // click fills positionals in order, so a spawn with no message would
+        // eat the bundle's first token as MESSAGE; an explicit empty keeps
+        // the slot reserved for the prompt.
+        if !flag(payload, "positional_present") {
+            out_tail_append_empty = true;
+        }
+        let mut bundle_tokens: Vec<String> = vec!["--".to_string()];
+        bundle_tokens.extend(token_strs.iter().cloned());
+        bundle_inject.push(json!(bundle_tokens));
+        applied.push(json!(["args", token_strs.join(" "), rung]));
+        messages.push(format!(
+            "fno agents spawn: bundle {rung} applied unverified (fno reads no \
+             effective harness config; confirm on the worker receipt)"
+        ));
+    }
+
     let mut out = Map::new();
+    out.insert("out_tail_append_empty".into(), json!(out_tail_append_empty));
+    out.insert("bundle_inject".into(), json!(bundle_inject));
     out.insert("inject".into(), json!(inject));
     out.insert("applied".into(), json!(applied));
     out.insert("suppressed".into(), json!(suppressed));

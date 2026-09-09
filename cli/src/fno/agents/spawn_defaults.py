@@ -1616,79 +1616,76 @@ def inject_spawn_defaults(
     suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
     injected_substrate = _axes.get("injected_substrate") or None
 
-    # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
-    # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
-    # the argv, so click fails the spawn on the operator's own flag.
-    if cfg_pane_group and not _flag_present(out[1:], "--tab"):
-        # Placement judgment (conflicts, pane geometry) lives in the verb;
-        # config-sourced fields degrade open, so an unavailable verb skips the
-        # group with a named line instead of failing the spawn.
-        _pg_rung = f"{pane_group_rung}.pane_group"
-        try:
-            from fno.agents.spawn_overlay_client import (
-                SpawnOverlayUnavailable,
-                spawn_overlay_call,
-            )
-
-            _pg = spawn_overlay_call(
-                {
-                    "kind": "pane-group",
-                    "group": cfg_pane_group,
-                    "rung": _pg_rung,
-                    "eff_substrate": explicit_substrate or injected_substrate or "pane",
-                    "argv_tail": [t for _, t in _spawn_tokens(out[1:])],
-                }
-            )
-        except SpawnOverlayUnavailable as exc:
-            print(
-                f"fno agents spawn: pane group skipped ({exc}); {_pg_rung} ignored",
-                file=err,
-            )
-            suppressed.append(
-                ("pane_group", cfg_pane_group, pane_group_rung or "", str(exc))
-            )
-        else:
-            if _pg.get("inject"):
-                inject += ["--tab", cfg_pane_group]
-                from_config.append(("tab", cfg_pane_group, _pg_rung))  # type: ignore[arg-type]
-            elif _pg.get("skipped"):
-                print(_pg["skipped"], file=err)
-                suppressed.append(
-                    ("pane_group", cfg_pane_group, pane_group_rung or "", _pg["skipped"])
-                )
-
     # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
     # profile harness overlay > defaults harness overlay, never concatenated)
     # lands behind the -- passthrough fence at the argv TAIL, so the caller's
     # own pre-fence tokens stay pre-fence; a boundary the caller already typed
     # displaces the configured bundle (the verb names it), and the off-pane
     # gate below re-reads the final argv, so a bundle on an explicit
-    # bg/headless substrate is refused exactly like a typed one.
+    # bg/headless substrate is refused exactly like a typed one. The bundle
+    # tokens ride the axes answer's bundle_inject (argv tail), never the head
+    # inject.
     _bundle_inject: List[str] = []
+    _pg_unavailable = ""
+    _pg_answer: Optional[dict] = None
     _bundle_json = (_overlay_answer or {}).get("bundle")
-    if isinstance(_bundle_json, dict) and "displaced" in _bundle_json:
-        _d = _bundle_json["displaced"]
-        print(
-            "fno agents spawn: harness args skipped (argv already "
-            f"carries a {_d['boundary']} passthrough); {_d['rung']} ignored",
-            file=err,
-        )
-    elif isinstance(_bundle_json, dict):
-        _tokens = [str(a) for a in _bundle_json["tokens"]]
-        _rung = _bundle_json["rung"]
-        # click fills positionals in order, so a spawn with no message would
-        # eat the bundle's first token as MESSAGE; an explicit empty keeps the
-        # slot reserved for the prompt.
-        if not _positional_indices(out[1:]):
+    _positional_present = bool(_positional_indices(out[1:]))
+    _axes: dict = {}
+    if cfg_pane_group or isinstance(_bundle_json, dict):
+        from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
+
+        _pg_rung = f"{pane_group_rung}.pane_group"
+        _pg_unavailable = ""
+        _pg_answer: Optional[dict] = None
+        if cfg_pane_group and not _flag_present(out[1:], "--tab"):
+            # Placement judgment (conflicts, pane geometry) lives in the verb;
+            # config-sourced fields degrade open, so an unavailable verb skips
+            # the group with a named line instead of failing the spawn.
+            try:
+                from fno.agents.spawn_overlay_client import (
+                    SpawnOverlayUnavailable,
+                    spawn_overlay_call,
+                )
+
+                _pg = spawn_overlay_call(
+                    {
+                        "kind": "pane-group",
+                        "group": cfg_pane_group,
+                        "rung": _pg_rung,
+                        "eff_substrate": explicit_substrate or injected_substrate or "pane",
+                        "argv_tail": [t for _, t in _spawn_tokens(out[1:])],
+                    }
+                )
+                _pg_answer = _pg
+            except SpawnOverlayUnavailable as _exc:
+                _pg_unavailable = str(_exc)
+        try:
+            _axes = spawn_axes_call({
+                "pane_group": {"value": cfg_pane_group, "rung": pane_group_rung},
+                "tab_flag_present": _flag_present(out[1:], "--tab"),
+                "pane_group_pg_rung": _pg_rung,
+                "pane_group_unavailable": _pg_unavailable,
+                "pane_group_answer": _pg_answer,
+                "bundle": _bundle_json,
+                "positional_present": _positional_present,
+            })
+        except SpawnAxesUnavailable as _exc:
+            print(
+                f"fno agents spawn: pane/bundle skipped (spawn-axes "
+                f"unavailable: {_exc})",
+                file=err,
+            )
+            _axes = {}
+        for _line in _axes.get("messages") or []:
+            print(_line, file=err)
+        inject += [str(t) for _pair in _axes.get("inject") or [] for t in _pair]
+        from_config.extend([tuple(e) for e in _axes.get("applied") or []])
+        suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
+        _bundle_inject = [
+            str(t) for _pair in _axes.get("bundle_inject") or [] for t in _pair
+        ]
+        if _axes.get("out_tail_append_empty"):
             out = [*out, ""]
-        _bundle_inject = ["--", *_tokens]
-        from_config.append(("args", " ".join(_tokens), _rung))  # type: ignore[arg-type]
-        print(
-            "fno agents spawn: bundle "
-            f"{_rung} applied unverified (fno reads no effective "
-            "harness config; confirm on the worker receipt)",
-            file=err,
-        )
 
     if from_config:
         # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the
