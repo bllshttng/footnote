@@ -57,6 +57,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "notify-watch",
     "orphan-reap",
     "feed",
+    "flight-acquire",
+    "flight-release",
     "ping",
     "pr-heal",
     "probe-run",
@@ -148,6 +150,17 @@ async fn run(args: Vec<String>) -> i32 {
     // `fno agents` verb.
     if matches!(verb, "orphan-reap") {
         return fno_agents::orphan_reap::run_orphan_reap(&args[1..]);
+    }
+
+    // `flight-acquire` / `flight-release` are the backlog one-in-flight gate's
+    // lock verbs, binary-direct like `orphan-reap` (not routable, not in the
+    // parity sets): the Python backlog verbs exec them so the compatibility
+    // shell does not grow the locking logic.
+    if matches!(verb, "flight-acquire") {
+        return fno_agents::flight_gate::run_flight_acquire(&args[1..]);
+    }
+    if matches!(verb, "flight-release") {
+        return fno_agents::flight_gate::run_flight_release(&args[1..]);
     }
 
     // `reentry-plan` is the INTERNAL machine resolver behind every
