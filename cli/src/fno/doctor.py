@@ -623,16 +623,8 @@ def _component_convergence(
     marker: Optional[str],
     content_drift: Optional[int],
 ) -> list[dict[str, Any]]:
-    """Probe every deployed component and classify through the native verdict.
-
-    Components: the Python tool (the front door's own resolution, with the
-    installed-rev marker and a positive content-drift count as contradicting
-    evidence) plus the cargo triad and mux front door. Returns one verdict row
-    per component; [] when the machine cannot answer (no source, no crates rev,
-    no verdict-carrying binary) - an empty list is "no evidence", never fresh.
-    Never raises: a probe that cannot answer arrives at the classifier as
-    Unknown with the named instrument.
-    """
+    """Probe every deployed component and classify natively. [] = the machine
+    could not answer, which is no evidence - never fresh. Never raises."""
     if src is None:
         return []
     subtree = _rust_source_rev(src)
@@ -659,8 +651,7 @@ def _component_convergence(
     )
     if report and isinstance(report.get("components"), list):
         return report["components"]
-    # The deployed binary could not answer the verdict: Unknown rows with the
-    # named gap, never a silent collapse into fresh.
+    # Could not answer: Unknown rows with the named gap, never fresh.
     return [
         {
             "component": c,
@@ -1891,22 +1882,20 @@ def _verdict(
     if content_indeterminate and status == "fresh":
         status = "unknown"
 
-    # Rust staleness: requires full evidence. Partial evidence is never stale.
-    # The per-component verdict widens it: a daemon or worker the deployed
-    # client's own rev check cannot see (client current, sibling not) is
-    # proven stale by the component probes and gates the fix path too.
+    # Rust staleness needs full evidence; a component probe proving a stale
+    # sibling beside a fresh client widens the gate (and so the fix path).
     rust_stale = (
         cargo_bin_present
         and rust_installed_rev is not None
         and rust_source_rev is not None
         and rust_installed_rev != rust_source_rev
-    )
-    if not rust_stale and component_statuses:
-        rust_stale = any(
+    ) or (
+        any(
             status in ("stale", "missing", "failed")
-            for name, status in component_statuses
+            for name, status in component_statuses or []
             if name.startswith("fno-agents")
         )
+    )
 
     # Fold rust staleness into overall status.
     if rust_stale and status != "stale":
@@ -2294,10 +2283,8 @@ def _emit_human(
             "(build provenance)."
         )
 
-    # Per-component convergence: a summary line proves the probes ran and every
-    # component answered fresh; anything else names the component, its status,
-    # its evidence and its executable repair command. Unknown keeps the named
-    # instrument - it is never collapsed into fresh or missing (AC3-HP).
+    # Component convergence: a summary line proves the probes ran; anything
+    # else renders per component with evidence and repair (Unknown included).
     components = result.get("components") or []
     non_fresh = [c for c in components if c.get("status") not in ("fresh", "updated")]
     if components and not non_fresh:
@@ -4057,10 +4044,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     source_config_keys = _source_config_keys(src)
     content_drift = _python_content_drift(src)
 
-    # Per-component convergence (the deployed shape: the Python tool, the triad
-    # and the mux front door, each probed independently and classified by the
-    # native verdict). Feeds the rust gate so a stale sibling beside a fresh
-    # client is proven stale, and renders per-component.
+    # Per-component convergence: feeds the rust gate and renders per component.
     components = _component_convergence(src, rust, marker, content_drift)
 
     result = _verdict(

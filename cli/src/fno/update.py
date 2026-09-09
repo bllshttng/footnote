@@ -370,10 +370,8 @@ def _component_verdict(
     include_mux: Optional[bool] = None,
     python_tool: Optional[dict] = None,
 ) -> Optional[dict]:
-    """One transport call to the native convergence decision (fno-agents
-    component-verdict): the BINARY probes every component in bindir itself
-    and classifies. None when it cannot answer - never read as fresh.
-    """
+    """One call to the native verdict; the binary probes and classifies.
+    None when it cannot answer - never read as fresh."""
     cmd = [
         str(verdict_bin), "component-verdict",
         "--bindir", str(bindir),
@@ -409,8 +407,7 @@ def _component_verdict(
 
 
 def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update") -> list[str]:
-    """Non-fresh rows rendered by the native verdict itself; None means the
-    deployed binary could not answer, which is said plainly."""
+    """Non-fresh rows with their native one-liner; None = cannot answer."""
     if report is None:
         return [
             f"{prefix}: component verdict unavailable"
@@ -787,12 +784,8 @@ def update_readiness(
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
     # says "unknown" in prose; the structured fields need the same honesty for a
     # consumer reading them directly instead of parsing that prose.
-    # The two Python deployments a receipt must name: the script the cargo
-    # front door would exec (its own resolver, via `fno version --json`
-    # python_script) and the interpreter running this check. A mismatch means
-    # fno and fno-py resolve different deployments - the 2026-08-15 skew
-    # shape - and the receipt says so instead of declaring the reachable venv
-    # sufficient (AC2-HP).
+    # Name both Python deployments: the script the front door execs (its own
+    # resolver) and the running interpreter (AC2-HP).
     front_script: Optional[str] = None
     _mux = _cargo_installed_mux() or shutil.which("fno")
     if _mux:
@@ -1032,10 +1025,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         return "skipped-no-rev"
     # When force=True but subtree is None, we continue but remember we cannot write a marker.
 
-    # Freshness is proven by the BINARY ITSELF, not a marker file. One native
-    # probe classifies the triad (client + siblings); an absent, stale or
-    # unanswerable component falls through to cargo, which rebuilds the whole
-    # triad coherently. A marker could advance past a stale binary and lie.
+    # Freshness is proven by the binaries themselves via one native probe:
+    # an absent, stale or unanswerable component falls through to cargo.
     installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
     pre = (
         _component_verdict(
@@ -1049,16 +1040,12 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]}"
             " from binary); skipping cargo install"
         )
-        # The agents bins are current, but the mux front door (crates/fno ->
-        # `fno`) can still be ABSENT or STALE at a fresh triad: its install is
-        # best-effort, so a prior failure can leave an OLD or missing `fno`
-        # beside a fresh triad. Reinstall when missing or rev != source.
+        # The mux front door can still be absent or stale at a fresh triad
+        # (its install is best-effort); reinstall when missing or rev-mismatched.
         mux = _cargo_installed_mux()
         if mux is None or _installed_bin_crates_rev(mux) != subtree:
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
-        # The verdict decides "fresh", not the triad gate above: a repair that
-        # failed or left stale bytes must never read as full freshness
-        # (AC1-HP). The binary re-probes every cargo component and classifies.
+        # The post-repair verdict decides "fresh", never the gate above.
         report = _component_verdict(
             source, subtree, installed_bin.parent, installed_bin, attempted=True
         )
@@ -1084,10 +1071,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         install_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
 
     def _render_component_evidence() -> None:
-        """Name each non-converged component with its repair command on a path
-        that did not converge (failed or skipped refresh): the Python update
-        still proceeds, and the receipt says exactly which Rust components the
-        operator must repair by hand."""
+        """Name what did not converge; the Python update still proceeds."""
         if subtree is None:
             return
         report = _component_verdict(
@@ -1136,12 +1120,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         _render_component_evidence()
         return "failed"
 
-    # Post-deploy verify: cargo can exit 0 yet leave a stale artifact (a reused
-    # build cache, or an install root the runtime does not resolve), so the
-    # deployed triad is re-probed and classified natively. The client must
-    # prove current before anything else runs; HALT loud otherwise, with the
-    # per-component evidence naming the cause (dirty tree, unparseable output,
-    # wrong install root) instead of one shared misdiagnosis.
+    # Post-deploy verify: cargo can exit 0 yet deploy stale bytes, so the
+    # triad is re-probed natively; the client must prove current first.
     verdict_bin = install_root / "bin" / _triad_names()[0]
     if not verdict_bin.is_file():
         verdict_bin = _cargo_installed_bin() or verdict_bin
@@ -1178,9 +1158,8 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     _sync_triad(install_root / "bin", dry_run=False)
     _report_daemon_drift()
 
-    # Convergence proof (AC2-EDGE): re-probe every cargo component AFTER the
-    # mux install and triad sync, as finally deployed. An attempted build alone
-    # is never freshness - an unproven component downgrades to partial.
+    # Final proof: re-probe as finally deployed; an attempted build alone is
+    # never freshness (an unproven component downgrades to partial).
     post_report = (
         _component_verdict(
             source, subtree, install_root / "bin", verdict_bin, attempted=True
@@ -1215,8 +1194,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         )
         outcome = "refreshed"
 
-    # A claimed refresh with a component the post-probe could not prove is
-    # partial, never full freshness (AC1-HP / AC2-EDGE).
+    # Unproven components make the outcome partial, never full freshness.
     if outcome == "refreshed" and not post_converged:
         outcome = "partial"
 
