@@ -348,10 +348,15 @@ fn map_outcome(
             if tripped {
                 // Park by deferring the node in graph state (recoverable via
                 // `fno backlog undefer`), then reset the streak so a later
-                // undefer gives it a fresh failure_limit attempts.
+                // undefer gives it a fresh failure_limit attempts. Name what
+                // broke beside the count, so a capacity casualty does not read
+                // like five broken nodes. The `auto-failure:` sentinel prefix
+                // is load-bearing: graph/failure.py AUTO_FAILURE_SENTINEL
+                // matches by startswith.
                 let reason_str = format!(
-                    "auto-failure: {} consecutive failed drains",
-                    cfg.failure_limit
+                    "auto-failure: {} consecutive failed drains (last: {})",
+                    cfg.failure_limit,
+                    detail.chars().take(120).collect::<String>()
                 );
                 // Recorded, not asserted: `breaker.reset` below hands the node a
                 // fresh streak allowance either way, so a `parked` row claiming
@@ -688,6 +693,12 @@ struct AdvanceChild {
     decision: String,
     #[serde(default)]
     reason: String,
+    /// The failure text behind a `failed` row (the exception string), empty on
+    /// skipped rows and on an older CLI's receipt, which serialized only the
+    /// generic `reason`. The breaker's defer reason carries it so an operator
+    /// reading `auto-failure: N (last: ...)` sees what actually broke.
+    #[serde(default)]
+    detail: String,
     /// Resolved launch substrate. `Some("headless")` is SYNCHRONOUS:
     /// `subprocess.run` returned only after the one-shot worker finished, so
     /// the child must be resolved from graph state now, never held open for
@@ -853,10 +864,17 @@ fn dispatch_mission(
                 // map_outcome policy with the row's reason; it never enters
                 // pending. A skipped row means "not now" and must never touch
                 // the breaker (walker-live, lane-cap, already-claimed, ...).
-                let message = if child.reason.is_empty() {
+                // Prefer `detail` (the actual error text); `reason` is the
+                // generic category ("spawn-failed") and names nothing.
+                let cause = if child.detail.is_empty() {
+                    child.reason.as_str()
+                } else {
+                    child.detail.as_str()
+                };
+                let message = if cause.is_empty() {
                     "advance reported the spawn failed".to_string()
                 } else {
-                    format!("advance reported the spawn failed: {}", child.reason)
+                    format!("advance reported the spawn failed: {cause}")
                 };
                 let ur = UnitResult {
                     unit_id: child.node_id.clone(),
@@ -2195,6 +2213,48 @@ mod tests {
         assert!(
             parked.contains("\"deferred\":false"),
             "a defer that exited non-zero must be recorded as not landed: {parked}"
+        );
+    }
+
+    #[test]
+    fn parked_defer_reason_names_the_last_failure() {
+        // `auto-failure: 3 consecutive failed drains` named the drain and
+        // never the cause, so a capacity casualty read like five broken
+        // nodes. The receipt's failed row carries the actual error in
+        // `detail` (`reason` is the generic "spawn-failed"); the defer reason
+        // carries that detail beside the count, and the `auto-failure:`
+        // sentinel prefix is unchanged so graph/failure.py's startswith
+        // matching keeps working.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-3333","decision":"failed","reason":"spawn-failed","detail":"fno agents spawn exited 1: unwritable brief"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        let defer_line = calls
+            .lines()
+            .find(|l| l.contains("backlog defer x-3333"))
+            .expect("exactly one defer at failure_limit=3");
+        assert!(
+            defer_line.contains("auto-failure: 3 consecutive failed drains"),
+            "sentinel prefix must survive: {defer_line}"
+        );
+        assert!(
+            defer_line.contains("(last: advance reported the spawn failed: fno agents spawn exited 1: unwritable brief)"),
+            "the defer reason must name what broke: {defer_line}"
         );
     }
 
