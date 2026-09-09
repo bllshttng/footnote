@@ -46,7 +46,6 @@ class RunResult:
     variant: str = "baseline"
 
 
-# Parse-time name rule: a typo must never silently fold into the baseline score.
 VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
 
 

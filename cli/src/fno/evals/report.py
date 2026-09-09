@@ -44,15 +44,17 @@ class TaskStat:
 def load_rows(
     history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
 ) -> list[dict[str, object]]:
-    """Return history rows in order: one variant round by default (a missing
-    key reads as baseline), ``None`` for every round, ``since`` = last N rows
-    of that round, applied after the filter.
-    """
+    """Return history rows in order: one variant round by default (a missing key
+    reads as baseline), ``None`` for every round, ``since`` = last N of that round."""
     rows = [r for _, r in _history.iter_rows_tolerant(history_path)
-            if variant is None or (r.get("variant") or "baseline") == variant]
+            if variant is None or (r.get("variant") or BASELINE) == variant]
     if since is not None and since >= 0:
         rows = rows[-since:]
     return rows
+
+
+# The implicit round of rows written before the variant axis existed.
+BASELINE = "baseline"
 
 
 def _by_task(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -149,10 +151,8 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
 
 
 def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:
-    """Score *variant* against baseline, per task. Rows come from variant=None.
-    A task the variant skipped lands in missing_in_variant. Each *_rev is the
-    most common bank_rev in its set: the two shas for ``git diff``.
-    """
+    """Score *variant* against baseline, per task (rows from variant=None). A
+    skipped task lands in missing_in_variant. Each *_rev: the modal bank_rev."""
     by_id = _by_task(rows)
     tasks: dict[str, Any] = {}
     missing_in_variant: list[str] = []
@@ -160,8 +160,8 @@ def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, A
     base_rows: list[dict[str, object]] = []
     variant_rows: list[dict[str, object]] = []
     for tid, task_rows in sorted(by_id.items()):
-        b = [r for r in task_rows if (r.get("variant") or "baseline") == "baseline"]
-        v = [r for r in task_rows if (r.get("variant") or "baseline") == variant]
+        b = [r for r in task_rows if (r.get("variant") or BASELINE) == "baseline"]
+        v = [r for r in task_rows if (r.get("variant") or BASELINE) == variant]
         base_rows.extend(b)
         variant_rows.extend(v)
         if not b:
