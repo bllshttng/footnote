@@ -172,6 +172,61 @@ pub(crate) fn resolve_blocked_child_candidates(
     out
 }
 
+/// `to == session && ts > cutoff` across the live bus log plus its rotated
+/// `.N` segments, oldest first - the mail-answered signal AC3-EDGE names.
+/// Read-only and mechanical (no rotation/locking, the writer's job), so it
+/// stays a native Rust read rather than a Python subprocess per Change 1's
+/// own file list.
+pub(crate) fn mail_answered_since(
+    live_log: &Path,
+    cutoffs: &HashMap<String, String>,
+) -> HashMap<String, bool> {
+    let mut answered: HashMap<String, bool> = cutoffs.keys().map(|s| (s.clone(), false)).collect();
+    for segment in bus_segments_oldest_first(live_log) {
+        let Ok(text) = std::fs::read_to_string(&segment) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (Some(to), Some(ts)) = (s_str(&v, "to"), s_str(&v, "ts")) else {
+                continue;
+            };
+            if cutoffs.get(to).is_some_and(|cutoff| ts > cutoff.as_str()) {
+                answered.insert(to.to_string(), true);
+            }
+        }
+    }
+    answered
+}
+
+/// Retained bus log segments oldest -> newest: rotated `.N` (high N first),
+/// then the live file - mirrors `bus/log.py::_segment_paths_oldest_first`.
+fn bus_segments_oldest_first(live: &Path) -> Vec<std::path::PathBuf> {
+    let mut rotated: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    if let (Some(parent), Some(name)) = (live.parent(), live.file_name()) {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let prefix = format!("{}.", name.to_string_lossy());
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if let Some(n) = fname
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    rotated.push((n, entry.path()));
+                }
+            }
+        }
+    }
+    rotated.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out: Vec<std::path::PathBuf> = rotated.into_iter().map(|(_, p)| p).collect();
+    if live.exists() {
+        out.push(live.to_path_buf());
+    }
+    out
+}
+
 /// The final blocked_child rows: every candidate the mail-answered check
 /// did NOT clear, rendered as the row shape the queue emits. Pure.
 pub(crate) fn filter_unanswered_by_mail(
@@ -1166,5 +1221,30 @@ mod tests {
             out[0]["watchdog_verdict"], "ghost",
             "the queue surfaces the watchdog's own verdict rather than judging staleness itself"
         );
+    }
+
+    #[test]
+    fn mail_answered_since_reads_a_rotated_segment_not_just_the_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("messages.jsonl");
+        std::fs::write(
+            live.with_extension("jsonl.1"),
+            format!("{}\n", json!({"to": "cx-1", "ts": "2026-09-08T21:00:00Z"})),
+        )
+        .unwrap();
+        std::fs::write(&live, "not json\n").unwrap();
+        let mut cutoffs = HashMap::new();
+        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
+        let answered = mail_answered_since(&live, &cutoffs);
+        assert_eq!(answered.get("cx-1"), Some(&true));
+    }
+
+    #[test]
+    fn mail_answered_since_a_missing_bus_reads_unanswered_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cutoffs = HashMap::new();
+        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
+        let answered = mail_answered_since(&dir.path().join("messages.jsonl"), &cutoffs);
+        assert_eq!(answered.get("cx-1"), Some(&false));
     }
 }

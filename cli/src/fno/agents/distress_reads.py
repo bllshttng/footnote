@@ -1,6 +1,8 @@
-"""Batched mail-answered + watchdog-verdict lookup for the king board's
-blocked_child queue (x-3ecf). Registered via import from cli.py, same
-pattern as transcript_reads.py, so cli.py itself stays net 0."""
+"""Watchdog-verdict lookup for the king board's blocked_child queue (x-3ecf,
+Change 2: one classifier, two callers). Registered via import from cli.py,
+same pattern as transcript_reads.py, so cli.py itself stays net 0. The
+mail-answered signal (AC3-EDGE) is read natively in Rust; see
+king_board/queues.rs::mail_answered_since."""
 
 from __future__ import annotations
 
@@ -12,39 +14,20 @@ import typer
 from fno.agents.cli import agents_app
 
 
-@agents_app.command("distress-answered", hidden=True)
-def cmd_distress_answered(
-    pairs: str = typer.Option(
-        ..., "--pairs", help='JSON array of {"session": <id>, "after": <RFC3339 ts>} objects.'
-    ),
+@agents_app.command("distress-verdicts", hidden=True)
+def cmd_distress_verdicts(
+    sessions: str = typer.Option(..., "--sessions", help="JSON array of session ids."),
 ) -> None:
-    """Print ``{"<session>": {"answered": bool, "watchdog_verdict": str|null}}``.
-    ``answered``: mail to that session landed after ``after`` (AC3-EDGE).
-    ``watchdog_verdict`` is informational only, never a gate."""
-    from fno.bus.log import iter_messages
-
+    """Print ``{"<session>": "<verdict>"|null}``, the watchdog's own word for
+    each - informational only, never a gate."""
     try:
-        requested = _json.loads(pairs)
+        ids = _json.loads(sessions)
     except (TypeError, ValueError):
-        typer.echo("fno agents distress-answered: --pairs must be JSON", err=True)
+        typer.echo("fno agents distress-verdicts: --sessions must be JSON", err=True)
         raise typer.Exit(code=2)
-    if not isinstance(requested, list):
-        typer.echo("fno agents distress-answered: --pairs must be a JSON array", err=True)
+    if not isinstance(ids, list):
+        typer.echo("fno agents distress-verdicts: --sessions must be a JSON array", err=True)
         raise typer.Exit(code=2)
-
-    after_by_session: dict[str, str] = {}
-    for item in requested:
-        session = item.get("session") if isinstance(item, dict) else None
-        after = item.get("after") if isinstance(item, dict) else None
-        if isinstance(session, str) and session and isinstance(after, str) and after:
-            if session not in after_by_session or after < after_by_session[session]:
-                after_by_session[session] = after
-
-    answered = {session: False for session in after_by_session}
-    for env in iter_messages(warn=False):
-        cutoff = after_by_session.get(env.to)
-        if cutoff is not None and env.ts > cutoff:
-            answered[env.to] = True
 
     verdict_by_session: dict[str, Any] = {}
     try:
@@ -57,11 +40,5 @@ def cmd_distress_answered(
     except Exception:  # noqa: BLE001 - enrichment only, never fatal
         pass
 
-    out: dict[str, Any] = {
-        session: {
-            "answered": answered[session],
-            "watchdog_verdict": verdict_by_session.get(session),
-        }
-        for session in after_by_session
-    }
+    out = {s: verdict_by_session.get(s) for s in ids if isinstance(s, str)}
     typer.echo(_json.dumps(out))

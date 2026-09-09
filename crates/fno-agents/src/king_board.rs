@@ -648,6 +648,29 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         }
     }
 
+    // Mirrors `bus/log.py::bus_dir`'s env overrides only, not its
+    // `config.paths.bus_dir` template override - a documented gap: an
+    // operator who relocates the bus via config gets a mail-check that
+    // never sees mail there, degrading to "still shows unanswered" rather
+    // than a wrong answer.
+    fn bus_live_log_path() -> PathBuf {
+        if let Some(dir) = std::env::var("FNO_BUS_DIR").ok().filter(|v| !v.is_empty()) {
+            return PathBuf::from(dir).join("messages.jsonl");
+        }
+        if let Some(root) = std::env::var("FNO_INBOX_ROOT")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            return PathBuf::from(root).join(".bus").join("messages.jsonl");
+        }
+        let home = crate::paths::AgentsHome::from_env();
+        home.root()
+            .parent()
+            .unwrap_or_else(|| home.root())
+            .join("bus")
+            .join("messages.jsonl")
+    }
+
     // Blocked child: read the global distress journal and resolve every
     // candidate's answered/unanswered state HERE, where claims, the graph,
     // and the mail-check subprocess already live - build_board only
@@ -694,41 +717,39 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 if candidates.is_empty() {
                     SourceRead::ok(Value::Array(Vec::new()))
                 } else {
-                    let pairs: Vec<Value> = candidates
+                    let cutoffs: HashMap<String, String> = candidates
                         .iter()
-                        .map(|(row, _)| json!({"session": row.session, "after": row.ts}))
+                        .map(|(row, _)| (row.session.clone(), row.ts.clone()))
+                        .collect();
+                    let answered = queues::mail_answered_since(&bus_live_log_path(), &cutoffs);
+
+                    let sessions: Vec<Value> = candidates
+                        .iter()
+                        .map(|(row, _)| Value::String(row.session.clone()))
                         .collect();
                     let mut cmd = fno_py_cmd();
                     cmd.extend([
                         "agents".to_string(),
-                        "distress-answered".to_string(),
-                        "--pairs".to_string(),
-                        serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string()),
+                        "distress-verdicts".to_string(),
+                        "--sessions".to_string(),
+                        serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string()),
                     ]);
-                    let answered_payload = run_json(
+                    let verdict_payload = run_json(
                         cmd,
                         &cwd,
                         std::time::Duration::from_millis(HAND_RUN_BUDGET_MS),
                     );
-                    let mut answered: HashMap<String, bool> = HashMap::new();
-                    let mut verdicts: HashMap<String, String> = HashMap::new();
-                    for (row, _) in &candidates {
-                        let entry = answered_payload
-                            .payload
-                            .as_ref()
-                            .and_then(|p| p.get(&row.session));
-                        let ok = entry
-                            .and_then(|v| v.get("answered"))
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        answered.insert(row.session.clone(), ok);
-                        if let Some(v) = entry
-                            .and_then(|v| v.get("watchdog_verdict"))
-                            .and_then(Value::as_str)
-                        {
-                            verdicts.insert(row.session.clone(), v.to_string());
-                        }
-                    }
+                    let verdicts: HashMap<String, String> = candidates
+                        .iter()
+                        .filter_map(|(row, _)| {
+                            verdict_payload
+                                .payload
+                                .as_ref()
+                                .and_then(|p| p.get(&row.session))
+                                .and_then(Value::as_str)
+                                .map(|v| (row.session.clone(), v.to_string()))
+                        })
+                        .collect();
                     SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
                         candidates, &answered, &verdicts,
                     )))

@@ -1,98 +1,45 @@
-"""x-3ecf: the `distress-answered` board-collection helper.
+"""x-3ecf: the `distress-verdicts` board-collection helper.
 
 The king board's blocked_child queue shells this command once per board
-build (never once per row) to learn whether mail landed for a blocked
-session after its row's timestamp, plus the fleet watchdog's current word
-for that session as informational enrichment.
+build to learn the fleet watchdog's current word for each blocked session,
+as informational enrichment (Change 2: one classifier, two callers). The
+mail-answered signal itself (AC3-EDGE) is read natively in Rust.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 
-import pytest
-
-from fno.paths_testing import use_tmpdir
+from fno.agents.distress_reads import cmd_distress_verdicts
 
 
-@pytest.fixture
-def bus(tmp_path, monkeypatch):
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno import paths
-
-    return paths.bus_dir()
-
-
-def _run(pairs: list[dict]) -> dict:
-    from fno.agents.distress_reads import cmd_distress_answered
-
-    import io
-    import contextlib
-
+def _run(sessions: list) -> dict:
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        cmd_distress_answered(pairs=json.dumps(pairs))
+        cmd_distress_verdicts(sessions=json.dumps(sessions))
     return json.loads(out.getvalue())
 
 
-def test_no_mail_reads_unanswered(bus):
-    result = _run([{"session": "sid-a", "after": "2026-09-08T20:00:00Z"}])
-    assert result == {"sid-a": {"answered": False, "watchdog_verdict": None}}
+def test_an_unknown_session_reads_null():
+    assert _run(["sid-a"]) == {"sid-a": None}
 
 
-def test_mail_after_the_cutoff_reads_answered(bus):
-    from fno.bus.log import Envelope, append
-
-    append(
-        Envelope.new(
-            from_="king", to="sid-a", kind="text", body="go",
-            ts="2026-09-08T21:00:00Z",
-        )
-    )
-    result = _run([{"session": "sid-a", "after": "2026-09-08T20:00:00Z"}])
-    assert result["sid-a"]["answered"] is True
+def test_a_non_string_id_is_dropped_silently():
+    assert _run(["sid-a", 5, None]) == {"sid-a": None}
 
 
-def test_mail_before_the_cutoff_stays_unanswered(bus):
-    from fno.bus.log import Envelope, append
+def test_a_failed_sweep_still_answers_null_for_every_session(monkeypatch):
+    def _boom():
+        raise RuntimeError("roster unreadable")
 
-    append(
-        Envelope.new(
-            from_="king", to="sid-a", kind="text", body="go",
-            ts="2026-09-08T19:00:00Z",
-        )
-    )
-    result = _run([{"session": "sid-a", "after": "2026-09-08T20:00:00Z"}])
-    assert result["sid-a"]["answered"] is False
+    monkeypatch.setattr("fno.agents.watchdog.run_sweep", _boom)
+    assert _run(["sid-a", "sid-b"]) == {"sid-a": None, "sid-b": None}
 
 
-def test_mail_to_a_different_session_does_not_answer(bus):
-    from fno.bus.log import Envelope, append
+def test_a_matching_row_id_carries_its_verdict(monkeypatch):
+    def _sweep():
+        return {"verdicts": [{"row_id": "sid-a", "verdict": "ghost"}]}, []
 
-    append(
-        Envelope.new(
-            from_="king", to="sid-b", kind="text", body="go",
-            ts="2026-09-08T21:00:00Z",
-        )
-    )
-    result = _run([{"session": "sid-a", "after": "2026-09-08T20:00:00Z"}])
-    assert result["sid-a"]["answered"] is False
-
-
-def test_duplicate_session_keeps_the_oldest_after(bus):
-    from fno.bus.log import Envelope, append
-
-    append(
-        Envelope.new(
-            from_="king", to="sid-a", kind="text", body="go",
-            ts="2026-09-08T20:30:00Z",
-        )
-    )
-    # Two open rows for the same session: the board shows the oldest, so a
-    # reply clearing the EARLIER cutoff must answer both.
-    result = _run(
-        [
-            {"session": "sid-a", "after": "2026-09-08T20:00:00Z"},
-            {"session": "sid-a", "after": "2026-09-08T21:00:00Z"},
-        ]
-    )
-    assert result["sid-a"]["answered"] is True
+    monkeypatch.setattr("fno.agents.watchdog.run_sweep", _sweep)
+    assert _run(["sid-a", "sid-b"]) == {"sid-a": "ghost", "sid-b": None}
