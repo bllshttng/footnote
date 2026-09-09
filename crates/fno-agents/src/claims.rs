@@ -590,6 +590,9 @@ pub mod basis {
     pub const REGISTRY_SESSION_LIVE: &str = "registry-session-live";
     /// The session witness answered from the transcript reachability probe.
     pub const TRANSCRIPT_LIVE: &str = "transcript-live";
+    /// The registry has no live row for the holder and the harness truth
+    /// probe positively reports that session unreachable.
+    pub const SESSION_ABSENT: &str = "session-absent";
     /// Expired with the session witness unable to answer either way:
     /// Suspect inside the grace window, Stale (reapable by policy) after it.
     pub const TTL_EXPIRED_UNRESOLVED: &str = "ttl-expired-unresolved";
@@ -603,6 +606,8 @@ pub enum SessionLiveness {
     /// The session is demonstrably alive; the payload names the witness
     /// (`basis::REGISTRY_SESSION_LIVE` or `basis::TRANSCRIPT_LIVE`).
     Live(&'static str),
+    /// Both session witnesses positively report that the holder is gone.
+    Absent,
     /// Neither witness could answer. Never a verdict by itself:
     /// classification bounds it with a time-based exit.
     Unresolved,
@@ -829,7 +834,7 @@ pub fn classify_with_basis_and_exclusivity(
             .filter(|s| !s.is_empty())
             .and_then(|_| match witness(rec) {
                 SessionLiveness::Live(witness_basis) => Some(witness_basis),
-                SessionLiveness::Unresolved => None,
+                SessionLiveness::Absent | SessionLiveness::Unresolved => None,
             })
     };
     if is_expired(rec, now) {
@@ -903,6 +908,12 @@ pub fn classify_with_basis_and_exclusivity(
             // byte-for-byte today's verdict, which every pre-change claim and
             // the reaper counts the 1511 revert restored depend on.
             if rec.session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+                if rec.key.starts_with("node:")
+                    && is_same_machine(&rec.host, rec.machine_id.as_deref())
+                    && matches!(witness(rec), SessionLiveness::Absent)
+                {
+                    return (ClaimState::Stale, basis::SESSION_ABSENT);
+                }
                 if let Some(witness_basis) = session_live(witness) {
                     return (ClaimState::Live, witness_basis);
                 }
@@ -931,15 +942,27 @@ pub fn classify_with_basis_and_exclusivity(
     // proves the holder (x-ba96): a resumed session's recorded pid is
     // permanently dead, so without this heal the claim sits Suspect until the
     // heartbeat lapses and the dead pid decides at expiry.
+    let witnessed = session_witness.and_then(|witness| {
+        rec.session_id
+            .as_deref()
+            .filter(|session| !session.is_empty())
+            .map(|_| witness(rec))
+    });
+    if rec.key.starts_with("node:")
+        && is_same_machine(&rec.host, rec.machine_id.as_deref())
+        && matches!(witnessed, Some(SessionLiveness::Absent))
+    {
+        return (ClaimState::Stale, basis::SESSION_ABSENT);
+    }
     if live {
         (ClaimState::Live, cause)
-    } else if let Some(witness) = session_witness {
-        match session_live(witness) {
-            Some(witness_basis) => (ClaimState::Live, witness_basis),
-            None => (ClaimState::Suspect, cause),
-        }
     } else {
-        (ClaimState::Suspect, cause)
+        match witnessed {
+            Some(SessionLiveness::Live(witness_basis)) => (ClaimState::Live, witness_basis),
+            Some(SessionLiveness::Absent | SessionLiveness::Unresolved) | None => {
+                (ClaimState::Suspect, cause)
+            }
+        }
     }
 }
 
@@ -4956,3 +4979,7 @@ mod tests {
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]
 mod reservation_tests;
+
+#[cfg(test)]
+#[path = "claims_session_absence_tests.rs"]
+mod claims_session_absence_tests;

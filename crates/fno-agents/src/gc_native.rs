@@ -93,9 +93,9 @@ pub(crate) fn stop_outcome_effect(confirmed: bool) -> EffectRecord {
 /// Apply the ACTIVE-SURFACE removal for one row through the production
 /// seams (the daemon roster read and `claude rm`), returning the typed
 /// outcome the sweep records on the receipt. The roster read unions every
-/// account root, and the removal is routed to the root the row's launch
-/// account owns - absence from a single ambient read is a WRONG-ROOT
-/// absence and has never been removal evidence.
+/// account root, and the removal is routed to the root where that read found
+/// the row - absence from a single ambient read is a WRONG-ROOT absence and
+/// has never been removal evidence.
 pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome {
     if e.harness_name() == "opencode" {
         return apply_opencode_archive(e);
@@ -105,16 +105,18 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
     // the same listing generation, and a claude arm without a snapshot is a
     // panic the caller cannot recover from.
     let snapshot = crate::claude_roster::read_all_agents_union();
-    let account_dir = crate::claude_roster::isolated_account_dirs()
-        .into_iter()
-        .find(|(id, _)| Some(id.as_str()) == e.launch_account.as_deref())
-        .map(|(_, dir)| dir);
-    let account_for_rm = account_dir.as_deref();
     cascade_harness_session_result_with(
         e,
         Some(&snapshot),
         &crate::claude_roster::read_all_agents_union,
-        &move |short_id| crate::daemon::run_claude_rm_in(account_for_rm, short_id),
+        &|short_id| {
+            let dir = crate::claude_roster::removal_config_dir(
+                &snapshot,
+                short_id,
+                e.launch_account.as_deref(),
+            )?;
+            crate::daemon::run_claude_rm_in(dir.as_deref(), short_id)
+        },
     )
 }
 

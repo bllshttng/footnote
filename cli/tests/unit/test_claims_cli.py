@@ -281,10 +281,16 @@ def test_release_rollback_do_skipped_on_no_op_names_the_key(cwd_tmp):
 
 
 def test_status_free(cwd_tmp):
-    result = runner.invoke(cli, ["status", "nothing", "--json"])
+    result = runner.invoke(cli, ["status", "session:nothing", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
     assert parsed["state"] == "free"
+
+
+def test_status_colonless_garbage_refuses(cwd_tmp):
+    result = runner.invoke(cli, ["status", "nothing", "--json"])
+    assert result.exit_code == 2
+    assert "claim key must include a recognized prefix" in result.output
 
 
 def test_status_live(cwd_tmp):
@@ -495,9 +501,10 @@ def test_status_node_key_finds_global_claim_without_env(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
-    r = runner.invoke(cli, ["status", "node:ab-deadbeef", "--json"])
+    r = runner.invoke(cli, ["status", "ab-deadbeef", "--json"])
     assert r.exit_code == 0, r.output
     info = json.loads(r.output)
+    assert info["key"] == "node:ab-deadbeef"
     assert info["state"] == "live", info
     assert info["holder"] == "target-session:s"
 

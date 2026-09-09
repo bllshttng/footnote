@@ -998,12 +998,11 @@ pub(crate) fn cascade_harness_session_result_with(
 }
 
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
-    run_claude_rm_in(None, short_id)
+    let dir = crate::claude_roster::removal_config_dir_for_short_id(short_id)?;
+    run_claude_rm_in(dir.as_deref(), short_id)
 }
 
-/// `claude rm` against ONE account root. `None` is the ambient root; the
-/// dir pins `CLAUDE_CONFIG_DIR` so an isolated account's row is removed in
-/// the store that actually holds it.
+/// Run `claude rm` against one account root; `None` means ambient.
 pub(crate) fn run_claude_rm_in(
     config_dir: Option<&std::path::Path>,
     short_id: &str,
