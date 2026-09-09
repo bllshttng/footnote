@@ -9430,13 +9430,9 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
-    from fno.backlog.single_flight import (
-        FlightGate,
-        FlightHeld,
-        acquire_flight_open,
-        advance_flight_key,
-        report_held,
-    )
+    from contextlib import nullcontext
+
+    from fno.backlog.single_flight import advance_flight_scope
 
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
@@ -9444,21 +9440,13 @@ def cmd_advance(
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        # One in flight per mission (x-ef2c): the drain arm fires on a fixed
-        # interval, and a converge slower than the interval used to stack a
-        # second copy of itself on top, each copy making the store slower for
-        # the rest. A held tick is correct behavior: the work is in progress,
-        # not lost. --stop is a control action, not a converge, and never
-        # queues behind the very drain it is stopping.
-        flight = (
-            None
-            if stop
-            else acquire_flight_open(advance_flight_key(epic), scope=f"advance --epic {epic}")
-        )
-        if isinstance(flight, FlightHeld):
-            report_held(flight, "backlog advance", json_out=json_out)
-            return
-        try:
+        # One in flight per mission (x-ef2c): the gate lives in
+        # single_flight.advance_flight_scope. --stop is a control action, not
+        # a converge, and never queues behind its own drain.
+        scope_cm = nullcontext(True) if stop else advance_flight_scope(epic, json_out=json_out)
+        with scope_cm as ok:
+            if not ok:
+                return
             _run_advance_epic(
                 epic,
                 stop=stop,
@@ -9469,9 +9457,6 @@ def cmd_advance(
                 provider=provider,
                 continuation=continuation,
             )
-        finally:
-            if isinstance(flight, FlightGate):
-                flight.release()
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
@@ -9495,54 +9480,46 @@ def cmd_advance(
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
 
-    # One in flight for the board advance (x-ef2c), the same latch as the epic
-    # path: the merge event, a groom leg and a manual run all fire this verb,
-    # and nothing used to stop two of them from running at once.
-    flight = acquire_flight_open(advance_flight_key(None), scope="advance")
-    if isinstance(flight, FlightHeld):
-        # `decision` keeps the documented --json receipt shape; a held run
-        # dispatched nothing.
-        report_held(flight, "backlog advance", json_out=json_out,
-                    extra={"decision": "held"})
-        return
-
-    try:
-        result = _advance(
-            closed_node_id=closed,
-            project=project,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
-        # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
-        # Only meaningful with --closed (an edge source); the project-scoped
-        # next selection above never reaches a foreign dependent. Shares the
-        # dispatch:<id> dedup with reconcile's call so a node seen by both the
-        # reconcile sweep and this explicit verb dispatches at most once.
-        if closed:
-            _advance_deps(
+    # One in flight for the board advance (x-ef2c): the merge event, a groom
+    # leg and a manual run all fire this verb, and nothing used to stop two
+    # of them from running at once.
+    with advance_flight_scope(None, json_out=json_out) as ok:
+        if not ok:
+            return
+        try:
+            result = _advance(
                 closed_node_id=closed,
-                closed_project=closed_project,
+                project=project,
                 verbose=verbose,
                 model=model,
                 provider=provider,
             )
-            # G4: route the closed node's contract dependents to a reconcile pass
-            # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
-            # advance paths so a node seen by all three dispatches at most once.
-            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
+            # Only meaningful with --closed (an edge source); the project-scoped
+            # next selection above never reaches a foreign dependent. Shares the
+            # dispatch:<id> dedup with reconcile's call so a node seen by both the
+            # reconcile sweep and this explicit verb dispatches at most once.
+            if closed:
+                _advance_deps(
+                    closed_node_id=closed,
+                    closed_project=closed_project,
+                    verbose=verbose,
+                    model=model,
+                    provider=provider,
+                )
+                # G4: route the closed node's contract dependents to a reconcile pass
+                # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
+                # advance paths so a node seen by all three dispatches at most once.
+                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
-    except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
-        # advance() is designed non-fatal (every path emits + returns), but the
-        # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
-        # decision is not an error to whoever invoked the verb. Report on stderr
-        # and exit 0.
-        typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
-        return
-    finally:
-        if isinstance(flight, FlightGate):
-            flight.release()
+                dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
+        except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
+            # advance() is designed non-fatal (every path emits + returns), but the
+            # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
+            # decision is not an error to whoever invoked the verb. Report on stderr
+            # and exit 0.
+            typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
+            return
     if json_out:
         typer.echo(
             json.dumps(
@@ -9683,59 +9660,20 @@ def cmd_reconcile(
     to it (no archiving). This fires on every throttled auto-reconcile,
     including the SessionStart hook - not just a manual invocation.
     """
-    # --node + --pr-number together is refused rather than silently
-    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
-    # PR's trailer claims, unconditional on --node, but the scan/close scope
-    # would then collapse to the single --node id - leaving newly-bound
-    # sibling claims stamped with a live PR ref but never closed until some
-    # later, unrelated sweep happens to revisit them (round-6/7 review,
-    # flagged twice with no caller ever exercising this combination). Loud
-    # refusal beats a latent gap a future caller could silently trip. A
-    # refusal fires before the gate below: a bad invocation is refused even
-    # while another reconcile holds the scope.
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
+    from fno.backlog.single_flight import reconcile_gate
 
-    from fno.backlog.single_flight import (
-        FlightGate,
-        FlightHeld,
-        acquire_flight_open,
-        reconcile_flight_key,
-        report_held,
-    )
-
-    # One in flight per scope (x-ef2c): SessionStart hooks, merge paths, groom
-    # legs and manual runs all fire this verb, and a sweep slower than the
-    # arms' interval used to stack copies of itself until the store slowed
-    # every one of them further. A held sweep is correct behavior, not an
-    # error: the in-flight pass owns the work. --dry-run mutates nothing and
-    # is never gated.
-    if dry_run:
-        _reconcile_once(
+    # The mutual-exclusion refusal, the dry-run bypass, and the one-in-flight
+    # gate (x-ef2c) all live in single_flight.reconcile_gate.
+    reconcile_gate(
+        dry_run=dry_run,
+        node=node,
+        json_out=json_out,
+        pr_number=pr_number,
+        once=lambda: _reconcile_once(
             dry_run=dry_run, node=node, json_out=json_out,
             pr_number=pr_number, repo=repo,
-        )
-        return
-    flight = acquire_flight_open(
-        reconcile_flight_key(node=node, pr_number=pr_number),
-        scope="reconcile",
+        ),
     )
-    if isinstance(flight, FlightHeld):
-        report_held(flight, "backlog reconcile", json_out=json_out)
-        return
-    try:
-        _reconcile_once(
-            dry_run=dry_run, node=node, json_out=json_out,
-            pr_number=pr_number, repo=repo,
-        )
-    finally:
-        if isinstance(flight, FlightGate):
-            flight.release()
 
 
 def _reconcile_once(
