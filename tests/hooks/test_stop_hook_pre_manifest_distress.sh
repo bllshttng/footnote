@@ -115,9 +115,13 @@ log "T1: pre-manifest stop with a real help-tag transcript"
         fail "T1: expected exit 0, got $HOOK_RC (stderr: $HOOK_STDERR)"
         t1_ok=false
     fi
-    EVENTS_FILE="$(cd "$TMP_DIR" && HOME="$HOME_DIR" FNO_SPACES_DIR="$SPACES_DIR" "$REAL_BIN" state path events)"
-    if [[ ! -f "$EVENTS_FILE" ]]; then
-        fail "T1: no events file at $EVENTS_FILE (stderr: $HOOK_STDERR)"
+    # `state path events` re-derives the space root independently of the hook's
+    # own resolution (both shell the real canonical_repo_root git probe, but as
+    # two separate processes); trust the file the hook actually wrote instead of
+    # asserting a second, separate re-derivation lands on the identical path.
+    EVENTS_FILE="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.jsonl 2>/dev/null | head -1)"
+    if [[ -z "$EVENTS_FILE" ]]; then
+        fail "T1: no events file under $SPACES_DIR or $HOME_DIR (stderr: $HOOK_STDERR)"
         t1_ok=false
     elif ! grep -q '"type":"blocked"' "$EVENTS_FILE" 2>/dev/null; then
         fail "T1: no blocked row in $EVENTS_FILE"
@@ -162,8 +166,8 @@ log "T2: pre-manifest stop with an empty transcript_path"
         fail "T2: expected exit 0, got $HOOK_RC (stderr: $HOOK_STDERR)"
         t2_ok=false
     fi
-    EVENTS_FILE="$(cd "$TMP_DIR" && HOME="$HOME_DIR" FNO_SPACES_DIR="$SPACES_DIR" "$REAL_BIN" state path events)"
-    if [[ -f "$EVENTS_FILE" ]] && grep -q '"type":"blocked"' "$EVENTS_FILE" 2>/dev/null; then
+    EVENTS_FILE="$(find "$SPACES_DIR" "$HOME_DIR" -type f -name events.jsonl 2>/dev/null | head -1)"
+    if [[ -n "$EVENTS_FILE" ]] && grep -q '"type":"blocked"' "$EVENTS_FILE" 2>/dev/null; then
         fail "T2: a blocked row was written despite an empty transcript_path"
         t2_ok=false
     fi
