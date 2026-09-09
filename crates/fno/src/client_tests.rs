@@ -2754,6 +2754,7 @@ fn chrome_hit_label(hit: &Option<ChromeHit>) -> &'static str {
         Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
         Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
         Some(ChromeHit::CycleDensity) => "CycleDensity",
+        Some(ChromeHit::OpenFeedDetail(_)) => "OpenFeedDetail",
     }
 }
 

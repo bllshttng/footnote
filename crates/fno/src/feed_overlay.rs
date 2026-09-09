@@ -37,6 +37,23 @@ pub struct FeedItem {
     pub title: String,
     #[serde(default, rename = "ref")]
     pub r#ref: Option<String>,
+    /// Who acted, when that is a mechanism rather than a session. Provenance,
+    /// never an attach target.
+    #[serde(default)]
+    pub actor: Option<String>,
+    /// The model observed for that session AT EVENT TIME.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The effort recorded for that session at event time.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// The pipeline phase the session was in.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// A rendered recovery line the panel hands over verbatim, on a
+    /// `session_reaped` row.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Why a feed fold failed. Each variant is a different user action - retune a

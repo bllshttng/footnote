@@ -1071,6 +1071,13 @@ struct View {
     /// toggle; the fold's rows newest first. `None` closed. The panel's
     /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
+    /// The provenance view for ONE feed row, held BY VALUE. Rows arrive while
+    /// it is open, so an index into `feed.items` would silently re-point at a
+    /// different event; the inspected event never changes under the reader.
+    feed_detail_of: Option<crate::feed_overlay::FeedItem>,
+    /// Pending escape bytes in feed-focus / feed-detail mode (same split-arrow
+    /// safety as [`View::ans_esc`]).
+    feed_esc: Vec<u8>,
     feed_width: u16,
     feed_offset: usize,
     hover_feed_border: bool,
@@ -1517,6 +1524,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // The needs overlay's projection + render, moved out of this file (file
 // budget); the feed overlay answers its own question from its own module and
 // reuses join_fold_row's join keys for its deep link (x-4433).
+mod feed_detail;
 mod feed_view;
 mod needs_view;
 pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
@@ -1694,7 +1702,12 @@ fn build_keys_modal() -> KeysModal {
     // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
     // that never send them are named so the operator configures the terminal,
     // or reaches for the no-config paths, instead of reading a dead feature.
-    add(PopupRow::Rule, None);
+    //
+    // No Rule above this note. The pin below holds the whole block over the
+    // 64-row fold, and the modal grows one row per binding, so a separator
+    // here costs the same line a real key does. The header band already
+    // separates it. Every new binding spends this budget; the next one that
+    // overflows should reclaim a line rather than move the pin.
     add(
         PopupRow::Header("right-click works only where the terminal forwards it".into()),
         None,
@@ -2760,6 +2773,8 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
+            feed_detail_of: None,
+            feed_esc: Vec::new(),
             feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
             feed_offset: 0,
             hover_feed_border: false,
@@ -6560,7 +6575,25 @@ impl View {
         // (x-f089) Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
-        if let Some(lines) = &self.digest {
+        if let Some(item) = &self.feed_detail_of {
+            // One row's full provenance. Every field says how it is known, and
+            // an empty one says WHICH silence it is rather than going blank.
+            let row = feed_detail::live_row(&self.layout.agents, item);
+            let lines = feed_detail::detail_lines(item, row);
+            let chrome = chrome::Chrome::new("event provenance", Anchor::Center)
+                .footer(feed_detail::detail_footer(item, row));
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                None,
+            );
+        } else if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
             // key-table overlay). Framed chrome so it reads as one product with
             // the settings and connections modals.
@@ -8996,6 +9029,10 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
+    /// Open the activity feed's provenance view for one row. Carries the item
+    /// BY VALUE: a later fold replaces the row list, so an index would open
+    /// the view onto a different event than the one clicked.
+    OpenFeedDetail(crate::feed_overlay::FeedItem),
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -12574,7 +12611,14 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    // (x-f089) The feed panel is chrome and consumes no keys.
+    // (x-f089) The feed panel is chrome and consumes no keys UNTIL the
+    // operator focuses it with `E`, or opens a row's provenance. Both are
+    // explicit, and both release back to the pane on Esc, so the property
+    // this slot protects - typing reaches the focused pane - holds by
+    // default and is set aside only on request.
+    if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
+        return feed_keys(view, &passthrough, sock_w).await;
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -12763,6 +12807,7 @@ async fn dispatch_event(
             }
         }
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
+        Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
@@ -13016,8 +13061,86 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
+        // Inspect first. The deep link is this view's own action, not the
+        // click that opened it.
+        ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
     }
     Ok(())
+}
+
+/// The focused feed panel's keys, and the provenance view's.
+///
+/// Reached only when the operator asked for it: `E` focused the panel, or a
+/// click opened a row's provenance. Every other time the panel takes no keys
+/// at all and this function is never called, which is the whole point.
+///
+/// Precedence inside: the provenance view wins while it is open (it is the
+/// thing in front), then the focused panel. Esc unwinds one layer at a time -
+/// the view first, then the focus - so a reader never loses both at once.
+async fn feed_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.feed_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.feed_esc = esc;
+    for tok in toks {
+        if view.feed_detail_of.is_some() {
+            match tok {
+                ModalKey::Esc | ModalKey::Byte(b'q') | ModalKey::Byte(b'e') => {
+                    view.feed_detail_of = None;
+                }
+                ModalKey::Enter => {
+                    // The deep link is the view's ACTION, never its opening
+                    // gesture: inspecting attaches and resumes nothing.
+                    if let Some(hit) = view.feed_detail_hit() {
+                        apply_hit(view, hit, sock_w).await?;
+                    }
+                    view.feed_detail_of = None;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let Some(f) = view.feed.as_mut() else {
+            break; // closed mid-chunk: swallow the rest, never forward
+        };
+        let len = f.items.len();
+        match tok {
+            ModalKey::Esc => {
+                f.focused = false;
+            }
+            ModalKey::Up => {
+                f.sel = f.sel.saturating_sub(1);
+                view.follow_feed_selection();
+            }
+            ModalKey::Down => {
+                f.sel = (f.sel + 1).min(len.saturating_sub(1));
+                view.follow_feed_selection();
+            }
+            // Panning moves the TITLE only; the stamp, kind and node stay
+            // anchored, so a panned row is still the row you selected.
+            ModalKey::Left => f.hpan = f.hpan.saturating_sub(1),
+            ModalKey::Right => {
+                let ceiling = feed_view::widest_title(&f.items);
+                f.hpan = (f.hpan + 1).min(ceiling);
+            }
+            ModalKey::PageUp => {
+                let page = (view.term.0 as usize).saturating_sub(2).max(1);
+                f.sel = f.sel.saturating_sub(page);
+                view.follow_feed_selection();
+            }
+            ModalKey::PageDown => {
+                let page = (view.term.0 as usize).saturating_sub(2).max(1);
+                f.sel = (f.sel + page).min(len.saturating_sub(1));
+                view.follow_feed_selection();
+            }
+            ModalKey::Enter => view.open_feed_detail(),
+            ModalKey::Byte(_) => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
 }
 
 /// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends

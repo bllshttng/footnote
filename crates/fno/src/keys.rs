@@ -393,6 +393,9 @@ pub enum Event {
     /// chrome and consumes no keys; a click deep-links a row and the border
     /// drags (interpreted by the client's view layer, like OpenAnswers).
     OpenFeed,
+    /// Focus the activity feed panel, opening it first when it is closed.
+    /// Distinct from `OpenFeed`: the panel consumes no keys until this fires.
+    FocusFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
     /// (x-b186) Cycle the sideline density slim -> regular -> extended
@@ -1114,6 +1117,13 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
         b(b'e', "feed", OpenFeed, Global, "activity feed"),
+        b(
+            b'E',
+            "feedfocus",
+            FocusFeed,
+            Global,
+            "focus the activity feed (arrows, enter)",
+        ),
         b(
             b'm',
             "yard",
