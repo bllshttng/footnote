@@ -117,8 +117,11 @@ else
   # A target was named (Step 1 exported it as REVIEW_TARGET: a PR number,
   # a branch, or a path). Empty means THAT target's diff is empty - e.g. a
   # PR whose branch carries no commits ahead of its base - never the
-  # caller's tree.
-  if [ -z "$(git log "$BASE".."$REVIEW_TARGET" --oneline 2>/dev/null)" ]; then
+  # caller's tree. An UNRESOLVABLE target ref never reads as empty: the
+  # rev-parse conjunct fails, the guard stays silent, and the lane's
+  # Phase 0 resolves the target and reports the real failure there.
+  if git rev-parse --verify --quiet "$REVIEW_TARGET" >/dev/null 2>&1 \
+     && [ -z "$(git log "$BASE".."$REVIEW_TARGET" --oneline 2>/dev/null)" ]; then
     echo "no changes to review on target $REVIEW_TARGET"
     exit 0
   fi

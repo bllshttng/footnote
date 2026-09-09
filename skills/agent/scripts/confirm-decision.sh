@@ -110,8 +110,9 @@ WARN=""
 
 # ---- compute caveat (exec-stall / yolo / merge grant) ------------------------
 # Exec-stall: a codex/gemini exec build has nobody to answer a clarifying
-# question (codex auto-rejects and continues; gemini aborts the run). Caveats
-# always confirm under `auto`, even with an explicit provider (Locked Decision 3).
+# question (codex auto-rejects and continues; gemini aborts the run). Under the
+# free-lane posture (ab-994222ee) caveats do NOT force a confirm - they surface
+# as a `warn` alongside the genuine receipt (see the decide block below).
 CAVEAT=0
 CAVEAT_TEXT=""
 add_caveat() {
