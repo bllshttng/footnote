@@ -1120,8 +1120,7 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # Role comes from plan-presence, not plan quality: a /target on
-            # an unplanned node bills at the planning tier.
+            # Plan-presence, not plan quality: an unplanned target bills planning.
             grid_role: Optional[str] = None
             if grid_node_entry and verb == "target":
                 grid_role = (
@@ -1411,16 +1410,9 @@ def inject_spawn_defaults(
         inject += ["--harness", cfg_harness]
         from_config.append(("harness", cfg_harness, f"{provider_rung}.provider"))  # type: ignore[arg-type]
 
-    # route / account (ruling 4): two new fields beside the legacy provider.
-    # route carries vendor/model as vendor/model and is forwarded as --route, so
-    # it inherits the flag's fail-closed resolution - an unknown vendor or a
-    # missing key refuses the spawn rather than silently billing the primary,
-    # which is the invisible-billing shape this node exists to kill. account
-    # forwards --account.
-    # The billing axes (route/account/model) are decided by the Rust owner
+    # Billing axes (route/account/model, ruling 4): decided by the Rust owner
     # (crates/fno-agents/src/spawn_axes.rs): one round trip over the projected
-    # facts returns the injections, receipts and skip reasons verbatim; this
-    # seam applies them. The decision strings have exactly one spelling.
+    # facts returns injections, receipts and skip reasons verbatim.
     route_injected = False
     if cfg_route or cfg_account or cfg_model:
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
@@ -1446,9 +1438,7 @@ def inject_spawn_defaults(
                     else cfg_harness or resolve_dispatch_harness(None, env=env)[0]
                 )
             except Exception:
-                # Degrade open (AC5-FR): a resolution raise must never brick a
-                # spawn that would otherwise work. No target => no basis to
-                # inject; the owner composes the named message.
+                # Degrade open (AC5-FR): no target, no basis to inject.
                 _target = None
                 _target_failed = True
         try:
@@ -1548,11 +1538,8 @@ def inject_spawn_defaults(
         # effort must win on codex while the scalar still answers claude.
         cfg_effort, effort_rung = _seamed("effort")
 
-    # Substrate + permission + effort ride the same owner (spawn-axes): the
-    # seam precomputes the harness-capability facts their decisions consume
-    # (effort surface, substrate compatibility, pane token mapping) and
-    # applies the returned plan. The pane-group stays here: its placement
-    # judgment is already the spawn-overlay verb's. (x-3d5b lineage.)
+    # Mechanical axes ride the same owner; the pane-group stays here (its
+    # placement judgment is the spawn-overlay verb's).
     explicit_substrate = _has_explicit_substrate(out[1:])
     _effort_reason: Optional[str] = None
     if cfg_effort:
@@ -1635,9 +1622,7 @@ def inject_spawn_defaults(
         _pg_unavailable = ""
         _pg_answer: Optional[dict] = None
         if cfg_pane_group and not _flag_present(out[1:], "--tab"):
-            # Placement judgment (conflicts, pane geometry) lives in the verb;
-            # config-sourced fields degrade open, so an unavailable verb skips
-            # the group with a named line instead of failing the spawn.
+            # Placement judgment lives in the verb; degrade open on missing it.
             try:
                 from fno.agents.spawn_overlay_client import (
                     SpawnOverlayUnavailable,
