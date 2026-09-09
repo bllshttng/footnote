@@ -88,25 +88,7 @@ otherwise the whole argument is the spawn payload.
 
 ### Providers (all three are first-class)
 
-| Provider | Dispatch | Worker | Receipt |
-|---|---|---|---|
-| `claude` | `fno agents spawn` (default `pane` owned-PTY; `thread` -> `claude --bg`; `headless` -> `claude -p`) | owned pane, or persistent thread (`thread`) | compact JSON `.short_id` (reply on `headless`) |
-| `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `codex --exec` | daemon-managed PTY worker | pretty JSON `.short_id` |
-| `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
-
-All three create via `spawn`. The substrate axis (x-61df) selects the host:
-`pane` (default, owned-PTY drivable), `thread` (a persistent continuation lane),
-`headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). The per-harness
-support matrix, including refusals, lives in
-`docs/architecture/thread-lanes.md`; this skill does not restate provider verdicts.
-A one-shot Q&A is the
-`headless` substrate (x-cbb0: it subsumes the retired one-shot ask; today's `ask` verb is the sync lane to an existing worker). A codex/gemini
-exec worker is a **single autonomous pass**, not the claude "refuse to stop until
-shipped" loop - do not imply loop-grade completion guarantees for them.
-
-Every `spawn` captures (best-effort, non-blocking) the worker's full resume UUID
-into the registry, distinct from the 8-hex short-id, so a worker is a complete,
-identified citizen of the mesh that can later be addressed or escalated.
+Default is claude on the `pane` substrate. When the user names a non-default provider, a `thread`/`headless` substrate, or a one-shot Q&A, load [references/workflow-routes.md](references/workflow-routes.md) for the provider/substrate matrix and per-provider receipt shapes; the default-path invariants hold everywhere: every spawn captures the worker's full resume UUID (best-effort) into the registry, and a codex/agy exec worker is a single autonomous pass, never loop-grade.
 
 ### Inputs (dashless grammar - phone-first)
 
@@ -143,33 +125,21 @@ see below):
   the per-provider capability truth. Quotes protect a trailing word that is
   ambiguously a provider. (megawalk drivers like `hermes`/`openclaw` are a
   different axis, not `spawn` providers.)
-- **`drive`** (alias `interactive`, optional): route codex/gemini to a drivable
+- **`drive`** (alias `interactive`, optional): route codex/agy to a drivable
   `host` session instead of an autonomous `spawn`. No-op for claude. "drive it"
   / "interactive" map here.
-- **`yolo`** (aliases `auto`, `-Y`, `--yolo`, optional): typing `yolo` drops the sandbox for this
-  launch - codex runs `--dangerously-bypass-approvals-and-sandbox`, gemini runs
-  bare `--yolo` (unsandboxed full-auto). You rarely need it: with NO flag, a
-  headless codex/gemini worker is already BOUNDED - sandboxed AND never-prompt
-  (codex `--sandbox workspace-write --ask-for-approval never`, gemini
-  `--approval-mode yolo --sandbox`) - so it neither hangs nor roams outside the
-  workspace. Reach for `yolo` only when you genuinely want no sandbox. For claude
-  (which has no `--yolo` flag) it maps to `--permission-mode bypassPermissions`,
-  the equivalent full-auto/no-gates posture, so a yolo'd claude worker runs
-  gate-free instead of stalling on a permission prompt; an explicit
-  `--permission-mode` you pass wins over this default. "full auto" / "no sandbox"
-  / "unsandboxed" map here. (To make full yolo the standing default for a provider
-  instead of per-launch, set `config.agents.<provider>.headless_yolo: true`.)
+- **`yolo`** (aliases `auto`, `-Y`, `--yolo`, optional): drops the sandbox for
+  this launch. You rarely need it: a headless codex/agy worker is already
+  BOUNDED - sandboxed AND never-prompt - without it. On claude it maps to
+  `--permission-mode bypassPermissions`; an explicit `--permission-mode` wins.
+  Deep behavior per provider: [references/workflow-routes.md](references/workflow-routes.md).
 - **`model <name>`** (optional): exact model for the worker, plumbed to `fno
-  agents spawn --model` (each provider's own `--model`). Two-word posture so a
-  model name that is not a posture word is read as the value: `spawn ab-X model
-  opus`, `spawn ab-X codex model gpt-5`. "on opus" / "use sonnet" map here (name
-  the model after `model`). Default = the provider's default. There is NO short
-  flag: `-m` is `--allow-merge`, so a bare `-m opus` would set merge, not the
-  model - always write `model <name>`.
+  agents spawn --model`. Two-word posture (`spawn ab-X model opus`). Default =
+  the provider's default. There is NO short flag: `-m` is `--allow-merge`, so a
+  bare `-m opus` would set merge, not the model - always write `model <name>`.
 - **`effort <value>`** (optional): reasoning-effort tier, plumbed to `fno
-  agents spawn --effort`. It is orthogonal to `model`: the model selects which
-  model runs, while effort tunes how hard it reasons. The CLI validates the
-  provider-specific vocabulary and rejects unmappable values before spawning.
+  agents spawn --effort`. Orthogonal to `model`; the CLI validates the
+  provider-specific vocabulary before spawning.
 - **`as <name>`** (optional): explicit agent name. Default is derived
   (`<verb>-<node-id>-<slug>` / `<verb>-<slug>`). "call it X" / "name it X" map here.
 - **`merge`** (optional): do NOT inject the no-merge intent. Default injects it
@@ -177,9 +147,8 @@ see below):
   auto-merge. (`merge` only omits the no-merge intent; true auto-merge stays a
   separate opt-in.) "let it merge" / "can merge" map here.
 - **`--permission-mode <v>`** (optional): the worker's harness permission posture,
-  passed straight to `fno agents spawn --permission-mode` (claude
-  `default|acceptEdits|plan|bypassPermissions`; codex/gemini/opencode/agy mapped).
-  Value validation is the CLI's (fail-closed), not the skill's.
+  passed straight to `fno agents spawn --permission-mode`. Value validation is
+  the CLI's (fail-closed), not the skill's.
 - **`-r`/`--role <role>`** (optional): per-spawn model-routing role
   (`coordinate|tidy|orient|consolidate` route to the secondary GLM; production
   roles stay primary). Model routing ONLY - it does not affect pane/layout.
@@ -193,13 +162,11 @@ see below):
   names the canonical dir and the spawn receipt carries the effective `cwd` when
   it differs from the caller. A code payload still auto-isolates to a fresh
   worktree regardless (that lands as an explicit `--cwd`, which wins).
-- **Tier-3 harness passthrough** (all optional, x-b6e2): forwarded straight to
-  `fno agents spawn`, opaque to the skill; the CLI maps or fails closed per
-  provider. `--add-dir <dir>` grants the worker extra write access (claude/codex/
-  agy; additive to its own workspace). `--agent <name>` pins its sub-agent
-  (claude/opencode). `--tools <list>` / `--deny-tools <list>` scope its tool set
-  (claude `--allowedTools`/`--disallowedTools`). A no-equivalent provider cell is
-  rejected before spawn.
+- **Tier-3 harness passthrough** (all optional, x-b6e2): `--add-dir`, `--agent`,
+  `--tools`, `--deny-tools` forward straight to `fno agents spawn`, opaque to
+  the skill; the CLI maps or fails closed per provider, and a no-equivalent
+  provider cell is rejected before spawn. Per-flag detail:
+  [references/workflow-routes.md](references/workflow-routes.md).
 
 `normalize.sh` is the deterministic backstop: it recognizes this closed posture
 vocabulary as a contiguous TRAILING run (right-anchored), so a posture word that
@@ -816,13 +783,7 @@ See [docs/SKILL-COMPAT-MATRIX.md](../../docs/SKILL-COMPAT-MATRIX.md).
 
 ## Observability boundary (knowing a worker's state)
 
-- **exec (default):** codex/gemini never surface a "waiting" state in the exec
-  lane. When an action needs approval, codex auto-rejects it and continues;
-  gemini aborts the run. Watch via `fno agents list` (status -> `exited`) and
-  `fno agents logs <name>`.
-- **interactive (`-i`):** the TUI genuinely waits at approval prompts. See it via
-  `fno agents grid <name>` / `fno agents drive <name> --mode interactive`.
-- **no proactive push** fires for a codex/gemini worker today. When a claude `--bg` `/target` worker stalls, it does fire `fno inbox notify`.
+How a worker signals "waiting", and what pushes fire per provider, is provider-specific - load [references/workflow-routes.md](references/workflow-routes.md) when observing a non-claude worker. The invariants: `fno agents list` and `fno agents logs <name>` never lie about exit state, and a receipt you did not see printed is not evidence.
 
 ## Known Limitations and Deferred Work
 

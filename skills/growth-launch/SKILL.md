@@ -50,11 +50,14 @@ into a prior campaign.
 Parse the `byline` argument from the invocation: `auto` (the default when
 absent), `on`, or `off`. It controls whether drafts carry the founder byline,
 read from the `byline:` form under `## Founder` in brand-identity, so the name
-is per-project and the skill never free-texts one. Under `auto`, the
-press-draft and the social LinkedIn post carry the byline (the founder-voice
-surfaces); the campaign-plan, the rendered-mock, and the social X/Threads
-posts carry none. `on` puts the byline on every text draft; `off` strips it
-everywhere. Write the resolved byline mode to `.fno/campaigns/<slug>/byline`.
+is per-project and the skill never free-texts one. The byline belongs to
+published founder-voice prose and never to internal artifacts: the
+campaign-plan and the rendered-mock carry none in every mode. Under `auto`,
+the press-draft and the social LinkedIn post carry the byline (the
+founder-voice surfaces) and the social X/Threads posts carry none. `on` puts
+the byline on every published text draft (press-draft and all social posts);
+`off` strips it everywhere. Write the resolved byline mode to
+`.fno/campaigns/<slug>/byline`.
 
 Derive the activated pack's root from its receipt so paths resolve whether the
 pack is the in-tree dogfood copy or an installed pack in another project:
@@ -139,7 +142,7 @@ Before dispatching, check the declared width against the route's provider budget
 fno config assert-subagent-budget --width 4
 ```
 
-A refusal (exit 1) names the provider, the width and the budget: dispatch in two waves instead, or run inline. A permit whose reason says the budget is unknown records that honestly and dispatch stands.
+A refusal (exit 1) names the provider, the width and the budget: dispatch in two waves instead, or run inline only where the inline runtime itself holds no publish or external-effect tool - the draft-only boundary is the tool list, so an inline fallback without that boundary stays a refusal, never a bypass. A permit whose reason says the budget is unknown records that honestly and dispatch stands.
 
 Dispatch the roles that resolved, concurrently via the Task tool:
 
@@ -154,8 +157,10 @@ brand-voice and brand-identity; marketing, communications, and social get
 product-truth, brand-voice, and brand-identity. Hand each text role its
 byline instruction from the resolved byline mode: under `auto`, communications
 (press-draft) and social's LinkedIn post carry the founder byline read from
-brand-identity's `byline:` form; under `on`, every text role carries it; under
-`off`, none do. Marketing and design never carry a byline.
+brand-identity's `byline:` form; under `on`, every published text role carries
+it (press-draft and all social posts); under `off`, none do. Marketing's
+campaign-plan and design's rendered-mock are internal artifacts and never
+carry a byline in any mode.
 One round.
 A subagent that returns `FAILED` or `BLOCKED` is recorded as such beside its
 draft and the campaign continues to a partial bundle; it does not abort the

@@ -261,3 +261,72 @@ def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
     assert "Haiku worker" not in using
     assert "the configured pr-create worker" in using
     assert "a skill spawns a new agent context" not in using
+
+
+# ---- wave 3: conditional recipes behind triggers, concrete drift --------------
+
+
+def test_agent_and_king_roots_route_to_workflow_routes_references():
+    for skill, trigger in (
+        ("skills/agent/SKILL.md", "workflow-routes.md"),
+        ("skills/king-for-a-day/SKILL.md", "workflow-routes.md"),
+    ):
+        text = _skill(skill)
+        assert trigger in text
+        ref = REPO_ROOT / skill.rsplit("/", 1)[0] / "references" / trigger
+        assert ref.exists(), ref
+
+
+def test_fix_root_is_contract_and_body_lives_behind_mode():
+    root = _skill("skills/fix/SKILL.md")
+    assert "references/fix-loop.md" in root
+    assert "Ask only unresolved consequential choices" in root
+    assert "fix_score" not in root  # the unexplained weighted score moved out
+    body = _skill("skills/fix/references/fix-loop.md")
+    assert "fix_score" in body  # and now states what it is for
+    assert "Anti-Pattern Blocklist" in body
+
+
+def test_tdd_recovery_rule_preserves_unrelated_work():
+    text = _skill("skills/tdd/SKILL.md")
+    assert "keep everything else" in text
+    assert "PROVES the behavior is missing" in text
+    examples = _skill("skills/tdd/references/examples.md")
+    assert "ratio-compliance" in examples
+
+
+def test_cache_keepalive_reports_unverified_not_assumed_warmth():
+    text = _skill("skills/cache-keepalive/SKILL.md")
+    assert "Capability gate" in text
+    assert "schedule unavailable" in text
+    assert "warmth unverified" in text.lower() or "Warmth is measured" in text
+    assert "use ONLY these values" not in text
+    assert "$0.52" not in text
+    assert "pricing unverified" in text
+
+
+def test_autocorrect_cadence_matches_the_scheduler_once():
+    text = _skill("skills/autocorrect/SKILL.md")
+    assert "quarterly" not in text
+    assert "--severity S1,S2" in text
+    assert "Harness boundary" in text
+
+
+def test_growth_launch_byline_resolved_once_and_inline_fallback_is_bounded():
+    text = _skill("skills/growth-launch/SKILL.md")
+    assert "never" in text and "internal artifacts" in text
+    assert "every published text draft" in text
+    assert "the draft-only boundary is the tool list" in text
+
+
+def test_diet_doc_measures_payload_bytes():
+    text = _skill("docs/architecture/skill-body-diet.md")
+    assert "UTF-8 payload byte count" in text
+    assert "selected-reference payload" in text
+    assert "wc -l skills/{name}" not in text
+
+
+def test_how_to_guides_has_no_retired_config_gate():
+    text = _skill("skills/ship-docs/references/how-to-guides.md")
+    assert "config.docs" not in text
+    assert "/setup --full" not in text

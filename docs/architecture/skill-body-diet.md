@@ -2,12 +2,18 @@
 
 A structural pattern for keeping `SKILL.md` files lean by extracting per-topic detail into `references/`. Applies whenever a skill body grows beyond the reliable-attention threshold for a single-file load.
 
+## Measured in payload bytes, never lines
+
+The unit of measure is the **UTF-8 payload byte count** of the always-loaded body, plus the **selected-reference payload** of a representative invocation (which references the trigger actually fires). Physical line counts are the wrong instrument in both directions: one dense 900-byte prose line carries more instruction than ten sparse list lines, and a 400-line file of long paragraphs can outweigh a 600-line file of short ones. A diet that moved 12 KB out of the root but left the reference loading on every run moved nothing; a diet is finished when the bytes a representative run actually reads went down and the behavior receipts still hold.
+
+Compaction preserves authority statements and positive receipts: a moved block's specimens, refusal quotes, and measured numbers travel with it verbatim. The root keeps the invariant, the reference keeps the evidence.
+
 ## The problem
 
-Every Claude Code skill invocation re-loads its `SKILL.md` into the prompt. The longer the file, the more attention the LLM spreads across it on every invocation. Past ~500 lines, two failures show up:
+Every Claude Code skill invocation re-loads its `SKILL.md` into the prompt. The longer the file, the more attention the LLM spreads across it on every invocation. Past the reliable-attention threshold, two failures show up:
 
 1. **First-screen rules dilute.** State machine rules and FORBIDDEN markers that fire in the first 30 seconds of execution sit alongside dense reference material that fires only in narrow phases. The LLM spends attention on both equally.
-2. **Cost compounds.** A 1746-line skill body loaded by every `/target` invocation is the same input tokens, every time. Cached input is cheap, but that does not mean it should grow without limit.
+2. **Cost compounds.** A large skill body loaded by every `/target` invocation is the same input tokens, every time. Cached input is cheap, but that does not mean it should grow without limit.
 
 `skills/target/SKILL.md` reached 1746 lines and `skills/megawalk/SKILL.md` reached 803 lines before the 2026-04-29 diet. Both were past the threshold.
 
@@ -90,15 +96,15 @@ A diet must preserve behavior. The verification bar is not a code-level test sui
 
 Concrete check:
 
-1. `wc -l skills/{name}/SKILL.md` shows the lean target (typically <500 lines).
+1. `wc -c skills/{name}/SKILL.md` shows the payload target; compare against the pre-diet byte count, and against the representative invocation's selected-reference payload (the references its triggers fire).
 2. `ls skills/{name}/references/` shows the expected count of new reference files.
 3. `grep -rEn "{name}/SKILL\.md:[0-9]+"` across the repo returns no broken line-number citations (any survivors got updated to point at references). `-E` enables extended regex so `[0-9]+` correctly matches multi-digit line numbers; with default BRE, `[0-9]+` would match a literal `+`.
-4. End-to-end smoke test: invoke the skill in a clean test directory and verify the first 100 lines of behavior match the pre-diet output (saved snapshot from before the change).
+4. End-to-end smoke test: invoke the skill in a clean test directory and verify the representative behavior and its receipts match the pre-diet output (saved snapshot from before the change).
 5. Repo-wide test suite passes. No test should depend on a specific `SKILL.md` line number; if any do, those tests are broken in their own right and need fixing.
 
 ## When NOT to diet
 
-- A skill under ~500 lines is already in the comfort zone. Don't extract for the sake of extraction.
+- A skill whose representative-run payload is already small is in the comfort zone. Don't extract for the sake of extraction.
 - Don't bundle a content rewrite with a diet. The diet is a *move*, not a *rewrite*. If the extracted content is unclear or outdated, that is a separate spec.
 - Don't extract content the LLM needs in every invocation. State machine rules, FORBIDDEN markers, MANDATORY clauses, and other load-bearing-on-every-run content stays in `SKILL.md`. The diet protects them by reducing the surrounding noise, not by moving them away.
 
