@@ -116,7 +116,10 @@ def acquire_flight(key: str, *, scope: str) -> FlightGate | FlightHeld:
             if token is not None:
                 release_dir_mutex(cpath.with_name(cpath.name + RECOVERY_LOCK_SUFFIX), token)
         if still_dead:
-            force_release_claim(key, "single-flight holder process is gone", root=root)
+            force_release_claim(
+                key, "single-flight holder process is gone", root=root,
+                holding_recovery_lock=True,
+            )
             try:
                 acquire_claim(key, holder, reason=f"backlog single-flight: {scope}", ttl_ms=FLIGHT_TTL_MS, root=root)
                 return FlightGate(key=key, holder=holder)
