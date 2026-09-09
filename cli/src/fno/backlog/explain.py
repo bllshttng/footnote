@@ -10,7 +10,7 @@ selection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 from fno.graph.store import ready as store_ready
 from fno.graph._intake import repo_root
@@ -110,7 +110,32 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
     return Gate(name, None, None, f"unreadable: {exc}", key=key)
 
 
-def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[Gate]:
+#: Sentinel for "no load decision supplied; sample one". Distinct from None,
+#: which means the shared read already ran and found the gate unreadable.
+_UNSAMPLED: object = object()
+
+
+def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
+    """One load-gate decision for a report build, or None when unreadable.
+
+    The gates row and the stop reason share the sample: two footprint reads on
+    an already-loaded box is the preview costing more than the thing it
+    previews.
+    """
+    try:
+        from fno.agents.spawn_gate import load_gate_decision
+        from fno.config import load_settings
+
+        return load_gate_decision(float(load_settings().agents.max_load_per_cpu))
+    except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
+        return None
+
+
+def gates_for(
+    node: Optional[dict],
+    grid_harness: Optional[str] = None,
+    load_decision: object = _UNSAMPLED,
+) -> list[Gate]:
     """Every gate advance would consult for ``node``, each measured.
 
     Calls the measurement functions only - never ``preflight_gate``, which
@@ -120,6 +145,9 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
     ``grid_harness`` is the harness the capacity grid picked, so the provider
     lane reported is the one the spawn would actually be counted against rather
     than the config default the grid was about to override.
+
+    ``load_decision`` is a decision a caller already sampled for this report
+    (one footprint read per build); leave it unsampled to read fresh.
     """
     from fno.agents.spawn_gate import (
         ProviderCountUnavailable,
@@ -226,7 +254,7 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
 
-    out.extend(_machine_gates())
+    out.extend(_machine_gates(load_decision))
     return out
 
 
@@ -236,7 +264,7 @@ def _max_live() -> int:
     return int(load_settings().agents.max_live)
 
 
-def _machine_gates() -> list[Gate]:
+def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
     """RAM and load, read the way the gate reads them (never probing to refuse)."""
     from fno.agents.spawn_gate import available_ram_gb
 
@@ -279,7 +307,9 @@ def _machine_gates() -> list[Gate]:
         )
 
         snapshot = _load_snapshot(per_cpu)
-        decision = load_gate_decision(per_cpu)
+        decision = load_gate_decision(per_cpu) if load_decision is _UNSAMPLED else cast(
+            "Optional[tuple[str, str, dict]]", load_decision
+        )
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
     else:
@@ -308,20 +338,18 @@ def _machine_gates() -> list[Gate]:
     return out
 
 
-def _load_gate_stop_reason() -> Optional[str]:
+def _load_gate_stop_reason(load_decision: object = _UNSAMPLED) -> Optional[str]:
     """``"load-refused"`` when the spawn's load gate would refuse, else None.
 
     Reads the SAME ``load_gate_decision`` the real gate runs, so a preview
     cannot promise a dispatch on a box the spawn would refuse - the surface
     that once sent a king looking at the wrong symptom.
     """
-    try:
-        from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS, load_gate_decision
-        from fno.config import load_settings
+    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
 
-        decision = load_gate_decision(float(load_settings().agents.max_load_per_cpu))
-    except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
-        return None
+    decision = _explain_load_decision() if load_decision is _UNSAMPLED else cast(
+        "Optional[tuple[str, str, dict]]", load_decision
+    )
     if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
         return "load-refused"
     return None
@@ -683,9 +711,11 @@ def build_lane_fill_report(
 
     # The spawn's load gate refuses machine-wide, so a preview that left stop
     # empty would promise a dispatch the real spawn refuses (the dry run once
-    # passed every gate at load 255/120 while the arm died on exit 79).
+    # passed every gate at load 255/120 while the arm died on exit 79). One
+    # decision sample feeds both this stop and the gates row below.
+    load_decision = _explain_load_decision()
     if stop is None:
-        stop = _load_gate_stop_reason()
+        stop = _load_gate_stop_reason(load_decision)
 
     ordered_names = [
         "no-project",
@@ -742,7 +772,9 @@ def build_lane_fill_report(
         "asked": asked,
         "gates": [
             g.as_dict()
-            for g in gates_for(subject, (routing.get("candidate") or {}).get("harness"))
+            for g in gates_for(
+                subject, (routing.get("candidate") or {}).get("harness"), load_decision
+            )
         ],
         "routing": routing,
         "decision": {
