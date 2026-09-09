@@ -40,13 +40,10 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     # spawning session's cwd (inherited), so the parent cwd is always captured.
     parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
-    # x-5c25: with NO marker in the env the resolve above returns nothing, so
-    # the row reads the same as a human-run spawn. The process-tree walk still
-    # names the family, and a harness ANCESTOR cannot be a stranger the way an
-    # inherited MARKER can, so take the harness from it and leave the id null.
-    # Gated on an empty marker set, not on a missing harness: a marker that IS
-    # present and resolved to nothing is the contradiction x-b57a / x-0992 rule
-    # must attribute nothing.
+    # x-5c25: with NO marker the walk still names the family, and an ANCESTOR
+    # cannot be the stranger an inherited MARKER can. Gated on an empty marker
+    # set, never a missing harness: a present marker that resolved to nothing
+    # is the contradiction x-b57a / x-0992 rule must attribute nothing.
     harness = identity.harness
     if not harness and not identity.markers_present:
         from fno.claims.session_pid import resolve_session_harness
@@ -262,14 +259,10 @@ def _stamp_launch_edge(node: "str | None") -> None:
     if not session_id:
         return
 
-    # Decide on the cheap read before paying the locked write. The sibling
-    # stamp above already spends one full keeper cycle on this node, and a
-    # second one that changes nothing is pure cost on every re-spawn.
-    #
-    # It also has to SAY when it writes nothing. resolve_provenance keeps a
-    # well-formed id it could not resolve, so a graph missing the node would
-    # otherwise commit an unchanged snapshot and exit 0. Silence there is the
-    # absence this stamp exists to end, one layer down.
+    # Decide on the cheap read before paying the locked write: the sibling
+    # stamp already spends a keeper cycle here. Say when nothing was written,
+    # or a graph missing the node commits an unchanged snapshot and exits 0,
+    # which is the absence this stamp exists to end.
     try:
         from fno.graph.store import locked_mutate_graph, read_graph
         from fno.paths import graph_json
