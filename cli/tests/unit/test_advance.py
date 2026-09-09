@@ -441,19 +441,33 @@ def test_gate_refusal_maps_the_gate_exit_family():
         assert refusal.exit_code == code and refusal.detail == _GATE_LINE
 
     schema = adv.gate_refusal(
-        adv.SpawnError("exited 81", exit_code=EXIT_REGISTRY_SCHEMA, detail="bad")
+        adv.SpawnError(
+            "exited 81",
+            exit_code=EXIT_REGISTRY_SCHEMA,
+            detail="spawn-gate: registry schema 3 > 2; refusing",
+        )
     )
     assert schema.reason == "gate-unavailable" and schema.exit_code == EXIT_REGISTRY_SCHEMA
 
     # A node fault carries no gate code, or a code outside the family.
     assert adv.gate_refusal(adv.SpawnError("daemon unreachable")) is None
     assert adv.gate_refusal(adv.SpawnError("boom", exit_code=1, detail="x")) is None
+    # The spawn-gate: marker is required provenance: the codex create path
+    # propagates a provider's raw exit, so the number alone is not proof.
+    assert (
+        adv.gate_refusal(
+            adv.SpawnError("exited 79", exit_code=79, detail="codex exited 79")
+        )
+        is None
+    )
 
 
 def test_gate_refusal_carries_queue_retry_at():
     from fno.agents.spawn_gate import EXIT_PROVIDER_CAP
 
-    refusal = adv.gate_refusal(adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0))
+    exc = adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0)
+    exc.detail = _GATE_LINE
+    refusal = adv.gate_refusal(exc)
     assert refusal is not None
     assert refusal.reason == "capacity-refused" and refusal.exit_code == EXIT_PROVIDER_CAP
     assert refusal.retry_at == 1234.0
@@ -547,7 +561,9 @@ def test_exit_78_skips_with_retry_at_and_never_defers(iso, monkeypatch):
     """AC5-EDGE + LD5: a slot-queue refusal leaves the row ready (no defer
     subprocess - deleted, not moved) and the skip carries retry_at."""
     def queue_refused(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
-        raise adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0)
+        exc = adv.SpawnQueueRefused("slot queue refused", retry_at=1234.0)
+        exc.detail = _GATE_LINE
+        raise exc
 
     def no_defer(cmd, **kw):
         if "defer" in [str(a) for a in cmd]:
@@ -564,6 +580,26 @@ def test_exit_78_skips_with_retry_at_and_never_defers(iso, monkeypatch):
     skips = [e for e in _events(iso) if e["type"] == "advance_skipped"]
     assert skips[0]["data"]["retry_at"] == 1234.0
     assert skips[0]["data"]["exit_code"] == 78
+
+
+def test_reserved_exit_without_gate_marker_stays_failed(iso, monkeypatch):
+    """P1: a provider crash can exit with a reserved code (the codex create
+    path propagates the provider's raw exit verbatim), so the code alone is
+    not machine provenance. Without the gate's own spawn-gate: marker the
+    verdict stays failed and the strike is charged."""
+    def provider_crash(node_id, node_cwd, node_slug=None, model=None, provider=None, **kw):
+        raise adv.SpawnError(
+            "codex exited 79 (see output)", exit_code=79, detail="codex exited 79"
+        )
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", provider_crash)
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "failed" and res.reason == "spawn-failed"
+    assert [e for e in _events(iso) if e["type"] == "advance_failed"]
+    assert not [e for e in _events(iso) if e["type"] == "advance_skipped"]
 
 
 def test_converge_one_capacity_refusal_skips(monkeypatch, tmp_path):

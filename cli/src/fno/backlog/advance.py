@@ -178,6 +178,8 @@ class AdvanceResult:
     node_id: Optional[str] = None
     short_id: Optional[str] = None
     detail: Optional[str] = None
+    # Spawn-gate exit code behind a machine-scoped skip; None otherwise.
+    exit_code: Optional[int] = None
     # Resolved substrate of the launch ("bg" | "thread" | "headless"); set on
     # dispatched results only. "headless" is synchronous: the worker already
     # ran and released its claim before this result exists.
@@ -225,17 +227,10 @@ class SpawnAlreadyRunning(RuntimeError):
 
 class SpawnError(RuntimeError):
     """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable.
+    A gate refusal (exit 75-81) carries ``exit_code`` plus the gate's own refusal
+    sentence in ``detail``; :func:`gate_refusal` reads them."""
 
-    A gate refusal (exit 75-81) carries ``exit_code`` and the gate's own
-    refusal sentence in ``detail``: :func:`gate_refusal` reads them to route
-    the verdict to a machine-scoped skip instead of a node failure."""
-
-    def __init__(
-        self,
-        message: str,
-        exit_code: Optional[int] = None,
-        detail: str = "",
-    ):
+    def __init__(self, message: str, exit_code: Optional[int] = None, detail: str = ""):
         super().__init__(message)
         self.exit_code = exit_code
         self.detail = detail
@@ -264,52 +259,54 @@ _GATE_REFUSAL_REASONS = {
     EXIT_REGISTRY_SCHEMA: "gate-unavailable",
 }
 
+#: Gate exits whose refusing condition is the same for every child of a pass
+#: (load, RAM, the shared queue, the king's share, a broken registry).
+#: EXIT_PROVIDER_CAP is absent on purpose: 78 names the attempted child's own
+#: route provider, so siblings routed elsewhere stay dispatchable.
+_GLOBAL_REFUSAL_EXITS = frozenset(
+    {
+        EXIT_QUEUE_TIMEOUT,
+        EXIT_NO_WAIT,
+        EXIT_RAM_REFUSED,
+        EXIT_LOAD_REFUSED,
+        EXIT_KING_SHARE,
+        EXIT_REGISTRY_SCHEMA,
+    }
+)
+
 
 @dataclass(frozen=True)
 class GateRefusal:
-    """A machine-scoped spawn refusal: raised by the gate before any
-    node-specific work began, so it is evidence about the machine, never
-    about the node."""
+    """A machine-scoped refusal: raised before any node work, never the node's fault."""
 
-    reason: str  # "capacity-refused" | "gate-unavailable"
+    reason: str
     exit_code: int
     detail: str
     retry_at: Optional[float] = None
 
 
 def _gate_refusal_detail(stderr: str) -> str:
-    """The gate's own refusal sentence: the LAST ``spawn-gate:`` line on
-    stderr, falling back to the head of stderr. The gate prints warnings
-    before its verdict, so the last line is the reason and the first may name
-    an unrelated condition."""
+    """The gate's own refusal sentence: the LAST ``spawn-gate:`` line (the gate
+    warns before its verdict, so the first line may name an unrelated condition);
+    stderr head as fallback."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
     gate_lines = [ln for ln in lines if ln.startswith("spawn-gate:")]
-    if gate_lines:
-        return gate_lines[-1]
-    return (stderr or "").strip()[:200]
+    return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
-    """Classify a spawn failure: a :class:`GateRefusal` when its exit code
-    names a machine-scoped gate condition, None when it is a node fault and
-    the caller keeps its ``failed`` verdict."""
+    """A :class:`GateRefusal` when ``exc`` is a machine-scoped gate refusal, else
+    None (the caller keeps its ``failed`` verdict). The ``spawn-gate:`` marker is
+    REQUIRED provenance: ``_codex_create_path`` propagates a provider crash's raw
+    exit verbatim, so the number alone cannot prove the machine refused."""
     code = getattr(exc, "exit_code", None)
     if not isinstance(code, int):
         return None
     reason = _GATE_REFUSAL_REASONS.get(code)
-    if reason is None:
+    detail = (getattr(exc, "detail", "") or "").strip()
+    if reason is None or not detail.startswith("spawn-gate:"):
         return None
-    return GateRefusal(
-        reason=reason,
-        exit_code=code,
-        detail=getattr(exc, "detail", "") or str(exc),
-        retry_at=getattr(exc, "retry_at", None),
-    )
-
-
-#: The machine-scoped skip reasons, derived from the map so the vocabulary
-#: has exactly one source. The epic-advance pass stops on any of these.
-_MACHINE_SCOPED_REASONS = frozenset(_GATE_REFUSAL_REASONS.values())
+    return GateRefusal(reason, code, detail, getattr(exc, "retry_at", None))
 
 
 def _slot_queue_retry_at(stdout: str) -> Optional[float]:
@@ -3316,7 +3313,8 @@ def advance(
             tick_detail += f" detail={detail[:120]}"
         _tick(0, reason, tick_detail)
         return AdvanceResult(
-            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
+            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail,
+            exit_code=exit_code,
         )
 
     def failed(node_id: str, error: str) -> AdvanceResult:
@@ -3481,9 +3479,8 @@ def advance(
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
     except SpawnError as exc:
-        # A machine-scoped gate refusal is a skip that leaves the row ready -
-        # never a defer (a lane-wide condition written onto a row as node
-        # state) and never a strike.
+        # A machine-scoped refusal skips (row stays ready, no strike, no defer);
+        # a node fault fails and charges.
         _safe_release(dispatch_key, holder, dispatch_root)
         refusal = gate_refusal(exc)
         if refusal is None:
@@ -3776,7 +3773,8 @@ def _converge_one(
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
         return AdvanceResult(
-            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
+            "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail,
+            exit_code=exit_code,
         )
 
     def failed(error: str) -> AdvanceResult:
@@ -4380,12 +4378,12 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
-        if res.decision == "skipped" and res.reason in _MACHINE_SCOPED_REASONS:
-            # The first machine-scoped refusal ends the pass: the refusing
-            # condition is identical for every remaining child, so attempting
-            # them only manufactures one refusal per child. Name every child
-            # the pass did NOT try, so the journal shows what was skipped for
-            # the machine rather than implying it was considered.
+        if res.decision == "skipped" and res.exit_code in _GLOBAL_REFUSAL_EXITS:
+            # The first global refusal ends the pass: the condition is
+            # identical for every remaining child, so attempting them only
+            # manufactures one refusal per child. A provider-scoped 78 skip
+            # falls through and keeps trying (siblings on other routes may
+            # still dispatch). Name every child the pass did NOT try.
             for remaining in children[idx + 1:]:
                 _emit(
                     EVENT_SKIPPED,

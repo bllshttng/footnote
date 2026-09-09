@@ -271,7 +271,8 @@ def test_gate_refusal_stops_the_pass_and_names_untried_children(iso, tmp_path, m
     def converge(child, root, ev_path, verbose, **kw):
         calls.append(child["id"])
         return adv.AdvanceResult(
-            "skipped", adv.EVENT_SKIPPED, reason="capacity-refused", node_id=child["id"]
+            "skipped", adv.EVENT_SKIPPED, reason="capacity-refused",
+            node_id=child["id"], exit_code=79,
         )
 
     monkeypatch.setattr(adv, "_converge_one", converge)
@@ -289,6 +290,45 @@ def test_gate_refusal_stops_the_pass_and_names_untried_children(iso, tmp_path, m
     ]
     assert sorted(e["data"]["node_id"] for e in untried) == ["x-b", "x-c", "x-d", "x-e"]
     assert not [e for e in _events(iso) if e["type"] == "advance_failed"]
+
+
+def test_provider_scoped_refusal_keeps_trying_other_children(iso, tmp_path, monkeypatch):
+    """P2: exit 78 names the attempted child's route provider, not the
+    machine. Siblings routed elsewhere may still be dispatchable, so the pass
+    continues after a provider-scoped refusal and only a global one stops it."""
+    _epic_graph(tmp_path, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    _patch_headroom(monkeypatch, 8)
+    monkeypatch.setattr(
+        adv,
+        "_ready_leaf_children",
+        lambda e: _ready(("x-a", "web"), ("x-b", "web"), ("x-c", "etl")),
+    )
+    calls = []
+
+    def converge(child, root, ev_path, verbose, **kw):
+        calls.append(child["id"])
+        if child["id"] == "x-a":
+            return adv.AdvanceResult(
+                "skipped", adv.EVENT_SKIPPED, reason="capacity-refused",
+                node_id=child["id"], exit_code=78,
+            )
+        return adv.AdvanceResult(
+            "dispatched", adv.EVENT_DISPATCHED, node_id=child["id"], short_id="sid"
+        )
+
+    monkeypatch.setattr(adv, "_converge_one", converge)
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert calls == ["x-a", "x-b", "x-c"]
+    assert res.dispatched == ("x-b", "x-c")
+    untried = [
+        e
+        for e in _events(iso)
+        if e["type"] == "advance_skipped" and e["data"].get("attempted") is False
+    ]
+    assert untried == []
 
 
 def test_unmapped_project_loud_skip_others_dispatch(iso, tmp_path, monkeypatch):

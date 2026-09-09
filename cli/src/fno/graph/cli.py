@@ -8973,7 +8973,8 @@ def _run_advance_epic(
                     "dispatched": list(result.dispatched),
                     "children": [
                         {"node_id": r.node_id, "decision": r.decision,
-                         "reason": r.reason, "short_id": r.short_id,
+                         "reason": r.reason, "detail": r.detail,
+                         "short_id": r.short_id,
                          "substrate": r.substrate}
                         for r in result.child_results
                     ],
