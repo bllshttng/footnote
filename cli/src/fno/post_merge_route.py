@@ -184,10 +184,20 @@ def inject_pr_merged(
         entry = _live_codex_registry_entry(session_id)
         if entry is None:
             return False, "not-live"
+        # The sender string should name this session, not a literal no row
+        # resolves. Best-effort: an unresolvable identity keeps the
+        # default rather than blocking the ritual.
+        try:
+            from fno.agents.self_stamp import resolve_self_identity
+
+            _session = getattr(resolve_self_identity(), "session_id", None)
+        except Exception:  # noqa: BLE001 - identity is metadata here, never a gate
+            _session = None
+        from_name = canonical_handle(_session) if _session else "fno"
         try:
             from fno.agents.dispatch import _deliver_live
 
-            delivered = _deliver_live(entry, command, from_name="fno", mail=None)
+            delivered = _deliver_live(entry, command, from_name=from_name, mail=None)
         except Exception as exc:
             return False, f"inject-error: {exc}"[:120]
         return (True, "delivered") if delivered else (False, "not-live")
