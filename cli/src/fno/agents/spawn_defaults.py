@@ -1053,6 +1053,7 @@ def inject_spawn_defaults(
     slot_candidate: Optional[dict] = None
     slot_chain: List[str] = []
     grid_node_entry: Optional[dict] = None
+    grid_account_injected = False
     # Axis occupancy scanned ONCE, before the slot resolver: a lane named on
     # the command line changes the all-exhausted terminal (degrade, not
     # refuse), an occupied model axis stands the no-lanes grid down, and
@@ -1327,6 +1328,7 @@ def inject_spawn_defaults(
                 from_config.append(
                     ("account", grid_candidate["account"], "difficulty-grid")
                 )
+                grid_account_injected = True
             else:
                 print(
                     f"fno agents spawn: account skipped (claude-only, grid "
@@ -1452,7 +1454,7 @@ def inject_spawn_defaults(
     # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
     # would otherwise carry a Claude account into a spawn that can't use it and
     # abort instead of cutting over.
-    if cfg_account and not _flag_present(out[1:], "--account"):
+    if cfg_account and not grid_account_injected and not _flag_present(out[1:], "--account"):
         prov = resolved_harness()
         if prov == "claude":
             inject += ["--account", cfg_account]

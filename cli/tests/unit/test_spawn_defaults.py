@@ -307,6 +307,28 @@ def test_grid_account_skips_on_a_non_claude_grid_harness(monkeypatch):
     assert "account skipped" in err.getvalue()
 
 
+def test_grid_account_wins_over_the_config_default(monkeypatch):
+    """The grid read the row account's capacity, so its account outranks a
+    config-sourced agents.defaults.account: exactly one --account on argv."""
+    _declare_inventory(monkeypatch, [
+        {"name": "zai-flash", "harness": "claude", "model": "glm-5.3-flash[1m]",
+         "band": "high", "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+    ])
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}},
+    )
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-acct2", "hi"], account="ccm"
+    )
+    assert result.count("--account") == 1
+    assert result[result.index("--account") + 1] == "zai-main"
+
+
 def test_grid_routeless_row_injects_no_route(monkeypatch):
     """AC4-EDGE (x-b545): a routeless row (claude-canonical-*) produces argv
     unchanged from today - no lane selector."""
