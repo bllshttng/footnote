@@ -277,3 +277,55 @@ fn assignment_recovery_joins_name_and_first_directive_against_the_graph() {
     );
     assert_eq!(links, vec!["x-f370".to_string()]);
 }
+
+// --- the build pin the audit keys on (x-d2ba) --------------------------------
+
+/// The writer of a retirement receipt is `fno-agents-daemon`. The reader of
+/// `reap --verify` is `fno-agents`. They are separate executables, so the pin
+/// they stamp and compare must name the BUILD, never the running file.
+///
+/// This is the regression it guards. The pin used to be the running exe's own
+/// mtime. One `cargo install` writes the three bins seconds apart, so the
+/// daemon's stamp could never equal the client's: a live 523-receipt window
+/// read 0 verified, with every current-daemon receipt named stale over a
+/// 5-second gap. Every unit test passed, because each one wrote and read the
+/// stamp inside one process.
+#[test]
+fn ac_x_d2ba_the_build_pin_agrees_across_the_installed_bins() {
+    let client = build_pin(env!("CARGO_BIN_EXE_fno-agents"));
+    let daemon = build_pin(env!("CARGO_BIN_EXE_fno-agents-daemon"));
+    let worker = build_pin(env!("CARGO_BIN_EXE_fno-agents-worker"));
+    // A positive marker first: an absent or empty pin would make the three
+    // agree for the wrong reason.
+    assert!(
+        client.contains(" rev "),
+        "the client pin names no build rev: {client:?}"
+    );
+    assert_eq!(
+        client, daemon,
+        "client and daemon disagree on the build pin"
+    );
+    assert_eq!(
+        client, worker,
+        "client and worker disagree on the build pin"
+    );
+}
+
+/// Read one bin's own build pin out of `version --json`.
+fn build_pin(bin: &str) -> String {
+    let out = std::process::Command::new(bin)
+        .args(["version", "--json"])
+        .output()
+        .unwrap_or_else(|err| panic!("{bin} version --json: {err}"));
+    assert!(
+        out.status.success(),
+        "{bin} version --json exited {:?}",
+        out.status
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|err| panic!("{bin} version --json is not json: {err}"));
+    v["build"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{bin} version --json carries no build field: {v}"))
+        .to_string()
+}

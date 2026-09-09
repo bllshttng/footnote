@@ -24,6 +24,9 @@ pub fn version_json() -> serde_json::Value {
         "crates_rev": env!("FNO_AGENTS_CRATES_REV"), // crates/ subtree rev, or "unknown"
         "dirty": env!("FNO_AGENTS_GIT_DIRTY") == "1",
         "profile": profile,
+        // The retirement receipt's build pin, readable off every bin so the
+        // triad's agreement is checkable from outside a single process.
+        "build": crate::gc_verify::current_build(),
     })
 }
 
