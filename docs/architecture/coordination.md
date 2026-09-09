@@ -236,6 +236,15 @@ so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP`
 fleet is full" (queueable) from "this territory's team is over the line"
 (the other territories keep their headroom).
 
+Two CLI verbs read the same Rust territory projection so no two surfaces
+disagree. `fno config active-backlog` (`config_cli.py`) passes through the
+`active-backlog-receipt` binary call: territories resolved from the graph,
+the crown registry, the workspace map, and `config.active_backlog`. Read-only;
+exit 1 names the unreadable source. `fno config active-backlog-territories`
+(hidden) passes through `territory-rows`: one row per scope, with its
+missions, king or kingless state, live count against the cap, and the
+standing blueprinter's handle. Both are read-only.
+
 ## Selection-time enforcement (node claims)
 
 `node:<id>` claims are the cross-session mutex that stops two `/target`

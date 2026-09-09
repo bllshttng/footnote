@@ -958,12 +958,8 @@ def active_backlog_cmd(
         False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
     ),
 ) -> None:
-    """Print the active-backlog drain targets the daemon resolves.
-
-    A passthrough over the Rust receipt (crates/fno-agents territory fact
-    set): the binary resolves territories from the graph, the crown registry,
-    the workspace map, and config.active_backlog, and this verb prints that
-    answer verbatim. Read-only; exit 1 names the unreadable source.
+    """Print the active-backlog drain targets. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
     """
     from fno.rust_binary import call_binary_json
 
@@ -991,12 +987,8 @@ def active_backlog_territories_cmd(
         False, "--json", "-J", help="Emit a JSON list of territory rows."
     ),
 ) -> None:
-    """The territory readout (x-e221 AC7): one row per scope.
-
-    A passthrough over the Rust projection: scope, missions, king or kingless
-    state, live count against the per-territory cap, and the standing
-    blueprinter's handle. The king check-in and the operational probe read the
-    same projection, so none of them can disagree. Read-only.
+    """The territory readout: one row per scope. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
     """
     from fno.rust_binary import call_binary_json
 
