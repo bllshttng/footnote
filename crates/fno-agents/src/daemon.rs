@@ -1167,6 +1167,28 @@ enum WorktreeGate {
     Unanswerable(String),
 }
 
+/// (x-f55c) What actually happened to a prune attempt, so a caller can branch
+/// on the outcome instead of recording intent as fact. `Removed` carries the
+/// worktree path; `Kept` carries the reason already built by the gate or the
+/// removal attempt (the blocked gate, the unanswerable probe, or the failed
+/// `git worktree remove`), formatted exactly as `receipt()` prints it below.
+pub(crate) enum PruneOutcome {
+    Removed(String),
+    Kept(String),
+}
+
+impl PruneOutcome {
+    /// The exact strings `rm_take_worktree_with` printed before this type
+    /// existed - callers that only want the receipt text keep reading it
+    /// unchanged.
+    pub(crate) fn receipt(&self) -> String {
+        match self {
+            PruneOutcome::Removed(path) => format!("worktree removed: {path}"),
+            PruneOutcome::Kept(reason) => format!("worktree kept: {reason}"),
+        }
+    }
+}
+
 /// Per-subprocess budget for the rm worktree path, matching the Python
 /// runtime's remove bound (`subprocess.run(..., timeout=60.0)`).
 const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
@@ -1344,26 +1366,26 @@ fn rm_take_worktree_with(
     entry: &state::RegistryEntry,
     gate: &dyn Fn(&str) -> WorktreeGate,
     remove: &dyn Fn(&str) -> Result<(), String>,
-) -> Option<String> {
+) -> Option<PruneOutcome> {
     let cwd = entry.cwd.as_str();
     if !is_linked_worktree(cwd) {
         return None;
     }
     match gate(cwd) {
         WorktreeGate::Reapable => match remove(cwd) {
-            Ok(()) => Some(format!("worktree removed: {cwd}")),
-            Err(e) => Some(format!(
-                "worktree kept: {cwd} (git worktree remove failed: {e})"
-            )),
+            Ok(()) => Some(PruneOutcome::Removed(cwd.to_string())),
+            Err(e) => Some(PruneOutcome::Kept(format!(
+                "{cwd} (git worktree remove failed: {e})"
+            ))),
         },
-        WorktreeGate::Blocked(reason) => {
-            Some(format!("worktree kept: {cwd} (the gate said no: {reason})"))
-        }
-        WorktreeGate::Unanswerable(why) => Some(format!("worktree kept: {cwd} ({why})")),
+        WorktreeGate::Blocked(reason) => Some(PruneOutcome::Kept(format!(
+            "{cwd} (the gate said no: {reason})"
+        ))),
+        WorktreeGate::Unanswerable(why) => Some(PruneOutcome::Kept(format!("{cwd} ({why})"))),
     }
 }
 
-pub(crate) fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+pub(crate) fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<PruneOutcome> {
     rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
         // Run git FROM the worktree: the daemon's own cwd is usually not a
         // repository, and `git worktree remove` needs one to resolve against.
@@ -7193,7 +7215,7 @@ async fn handle_rm_with(
         } else {
             None
         };
-        (measured, rm_take_worktree(&entry))
+        (measured, rm_take_worktree(&entry).map(|o| o.receipt()))
     });
     let worktree_removed = worktree_touched && !worktree_path.exists();
     let reclaimed_bytes =
@@ -10288,7 +10310,7 @@ mod tests {
         row.cwd = wt.to_string_lossy().into_owned();
         let receipt = rm_take_worktree_with(&row, &|_| WorktreeGate::Reapable, &|_| Ok(()));
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!("worktree removed: {}", wt.to_string_lossy()))
         );
         std::fs::remove_dir_all(&wt).ok();
@@ -10308,7 +10330,7 @@ mod tests {
             &|_| Ok(()),
         );
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!(
                 "worktree kept: {} (the gate said no: modified-tracked)",
                 wt.to_string_lossy()
@@ -10329,7 +10351,7 @@ mod tests {
             &|_| Ok(()),
         );
         assert_eq!(
-            receipt.as_deref().map(|s| s.to_string()),
+            receipt.map(|o| o.receipt()),
             Some(format!(
                 "worktree kept: {} (the reapable probe could not answer)",
                 wt.to_string_lossy()
@@ -10353,7 +10375,7 @@ mod tests {
             },
             &|_| Ok(()),
         );
-        assert_eq!(receipt, None);
+        assert!(receipt.is_none());
         assert_eq!(asked.get(), 0, "the gate was never consulted");
     }
 

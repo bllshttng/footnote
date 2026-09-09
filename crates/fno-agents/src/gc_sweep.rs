@@ -52,6 +52,20 @@ pub struct GcSummary {
     /// `(row id, worktree path)` for every tree pruned (clean and merged;
     /// the branch survives).
     pub pruned: Vec<(String, String)>,
+    /// `(row id, reason)`: the sweep asked `prune_tree` to remove a
+    /// clean-and-merged tree and the attempt did not confirm removal - the
+    /// gate refused, the probe could not answer, or `git worktree remove`
+    /// itself failed. A row here never also appears in `pruned` (x-f55c: the
+    /// callback's own answer decides the bucket, not the order that asked).
+    pub prune_failed: Vec<(String, String)>,
+    /// `(row id, holder)`: a retiring row's cwd is still occupied by
+    /// `holder`, a live registry row not retiring this pass - the tree
+    /// survives and the prune never runs.
+    pub kept_shared_tree: Vec<(String, String)>,
+    /// `(row id, descendant)`: a live registry row names this row's session
+    /// in its own `spawned_by_session` - the parent is held, unretired,
+    /// until that child is gone.
+    pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
     /// `(id, origin)`: origin is not `spawn` (adopted, unknown spelling), so
@@ -153,6 +167,7 @@ pub(crate) enum RetireRefusal {
 pub(crate) struct CommitReport {
     pub(crate) retired: Vec<(String, String)>,
     pub(crate) pruned: Vec<(String, String)>,
+    pub(crate) prune_failed: Vec<(String, String)>,
     pub(crate) kept_no_receipt: Vec<(String, String)>,
     pub(crate) retired_names: std::collections::BTreeSet<String>,
 }
@@ -680,7 +695,7 @@ pub(crate) fn run(
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
-    prune_tree: &dyn Fn(&state::RegistryEntry),
+    prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     // The retention pass runs on EVERY sweep, before the empty-registry early
@@ -811,6 +826,18 @@ pub(crate) fn run(
             }
             continue;
         }
+        // x-f55c task 1.3: a parent whose descendant is still live is never
+        // retired - the lineage field says who spawned whom, and this is
+        // the only site that consults it. Runs before staging so no
+        // active-surface removal ever touches a row a live child names.
+        if !sid.is_empty() {
+            if let Some(child) = registry.entries.iter().find(|other| {
+                other.name != e.name && other.spawned_by_session.as_deref() == Some(sid)
+            }) {
+                summary.kept_live_descendants.push((id, row_handle(child)));
+                continue;
+            }
+        }
         // A retiring row first confirms its process is stopped: a refusal
         // keeps the row this tick and names the refusal. DRY-RUN never stops
         // anything - a rehearsal that killed the worker it rehearsed
@@ -904,6 +931,49 @@ pub(crate) fn run(
         );
     }
 
+    // x-f55c task 2: a cwd another live row still occupies is never pruned
+    // out from under it, and two rows retiring on the SAME cwd this pass
+    // still prune it exactly once - `owns_worktree` above answers only
+    // "does THIS row's own cwd look like a linked worktree", nothing about
+    // who else sits there.
+    let mut prune_by_cwd: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, order) in to_retire.iter() {
+        if order.tree == TreeAction::Prune {
+            if let Some(cwd) = &order.worktree {
+                prune_by_cwd
+                    .entry(cwd.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+    }
+    for (cwd, names) in prune_by_cwd {
+        let occupant = registry
+            .entries
+            .iter()
+            .find(|e| e.cwd == cwd && !to_retire.contains_key(&e.name));
+        if let Some(occupant) = occupant {
+            let holder = row_handle(occupant);
+            for name in names {
+                if let Some(order) = to_retire.get_mut(&name) {
+                    order.tree = TreeAction::None;
+                    summary
+                        .kept_shared_tree
+                        .push((order.id.clone(), holder.clone()));
+                }
+            }
+        } else if names.len() > 1 {
+            // Both rows retire together: the tree goes with the first, the
+            // rest own nothing left to prune.
+            for name in names.iter().skip(1) {
+                if let Some(order) = to_retire.get_mut(name) {
+                    order.tree = TreeAction::None;
+                }
+            }
+        }
+    }
+
     if to_retire.is_empty() {
         return summary;
     }
@@ -932,6 +1002,7 @@ pub(crate) fn run(
     );
     summary.retired = report.retired;
     summary.pruned = report.pruned;
+    summary.prune_failed = report.prune_failed;
     summary.kept_no_receipt.extend(report.kept_no_receipt);
     summary
 }
@@ -1004,7 +1075,7 @@ pub(crate) fn commit_retirements(
     entries: &[state::RegistryEntry],
     to_retire: &mut std::collections::BTreeMap<String, RetireOrder>,
     receipts: &std::collections::BTreeMap<String, ReapReceipt>,
-    prune_tree: &dyn Fn(&state::RegistryEntry),
+    prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> CommitReport {
     let mut report = CommitReport::default();
     // Persist every receipt BEFORE the write drops its row: the ordering IS
@@ -1131,12 +1202,21 @@ pub(crate) fn commit_retirements(
                 );
                 report.retired.push((order.id.clone(), order.basis.clone()));
                 if order.tree == TreeAction::Prune {
-                    if let Some(path) = &order.worktree {
-                        // The same door a human removal walks (production:
-                        // gate + merge check + `git worktree remove`; the
-                        // branch survives).
-                        prune_tree(e);
-                        report.pruned.push((order.id.clone(), path.clone()));
+                    // The same door a human removal walks (production: gate +
+                    // merge check + `git worktree remove`; the branch
+                    // survives). The callback's own answer decides the
+                    // bucket - the order that asked for a prune is not proof
+                    // one happened (x-f55c).
+                    match prune_tree(e) {
+                        Some(crate::daemon::PruneOutcome::Removed(path)) => {
+                            report.pruned.push((order.id.clone(), path))
+                        }
+                        Some(crate::daemon::PruneOutcome::Kept(reason)) => {
+                            report.prune_failed.push((order.id.clone(), reason))
+                        }
+                        None => report
+                            .prune_failed
+                            .push((order.id.clone(), "the row owns no linked worktree".into())),
                     }
                 }
             }
@@ -1150,6 +1230,7 @@ pub(crate) fn commit_retirements(
             // divergence).
             report.retired.clear();
             report.pruned.clear();
+            report.prune_failed.clear();
             report.retired_names.clear();
         }
     }

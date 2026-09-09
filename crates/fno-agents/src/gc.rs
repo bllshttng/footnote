@@ -319,9 +319,7 @@ pub fn gc_sweep(
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
-        &|e| {
-            crate::daemon::rm_take_worktree(e);
-        },
+        &crate::daemon::rm_take_worktree,
     );
     summary.settled_do_rows = settled
         .into_iter()
@@ -356,9 +354,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
-        &|e| {
-            crate::daemon::rm_take_worktree(e);
-        },
+        &crate::daemon::rm_take_worktree,
     );
     summary.settled_do_rows = planned
         .into_iter()
@@ -1006,7 +1002,7 @@ mod tests {
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| (None, None),
-            &|_e| {},
+            &|_e| None,
         );
         assert!(
             !stopped.load(Ordering::SeqCst),
@@ -1123,7 +1119,7 @@ mod tests {
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| (None, None),
-            &|_e| {},
+            &|_e| None,
         );
         assert!(
             !stopped.load(Ordering::SeqCst),
@@ -1183,7 +1179,7 @@ mod tests {
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
-            &|_| {},
+            &|_| None,
         );
         assert_eq!(
             summary.kept_not_spawn,

@@ -25,6 +25,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, path)| json!({"id": id, "worktree": path}))
             .collect();
+        let prune_failed: Vec<Value> = summary
+            .prune_failed
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         let open_work: Vec<Value> = summary
             .kept_open_work
             .iter()
@@ -67,6 +72,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             json!({
                 "retired": retired,
                 "pruned": pruned,
+                "prune_failed": prune_failed,
                 "settled_do_rows": settled,
                 "settle_refused": pair(&summary.settle_refused),
                 "kept_operator": summary.kept_operator,
@@ -83,6 +89,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_dirty": pathed(&summary.kept_dirty),
                 "kept_unmerged": pathed(&summary.kept_unmerged),
                 "kept_unprobed": pathed(&summary.kept_unprobed),
+                "kept_shared_tree": pair(&summary.kept_shared_tree),
+                "kept_live_descendants": pair(&summary.kept_live_descendants),
                 "stop_refused": pair(&summary.stop_refused),
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
@@ -102,6 +110,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (id, path) in &summary.pruned {
         out.push_str(&format!("  pruned {id} (clean and merged: {path})\n"));
+    }
+    for (id, reason) in &summary.prune_failed {
+        out.push_str(&format!("  prune failed {id} ({reason})\n"));
     }
     let settle_verb = if dry_run { "would settle" } else { "settled" };
     for (node, harness, session_id) in &summary.settled_do_rows {
@@ -174,6 +185,14 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!(
             "  kept tree {id} (the cleanliness probe could not answer: {path})\n"
         ));
+    }
+    for (id, holder) in &summary.kept_shared_tree {
+        out.push_str(&format!(
+            "  kept tree {id} (shared with {holder}, still live)\n"
+        ));
+    }
+    for (id, child) in &summary.kept_live_descendants {
+        out.push_str(&format!("  kept {id} (live descendant: {child})\n"));
     }
     for (id, reason) in &summary.stop_refused {
         out.push_str(&format!("  kept {id} (stop refused: {reason})\n"));
@@ -251,6 +270,7 @@ mod tests {
         for key in [
             "retired",
             "pruned",
+            "prune_failed",
             "settled_do_rows",
             "settle_refused",
             "kept_operator",
@@ -267,6 +287,8 @@ mod tests {
             "kept_dirty",
             "kept_unmerged",
             "kept_unprobed",
+            "kept_shared_tree",
+            "kept_live_descendants",
             "stop_refused",
             "kept_no_receipt",
             "expired_receipts",
