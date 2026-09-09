@@ -938,20 +938,14 @@ def remove_session_index_entry(
 ) -> bool:
     """Drop ``session_id``'s line(s) from codex's session index.
 
-    Record-only teardown: the rollout/transcript files under
-    ``~/.codex/sessions/`` are never touched. Returns True if the index
-    changed, False if the id was already absent (idempotent success --
-    a manually-cleaned index must not fail ``fno agents rm``).
+    Record-only teardown: the rollout files are never touched. True if
+    the index changed, False if already absent (idempotent success).
 
-    Matching is on the parsed ``id`` FIELD, not substring containment.
-    The index also carries a free-text ``thread_name``, so a substring
-    match would delete an unrelated session whose name merely quotes
-    this uuid. :func:`load_known_session_ids` can afford its schema-
-    agnostic regex because a false positive there only over-reports
-    liveness; here it would destroy the wrong record.
-
-    A line that does not parse, or that carries no matching ``id``, is
-    always kept: this never removes what it does not understand.
+    Matching is on the parsed ``id`` FIELD, never substring: the index
+    also carries a free-text ``thread_name`` whose substring match would
+    delete an unrelated session quoting this uuid. Unparseable lines and
+    non-matching ids are always kept: this never removes what it does
+    not understand.
 
     The rewrite is atomic (temp file in the same directory + ``os.replace``,
     preserving the original mode), so a concurrent codex append can never
@@ -1004,15 +998,10 @@ def capture_session_index_entries(
 ) -> list:
     """Return the raw index lines whose parsed ``id`` equals ``session_id``.
 
-    The rollback half of the removal contract (the companion of
-    :func:`remove_session_index_entry`): a removal that does not succeed
-    must leave every store unchanged, so the caller snapshots the exact
-    lines the rewrite will drop BEFORE tearing down, and re-appends them
-    when the registry write later declines. Same parse discipline as the
-    removal: matching on the parsed ``id`` field, never substring. A
-    missing index is nothing to snapshot; an unreadable one raises, so
-    the caller refuses before touching any store rather than silently
-    losing the ability to roll back.
+    Rollback half of the removal contract: snapshot BEFORE teardown,
+    re-append when the registry write declines. Parse discipline matches
+    the removal: the ``id`` field, never substring. Unreadable index
+    raises, so the caller refuses before touching any store.
     """
     if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
         return []
@@ -1037,10 +1026,9 @@ def restore_session_index_entries(
 ) -> None:
     """Re-append previously captured index lines (atomic rewrite).
 
-    The caller invokes this when the registry write declined after a
-    successful teardown: the harness record goes back, so the refusal's
-    "nothing was removed" is true of every store. Raises on a failed
-    restore so a half-removal never reads as a clean one.
+    Called when the registry write declined after teardown, so the
+    refusal's "nothing was removed" stays true of every store. Raises
+    on a failed restore: a half-removal never reads as a clean one.
     """
     if not lines:
         return
@@ -1063,12 +1051,7 @@ def restore_session_index_entries(
 def capture_for_rm_rollback(
     session_id: str, *, session_index_path: Optional[Path] = None
 ) -> list:
-    """Snapshot the index lines a teardown will drop, or refuse the removal.
-
-    Raises DispatchAskError (exit 1) when the read fails: an unreadable
-    snapshot is a rollback nobody can promise, so the removal refuses
-    before any store is touched.
-    """
+    """Snapshot the index lines a teardown will drop, or refuse (exit 1)."""
     try:
         return capture_session_index_entries(
             session_id, session_index_path=session_index_path
@@ -1080,22 +1063,10 @@ def capture_for_rm_rollback(
         ) from exc
 
 
-def restore_after_declined_write(
-    lines: list, *, session_index_path: Optional[Path] = None
-) -> None:
-    """Put the snapshot back after a declined write; raises on failure."""
-    restore_session_index_entries(lines, session_index_path=session_index_path)
-
-
 def teardown_session_index(
     session_id: str, *, session_index_path: Optional[Path] = None
 ) -> Optional[tuple]:
-    """Drop the session's index record: None on success, (message, exit) on failure.
-
-    Record-only: the rollout files are never touched. An already-absent
-    record is idempotent success, so a manually-cleaned index never
-    wedges ``fno agents rm``.
-    """
+    """Drop the index record: None on success, else (message, exit_code)."""
     try:
         removed = remove_session_index_entry(
             session_id, session_index_path=session_index_path

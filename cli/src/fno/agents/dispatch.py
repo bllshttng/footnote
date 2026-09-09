@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from fno.agents.dispatch_errors import DispatchAskError
 from fno.agents.rust_spawn import _codex_thread_spawn, _opencode_serve_spawn
 from typing import (
     TYPE_CHECKING,
@@ -407,9 +408,6 @@ _PROVABLY_LIVE_WINDOW_SEC = 3600.0
 
 
 
-# Re-exported: every existing importer keeps its import site, and harness
-# modules raise the SAME type without importing dispatch itself.
-from fno.agents.dispatch_errors import DispatchAskError
 
 
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
@@ -4454,7 +4452,7 @@ def rm_agent(
                 )
             except (OSError, RegistryVersionError) as exc:
                 if captured_index_lines:
-                    codex_mod.restore_after_declined_write(captured_index_lines)
+                    codex_mod.restore_session_index_entries(captured_index_lines)
                 events.emit(
                     "agent_removed",
                     name=name,
@@ -4472,7 +4470,7 @@ def rm_agent(
                 ) from exc
             if not registry_changed:
                 if captured_index_lines:
-                    codex_mod.restore_after_declined_write(captured_index_lines)
+                    codex_mod.restore_session_index_entries(captured_index_lines)
                 row_removed = decline_reason and decline_reason[0] == "row_removed"
                 events.emit(
                     "agent_removed",
