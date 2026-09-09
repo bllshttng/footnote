@@ -82,7 +82,7 @@ One session found a completed, validated plan this way twelve minutes after the 
 
 The general rule: `last_message_at` measures mail, not work.
 
-A subagent fails the same way and gives you less to read. One finished at 23:13 and again at 23:22, and its result reached the caller at 23:40. By then the caller had read its listing row as `idle`, called it wedged, sent it a nudge to finish, and stopped it. The nudge did nothing, because the work was already done. Silence after a nudge reads as proof of a wedge and is not.
+A subagent fails the same way and gives you less to read. One finished at 23:13 and again at 23:22, and both results reached the caller at 23:40. In between, the caller read its listing row as `idle`, called it wedged, nudged it, and stopped it. The stop did not lose the results. Whether the nudge caused the second finish is not recoverable from the caller's own records, and that gap is part of the lesson.
 
 `idle` in an agent listing means "not running a tool right now". It does not separate finished-and-undelivered from stuck. Read what the worker produced before you call it wedged. For a spawned worker that is its transcript. For a subagent there is no equivalent reader, which is the gap.
 
@@ -150,7 +150,7 @@ The shapes, each measured:
 
 **A refusal exits 0.** The spawn gate writes its refusal to stdout as JSON and still exits 0: `{"status": "refused", "reason": "queue_timeout", "max_live": 30, ...}` followed by `[exited with code 0]`.
 
-**A guard that lists a wrong value as legal lets it pass.** One arm printed `main:pending` every tick for a session. It read the commit status API. Its guard allowed `success|pending|failure|error` and anything else became UNREADABLE, so a permanently wrong value passed as a legal one. This repo publishes check-runs, not commit statuses, and the status API returns `state` pending with zero statuses forever. Measured directly it read `{"state":"pending","total":0}` while the check-runs API read 21 success and 6 skipped, none failing and none running. Zero statuses is the tell: a ref with no statuses is not pending, it is unmeasured by that API.
+**A guard that lists a wrong value as legal lets it pass.** A king wrote this arm for one session. It is not shipped machinery, so do not go looking for the file. That arm read the commit status API and printed `main:pending` every tick. Its guard allowed `success|pending|failure|error` and made anything else UNREADABLE, so a permanently wrong value passed as a legal one. This repo publishes check-runs, not commit statuses, and the status API returns `state` pending with zero statuses forever. Measured directly it read `{"state":"pending","total":0}` while the check-runs API read 21 success and 6 skipped, none failing and none running. Zero statuses is the tell: a ref with no statuses is not pending, it is unmeasured by that API. Every shipped caller of that endpoint reads `.statuses[]` rather than the top-level `state`, which is the correct read. The hand-rolled arm was the only thing that got it wrong.
 
 **A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
@@ -405,7 +405,7 @@ Grep the name and you can still miss one. A third copy lived in `scripts/ci/chec
 
 **Specimen.** The standing two-review law says a scoped fix and its verify is not a round. A reviewer was asked to verify a three-commit fix delta and post dispositions. It verified all three fixes and then refused to emit, because the branch diff was 456 lines and it had read the delta. The script's own header says running it over unresolved findings "makes the gate the whole board trusts tell a lie, and nothing downstream can tell that apart from a real pass." The reviewer was right to refuse. The honest action and the mechanically available action were different actions.
 
-**The half that costs more.** A findings chain is keyed by branch NAME. That reviewer had worked from a locally fetched copy. Its rows recorded a review-only branch name, while the PR's own chain carried six findings of its own. `_coverage_gate.py` builds `findings_by_key` from the chain, so disposing findings against the wrong chain is inert rather than wrong. That is worse, because it looks like progress. Three review rounds landed where nothing read them.
+**The half that costs more.** A findings chain is keyed by branch NAME. A DIFFERENT reviewer on the same PR worked from a locally fetched copy, so its attestation recorded a review-only branch name. That row carried four findings the PR's own chain never saw, while that chain carried six of its own. `_coverage_gate.py` builds `findings_by_key` from the chain, so disposing findings against the wrong chain is inert rather than wrong. That is worse, because it looks like progress.
 
 Review on the PR's own branch, in a worktree that has it checked out. A review done on a fetched copy is invisible to the gate forever.
 
