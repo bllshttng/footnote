@@ -235,3 +235,4 @@
 {"expect":"valid","reason":"operator_notice with pointer","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"python","data":{"title":"operator questions","body":"3 open operator questions.","pointer":"fno inbox outstanding"}}}
 {"expect":"valid","reason":"operator_notice without the optional pointer","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"daemon","data":{"title":"t","body":"b"}}}
 {"expect":"invalid","reason":"operator_notice missing body","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"python","data":{"title":"t"}}}
+{"expect":"valid","reason":"control_plane_tick retire arm row carrying the interval the loop enforces (x-d354)","event":{"ts":"2026-09-09T12:00:00Z","type":"control_plane_tick","source":"daemon","data":{"arm":"retire","scheduler":"daemon","acted":1,"interval_s":300,"skip_reason":null,"detail":null}}}

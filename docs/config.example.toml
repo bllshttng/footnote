@@ -283,6 +283,8 @@ auto_register_sessions = false
 happy_routed_panes = false
 # Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.
 retire_grace_s = 900
+# Seconds between runs of the daemon's retirement sweep (default 300, a third of the retire grace). The Rust resolver clamps this under a third of agents.retire_grace_s: the interval must be a fraction of the grace, never a multiple, so an eligible row never waits past the grace window it retires inside. Unset, unparseable, or below the 5s daemon tick resolves to the default. The `retire` row in `fno agents status` carries the value the loop enforces.
+retire_interval_s = 300
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
 max_live = 3
 # Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.
