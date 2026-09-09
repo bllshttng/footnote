@@ -635,7 +635,8 @@ def _component_convergence(
 
     cargo_bin = _cargo_bin_path()
     report = _update._component_verdict(
-        src, subtree, cargo_bin.parent if cargo_bin else Path.home() / ".cargo" / "bin",
+        src, subtree,
+        Path(cargo_bin).parent if cargo_bin else Path.home() / ".cargo" / "bin",
         Path(verdict_bin),
         python_tool={
             "rev": marker,
@@ -4056,7 +4057,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         deployed_config_keys=deployed_config_keys,
         source_config_keys=source_config_keys,
         content_drift_count=content_drift,
-        component_statuses=[(c.get("component"), c.get("status")) for c in components],
+        component_statuses=[
+            (str(c.get("component")), str(c.get("status"))) for c in components
+        ],
     )
     result["components"] = components
     # Advisory front-door fields (x-c267); never change status/exit.
