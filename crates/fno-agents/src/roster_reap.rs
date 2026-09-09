@@ -25,11 +25,12 @@
 //!
 //! The scope (`agents.reap.roster_scope`) names the population that may
 //! retire, as an operator setting: `off` retires nothing, `provenanced`
-//! (the default) is the chain above, `all` widens to resolved rows with
-//! open work. One rule sits under every value: a row that resolves to no
-//! fno node is never retirable at any scope. An operator session names no
-//! fno node, so a hand-started session is unreachable by construction, not
-//! by default value, and a wrong config cannot reach it.
+//! (the default) is the chain above, `all` widens to rows fno itself
+//! spawned (sessions or registry provenance) whose work is open. One rule
+//! sits under every value: a row that resolves to no fno node is never
+//! retirable at any scope. An operator session names no fno node, so a
+//! hand-started session is unreachable by construction, not by default
+//! value, and a wrong config cannot reach it.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -265,10 +266,12 @@ pub fn run(
             continue;
         }
         // The basis names why the row may retire. `all` widens the
-        // population to resolved rows with open work; `provenanced` keeps
-        // them. NoProvenance keeps at EVERY scope: an operator session
-        // names no fno node, so this keep is by construction, not by
-        // default value.
+        // population to rows fno ITSELF spawned (the sessions join or the
+        // registry) whose work is open; a name pattern or a transcript
+        // mention is exactly how a hand-started operator session acquires a
+        // phantom node, so weak provenance keeps even at `all`.
+        // NoProvenance keeps at EVERY scope: an operator session names no
+        // fno node, so this keep is by construction, not by default value.
         let basis: String = match &verdict.work {
             WorkState::AllDone { nodes } => format!(
                 "every named node done: {} (via {})",
@@ -280,7 +283,12 @@ pub fn run(
                     .unwrap_or("sessions")
             ),
             WorkState::Open { node: n, status }
-                if scope == crate::agents_config::RosterScope::All =>
+                if scope == crate::agents_config::RosterScope::All
+                    && matches!(
+                        verdict.route.source,
+                        Some(crate::node_route::NodeSource::Sessions)
+                            | Some(crate::node_route::NodeSource::Registry)
+                    ) =>
             {
                 format!(
                     "open work {n} {status} at roster scope all (via {})",
@@ -721,15 +729,64 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // `all` is exercised beyond the default: an OPEN-node row quiet past the
-    // grace retires at `all` and is kept at `provenanced`.
+    // `all` is exercised beyond the default - but only for rows fno itself
+    // spawned. A row whose open node was resolved by NAME (a pattern match,
+    // exactly how a hand-started session acquires a phantom node) stays
+    // kept even at `all`; the same open row resolved by the sessions join
+    // retires.
     #[test]
-    fn all_scope_retires_an_open_node_row_the_default_keeps() {
-        let dir = tmpdir("scope-all");
+    fn all_scope_keeps_a_name_provenanced_open_node_row() {
+        let dir = tmpdir("scope-all-weak");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
         let mut g = graph_done("x-aaaa");
         g.statuses.insert("x-aaaa".into(), "in_progress".into());
+        let at_all = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows.clone()),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(at_all.retired.is_empty(), "{at_all:?}");
+        assert!(at_all.kept[0].reason.contains("open work"), "{at_all:?}");
+        // The same row retires at the default too - done work needs no
+        // spawn provenance beyond the cascade - so this is `all`-only
+        // slack, not a default change.
+        g.statuses.insert("x-aaaa".into(), "done".into());
+        let at_default = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(at_default.retired.len(), 1, "{at_default:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The `all` widening fires for a sessions-provenanced open row: the
+    // reverse join names the session, its node is open, the transcript is
+    // quiet past the grace.
+    #[test]
+    fn all_scope_retires_a_spawn_provenanced_open_node_row() {
+        let dir = tmpdir("scope-all-sessions");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-aaaa".into(), "in_progress".into());
+        g.index
+            .insert("sid-1".into(), vec![("x-aaaa".into(), "do".into())]);
         let at_all = run(
             &no_home(),
             900,
@@ -747,6 +804,11 @@ mod tests {
             at_all.retired[0].reason.contains("roster scope all"),
             "{at_all:?}"
         );
+        assert!(
+            at_all.retired[0].reason.contains("via sessions"),
+            "{at_all:?}"
+        );
+        // The identical world is kept at the default: this is the widening.
         let at_default = run(
             &no_home(),
             900,

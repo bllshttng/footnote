@@ -385,19 +385,20 @@ pub enum RosterScope {
 pub const DEFAULT_ROSTER_SCOPE: RosterScope = RosterScope::Provenanced;
 
 fn table_roster_scope(t: &toml::Table) -> Option<RosterScope> {
-    let raw = t
+    let value = t
         .get("agents")?
         .as_table()?
         .get("reap")?
         .as_table()?
-        .get("roster_scope")?
-        .as_str()?
-        .trim()
-        .to_ascii_lowercase();
-    // An unknown PRESENT value degrades here, in the file that holds it, so
-    // it cannot fall through to a lower-precedence file and resurrect a
-    // wider scope.
-    match raw.as_str() {
+        .get("roster_scope")?;
+    // A PRESENT value that cannot be honored - an unknown string, or a
+    // non-string scalar - degrades here, in the file that holds it, so it
+    // cannot fall through to a lower-precedence file and resurrect a wider
+    // scope behind a mistyped local one.
+    let Some(raw) = value.as_str() else {
+        return Some(DEFAULT_ROSTER_SCOPE);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
         "off" => Some(RosterScope::Off),
         "all" => Some(RosterScope::All),
         "provenanced" => Some(RosterScope::Provenanced),
@@ -967,6 +968,12 @@ mod tests {
         // and must not widen or disable the sweep.
         assert_eq!(
             read_roster_scope("[agents.reap]\nroster_scope = \"banana\"\n"),
+            Some(DEFAULT_ROSTER_SCOPE)
+        );
+        // A present non-string value degrades the same way: absence is the
+        // only shape that reads a lower-precedence file.
+        assert_eq!(
+            read_roster_scope("[agents.reap]\nroster_scope = 7\n"),
             Some(DEFAULT_ROSTER_SCOPE)
         );
     }

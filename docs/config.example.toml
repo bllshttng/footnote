@@ -331,7 +331,7 @@ harness = {}
 retain_days = 7
 
 [agents.reap]
-# Which rows the roster sweep may retire: "off" retires nothing, "provenanced" (the default) only rows whose provenance resolves to fno and whose work is done, "all" widens to resolved rows with open work. One rule no value can cross: a row that resolves to no fno node is never retirable at any value, including "all" - a session the operator started by hand is safe by construction, not by default value. A misspelled value degrades to the default and is named by `fno config doctor`.
+# Which rows the roster sweep may retire: "off" retires nothing, "provenanced" (the default) only rows whose provenance resolves to fno and whose work is done, "all" widens to rows fno itself spawned (sessions or registry provenance) with open work. One rule no value can cross: a row that resolves to no fno node is never retirable at any value, including "all" - a session the operator started by hand is safe by construction, not by default value. A present value that cannot be honored degrades in place to the default and is named by `fno config doctor`.
 roster_scope = "provenanced"
 
 [agents.codex]

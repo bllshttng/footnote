@@ -40,10 +40,10 @@ class ReapBlock(BaseModel):
     ``roster_scope`` names which claude rows the sweep may retire:
     ``off`` retires nothing, ``provenanced`` (the default) only rows whose
     provenance resolves to fno and whose work is done, ``all`` widens to
-    resolved rows with open work. One rule no value can cross: a row that
-    resolves to no fno node is never retirable at any value, including
-    ``all`` - an operator's hand-started session is safe by construction,
-    not by default value.
+    rows fno itself spawned (sessions or registry provenance) with open
+    work. One rule no value can cross: a row that resolves to no fno node
+    is never retirable at any value, including ``all`` - an operator's
+    hand-started session is safe by construction, not by default value.
     """
 
     model_config = ConfigDict(extra="ignore")
