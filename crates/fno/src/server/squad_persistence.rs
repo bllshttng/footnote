@@ -60,9 +60,10 @@ impl Core {
     pub(super) fn persist_result(
         &mut self,
         result: std::io::Result<crate::squad_store::SnapshotBatch>,
-    ) {
+    ) -> bool {
         match result {
             Ok(batch) => {
+                let current = batch.conflicts.is_empty();
                 self.store_generations.extend(batch.generations);
                 if !batch.conflicts.is_empty() {
                     eprintln!(
@@ -70,8 +71,12 @@ impl Core {
                         batch.conflicts.join(", ")
                     );
                 }
+                current
             }
-            Err(error) => self.persist_degraded(&error),
+            Err(error) => {
+                self.persist_degraded(&error);
+                false
+            }
         }
     }
 

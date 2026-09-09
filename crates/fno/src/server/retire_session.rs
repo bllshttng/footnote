@@ -51,8 +51,12 @@ impl Core {
                 flow = Flow::Shutdown;
             }
         }
-        let retired = match crate::squad_store::retire_session_members(&harness, &session_id) {
-            Ok(retired) => retired,
+        let (retired, batch) = match crate::squad_store::retire_session_members_with_generations(
+            Some(&self.store_generations),
+            &harness,
+            &session_id,
+        ) {
+            Ok(outcome) => outcome,
             Err(error) => {
                 let _ = reply.send(ServerMsg::Err {
                     code: err_code::STORE_WRITE_FAILED,
@@ -61,6 +65,7 @@ impl Core {
                 return Flow::Continue;
             }
         };
+        self.persist_result(Ok(batch));
         self.reload_members_from_store();
         let _ = reply.send(ServerMsg::SessionRetired {
             retired,

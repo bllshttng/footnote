@@ -715,7 +715,7 @@ pub fn upsert_with_generations(
     // lives here: a caller passing both minted a row that matched by name
     // while its key-keyed twin stayed alive.
     let key = if name.is_empty() { key } else { "" };
-    mutate_generations(expected, &[], |squads| {
+    mutate_generations(expected, &[], false, |squads| {
         let existing = squads.iter().find(|s| same_squad(s, name, key));
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -756,7 +756,7 @@ pub fn set_tab_specs_with_generations(
     name: &str,
     tab_specs: &[StoredTabSpec],
 ) -> io::Result<SnapshotBatch> {
-    mutate_generations(expected, &[], |squads| {
+    mutate_generations(expected, &[], false, |squads| {
         if let Some(s) = squads.iter_mut().find(|s| s.name == name) {
             s.tab_specs = tab_specs.to_vec();
         } else {
@@ -890,7 +890,7 @@ pub fn remove_with_generations(
     key: &str,
 ) -> io::Result<SnapshotBatch> {
     let protected: Vec<_> = generation_key(name, key).into_iter().collect();
-    mutate_generations(expected, &protected, |squads| {
+    mutate_generations(expected, &protected, false, |squads| {
         squads.retain(|s| !same_squad(s, name, key))
     })
 }
@@ -1624,10 +1624,18 @@ pub fn prune_with_evidence(
     decide: impl Fn(&StoredSquad) -> PruneDecision,
     evidence: &MemberEvidence,
 ) -> io::Result<PruneOutcome> {
+    prune_with_evidence_with_generations(None, decide, evidence).map(|(outcome, _)| outcome)
+}
+
+pub fn prune_with_evidence_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
+    decide: impl Fn(&StoredSquad) -> PruneDecision,
+    evidence: &MemberEvidence,
+) -> io::Result<(PruneOutcome, SnapshotBatch)> {
     let mut out = PruneOutcome::default();
-    mutate_squads_file(|sf| {
-        let mut kept = Vec::with_capacity(sf.squads.len());
-        for mut sq in sf.squads.drain(..) {
+    let batch = mutate_generations(expected, &[], true, |squads| {
+        let mut kept = Vec::with_capacity(squads.len());
+        for mut sq in squads.drain(..) {
             let fate = classify_squad_with_evidence(&sq, &decide, evidence);
             if matches!(fate.decision, PruneDecision::Prune) {
                 out.members_reaped += fate.reaped_if_kept;
@@ -1647,9 +1655,9 @@ pub fn prune_with_evidence(
             out.members_kept_unknown += fate.kept_unknown;
             kept.push(sq);
         }
-        sf.squads = kept;
+        *squads = kept;
     })?;
-    Ok(out)
+    Ok((out, batch))
 }
 
 /// Heal duplicate rows that accumulated under the old random-mint identity
@@ -1798,7 +1806,7 @@ pub fn rename_with_generations(
     members: &[StoredMember],
 ) -> io::Result<SnapshotBatch> {
     let protected = [format!("name:{old}"), format!("name:{new}")];
-    mutate_generations(expected, &protected, |squads| {
+    mutate_generations(expected, &protected, false, |squads| {
         let existing = squads.iter().find(|s| s.name == old || s.name == new);
         let created_at = existing
             .map(|s| s.created_at.clone())
@@ -1985,9 +1993,26 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
 fn mutate_generations(
     expected: Option<&std::collections::HashMap<String, u64>>,
     protected: &[String],
+    protect_all: bool,
     f: impl FnOnce(&mut Vec<StoredSquad>),
 ) -> io::Result<SnapshotBatch> {
     mutate_file(|file| {
+        let all_protected;
+        let protected = if protect_all {
+            all_protected = squads_by_identity(file)
+                .into_keys()
+                .chain(
+                    expected
+                        .into_iter()
+                        .flat_map(|expected| expected.keys().cloned()),
+                )
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            all_protected.as_slice()
+        } else {
+            protected
+        };
         let conflicts: Vec<_> = match expected {
             Some(expected) => protected
                 .iter()
@@ -2019,8 +2044,16 @@ fn mutate_generations(
 /// A resume epoch that re-adds the same native id as a NEW member is real new
 /// membership and is not hidden by the old tombstone.
 pub fn retire_session_members(harness: &str, session_id: &str) -> io::Result<usize> {
+    retire_session_members_with_generations(None, harness, session_id).map(|(retired, _)| retired)
+}
+
+pub fn retire_session_members_with_generations(
+    expected: Option<&std::collections::HashMap<String, u64>>,
+    harness: &str,
+    session_id: &str,
+) -> io::Result<(usize, SnapshotBatch)> {
     let mut retired = 0usize;
-    mutate(|squads| {
+    let batch = mutate_generations(expected, &[], false, |squads| {
         for squad in squads {
             for member in &mut squad.members {
                 let matches = member.harness.as_deref() == Some(harness)
@@ -2033,7 +2066,7 @@ pub fn retire_session_members(harness: &str, session_id: &str) -> io::Result<usi
             }
         }
     })?;
-    Ok(retired)
+    Ok((retired, batch))
 }
 
 /// The lifecycle-collection twin of [`mutate`] (x-7561): the SAME locked atomic

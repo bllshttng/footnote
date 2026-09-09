@@ -7770,7 +7770,8 @@ impl Core {
         let live_cwds: Vec<String> = self.panes.values().map(|p| p.cwd.clone()).collect();
         let origin_exists = |path: &str| Path::new(path).exists();
         let now = crate::squad_store::now_epoch_secs();
-        let outcome = crate::squad_store::prune_with_evidence(
+        let outcome = crate::squad_store::prune_with_evidence_with_generations(
+            Some(&self.store_generations),
             |squad| {
                 crate::squad_store::prune_decision_with_evidence(
                     squad,
@@ -7784,7 +7785,11 @@ impl Core {
             &evidence,
         );
         match outcome {
-            Ok(outcome) => {
+            Ok((outcome, batch)) => {
+                if !self.persist_result(Ok(batch)) {
+                    self.notice(client_id, "sweep skipped: squad store changed");
+                    return;
+                }
                 self.reload_members_from_store();
                 // Refused restore placeholders are positive dead markers even
                 // when their registry row is gone. Remove their visible panes

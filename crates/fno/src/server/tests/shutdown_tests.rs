@@ -223,7 +223,7 @@ fn stale_local_rename_cannot_replace_a_newer_squad() {
 }
 
 #[test]
-fn store_reload_refreshes_the_shutdown_generation_baseline() {
+fn member_only_store_reload_preserves_the_topology_generation_conflict() {
     let _scratch = StoreScratch::new("shutdown-capture-store-reload");
     let (mut core, _) = template_core();
     core.restored = true;
@@ -233,10 +233,40 @@ fn store_reload_refreshes_the_shutdown_generation_baseline() {
     core.reload_members_from_store();
     core.session.squad_mut(1).unwrap().tabs[0].name = Some("after-reload".into());
 
-    assert!(core.capture_topology_now());
+    assert!(!core.capture_topology_now());
     let stored = crate::squad_store::load();
     let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
-    assert_eq!(squad.tab_trees[0].tab_name.as_deref(), Some("after-reload"));
+    assert_eq!(squad.tab_trees[0].tab_name, None);
+    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
+fn local_member_prune_refreshes_the_shutdown_generation_baseline() {
+    let _scratch = StoreScratch::new("shutdown-capture-local-prune");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    core.squad_members.insert(1, vec![deadbeef_member()]);
+    core.persist_stored("sq", "", &["/a".into()], &[deadbeef_member()]);
+    let evidence = crate::squad_store::MemberEvidence::from_sets(
+        std::collections::HashSet::new(),
+        ["deadbeef".to_string()].into_iter().collect(),
+    );
+    let (_, batch) = crate::squad_store::prune_with_evidence_with_generations(
+        Some(&core.store_generations),
+        |_| crate::squad_store::PruneDecision::Keep,
+        &evidence,
+    )
+    .unwrap();
+    core.persist_result(Ok(batch));
+    core.reload_members_from_store();
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("after-prune".into());
+
+    assert!(core.capture_topology_now());
+    let squad = crate::squad_store::load().squads.remove(0);
+    assert!(squad.members.is_empty());
+    assert_eq!(squad.tab_trees[0].tab_name.as_deref(), Some("after-prune"));
 }
 
 #[test]
