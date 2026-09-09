@@ -998,18 +998,11 @@ pub(crate) fn cascade_harness_session_result_with(
 }
 
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
-    let dir = if crate::claude_roster::isolated_account_dirs().is_empty() {
-        None
-    } else {
-        let snapshot = crate::claude_roster::read_all_agents_union();
-        crate::claude_roster::removal_config_dir(&snapshot, short_id, None)?
-    };
+    let dir = crate::claude_roster::removal_config_dir_for_short_id(short_id)?;
     run_claude_rm_in(dir.as_deref(), short_id)
 }
 
-/// `claude rm` against ONE account root. `None` is the ambient root; the
-/// dir pins `CLAUDE_CONFIG_DIR` so an isolated account's row is removed in
-/// the store that actually holds it.
+/// Run `claude rm` against one account root; `None` means ambient.
 pub(crate) fn run_claude_rm_in(
     config_dir: Option<&std::path::Path>,
     short_id: &str,

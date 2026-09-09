@@ -388,6 +388,16 @@ pub fn removal_config_dir(
         .ok_or_else(|| format!("claude account root '{account}' is not configured"))
 }
 
+/// Resolve the account root for a legacy short-id-only removal call.
+pub fn removal_config_dir_for_short_id(
+    short_id: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if isolated_account_dirs().is_empty() {
+        return Ok(None);
+    }
+    removal_config_dir(&read_all_agents_union(), short_id, None)
+}
+
 /// Parse `[[providers.records]]` / `[[accounts.records]]` entries carrying an
 /// isolated `config_dir`, as `(account_id, dir)` with `~/` expanded. Malformed
 /// records are skipped, never a panic.

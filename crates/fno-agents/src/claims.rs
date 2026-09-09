@@ -3576,60 +3576,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_session_absent_releases_an_unexpired_node_claim_with_a_live_ambient_pid() {
-        let now = now_ms();
-        let mut rec = session_record(std::process::id() as i32, now, Some(now + 3_600_000));
-        rec.key = "node:x-absent".into();
-        rec.pid_provenance = Some("ambient".into());
-        let witness: SessionWitness = &|_| SessionLiveness::Absent;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Stale, basis::SESSION_ABSENT)
-        );
-    }
-
-    #[test]
-    fn claim_session_absent_does_not_turn_unresolved_into_early_release() {
-        let now = now_ms();
-        let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
-        rec.key = "node:x-unresolved".into();
-        rec.pid_provenance = Some("ambient".into());
-        let witness: SessionWitness = &|_| SessionLiveness::Unresolved;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Suspect, basis::PID_ABSENT)
-        );
-    }
-
-    #[test]
-    fn claim_session_absent_keeps_an_unexpired_offhost_claim_protected() {
-        let now = now_ms();
-        let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
-        rec.key = "node:x-offhost".into();
-        rec.host = "remote-host".into();
-        rec.machine_id = Some("remote-machine".into());
-        rec.pid_provenance = Some("ambient".into());
-        let witness: SessionWitness = &|_| SessionLiveness::Absent;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Suspect, basis::OFFHOST)
-        );
-    }
-
-    #[test]
-    fn claim_session_absent_skips_unresolved_grace_after_expiry() {
-        let now = now_ms();
-        let mut rec = session_record(dead_pid() as i32, now - 1, Some(now - 1));
-        rec.key = "node:x-expired-absent".into();
-        rec.pid_provenance = Some("ambient".into());
-        let witness: SessionWitness = &|_| SessionLiveness::Absent;
-        assert_eq!(
-            classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
-            (ClaimState::Stale, basis::SESSION_ABSENT)
-        );
-    }
-
-    #[test]
     fn expired_unresolved_becomes_reapable_after_grace() {
         // The design refusal this node encodes: unknown is reapable by policy
         // after a bounded wait, never held for a proof that never arrives.
@@ -5033,3 +4979,7 @@ mod tests {
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]
 mod reservation_tests;
+
+#[cfg(test)]
+#[path = "claims_session_absence_tests.rs"]
+mod claims_session_absence_tests;
