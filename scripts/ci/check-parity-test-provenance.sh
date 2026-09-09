@@ -29,8 +29,9 @@
 # that were already deleted. The declaration makes the difference machine
 # readable, and the reverse assertion is what catches the next one.
 #
-# The header carries NO node id and NO PR number: scripts/ci/check-no-internal
-# -refs.sh fails on them. The oracle is the identity.
+# The header carries NO node id and NO PR number. The internal-refs gate fails
+# on the node id. The PR number is house style, and no gate catches it. The
+# oracle is the identity.
 #
 # The pass is NOT silent. It prints one line per file naming the stage and the
 # RESOLVED oracle, because a green with no positive marker is exactly the

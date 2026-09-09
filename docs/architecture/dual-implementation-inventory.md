@@ -135,7 +135,7 @@ The symbol form is the ordinary Python case. The module file survives the port, 
 
 The check is two-sided on purpose. A `characterization` file must name an oracle that NO LONGER RESOLVES. The leg was deleted, and the golden stands in for it. A `differential` file must name one that DOES resolve. A live second implementation is the only reason to run both legs. Either way the assertion has a positive marker rather than an absence. Either way it fails loudly the moment a port finishes or a new dual implementation appears.
 
-The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on them. The oracle is the identity. A path names a whole-file leg, a symbol names a leg inside a surviving module, and resolution is what both arms of the check test.
+The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on the node id. The PR number is house style, and no gate catches it. The oracle is the identity. A path names a whole-file leg, a symbol names a leg inside a surviving module, and resolution is what both arms of the check test.
 
 ## Sequence
 
