@@ -46,7 +46,7 @@ In any Claude Code session:
 /plugin install fno@footnote
 ```
 
-The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `brew install bllshttng/fno/fno`, or `cargo install fno`. Full options: the [README](../README.md).
+The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `brew install bllshttng/fno/fno`, or `cargo install fno`. Every one of these channels lands the same complete set: the Rust `fno` front door, the Python CLI (`fno-py`), and the three agent binaries. Full options: the [README](../README.md).
 
 ### Windows (WSL2)
 
@@ -66,7 +66,7 @@ Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.
 fno --version          # prints a version
 ```
 
-If `fno` is "command not found", you have the Python CLI (`fno-py`) but not the Rust **`fno` front door**. `fno` owns the mux and terminal command and bootstraps the Python CLI. Install it with `cargo install fno` or, from a clone, `fno doctor update --rust`. Both commands build Rust, so they need a **Rust toolchain** (`rustup`). A Python-only machine installed through `uv` or `pip` must add Rust first. When the front door is missing, a Claude Code session also reminds you. Until it is installed, reach the CLI directly as `fno-py`.
+If `fno` is "command not found", your install predates the complete payload or is a source/editable dev build (those are development artifacts and carry no binaries). Every supported channel - wheel, plugin postinstall, `fno.sh`, Homebrew - ships the Rust **`fno` front door**, which owns the mux and bootstraps the Python CLI. Repair: upgrade to a current release through your channel, or install the front door directly with `cargo install fno` (needs a **Rust toolchain**, `rustup`). When the front door is missing, a Claude Code session also reminds you. Until it is installed, reach the CLI directly as `fno-py`.
 
 Inside Claude Code, type `/fno:` and you should see skill autocomplete (`target`, `think`, `blueprint`, ...).
 
