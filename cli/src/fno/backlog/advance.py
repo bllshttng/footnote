@@ -259,21 +259,6 @@ _GATE_REFUSAL_REASONS = {
     EXIT_REGISTRY_SCHEMA: "gate-unavailable",
 }
 
-#: Gate exits whose refusing condition is the same for every child of a pass
-#: (load, RAM, the shared queue, the king's share, a broken registry).
-#: EXIT_PROVIDER_CAP is absent on purpose: 78 names the attempted child's own
-#: route provider, so siblings routed elsewhere stay dispatchable.
-_GLOBAL_REFUSAL_EXITS = frozenset(
-    {
-        EXIT_QUEUE_TIMEOUT,
-        EXIT_NO_WAIT,
-        EXIT_RAM_REFUSED,
-        EXIT_LOAD_REFUSED,
-        EXIT_KING_SHARE,
-        EXIT_REGISTRY_SCHEMA,
-    }
-)
-
 
 @dataclass(frozen=True)
 class GateRefusal:
@@ -1593,11 +1578,9 @@ def _spawn_worker(
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
         if proc.returncode == EXIT_PROVIDER_CAP:
-            # Typed capacity refusal: retry_at rides the exception to the skip.
             gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
             exc = SpawnQueueRefused(
-                f"fno agents spawn exited {EXIT_PROVIDER_CAP} (slot queue refused): "
-                f"{gate_detail}",
+                f"fno agents spawn exited {EXIT_PROVIDER_CAP} (slot queue refused): {gate_detail}",
                 retry_at=_slot_queue_retry_at(proc.stdout or ""),
             )
             exc.detail = gate_detail
@@ -3485,13 +3468,8 @@ def advance(
         refusal = gate_refusal(exc)
         if refusal is None:
             return failed(node_id, str(exc))
-        return skip(
-            refusal.reason,
-            node_id=node_id,
-            detail=refusal.detail,
-            retry_at=refusal.retry_at,
-            exit_code=refusal.exit_code,
-        )
+        return skip(refusal.reason, node_id=node_id, detail=refusal.detail,
+                    retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(node_id, str(exc))
@@ -3839,17 +3817,12 @@ def _converge_one(
         except SpawnAlreadyRunning:
             return skip("already-claimed")
         except SpawnError as exc:
-            # A machine-scoped gate refusal is "not now" (the row stays ready,
-            # no strike); a node fault stays failed.
+            # Machine-scoped -> skip (no strike); node fault -> failed.
             refusal = gate_refusal(exc)
             if refusal is None:
                 return failed(str(exc))
-            return skip(
-                refusal.reason,
-                detail=refusal.detail,
-                retry_at=refusal.retry_at,
-                exit_code=refusal.exit_code,
-            )
+            return skip(refusal.reason, detail=refusal.detail,
+                        retry_at=refusal.retry_at, exit_code=refusal.exit_code)
         except Exception as exc:  # noqa: BLE001
             return failed(str(exc))
 
@@ -4064,6 +4037,25 @@ class AdvanceEpicResult:
     all_done: bool = False
     dispatched: tuple = ()  # node ids successfully dispatched this pass
     child_results: tuple = ()  # AdvanceResult per attempted child
+
+    def receipt(self) -> dict:
+        """The epic-advance --json receipt. A failed child carries the actual
+        error text in ``detail`` (``reason`` is the generic category), so the
+        mission drain's defer reason names what broke."""
+        return {
+            "epic_id": self.epic_id,
+            "error": self.error,
+            "activated": self.activated,
+            "deactivated": self.deactivated,
+            "all_done": self.all_done,
+            "dispatched": list(self.dispatched),
+            "children": [
+                {"node_id": r.node_id, "decision": r.decision,
+                 "reason": r.reason, "detail": r.detail,
+                 "short_id": r.short_id, "substrate": r.substrate}
+                for r in self.child_results
+            ],
+        }
 
 
 def _ready_leaf_children(epic_id: str) -> list[dict]:
@@ -4378,12 +4370,11 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
-        if res.decision == "skipped" and res.exit_code in _GLOBAL_REFUSAL_EXITS:
-            # The first global refusal ends the pass: the condition is
-            # identical for every remaining child, so attempting them only
-            # manufactures one refusal per child. A provider-scoped 78 skip
-            # falls through and keeps trying (siblings on other routes may
-            # still dispatch). Name every child the pass did NOT try.
+        if res.decision == "skipped" and res.exit_code not in (None, EXIT_PROVIDER_CAP):
+            # A global refusal (load, RAM, queue, registry) ends the pass: the
+            # condition is identical for every remaining child. A 78 skip is
+            # provider-scoped and falls through: siblings on other routes may
+            # still dispatch. Name every child the pass did NOT try.
             for remaining in children[idx + 1:]:
                 _emit(
                     EVENT_SKIPPED,

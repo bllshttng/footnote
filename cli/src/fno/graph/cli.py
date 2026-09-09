@@ -8962,26 +8962,7 @@ def _run_advance_epic(
         raise typer.Exit(code=0)
 
     if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "epic_id": result.epic_id,
-                    "error": result.error,
-                    "activated": result.activated,
-                    "deactivated": result.deactivated,
-                    "all_done": result.all_done,
-                    "dispatched": list(result.dispatched),
-                    "children": [
-                        {"node_id": r.node_id, "decision": r.decision,
-                         "reason": r.reason, "detail": r.detail,
-                         "short_id": r.short_id,
-                         "substrate": r.substrate}
-                        for r in result.child_results
-                    ],
-                },
-                indent=2,
-            )
-        )
+        typer.echo(json.dumps(result.receipt(), indent=2))
     else:
         if result.error:
             typer.echo(f"epic {result.epic_id}: {result.error}", err=True)

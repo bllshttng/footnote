@@ -251,18 +251,13 @@ def _dispatch_reconcile(
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed")
     except SpawnError as exc:
-        # A machine-scoped gate refusal is a skip naming the gate's own
-        # sentence; a node fault stays failed.
+        # Machine-scoped -> skip naming the gate's own sentence; node fault -> failed.
         _safe_release(dispatch_key, holder, dispatch_root)
         refusal = gate_refusal(exc)
         if refusal is None:
             return failed(str(exc))
-        return skip(
-            refusal.reason,
-            detail=refusal.detail,
-            retry_at=refusal.retry_at,
-            exit_code=refusal.exit_code,
-        )
+        return skip(refusal.reason, detail=refusal.detail,
+                    retry_at=refusal.retry_at, exit_code=refusal.exit_code)
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(str(exc))
