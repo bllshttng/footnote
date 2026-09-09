@@ -369,7 +369,7 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_REAP_RECEIPT_RETAIN_DAYS)
 }
 
-/// Which rows the roster-side sweep may retire (x-17e9). `Provenanced` is
+/// Which rows the roster-side sweep may retire. `Provenanced` is
 /// today's behavior: only rows whose provenance resolves and whose work is
 /// done. `All` widens to resolved rows with open work. `Off` retires nothing.
 /// The one rule no value can cross: a row that resolves to no fno node is
@@ -405,8 +405,8 @@ fn table_roster_scope(t: &toml::Table) -> Option<RosterScope> {
     }
 }
 
-/// Resolve `agents.reap.roster_scope` (x-17e9). An absent key falls through
-/// the precedence chain to the default; an unparseable value degrades to the
+/// Resolve `agents.reap.roster_scope`. An absent key falls through the
+/// precedence chain to the default; an unparseable value degrades to the
 /// default - a config typo widens nothing and disables nothing.
 pub fn roster_scope(cwd: &Path) -> RosterScope {
     resolve(cwd, table_roster_scope).unwrap_or(DEFAULT_ROSTER_SCOPE)
