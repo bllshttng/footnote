@@ -11,7 +11,7 @@
 //! Keeper -> client: `Response(json)`, `IdentifyReply(json)`.
 //!
 //! Requests are one-shot JSON: `{"id": n, "method": ..., "params": {...}}`.
-//! Methods: `read`, `read_strict`, `begin`, `commit`, `op`, `read_archive`.
+//! Methods: `read`, `read_strict`, `begin`, `commit`, `commit_rows`, `op`, `read_archive`.
 //! Responses: `{"id": n, "ok": true, "result": ...}` or
 //! `{"id": n, "ok": false, "error": {"kind": ..., "message": ...}}`.
 //!
@@ -385,6 +385,9 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
+    if method == "commit_rows" {
+        return handle_commit_rows_reply(id, state, &params);
+    }
     let result = match method {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
@@ -616,6 +619,7 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     let entries = graph_store::read_defaulted(&state.graph, false)?;
     Ok(json!({
         "version": version,
+        "base_digests": canonical_row_digests(&entries),
         "entries": entries,
     }))
 }
@@ -641,6 +645,157 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             entries,
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
+            plan_rungs: plan_rung_map(params),
+        },
+        state.lock_timeout,
+    )?;
+    Ok(outcome_json(&outcome))
+}
+
+enum CommitRowsError {
+    Store(StoreError),
+    Conflict(Vec<String>),
+}
+
+impl From<StoreError> for CommitRowsError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+fn handle_commit_rows_reply(id: u64, state: &StoreState, params: &Value) -> Value {
+    match handle_commit_rows(state, params) {
+        Ok(result) => json!({"id": id, "ok": true, "result": result}),
+        Err(CommitRowsError::Conflict(ids)) => err_reply(
+            id,
+            "conflict",
+            format!("graph conflict on {}", ids.join(", ")),
+        ),
+        Err(CommitRowsError::Store(error)) => {
+            err_reply(id, store_err_kind(&error), error.to_string())
+        }
+    }
+}
+
+fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
+    use sha2::Digest as _;
+
+    let mut canonical = entries.to_vec();
+    graph_store::canonicalize_entries(&mut canonical);
+    canonical
+        .iter()
+        .filter_map(|row| {
+            let id = graph_store::entry_id(row)?.to_string();
+            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
+            Some((id, format!("{digest:x}")[..16].to_string()))
+        })
+        .collect()
+}
+
+fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, CommitRowsError> {
+    let base_version = params
+        .get("base_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs base_version".into()))?;
+    let base_digests: std::collections::BTreeMap<String, String> = params
+        .get("base_digests")
+        .and_then(Value::as_object)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs base_digests".into()))?
+        .iter()
+        .map(|(id, digest)| {
+            digest
+                .as_str()
+                .map(|value| (id.clone(), value.to_string()))
+                .ok_or_else(|| StoreError::Invalid("commit_rows digest must be a string".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    let changed_values = params
+        .get("changed")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs changed rows".into()))?;
+    let mut changed = Vec::with_capacity(changed_values.len());
+    let mut touched = std::collections::BTreeSet::new();
+    for row in changed_values {
+        let id = graph_store::entry_id(row)
+            .ok_or_else(|| StoreError::Invalid("commit_rows changed row needs an id".into()))?
+            .to_string();
+        if !touched.insert(id.clone()) {
+            return Err(StoreError::Invalid(format!(
+                "commit_rows changed id {id:?} appears twice"
+            ))
+            .into());
+        }
+        changed.push((id, row.clone()));
+    }
+    let removed: std::collections::BTreeSet<String> = params
+        .get("removed")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs removed ids".into()))?
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| StoreError::Invalid("commit_rows removed id must be a string".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    if let Some(id) = removed.iter().find(|id| touched.contains(*id)) {
+        return Err(StoreError::Invalid(format!(
+            "commit_rows id {id:?} is both changed and removed"
+        ))
+        .into());
+    }
+    touched.extend(removed.iter().cloned());
+
+    let _gate = state.write_gate.lock().unwrap_or_else(|error| error.into_inner());
+    let current_version = file_version(&state.graph);
+    let current = graph_store::read_defaulted(&state.graph, false)?;
+    if current_version != base_version {
+        let current_digests = canonical_row_digests(&current);
+        let ids: std::collections::BTreeSet<String> = base_digests
+            .keys()
+            .chain(current_digests.keys())
+            .cloned()
+            .collect();
+        let conflicts: Vec<String> = ids
+            .into_iter()
+            .filter(|id| base_digests.get(id) != current_digests.get(id) && touched.contains(id))
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(CommitRowsError::Conflict(conflicts));
+        }
+    }
+
+    let changed_by_id: std::collections::BTreeMap<String, Value> =
+        changed.iter().cloned().collect();
+    let mut replaced = std::collections::BTreeSet::new();
+    let mut merged = Vec::with_capacity(current.len() + changed.len());
+    for row in current {
+        let Some(id) = graph_store::entry_id(&row).map(str::to_string) else {
+            merged.push(row);
+            continue;
+        };
+        if removed.contains(&id) {
+            continue;
+        }
+        if let Some(replacement) = changed_by_id.get(&id) {
+            merged.push(replacement.clone());
+            replaced.insert(id);
+        } else {
+            merged.push(row);
+        }
+    }
+    for (id, row) in changed {
+        if !replaced.contains(&id) && !removed.contains(&id) {
+            merged.push(row);
+        }
+    }
+
+    let outcome = graph_store::locked_mutate(
+        &state.graph,
+        MutateInput {
+            entries: merged,
+            canonical_path: state.canonical.then(|| state.graph.clone()),
+            base_version: Some(current_version),
             plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
