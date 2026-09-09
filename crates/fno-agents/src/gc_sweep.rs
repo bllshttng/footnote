@@ -1000,9 +1000,20 @@ pub(crate) fn run(
             &mut receipts,
         ) {
             match refusal {
-                RetireRefusal::StopRefused(reason) | RetireRefusal::NativeRemoval(reason) => {
-                    summary.stop_refused.push((id, reason))
+                RetireRefusal::StopRefused(reason) => {
+                    // A claude row with no death evidence names the missing
+                    // evidence, not just the unconfirmed stop: the refusal
+                    // says what would have satisfied it.
+                    let reason = if death.is_none() && e.harness_name() == "claude" {
+                        "no death evidence (no terminal roster state, no dead pid) and the \
+                         stop did not confirm; row kept for retry"
+                            .into()
+                    } else {
+                        reason
+                    };
+                    summary.stop_refused.push((id, reason));
                 }
+                RetireRefusal::NativeRemoval(reason) => summary.stop_refused.push((id, reason)),
                 RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
                 RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
             }

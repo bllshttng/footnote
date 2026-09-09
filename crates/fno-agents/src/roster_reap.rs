@@ -369,6 +369,7 @@ mod tests {
             name: name.map(str::to_string),
             cwd: Some("/work".into()),
             account: None,
+            pid: None,
         }
     }
 

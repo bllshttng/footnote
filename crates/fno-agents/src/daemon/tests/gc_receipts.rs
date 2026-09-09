@@ -297,6 +297,7 @@ fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| {
             Some(crate::daemon::PruneOutcome::Kept(
@@ -365,6 +366,7 @@ fn a_shared_worktree_survives_while_the_other_row_is_live() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| {
             Some(crate::daemon::PruneOutcome::Removed(
@@ -430,6 +432,7 @@ fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
         },
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|e| Some(crate::daemon::PruneOutcome::Removed(e.cwd.clone())),
     );
@@ -474,6 +477,7 @@ fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| panic!("active-surface removal must never run on a held parent"),
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -513,6 +517,7 @@ fn a_parent_retires_once_its_descendant_is_gone() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -3829,7 +3834,7 @@ fn evidence_sweep(
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &move || agents.clone(),
         &|_| (None, None),
-        &|_| {},
+        &|_| None,
     )
 }
 
