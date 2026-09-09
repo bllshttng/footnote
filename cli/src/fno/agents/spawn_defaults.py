@@ -1422,13 +1422,7 @@ def inject_spawn_defaults(
         )
         _target: Optional[str] = None
         _target_failed = False
-        if (
-            cfg_model
-            and not has_model
-            and not explicit_route
-            and not explicit_vendor_present
-            and not _role_route
-        ):
+        if cfg_model and not has_model and not explicit_route and not explicit_vendor_present and not _role_route:
             from fno.dispatch_flags import resolve_dispatch_harness
 
             try:
@@ -1456,11 +1450,9 @@ def inject_spawn_defaults(
                 "grid_account_injected": grid_account_injected,
                 "account_flag_present": _flag_present(out[1:], "--account"),
                 "prov": (resolved_harness() or "") if cfg_account else "",
-                "role": role,
-                "role_resolves": _role_route,
+                "role": role, "role_resolves": _role_route,
                 "cfg_harness": cfg_harness or "",
-                "harness_target": _target,
-                "harness_target_failed": _target_failed,
+                "harness_target": _target, "harness_target_failed": _target_failed,
             })
         except SpawnAxesUnavailable as _exc:
             # Degrade open (AC5-FR), the seam's own stance for config-sourced
@@ -1574,16 +1566,13 @@ def inject_spawn_defaults(
         try:
             _axes = spawn_axes_call({
                 "effort": {"value": cfg_effort, "rung": effort_rung},
-                "has_effort": has_effort,
-                "effort_reason": _effort_reason or "",
+                "has_effort": has_effort, "effort_reason": _effort_reason or "",
                 "substrate": {"value": cfg_substrate or "", "rung": substrate_rung},
                 "explicit_substrate": explicit_substrate or "",
-                "substrate_unknown": _substrate_unknown,
-                "substrate_ok": _substrate_ok,
+                "substrate_unknown": _substrate_unknown, "substrate_ok": _substrate_ok,
                 "substrate_valid_list": ", ".join(_SUBSTRATES),
                 "permission_mode": {"value": cfg_permission, "rung": permission_rung},
-                "has_permission": _has_permission,
-                "pane_tokens_ok": _pane_tokens_ok,
+                "has_permission": _has_permission, "pane_tokens_ok": _pane_tokens_ok,
                 "prov": prov,
             })
         except SpawnAxesUnavailable as _exc:
@@ -1648,8 +1637,7 @@ def inject_spawn_defaults(
                 "pane_group_pg_rung": _pg_rung,
                 "pane_group_unavailable": _pg_unavailable,
                 "pane_group_answer": _pg_answer,
-                "bundle": _bundle_json,
-                "positional_present": _positional_present,
+                "bundle": _bundle_json, "positional_present": _positional_present,
             })
         except SpawnAxesUnavailable as _exc:
             print(
