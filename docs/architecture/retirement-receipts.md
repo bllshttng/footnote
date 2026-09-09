@@ -6,9 +6,9 @@ What a retirement must prove, and how `fno agents reap --verify` checks it.
 
 A retirement is one sequence shared by the scheduled sweep and the merge trigger, in `crates/fno-agents/src/gc_sweep.rs` (`stage_session_retirement`, `commit_retirements`).
 
-The durable record comes first. The receipt is built from the registry row and the harness capability table, then written to disk BEFORE any effect fires, and each effect appends its typed record and rewrites it. A crash after an effect leaves a receipt naming what happened, instead of a removal nothing recorded. A receipt that cannot be built or persisted refuses the retirement before the harness is touched, and the row is kept.
+The durable record comes first. The receipt is built from the registry row and the harness capability table. It is written to disk BEFORE any effect fires, and each effect appends its typed record and rewrites it. A crash after an effect leaves a receipt naming what happened, instead of a removal nothing recorded. A receipt that cannot be built or persisted refuses the retirement before the harness is touched, and the row is kept.
 
-The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. For the planning lane the gate is different: a planner row retires only when its own blueprint/think `sessions[]` entry carries `ended_at`, the positive marker `fno backlog session close` writes, so a quiet replanning worker cannot inherit a completion an earlier assignment wrote. Under the commit, the graph is re-read and any session that has gained an open do row is held before the registry write.
+The effects, in order: the confirmed stop of the held process, the native active-surface removal, and the resumability evidence measured off the receipt itself. The planning lane adds a gate of its own. A planner row retires only when its own blueprint/think `sessions[]` entry carries `ended_at`. That field is the positive marker `fno backlog session close` writes. It stops a quiet replanning worker from inheriting a completion an earlier assignment wrote. Under the commit, the graph is re-read. Any session that has gained an open do row is held before the registry write.
 
 ## The receipt and its required ops
 
@@ -22,11 +22,11 @@ Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed 
 | `active-surface` | the harness's own listing no longer carries the session |
 | `resume-evidence` | the receipt names resume tokens and a transcript that exists on disk |
 
-`resume-evidence` is what separates a recovery record from an obituary. A `failed` outcome does not hold the row (the session is already stopped); it marks the receipt unverifiable, so the gate refuses rather than certifies.
+`resume-evidence` is what separates a recovery record from an obituary. A `failed` outcome does not hold the row, because the session is already stopped. It marks the receipt unverifiable, so the gate refuses rather than certifies.
 
-`--expect-sessions <a>,<b>` adds a cohort: every named session must appear among the verified retirements, so a pass can cover a named set instead of whatever the window happens to hold. The report carries `expected` and `missing`.
+`--expect-sessions <a>,<b>` adds a cohort. Every named session must appear among the verified retirements, so a pass can cover a named set instead of whatever the window happens to hold. The report carries `expected` and `missing`.
 
-Mux effects are NOT required. No fno-agents call site emits a mux effect record yet; the mux server transport exists on the daemon side, and the wiring is owned by the transport epic. The refusal text names this as context so the absence reads as known, not as a regression.
+Mux effects are NOT required. No fno-agents call site emits a mux effect record yet. The mux server transport exists on the daemon side, and the wiring is owned by the transport epic. The refusal text names this as context so the absence reads as known, not as a regression.
 
 ## The rerunnable probe
 
