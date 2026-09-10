@@ -132,20 +132,19 @@ pub(crate) fn apply_title_changes(
 }
 
 /// A liveness word this binary measures is served only while it is fresh:
-/// two sweep budgets old (the window the mux-side `served_liveness` gates
-/// by, mirrored here because the crates share the FILE, not types) it no
-/// longer answers "is this row alive NOW", and republishing it as the
-/// served word made a 24-hour-old `dead` read as current. Past the window
-/// the word is withheld (the reader falls back to the status ladder); the
-/// stamp is served unchanged so the age stays honest.
+/// past the shared window (crates/fno/src/served_liveness.rs) it no longer
+/// answers "is this row alive NOW", and republishing it as the served word
+/// made a 24-hour-old `dead` read as current. Past the window the word is
+/// withheld (the reader falls back to the status ladder); the stamp is
+/// served unchanged so the age stays honest.
 pub(crate) fn served_fresh_liveness<'a>(
     word: Option<&'a str>,
     measured_at: Option<&str>,
 ) -> Option<&'a str> {
-    const SERVED_LIVENESS_MAX_AGE_SECS: i64 = 2 * 5; // 2 x RECONCILE_SWEEP_BUDGET (5s)
-    let stamp = measured_at.and_then(crate::state::rfc3339_like_to_secs)? as i64;
-    crate::daemon::now_epoch_secs()
-        .checked_sub(stamp)
-        .filter(|age| (0..=SERVED_LIVENESS_MAX_AGE_SECS).contains(age))?;
-    word
+    let stamp = measured_at.and_then(crate::state::rfc3339_like_to_secs)? as u64;
+    fno::served_liveness::served_liveness_word(
+        word,
+        Some(stamp),
+        crate::daemon::now_epoch_secs() as u64,
+    )
 }

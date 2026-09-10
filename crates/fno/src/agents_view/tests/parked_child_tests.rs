@@ -124,6 +124,17 @@ fn served_liveness_beats_a_stale_status_when_fresh() {
 }
 
 #[test]
+fn a_word_90_seconds_old_still_serves_ac1_hp() {
+    // The freshness window is twice the serve-only cadence (2 x 60s), so a
+    // row measured one full missed tick ago still answers from its stamp.
+    // Under the old two-sweep-budget window (10s) this read as stale.
+    let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "orphaned", "liveness": "alive", "liveness_measured_at": "MEASURED_AT"}]}"#;
+    let (rows, _) = derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(90)), NOW).unwrap();
+    assert_eq!(rows[0].liveness, Liveness::Alive);
+    assert_eq!(rows[0].liveness_age_s, Some(90));
+}
+
+#[test]
 fn stale_served_liveness_falls_back_to_the_status_ladder() {
     // A measurement older than the freshness window is not trusted: the
     // ladder answers (orphaned -> Unmeasured here), never a stale `alive`.
@@ -149,8 +160,9 @@ fn now_stamp(age: u64) -> String {
     match age {
         0 => "2027-01-15T08:00:00Z".to_string(),
         1 => "2027-01-15T07:59:59Z".to_string(),
+        90 => "2027-01-15T07:58:30Z".to_string(),
         3600 => "2027-01-15T07:00:00Z".to_string(),
-        _ => unreachable!("only these three ages are used"),
+        _ => unreachable!("only these four ages are used"),
     }
 }
 

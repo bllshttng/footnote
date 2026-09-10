@@ -39,6 +39,12 @@ name = "fno-agents-worker"
 path = "src/bin/worker.rs"
 
 [dependencies]
+# The served-liveness rule and its constants are the shared answer to one
+# question; fno-agents calls them, it does not restate them. Direction is
+# acyclic: fno never links fno-agents (it shells the binary at runtime), and
+# tests feed a refusal's printed command to the real parser rather than a
+# copy of its grammar.
+fno = { path = "../fno" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
@@ -117,7 +123,3 @@ serde_yaml_ng = "0.10"
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
-# Tests feed a refusal's printed `fno mux pane kill ...` command to the real
-# parser rather than a copy of its grammar, so the two cannot drift apart.
-# Dev-only: fno never links fno-agents, it shells the binary at runtime.
-fno = { path = "../fno" }

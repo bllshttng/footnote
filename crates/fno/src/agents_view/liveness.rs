@@ -1,6 +1,6 @@
-//! The per-row liveness classifier: the pid probes, the served-liveness
-//! trust window, and the status ladder. Child of `agents_view`; parent
-//! items resolve through the glob.
+//! The per-row liveness classifier: the pid probes and the status ladder.
+//! The served window lives in crate::served_liveness. Child of
+//! `agents_view`; parent items resolve through the glob.
 
 use super::*;
 
@@ -31,31 +31,6 @@ fn pid_confirmed_alive(pid: u64) -> bool {
     // check.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-/// A SERVED liveness measurement younger than two sweep budgets
-/// (2 x 5s `RECONCILE_SWEEP_BUDGET`; mirrored because the crates share the
-/// FILE, not types) is trusted over the status-string ladder.
-const LIVENESS_MAX_AGE_SECS: u64 = 10;
-
-/// The served pair decides the row's liveness when the
-/// measurement is fresh; an absent/stale measurement or an unknown word
-/// answers `None` and the status/pid ladder takes over exactly as before.
-pub(super) fn served_liveness(
-    liveness: Option<&str>,
-    measured_at: Option<u64>,
-    now_secs: u64,
-) -> Option<Liveness> {
-    let age = now_secs.checked_sub(measured_at?)?;
-    if age > LIVENESS_MAX_AGE_SECS {
-        return None;
-    }
-    match liveness? {
-        "alive" => Some(Liveness::Alive),
-        "dead" => Some(Liveness::Dead),
-        "unmeasured" => Some(Liveness::Unmeasured),
-        _ => None,
-    }
 }
 
 /// Derive [`Liveness`] for one row. `status` is the raw registry string;

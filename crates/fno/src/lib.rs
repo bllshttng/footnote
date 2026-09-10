@@ -36,6 +36,7 @@ pub mod pty;
 pub mod registry_label;
 pub mod restore_gate;
 pub mod restore_liveness;
+pub mod served_liveness;
 pub mod server;
 pub mod sideline_color;
 pub mod spawn_journal;
