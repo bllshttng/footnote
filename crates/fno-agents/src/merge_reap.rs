@@ -77,63 +77,94 @@ pub(crate) fn pending_merge_cleanup_requests(
         .collect()
 }
 
-/// Every pending request across repos, in one journal read.
+/// Every pending request across repos, in one journal read spanning one
+/// rotation: the `.1` generation is read before the active file, so a request
+/// minted shortly before a rotation stays pending across it instead of
+/// dropping with no event. Duplicate envelopes that share a request id (the
+/// merge mint and the ritual mint for one merge) fold field by field.
 fn pending_merge_cleanup_requests_all(home: &AgentsHome) -> Vec<MergeCleanupRequest> {
-    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
-        return Vec::new();
-    };
+    let (requested, finished) = scan_merge_cleanup_events(home);
+    requested
+        .into_values()
+        .filter(|request| !finished.contains(&request.request_id))
+        .collect()
+}
+
+/// Every repo a merge-cleanup request names, pending or settled: what
+/// `registry_repo_roots` collects, so a repo whose only request rotated into
+/// the `.1` generation stays in the reaper's roots.
+pub(crate) fn merge_cleanup_request_repos(home: &AgentsHome) -> Vec<String> {
+    let (requested, _) = scan_merge_cleanup_events(home);
+    let repos: HashSet<String> = requested.into_values().map(|r| r.repo).collect();
+    repos.into_iter().collect()
+}
+
+/// The merge-cleanup envelopes across the active journal and its one rotated
+/// generation, folded per request id, plus the settled tombstone ids. A line
+/// that does not name a merge_cleanup_ kind is skipped before JSON parsing,
+/// so the second file does not double the parse cost.
+fn scan_merge_cleanup_events(
+    home: &AgentsHome,
+) -> (BTreeMap<String, MergeCleanupRequest>, HashSet<String>) {
+    let active = home.events_jsonl();
+    let rotated = crate::events::rotated_path(&active);
     let mut requested = BTreeMap::<String, MergeCleanupRequest>::new();
     let mut finished = HashSet::<String>::new();
-    for line in contents.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
+    for file in [rotated, active] {
+        let Ok(contents) = std::fs::read_to_string(&file) else {
+            continue; // a missing generation reads as empty
         };
-        let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(data) = event.get("data") else {
-            continue;
-        };
-        let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
-            continue;
-        };
-        match kind {
-            "merge_cleanup_requested" => {
-                let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
-                    continue;
-                };
-                let ts_unix = event
-                    .get("ts")
-                    .and_then(Value::as_str)
-                    .and_then(crate::tick_ledger::parse_rfc3339_unix)
-                    .map(|v| v as i64)
-                    .unwrap_or(0);
-                let merged_at = data
-                    .get("merged_at")
-                    .and_then(Value::as_str)
-                    .and_then(crate::tick_ledger::parse_rfc3339_unix)
-                    .map(|v| v as i64);
-                let string_field = |key: &str| {
-                    data.get(key)
+        for line in contents.lines() {
+            if !line.contains("\"merge_cleanup_") {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(kind) = event.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(data) = event.get("data") else {
+                continue;
+            };
+            let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
+                continue;
+            };
+            match kind {
+                "merge_cleanup_requested" => {
+                    let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
+                        continue;
+                    };
+                    let ts_unix = event
+                        .get("ts")
                         .and_then(Value::as_str)
-                        .filter(|v| !v.is_empty())
-                        .map(str::to_owned)
-                };
-                let strings = |key: &str| {
-                    data.get(key)
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                };
-                requested.insert(
-                    request_id.to_owned(),
-                    MergeCleanupRequest {
+                        .and_then(crate::tick_ledger::parse_rfc3339_unix)
+                        .map(|v| v as i64)
+                        .unwrap_or(0);
+                    let merged_at = data
+                        .get("merged_at")
+                        .and_then(Value::as_str)
+                        .and_then(crate::tick_ledger::parse_rfc3339_unix)
+                        .map(|v| v as i64);
+                    let string_field = |key: &str| {
+                        data.get(key)
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_owned)
+                    };
+                    let strings = |key: &str| {
+                        data.get(key)
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    };
+                    let mint = MergeCleanupRequest {
                         request_id: request_id.to_owned(),
                         repo: request_repo.to_owned(),
                         pr,
@@ -144,19 +175,55 @@ fn pending_merge_cleanup_requests_all(home: &AgentsHome) -> Vec<MergeCleanupRequ
                         ts_unix,
                         session_id: string_field("session_id"),
                         harness: string_field("harness"),
-                    },
-                );
+                    };
+                    match requested.remove(request_id) {
+                        Some(kept) => {
+                            requested.insert(request_id.to_owned(), fold_request(kept, mint));
+                        }
+                        None => {
+                            requested.insert(request_id.to_owned(), mint);
+                        }
+                    }
+                }
+                "merge_cleanup_completed" | "merge_cleanup_refused" | "merge_cleanup_expired" => {
+                    finished.insert(request_id.to_owned());
+                }
+                _ => {}
             }
-            "merge_cleanup_completed" | "merge_cleanup_refused" | "merge_cleanup_expired" => {
-                finished.insert(request_id.to_owned());
-            }
-            _ => {}
         }
     }
-    requested
-        .into_values()
-        .filter(|request| !finished.contains(&request.request_id))
-        .collect()
+    (requested, finished)
+}
+
+/// Fold a second envelope for a shared request id into the kept one: the
+/// union of node_ids, the first non-empty repo/worktree/branch/session_id/
+/// harness, the earliest merged_at and ts. Last-write-wins would let a
+/// ritual mint carrying `worktree: null` erase the merge mint's tree.
+fn fold_request(mut kept: MergeCleanupRequest, next: MergeCleanupRequest) -> MergeCleanupRequest {
+    for id in next.node_ids {
+        if !kept.node_ids.contains(&id) {
+            kept.node_ids.push(id);
+        }
+    }
+    if kept.repo.is_empty() {
+        kept.repo = next.repo;
+    }
+    for (slot, value) in [
+        (&mut kept.worktree, next.worktree),
+        (&mut kept.branch, next.branch),
+        (&mut kept.session_id, next.session_id),
+        (&mut kept.harness, next.harness),
+    ] {
+        if slot.is_none() {
+            *slot = value;
+        }
+    }
+    kept.merged_at = match (kept.merged_at, next.merged_at) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    kept.ts_unix = kept.ts_unix.min(next.ts_unix);
+    kept
 }
 
 /// True while any pending request stands for the repo: the worktree sweep's
@@ -336,10 +403,14 @@ fn run_request(
     now: i64,
     seams: &RequestSeams,
 ) -> u64 {
-    // 2. Doneness re-read: every named node must read done AND merged. An
-    // open node holds (a merge whose reconcile failed must not reap a worker
-    // still working an open node); an EMPTY node list holds too - no proof,
-    // no removal. A graph that will not read holds for the same reason.
+    // 2. Doneness re-read: every named node must read done, with no recorded
+    // merge_status that contradicts the merge. An ABSENT merge_status passes
+    // (the gc sweep's rule: unrecorded is not a contradiction - both mint
+    // sites only fire against a gh-confirmed MERGED state, and cascade closes
+    // leave the field null). A recorded non-merged value holds under its own
+    // reason; a node not done, or unknown to the graph, still holds. An EMPTY
+    // node list holds too - no proof, no removal. A graph that will not read
+    // holds for the same reason.
     let Some(states) = states else {
         emit_hold_once_per_hour(home, emitter, request, "graph-unreadable", now);
         return 0;
@@ -347,15 +418,13 @@ fn run_request(
     let open: Vec<String> = request
         .node_ids
         .iter()
-        .filter(|id| {
-            states
-                .get(id.as_str())
-                .map(|(status, merge_status)| {
-                    status != "done" || merge_status.as_deref() != Some("merged")
-                })
-                .unwrap_or(true)
+        .filter_map(|id| match states.get(id.as_str()) {
+            Some((status, merge_status)) if status == "done" => match merge_status {
+                Some(m) if m != "merged" => Some(format!("merge-status:{m}:{id}")),
+                _ => None,
+            },
+            _ => Some(format!("node-open:{id}")),
         })
-        .cloned()
         .collect();
     if request.node_ids.is_empty() || !open.is_empty() {
         let reason = match open.first() {
@@ -767,6 +836,216 @@ mod tests {
             .write_all(format!("{}\n", expired).as_bytes())
             .unwrap();
         assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn pending_read_spans_one_rotation() {
+        // AC2-HP: a request that rotated into the .1 generation stays pending,
+        // and a tombstone in the active file still settles it.
+        let home = temp_home("rotation-span");
+        let rotated = crate::events::rotated_path(&home.events_jsonl());
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            &rotated,
+            request_line(
+                "2026-09-06T00:00:00Z",
+                "merge-cleanup-1",
+                None,
+                json!(["x-1"]),
+            ) + "\n",
+        )
+        .unwrap();
+        write_events(
+            &home,
+            &[request_line(
+                "2026-09-06T01:00:00Z",
+                "merge-cleanup-2",
+                None,
+                json!(["x-2"]),
+            )],
+        );
+        let ids: Vec<String> = pending_merge_cleanup_requests_all(&home)
+            .into_iter()
+            .map(|r| r.request_id)
+            .collect();
+        assert!(ids.contains(&"merge-cleanup-1".to_string()), "{ids:?}");
+        assert!(ids.contains(&"merge-cleanup-2".to_string()), "{ids:?}");
+
+        let completed = json!({
+            "ts": "2026-09-06T02:00:00Z",
+            "type": "merge_cleanup_completed",
+            "source": "daemon",
+            "data": {"request_id": "merge-cleanup-1", "repo": "/repo", "pr": 42}
+        });
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(home.events_jsonl())
+            .unwrap()
+            .write_all(format!("{}\n", completed).as_bytes())
+            .unwrap();
+        let ids: Vec<String> = pending_merge_cleanup_requests_all(&home)
+            .into_iter()
+            .map(|r| r.request_id)
+            .collect();
+        assert_eq!(ids, vec!["merge-cleanup-2".to_string()]);
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn duplicate_mints_fold_field_by_field() {
+        // AC2-FOLD: the merge mint (worktree set, empty ids, earlier merged_at)
+        // and the ritual mint (worktree null, ids named) share one request id;
+        // the fold keeps the union, the first non-empty worktree and the
+        // earliest merged_at, instead of the last envelope winning.
+        let home = temp_home("fold-dup");
+        let merge_mint = json!({
+            "ts": "2026-09-10T11:00:00Z",
+            "type": "merge_cleanup_requested",
+            "source": "python",
+            "data": {
+                "request_id": "merge-cleanup-1",
+                "repo": "/repo",
+                "pr": 42,
+                "branch": "feature/x",
+                "worktree": "/repo/wt",
+                "node_ids": [],
+                "merged_at": "2026-09-10T11:00:00Z",
+            }
+        })
+        .to_string();
+        let ritual_mint = json!({
+            "ts": "2026-09-10T11:05:00Z",
+            "type": "merge_cleanup_requested",
+            "source": "python",
+            "data": {
+                "request_id": "merge-cleanup-1",
+                "repo": "/repo",
+                "pr": 42,
+                "branch": "feature/x",
+                "worktree": null,
+                "node_ids": ["x-1"],
+                "merged_at": "2026-09-10T11:05:00Z",
+            }
+        })
+        .to_string();
+        write_events(&home, &[merge_mint, ritual_mint]);
+        let pending = pending_merge_cleanup_requests_all(&home);
+        assert_eq!(pending.len(), 1);
+        let request = &pending[0];
+        assert_eq!(request.worktree.as_deref(), Some("/repo/wt"));
+        assert_eq!(request.node_ids, vec!["x-1".to_string()]);
+        assert_eq!(
+            request.merged_at,
+            crate::tick_ledger::parse_rfc3339_unix("2026-09-10T11:00:00Z").map(|v| v as i64)
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn requested_repos_span_the_rotated_generation() {
+        // AC2-ROOTS: a repo whose only request rotated into .1 stays in the
+        // reaper's roots (its worktree sweep keeps the apply gate).
+        let home = temp_home("roots");
+        let repo_dir = home.root().parent().unwrap().join("repo-root");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let line = json!({
+            "ts": "2026-09-06T00:00:00Z",
+            "type": "merge_cleanup_requested",
+            "source": "python",
+            "data": {
+                "request_id": "merge-cleanup-1",
+                "repo": repo_dir.display().to_string(),
+                "pr": 42,
+                "branch": "feature/x",
+                "node_ids": ["x-1"],
+            }
+        })
+        .to_string();
+        let rotated = crate::events::rotated_path(&home.events_jsonl());
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(&rotated, line + "\n").unwrap();
+        assert!(merge_cleanup_request_repos(&home).contains(&repo_dir.display().to_string()));
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn absent_merge_status_does_not_hold_a_done_node() {
+        // AC3-HP: an unrecorded merge_status is not a contradiction; a done
+        // node passes the doneness read and the request settles.
+        let home = temp_home("null-merge-status");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[]);
+        let mut states = HashMap::new();
+        states.insert("x-1".to_string(), ("done".to_string(), None));
+        states.insert(
+            "x-2".to_string(),
+            ("done".to_string(), Some("merged".to_string())),
+        );
+        let mut request = settled_request("/repo/wt");
+        request.worktree = None;
+        request.node_ids = vec!["x-1".to_string(), "x-2".to_string()];
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("\"type\":\"merge_cleanup_completed\""),
+            "the request must settle: {events}"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn recorded_non_merged_merge_status_holds_under_its_own_reason() {
+        // AC3-ERR: a done node whose merge_status is recorded and not
+        // `merged` holds naming merge-status:<value>:<id>, not node-open.
+        let home = temp_home("merge-status-hold");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[]);
+        let mut states = HashMap::new();
+        states.insert(
+            "x-1".to_string(),
+            ("done".to_string(), Some("open".to_string())),
+        );
+        let mut request = settled_request("/repo/wt");
+        request.worktree = None;
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("merge-status:open:x-1"),
+            "the hold must name the recorded merge_status: {events}"
+        );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 
