@@ -3822,16 +3822,22 @@ def cmd_orphans(
 
 @agents_app.command("pane-identity", hidden=True)
 def cmd_pane_identity(
+    server: Optional[str] = typer.Option(
+        None,
+        "--server",
+        help="Mux server to check. Default: the resolved server.",
+    ),
     session_id: Optional[str] = typer.Option(
         None,
         "--session-id",
-        help="Mux session to check. Default: the resolved session.",
+        hidden=True,
+        help="Deprecated alias for --server.",
     ),
     session_legacy: Optional[str] = typer.Option(
         None,
         "--session",
         hidden=True,
-        help="Deprecated alias for --session-id.",
+        help="Deprecated alias for --server.",
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit the same content as JSON."
@@ -3863,9 +3869,14 @@ def cmd_pane_identity(
 
     session_name = resolve_mux_session(
         merge_deprecated_alias(
-            session_id,
+            merge_deprecated_alias(
+                server,
+                session_id,
+                canonical_flag="--server",
+                legacy_flag="--session-id",
+            ),
             session_legacy,
-            canonical_flag="--session-id",
+            canonical_flag="--server",
             legacy_flag="--session",
         )
     )

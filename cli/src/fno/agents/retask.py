@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from fno.agents.harness_map import capabilities, dispatch_command
+from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -173,7 +174,7 @@ def resolve_thread_viewport(
     """Open a thread's dedicated viewport and return its positive pane id."""
     runner = runner or subprocess.run
     thread_id = entry.fno_id
-    session = (os.environ.get("FNO_SESSION") or "main").strip()
+    session = resolve_mux_session(None).strip()
     if not isinstance(thread_id, str) or not thread_id.strip():
         # Name the row defect. A bare transport code here read as a broken
         # pipe, so an absent field looked like something a retry could fix.
