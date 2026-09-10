@@ -159,8 +159,9 @@ def test_map_covers_current_surface_once():
     # writes outside the checkout): 604 -> 602. The
     # one install verb for every harness allocates `config plugin` and
     # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
-    # from the merged file, 602 -> 603.
-    assert len(mapped) == 603, (
+    # from the merged file, 602 -> 603. `agents autonomy
+    # provenance`, the dispatch-source inventory read: 603 -> 604.
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

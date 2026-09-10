@@ -3,6 +3,7 @@ agents adopt	T1	agents adopt	6
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
+agents autonomy provenance	T1	agents autonomy provenance	0
 agents bash-census	T1	agents bash-census	0
 agents census	T1	agents census	0
 agents claim acquire	T1	agents claim acquire	27
