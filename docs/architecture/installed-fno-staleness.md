@@ -118,14 +118,9 @@ Implementation: `cli/src/fno/doctor.py`, `cli/src/fno/update.py`, `cli/src/fno/r
 
 ## Running processes: what restart reaches
 
-Binary freshness is half the picture. A rebuilt binary says nothing about the
-processes already running the old one. The census answers the question per
-process: is this running fno process an older build than the binary it was
-launched from?
+Binary freshness is half the picture. A rebuilt binary says nothing about the processes already running the old one. The census answers the question per process: is this running fno process an older build than the binary it was launched from?
 
-`update.running_components()` (read by `fno doctor` and by
-`fno doctor update --check`) walks every long-lived process and returns one row
-each:
+`update.running_components()` (read by `fno doctor` and by `fno doctor update --check`) walks every long-lived process and returns one row each:
 
 | component | on_restart | survives |
 |---|---|---|
@@ -134,36 +129,14 @@ each:
 | mux-server with panes | kept; only `--mux` replaces it, ending N shells | N panes |
 | pane-keeper, thread-keeper | kept | its pane; current only when that pane ends |
 
-Each row carries: `component`, `pid`, `name`, `exe`, `started_at`, `verdict`
-(`current` / `stale` / `unknown`), `evidence`, `on_restart`, `survives`. A probe
-that cannot decide reads `unknown` with the failure named in `evidence`, never
-`current`.
+Each row carries `component`, `pid`, `name`, `exe`, `started_at`, `verdict` (`current` / `stale` / `unknown`), `evidence`, `on_restart`, and `survives`. A probe that cannot decide reads `unknown` with the failure named in `evidence`, never `current`.
 
 There are two classifier sources, and no third rule.
 
-1. Build self-report. `drift.rs:self_drift` compares the fingerprint a process
-captured at startup against its own executable path, recomputed live. The
-keeper's Identify reply carries `build` (path, mtime, size) and `drift`
-(`fresh` / `drifted` / `unknown`); `fno-agents status --json` carries `drift`
-the same way. Evidence reads `build self-report`.
-2. Start time. A keeper built before the self-report shipped answers no
-`drift` key, and the mux server cannot call drift.rs at all (crates/fno does
-not depend on fno-agents; the census reads its pid from the `fno mux ls
---json` Live row instead). For these, `_started_before_rewrite` reads `stale`
-when the process started before its executable was written, with evidence
-`predates build self-report`.
+1. Build self-report. `drift.rs:self_drift` compares a startup fingerprint against the process's own executable path, recomputed live. The keeper's Identify reply carries `build` (path, mtime, size) and `drift`. `fno-agents status --json` carries `drift` the same way. Evidence reads `build self-report`.
+2. Start time. A keeper built before the self-report shipped answers no `drift` key. The mux server cannot call drift.rs at all, because crates/fno does not depend on fno-agents. The census reads the mux pid from the `fno mux ls --json` Live row. For these rows, the classifier is `_started_before_rewrite`: the process started before its executable was written, so the row reads `stale`. Evidence reads `predates build self-report`.
 
-The second classifier retires when crates/fno can depend on fno-agents and
-every Identify carries `drift`. Until then it is the only reading those
-processes can give, and it is conservative in one direction only: a process
-started after a rewrite reads `current`, which a same-second rebuild can
-fool.
+When crates/fno can depend on fno-agents and every Identify carries `drift`, the second classifier retires. Until then it is the only reading those processes can give. It errs in one direction only: a process started after a rewrite reads `current`, which a same-second rebuild can fool.
 
-`fno agents restart` reaches: the daemon (terminate, 30s grace, SIGKILL
-escalation, pid-verified), every stale store keeper (Shutdown + respawn, one
-keeper per socket), and pane-less stale-wire mux servers. It never reaches a
-pane keeper: cycling one would end its pane, and surviving a restart is the
-pane keeper's whole purpose. A stale pane keeper is reported as kept, and it
-goes current when its pane ends. No surface says "everything restarts" and
-"panes are kept" in one sentence; the census rows are the split.
+`fno agents restart` reaches the daemon (terminate, escalate, verify), every stale store keeper (Shutdown + respawn, one per socket), and pane-less stale-wire mux servers. It never reaches a pane keeper, because cycling one can only end its pane, and surviving a restart is the pane keeper's whole purpose. A stale pane keeper is reported as kept. The census rows are the split, and no surface says "everything restarts" and "panes are kept" in one sentence.
 

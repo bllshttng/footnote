@@ -75,9 +75,5 @@ The server is killed with SIGKILL so no graceful path can spare the child. The a
 
 ## The hard limit
 
-A pane keeper cannot be refreshed on demand. It holds a live child process and
-its pty master, and surviving a restart is the keeper's whole purpose, so
-cycling it would destroy the thing it exists to keep. It goes current
-only when its pane ends. Until then the running-process census reports it stale
-and kept, and no restart surface promises otherwise.
+A pane keeper cannot be refreshed on demand. It holds a live child process and its pty master. Surviving a restart is the keeper's whole purpose, so cycling it can only destroy the thing it exists to keep. Until then the running-process census reports the keeper stale and kept, and no restart surface promises otherwise. The census row names the split in three words: `stale`, `kept`, `current only when its pane ends`.
 
