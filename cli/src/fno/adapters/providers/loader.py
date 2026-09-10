@@ -244,10 +244,8 @@ def _strip_none(data: Any) -> Any:
 # shape test alone reads one as the other and raises on a valid setting.
 #
 # A literal rather than `set(AgentsBlock.model_fields)` because this loader runs
-# inside the config bootstrap path and must not import fno.config at module scope
-# (the same reason _global_settings_path above is reimplemented here). Drift is
-# caught instead by a test asserting set equality against that schema; the literal
-# without that test would be the drift bug.
+# inside the config bootstrap path and must not import fno.config at module scope.
+# A set-equality test against AgentsBlock catches drift in this bootstrap literal.
 _AGENTS_RESERVED_KEYS = frozenset(
     {
         "a2a",
@@ -278,6 +276,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "silence_deadline_seconds",
         "single_flight_join_budget_seconds",
         "single_flight_ttl_seconds",
+        "state_reap",
         "worker_qos",
     }
 )

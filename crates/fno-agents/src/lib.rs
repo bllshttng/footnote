@@ -902,6 +902,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // One bounded count summary for every configured state-retention pass.
+    "state_reap",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

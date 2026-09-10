@@ -142,6 +142,42 @@ pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
     })
 }
 
+fn resolve_state_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    Some(if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    })
+}
+
+/// Configured Python state root, including its `~/.fno` default.
+pub fn state_dir(cwd: &Path) -> Option<PathBuf> {
+    if let Some(raw) =
+        config_lookup(cwd, &["state_dir"]).and_then(|value| value.as_str().map(str::to_string))
+    {
+        return resolve_state_path(&raw, cwd);
+    }
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno"))
+}
+
+/// Config-independent plan/quota lock directory used by Python's `locks_dir`.
+pub fn machine_locks_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno/locks"))
+}
+
+/// PR-status cache directory, including its process-local override.
+pub fn pr_status_cache_dir(cwd: &Path) -> Option<PathBuf> {
+    if let Some(path) = non_empty_env("FNO_PR_STATUS_CACHE_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    Some(state_dir(cwd)?.join("cache/pr-status"))
+}
+
 fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
     t.get("agents")?
         .as_table()?
@@ -450,6 +486,65 @@ fn table_roster_scope(t: &toml::Table) -> Option<RosterScope> {
 /// default - a config typo widens nothing and disables nothing.
 pub fn roster_scope(cwd: &Path) -> RosterScope {
     resolve(cwd, table_roster_scope).unwrap_or(DEFAULT_ROSTER_SCOPE)
+}
+
+/// Retention policy for expendable local state families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateReapConfig {
+    pub enabled: bool,
+    pub locks_retain_days: u64,
+    pub expired_claims_retain_days: u64,
+    pub pr_status_cache_retain_days: u64,
+}
+
+impl Default for StateReapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            locks_retain_days: 7,
+            expired_claims_retain_days: 30,
+            pr_status_cache_retain_days: 14,
+        }
+    }
+}
+
+/// Resolve `agents.state_reap` through the shared config precedence ladder.
+///
+/// Each leaf resolves independently, so a partial project block can inherit
+/// unspecified values from the global tier. A present malformed value masks
+/// lower tiers and degrades to its compiled default, matching Pydantic's merge
+/// then validation behavior.
+pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
+    let defaults = StateReapConfig::default();
+    let value = |key: &str| {
+        resolve(cwd, |t| {
+            t.get("agents")?
+                .as_table()?
+                .get("state_reap")?
+                .as_table()?
+                .get(key)
+                .cloned()
+        })
+    };
+    let positive_days = |key: &str, default: u64| match value(key) {
+        Some(Value::Integer(days)) if days > 0 => u64::try_from(days).unwrap_or(default),
+        Some(_) => default,
+        None => default,
+    };
+    StateReapConfig {
+        enabled: value("enabled")
+            .and_then(|configured| configured.as_bool())
+            .unwrap_or(defaults.enabled),
+        locks_retain_days: positive_days("locks_retain_days", defaults.locks_retain_days),
+        expired_claims_retain_days: positive_days(
+            "expired_claims_retain_days",
+            defaults.expired_claims_retain_days,
+        ),
+        pr_status_cache_retain_days: positive_days(
+            "pr_status_cache_retain_days",
+            defaults.pr_status_cache_retain_days,
+        ),
+    }
 }
 
 // --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
@@ -866,6 +961,87 @@ pub(crate) fn read_roster_scope(content: &str) -> Option<RosterScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_reap_config_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
+        assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    #[test]
+    fn state_reap_config_reads_valid_values_and_disabled_false() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "state-reap-valid",
+            "[agents.state_reap]\n\
+             enabled = false\n\
+             locks_retain_days = 2\n\
+             expired_claims_retain_days = 45\n\
+             pr_status_cache_retain_days = 21\n",
+        );
+        assert_eq!(
+            state_reap_config(&cwd),
+            StateReapConfig {
+                enabled: false,
+                locks_retain_days: 2,
+                expired_claims_retain_days: 45,
+                pr_status_cache_retain_days: 21,
+            }
+        );
+        clear_config_env();
+    }
+
+    #[test]
+    fn state_reap_config_uses_project_then_global_precedence_per_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let global = write_project_settings(
+            "state-reap-global",
+            "[agents.state_reap]\n\
+             enabled = false\n\
+             locks_retain_days = 3\n\
+             expired_claims_retain_days = 60\n\
+             pr_status_cache_retain_days = 28\n",
+        );
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            global.join(".fno/settings.json"),
+        );
+        let cwd = write_project_settings(
+            "state-reap-project",
+            "[agents.state_reap]\nlocks_retain_days = 5\n",
+        );
+        assert_eq!(
+            state_reap_config(&cwd),
+            StateReapConfig {
+                enabled: false,
+                locks_retain_days: 5,
+                expired_claims_retain_days: 60,
+                pr_status_cache_retain_days: 28,
+            }
+        );
+        clear_config_env();
+    }
+
+    #[test]
+    fn state_reap_config_invalid_and_negative_values_degrade_to_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "state-reap-invalid",
+            "[agents.state_reap]\n\
+             enabled = \"banana\"\n\
+             locks_retain_days = 0\n\
+             expired_claims_retain_days = -1\n\
+             pr_status_cache_retain_days = \"fortnightly\"\n",
+        );
+        assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
 
     #[test]
     fn headless_yolo_default_true_when_absent() {

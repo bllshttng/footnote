@@ -31,6 +31,7 @@ import math
 import os
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +39,38 @@ from typing import Optional
 # operator's live config file.
 DEFAULT_TTL_SECONDS = 60
 DEFAULT_BACKOFF_CAP_SECONDS = 900
+
+
+def _open_locked_path(lock_path: Path):
+    while True:
+        handle = open(lock_path, "a+")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                opened = os.fstat(handle.fileno())
+                current = lock_path.stat()
+                same_inode = (opened.st_dev, opened.st_ino) == (
+                    current.st_dev,
+                    current.st_ino,
+                )
+            except OSError:
+                same_inode = False
+            if same_inode:
+                return handle
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except BaseException:
+            handle.close()
+            raise
+        handle.close()
+
+
+@contextmanager
+def _locked_path(lock_path: Path):
+    handle = _open_locked_path(lock_path)
+    try:
+        yield handle
+    finally:
+        handle.close()
 
 
 def _ttl() -> int:
@@ -173,8 +206,7 @@ def _arm_backoff_row(p: Path, *, fresh_output: Optional[dict] = None) -> None:
     """
     lock_path = p.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    with _locked_path(lock_path) as lf:
         try:
             row = read_row(p.stem) or {}
             now = time.time()
@@ -437,8 +469,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
     lock_path = cache_dir() / (key + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     p = cache_dir() / (key + ".json")
-    with open(lock_path, "a+") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    with _locked_path(lock_path) as lf:
         try:
             row = read_row(key)
             code = -1 if refresh else _servable(row, time.time())

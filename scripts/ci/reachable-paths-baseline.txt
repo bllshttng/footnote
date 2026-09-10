@@ -48,6 +48,8 @@ A	claude logs: claude binary not found on path; install claude or check $path	py
 A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	delivery-evaluate-response.v1	py=cli/src/fno/delivery/contracts.py;rs=crates/fno-agents/src/delivery_completion.rs	# protocol
 A	delivery_verdict_evaluated	py=cli/src/fno/delivery/contracts.py;rs=crates/fno-agents/src/delivery_completion.rs	# protocol
+A	expired_claims_retain_days	py=cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# protocol: Python validates the operator setting and the Rust reaper consumes the same retention leaf
+A	pr_status_cache_retain_days	py=cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# protocol: Python validates the operator setting and the Rust reaper consumes the same retention leaf
 A	description={description}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	empty supported {action}	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
 A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin

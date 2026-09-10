@@ -336,6 +336,16 @@ retain_days = 7
 # Which rows the roster sweep may retire: off retires nothing, provenanced (the default) only rows whose provenance resolves to fno and whose work is done, all widens to rows fno itself spawned (sessions or registry provenance) with open work. A row that resolves to no fno node is never retirable at any value, including all, so a session the operator started by hand is safe by construction. A present value that cannot be honored degrades in place to the default and is named by fno config doctor.
 roster_scope = "provenanced"
 
+[agents.state_reap]
+# Run age-based cleanup for expendable lock, expired-claim, and PR-status cache files (default true).
+enabled = true
+# Days to retain inactive lock files before state cleanup removes them (default 7).
+locks_retain_days = 7
+# Days to retain claims moved into the expired-claims graveyard (default 30).
+expired_claims_retain_days = 30
+# Days to retain expendable PR-status cache files (default 14).
+pr_status_cache_retain_days = 14
+
 [agents.codex]
 # Use full-yolo (drop sandbox) for headless codex workers.
 headless_yolo = false

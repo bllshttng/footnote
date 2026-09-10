@@ -358,6 +358,7 @@ dual_owner_kinds = {
     # reaper emits it (Rust) at the same removal boundary.
     "worktree_removed",
     "control_plane_tick",
+    "state_reap",
     # Evals demand: the pr-watch tick's evals leg (Python) is the only
     # emitter; the rows ride the daemon's journal, so the Rust known-kind
     # table carries them for acceptance without emitting.

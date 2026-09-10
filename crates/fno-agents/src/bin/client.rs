@@ -2195,6 +2195,45 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
 
+    if rest.iter().any(|arg| arg == "--state-files-only") {
+        let apply = rest.iter().any(|arg| arg == "--apply");
+        let explicit_dry_run = rest.iter().any(|arg| arg == "--dry-run");
+        if apply && explicit_dry_run {
+            eprintln!("fno-agents: reap --state-files-only cannot combine --apply and --dry-run");
+            return 2;
+        }
+        let extras: Vec<&str> = rest
+            .iter()
+            .map(String::as_str)
+            .filter(|arg| {
+                !matches!(
+                    *arg,
+                    "--state-files-only" | "--apply" | "--dry-run" | "--json" | "-J"
+                )
+            })
+            .collect();
+        if !extras.is_empty() {
+            eprintln!(
+                "fno-agents: reap --state-files-only takes only --apply/--dry-run/--json (got: {})",
+                extras.join(" ")
+            );
+            return 2;
+        }
+        let home = AgentsHome::from_env();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let summary = fno_agents::gc_sweep::reap_state_files_for_cwd(
+            &home,
+            &cwd,
+            fno_agents::agents_config::state_reap_config(&cwd),
+            apply,
+        );
+        print!(
+            "{}",
+            fno_agents::reap_render::render_state_files_reap(&summary, json_out)
+        );
+        return i32::from(fno_agents::gc_sweep::state_reap_has_failures(&summary));
+    }
+
     // The verify probe (x-70e1 task 5): read-only audit of the receipts
     // store over `--since`, pinned to THIS build. Nonzero exit on any
     // unmet condition - empty window, stale build, partial effects - so the
