@@ -983,6 +983,16 @@ def _require_node_id(task_id: str) -> None:
     raise typer.Exit(code=1)
 
 
+def _require_nodes(entries: "list[dict]", ids: "list[str]") -> None:
+    """The shared missing-node gate for the multi-id verbs."""
+    from fno.graph._intake import _find_node
+
+    missing = [tid for tid in ids if _find_node(entries, tid) is None]
+    if missing:
+        typer.echo(f"Error: feature(s) not found: {', '.join(missing)}", err=True)
+        raise typer.Exit(code=1)
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -6979,13 +6989,7 @@ def cmd_defer(
     def mutator(entries):
         # Resolve every id and abort naming ALL missing ones before mutating,
         # mirroring cmd_queue's all-or-nothing batch atomicity.
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         now = datetime.now(timezone.utc).isoformat()
         for tid in ids:
             node = _find_node(entries, tid)
@@ -7145,13 +7149,7 @@ def cmd_queue(
     cleaned_reason = (reason or "").strip() or None
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         now = datetime.now(timezone.utc).isoformat()
         for tid in ids:
             node = _find_node(entries, tid)
@@ -7186,13 +7184,7 @@ def cmd_unqueue(
     not_queued: list[str] = []
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
             if not node.get("queued_at"):
@@ -7581,13 +7573,7 @@ def cmd_undefer(
     was_deferred: list[tuple[str, bool]] = []
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
             was_deferred.append((tid, bool(node.get("deferred_at"))))
