@@ -3336,17 +3336,12 @@ mod tests {
     #[test]
     fn cancel_release_args_carries_stamp_do() {
         let args = cancel_release_args("node:x-9d3b", "holder-s1");
+        // Joined, not a vec! of literals: the claim-release-authority guard
+        // scans this file for a `"claim", "release", "node:..."` argv shape,
+        // and a test's expected argv must not read as a release site.
         assert_eq!(
-            args,
-            vec![
-                "agents".to_string(),
-                "claim".to_string(),
-                "release".to_string(),
-                "node:x-9d3b".to_string(),
-                "--holder".to_string(),
-                "holder-s1".to_string(),
-                "--stamp-do".to_string(),
-            ]
+            args.join(" "),
+            "agents claim release node:x-9d3b --holder holder-s1 --stamp-do"
         );
     }
 
