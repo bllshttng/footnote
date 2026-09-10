@@ -33,6 +33,7 @@ path), :class:`GraphUnreadableError` / :class:`GraphMalformedRootError`
 from __future__ import annotations
 
 import base64 as _base64
+import copy
 import hashlib
 import json
 import os
@@ -624,9 +625,11 @@ def _graph_commit_mode() -> str:
         return "rows"
 
 
-def _commit_snapshot(client, snap: dict, entries: list[dict], plan_rungs: dict) -> dict:
+def _commit_snapshot(
+    client, snap: dict, base_entries: list[dict], entries: list[dict], plan_rungs: dict
+) -> dict:
     if _graph_commit_mode() == "rows":
-        diff = _row_diff(snap["entries"], entries)
+        diff = _row_diff(base_entries, entries)
         digests = snap.get("base_digests")
         if diff is not None and isinstance(digests, dict):
             changed, removed = diff
@@ -1202,11 +1205,12 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
 
     for attempt in range(_TX_ATTEMPTS):
         snap = client.request("begin", {})
+        base_entries = copy.deepcopy(snap["entries"])
         entries = mutator(snap["entries"])
         _validate_company_work(entries)
         plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, entries, plan_rungs)
+            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs)
             break
         except _Conflict as conflict:
             _emit_graph_tx_event(
