@@ -1994,10 +1994,10 @@ def cmd_health(
         for d in ownership_defects:
             typer.echo(f"  {d['id']} [{d['status']}] {d['kind']} holder={d['holder']}")
         typer.echo(
-            "  liveness is not decided here. For each row: the transcript mtime under\n"
-            "  ~/.claude/projects/<slug>/<session>.jsonl AND the registry row from\n"
-            "  `fno agents list --json`. A claim lockfile confirms a live holder; its\n"
-            "  absence confirms nothing."
+            "  liveness is not decided here. For each row: the transcript mtime for\n"
+            "  the holder session under the harness projects dir, AND the registry\n"
+            "  row from `fno agents list --json`. A claim lockfile confirms a live\n"
+            "  holder; its absence confirms nothing."
         )
     if dnm["violations"]:
         typer.echo("")
