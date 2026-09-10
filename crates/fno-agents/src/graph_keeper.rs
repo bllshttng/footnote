@@ -249,12 +249,31 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     let shutdown = Arc::new(AtomicU64::new(0));
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
+    // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
+    // bound to that test run's lifetime, not the longer-lived idle bound
+    // above: a wedged test that never sends Shutdown must not leak this
+    // store past its own run (x-79bc's mechanism, one keeper family over).
+    // Resolved once - the env does not change mid-run - and polled at most
+    // every 250ms, cheap enough to share the accept loop's own tick.
+    let test_owner = crate::test_run::owner_from_env();
+    let mut last_owner_check = std::time::Instant::now();
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("cannot poll {}: {e}", cfg.sock.display()))?;
     loop {
         if shutdown.load(Ordering::SeqCst) == 1 {
             break;
+        }
+        if let Some((owner_pid, owner_birth)) = test_owner {
+            if last_owner_check.elapsed() >= Duration::from_millis(250) {
+                last_owner_check = std::time::Instant::now();
+                if !crate::test_run::owner_alive(owner_pid, owner_birth) {
+                    eprintln!(
+                        "fno-agents-worker: test_keeper_reaped graph_keeper owner_pid={owner_pid} owner_birth={owner_birth}"
+                    );
+                    break;
+                }
+            }
         }
         match listener.accept() {
             Ok((stream, _addr)) => {

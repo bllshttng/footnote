@@ -466,6 +466,31 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     });
     let _ = keeper.identify.set(identify);
 
+    // A test-owned pane (spawned under `fno-agents test-run`, argv carries
+    // FNO_TEST_OWNER_PID/BIRTH) never survives its test run: without a
+    // Drop on the pty type, a wedged/killed test that never sends Kill
+    // leaks this whole pane (x-79bc - 5 confirmed orphans, one traced to
+    // `run_pane_with_worker` at crates/fno/src/server.rs:20282). A
+    // production pane (no such env, Locked Decision 4) is unaffected - this
+    // thread never spawns for one.
+    if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
+        std::thread::Builder::new()
+            .name("fno-keeper-test-owner".into())
+            .spawn(move || loop {
+                if !crate::test_run::owner_alive(owner_pid, owner_birth) {
+                    // SAFETY: same kill(pid, SIGKILL) the explicit Frame::Kill
+                    // path already sends to this same child.
+                    unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
+                    eprintln!(
+                        "fno-agents-worker: test_keeper_reaped child_pid={child_pid} owner_pid={owner_pid} owner_birth={owner_birth}"
+                    );
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            })
+            .ok();
+    }
+
     // The pty-reader thread: master -> ring + Output frames. Blocking reads
     // live here and only here; EOF/EIO means the child is gone.
     let pty_keeper = Arc::clone(&keeper);

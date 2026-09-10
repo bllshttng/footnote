@@ -134,9 +134,23 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 /// an unrelated ancestor shell) is never trusted; that case re-acquires a
 /// fresh claim like a top-level run.
 fn nested_owner() -> Option<(u32, u64)> {
+    owner_from_env()
+}
+
+/// The declared test-run owner from `FNO_TEST_OWNER_PID`/`FNO_TEST_OWNER_BIRTH`,
+/// verified against the LIVE process (never trusted on the name alone) - the
+/// one parser test-owned keeper lanes share (pane_keeper.rs, graph_keeper.rs)
+/// so a malformed or foreign token reads the same way everywhere.
+pub fn owner_from_env() -> Option<(u32, u64)> {
     let pid: u32 = std::env::var("FNO_TEST_OWNER_PID").ok()?.parse().ok()?;
     let birth: u64 = std::env::var("FNO_TEST_OWNER_BIRTH").ok()?.parse().ok()?;
-    (crate::daemon::process_start_time(pid) == Some(birth)).then_some((pid, birth))
+    owner_alive(pid, birth).then_some((pid, birth))
+}
+
+/// Whether `pid` is still the SAME incarnation that was born at `birth` - a
+/// recycled pid with a different birth timestamp answers `false`.
+pub fn owner_alive(pid: u32, birth: u64) -> bool {
+    crate::daemon::process_start_time(pid) == Some(birth)
 }
 
 /// Block until the claim is ours or `deadline` passes. A contender spawns
