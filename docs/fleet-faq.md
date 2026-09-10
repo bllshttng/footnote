@@ -185,7 +185,7 @@ The discriminator is not the motive. Both a good and a bad edit will say "to fit
 - **Not fine:** the metric is satisfied by the explanation ceasing to exist.
 - **Fine:** the contract moves to a doc the file already cites elsewhere, and a one-line pointer stays.
 
-Also worth knowing, because it changes what you tell a worker: the same gate **excludes test paths** (`check-file-budget.sh`). Test coverage is free. Say so, or a worker will delete tests it must keep.
+Also worth knowing, because it changes what you tell a worker: the same gate **excludes test paths** (`check-file-budget.sh`). Test coverage is free. Say so, or a worker will delete tests it must keep. A deleted module banks all its lines, so deleting dead code is a real remedy. A module moved into `cli/src/fno` counts as growth, so a move is not a free port.
 
 *Graduates to:* the budget gate discounting comment and docstring lines, so the cheapest legal move for a worker is a real port.
 

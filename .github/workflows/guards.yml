@@ -347,6 +347,11 @@ jobs:
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
+      - name: File budget gate selftest
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_file_budget.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}

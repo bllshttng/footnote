@@ -150,8 +150,8 @@ _CACHED_COUNT=""
 live_count() {
     if [[ -z "$_CACHED_COUNT" ]]; then
         # -z / xargs -0: a quoted or spaced path must count, never split. The
-        # diff below reads with core.quotepath=off for the same reason - a
-        # changed file that arrives quoted would fail cat-file and silently
+        # diffs below read with -z for the same reason - a changed file that
+        # arrives quoted or brace-compacted would fail cat-file and silently
         # escape the gate.
         _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
             | xargs -0 wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
@@ -171,26 +171,26 @@ is_test_path() {
 }
 
 fails=0
-py_added=0
-py_deleted=0
 findings="$(mktemp)"
 trap 'rm -f "$findings"' EXIT
 
-while IFS=$'\t' read -r added deleted path; do
-    [[ "$added" == "-" ]] && continue            # binary row
-    case "$path" in *"=>"*) path="${path#*=> }" ;; esac
-    [[ -z "$path" ]] && continue
-    git cat-file -e "HEAD:$path" 2>/dev/null || continue   # deleted at HEAD
-
-    if [[ "$path" == cli/src/fno/*.py ]] && ! is_test_path "$path"; then
-        py_added=$((py_added + added))
-        py_deleted=$((py_deleted + deleted))
+# A -z numstat row is "added<TAB>deleted<TAB>path". A rename row leaves path
+# empty and sends the old and new paths as the next two fields.
+while IFS= read -r -d '' row; do
+    added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
+    deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
+    base_path="$path"
+    if [[ -z "$path" ]]; then
+        IFS= read -r -d '' base_path
+        IFS= read -r -d '' path
     fi
+    [[ "$added" == "-" ]] && continue            # binary row
+    git cat-file -e "HEAD:$path" 2>/dev/null || continue   # deleted at HEAD
 
     head_lines="$(git cat-file -p "HEAD:$path" | wc -l | tr -d ' ')"
     [[ "$head_lines" -gt "$BUDGET" ]] || continue   # under budget grows freely
 
-    if git cat-file -e "$BASE:$path" 2>/dev/null; then
+    if git cat-file -e "$BASE:$base_path" 2>/dev/null; then
         if [[ "$added" -gt "$deleted" ]]; then
             if [[ "$PUSH_ALARM" -eq 1 ]]; then
                 # A red push run is an alarm, not a refusal: the merge already
@@ -223,7 +223,21 @@ while IFS=$'\t' read -r added deleted path; do
 # are identical there; on the explicit-sha path a sha that is not an ancestor
 # (a force-push overwrite) must still be honored as pinned, which three-dot
 # would silently widen to the merge base.
-done < <(git -c core.quotepath=off diff --numstat -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+done < <(git diff --numstat -z -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+
+# The tree tally is its own pass because it needs no HEAD blob: a deleted
+# module banks its lines here. --no-renames counts a module moved into or out
+# of the tree as the growth or shrink it is.
+py_added=0
+py_deleted=0
+while IFS= read -r -d '' row; do
+    added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
+    deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
+    [[ "$added" == "-" ]] && continue
+    is_test_path "$path" && continue
+    py_added=$((py_added + added))
+    py_deleted=$((py_deleted + deleted))
+done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
 py_net=$((py_added - py_deleted))
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
@@ -238,6 +252,6 @@ if [[ "$fails" -eq 1 ]]; then
     exit 1
 fi
 if [[ "$QUIET" -eq 0 ]]; then
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net +$py_net, allowance $PY_ALLOWANCE)"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE)"
 fi
 exit 0
