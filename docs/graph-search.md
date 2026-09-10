@@ -8,7 +8,7 @@ The tool is `graphify`. It builds a knowledge graph of the repo and answers a wh
 
 Only when `graphify-out/graph.json` exists in the repo root. If it does not, skip this page and use `rg` / Grep.
 
-The index is generated and local. `graphify-out/` is gitignored, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool.
+The index is generated and local, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool. Keep `graphify-out/` out of commits: `graph.json` runs to tens of megabytes, and one `graphify-out/` under `crates/` makes the rust build report a dirty tree.
 
 ## The four verbs
 
