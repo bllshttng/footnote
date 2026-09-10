@@ -84,6 +84,9 @@ case "$PY_ALLOWANCE" in '' | *[!0-9]*)
 esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
+# The source types this gate measures. The diffs and the uncommitted-work check
+# read this one list, so a new type cannot reach one and miss the other.
+GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
 
 # Base resolution follows check-proto-version-bump.sh: an EXPLICIT refspec, so
 # a narrowed fetch config cannot leave a stale ref reading as current, and a
@@ -153,7 +156,7 @@ live_count() {
         # diffs below read with -z for the same reason - a changed file that
         # arrives quoted or brace-compacted would fail cat-file and silently
         # escape the gate.
-        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
+        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z "${GATED[@]}" \
             | xargs -0 wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
             | wc -l | tr -d ' ')"
     fi
@@ -225,7 +228,7 @@ while IFS= read -r -d '' row; do
 # are identical there; on the explicit-sha path a sha that is not an ancestor
 # (a force-push overwrite) must still be honored as pinned, which three-dot
 # would silently widen to the merge base.
-done < <(git diff --numstat -z -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
 
 # The tree tally is its own pass because it needs no HEAD blob: a deleted
 # module banks its lines here. --no-renames counts a module moved into or out
@@ -250,8 +253,8 @@ fi
 # A worker runs this locally mid-change to learn its number before CI does.
 # Every diff above reads commits, so uncommitted work would print as no growth.
 # It never changes the exit code.
-if ! git diff --quiet HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
-        || [[ -n "$(git ls-files --others --exclude-standard -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')" ]]; then
+if ! git diff --quiet HEAD -- "${GATED[@]}" \
+        || [[ -n "$(git ls-files --others --exclude-standard -- "${GATED[@]}")" ]]; then
     echo "check-file-budget: WARN uncommitted changes to gated files are not counted. The numbers here measure commits only. Commit, then re-run." >&2
 fi
 
