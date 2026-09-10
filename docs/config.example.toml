@@ -121,6 +121,8 @@ render_targets = []
 staleness_days = 30
 # Consecutive failures before a node auto-defers.
 max_failed_attempts = 3
+# Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone.
+abandoned_do_row_hours = 24
 # Age (days) before a stale idea enters the validity sweep.
 validity_days = 60
 # Oldest-first validity-sweep batch size (clamped to 100).
