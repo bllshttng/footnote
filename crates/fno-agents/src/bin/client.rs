@@ -2650,10 +2650,22 @@ fn render_restart(
             old_pid: Some(old),
             new_pid,
             forced: true,
-            note,
+            note: Some(note),
+        }) => (
+            // Escalated graceful restart: `forced: true` + a note only arises
+            // here, so the note is the discriminator.
+            Some(format!("restarted (escalated): pid {old} -> {new_pid}")),
+            Some(note.clone()),
+            0,
+        ),
+        Ok(RestartOutcome {
+            old_pid: Some(old),
+            new_pid,
+            forced: true,
+            note: None,
         }) => (
             Some(format!("forced: killed pid {old} -> {new_pid}")),
-            note.clone(),
+            None,
             0,
         ),
         Ok(RestartOutcome {

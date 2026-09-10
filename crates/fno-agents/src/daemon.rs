@@ -6356,7 +6356,11 @@ fn pid_recycled(pid: u32, recorded_start: Option<u64>) -> bool {
 /// ours to keep waiting on. Both arms demand positive evidence, so an
 /// alive-but-unsignalable process satisfies neither and the wait runs out --
 /// reporting failure, which is the honest answer when we cannot see.
-async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
+pub(crate) async fn pid_gone_within(
+    pid: u32,
+    recorded_start: Option<u64>,
+    budget: Duration,
+) -> bool {
     let start = Instant::now();
     loop {
         if pid_confirmed_dead(pid) || pid_recycled(pid, recorded_start) {

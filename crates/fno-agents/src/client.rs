@@ -498,8 +498,8 @@ pub enum RestartError {
     SigtermFailed { pid: u32, reason: String },
     #[error("SIGKILL to daemon pid {pid} failed: {reason}")]
     SigkillFailed { pid: u32, reason: String },
-    #[error("daemon pid {pid} did not exit after SIGTERM within {secs}s; check it manually")]
-    DidNotExit { pid: u32, secs: u64 },
+    #[error("daemon pid {pid} survived SIGKILL; it is still running - check it manually")]
+    DidNotDie { pid: u32 },
     #[error("daemon pid {pid} did not release the supervisor lock after SIGKILL within {secs}s; check it manually")]
     ForceDidNotFree { pid: u32, secs: u64 },
     #[error(
@@ -514,9 +514,20 @@ pub enum RestartError {
     Client(#[from] ClientError),
 }
 
-/// Bounded wait for the old daemon to release the supervisor socket. On a clean
-/// SIGTERM the daemon unlinks its own socket, so a failed connect means cleared.
-const RESTART_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+/// The grace a SIGTERM'd daemon gets before the restart escalates to SIGKILL.
+/// 30s because a loaded machine measured `fno agents list` at 11.5-18.7s the
+/// same hour, and restart.py wraps the verb in a 120s subprocess timeout:
+/// 30s grace + 2s kill + FORCE_LOCK_TIMEOUT + start_fresh fits inside it.
+const RESTART_SIGTERM_GRACE: Duration = Duration::from_secs(30);
+
+/// The result of [`terminate_confirmed`]. `Survived` is the honest-failure
+/// arm: the caller reports DidNotDie rather than a stop that did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Termination {
+    Exited,
+    Escalated,
+    Survived,
+}
 
 /// Bounded wait for a SIGKILLed holder's flock to dissolve. The kernel closes
 /// the descriptors of a SIGKILLed process synchronously enough that this is
@@ -562,18 +573,42 @@ async fn read_daemon_pid(home: &AgentsHome) -> Result<u32, RestartError> {
         .ok_or(RestartError::StatusMissingPid)
 }
 
-/// True once nothing is listening on the supervisor socket (the old daemon
-/// released it), bounded by `RESTART_SOCKET_TIMEOUT`.
-async fn await_socket_clear(home: &AgentsHome) -> bool {
-    let sock = home.supervisor_sock();
-    let start = Instant::now();
-    while start.elapsed() < RESTART_SOCKET_TIMEOUT {
-        if UnixStream::connect(&sock).await.is_err() {
-            return true;
+/// Terminate, escalate, verify (the house pattern `stop_worker_confirmed`
+/// applies to workers, applied here to the daemon itself): SIGTERM, wait out
+/// the grace, SIGKILL only a pid that is still provably ours, and refuse to
+/// claim a stop that did not happen. A pid whose recorded start time no
+/// longer matches at any poll counts as gone: the process we signalled
+/// exited and its pid was recycled; the new occupant is nobody's target.
+async fn terminate_confirmed(
+    pid: u32,
+    recorded_start: Option<u64>,
+    grace: Duration,
+) -> Result<Termination, RestartError> {
+    match send_signal(pid, libc::SIGTERM) {
+        SignalResult::Sent | SignalResult::AlreadyGone => {}
+        SignalResult::Failed(reason) => {
+            return Err(RestartError::SigtermFailed { pid, reason });
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    UnixStream::connect(&sock).await.is_err()
+    if crate::daemon::pid_gone_within(pid, recorded_start, grace).await {
+        return Ok(Termination::Exited);
+    }
+    // Still serving at the bound. Escalate only while the pid is still THIS
+    // daemon (AC1-ERR): a recycled pid is never signalled.
+    if !crate::daemon::pid_is_ours(pid, recorded_start) {
+        return Ok(Termination::Exited);
+    }
+    match send_signal(pid, libc::SIGKILL) {
+        SignalResult::Sent | SignalResult::AlreadyGone => {}
+        SignalResult::Failed(reason) => {
+            return Err(RestartError::SigkillFailed { pid, reason });
+        }
+    }
+    if crate::daemon::pid_gone_within(pid, recorded_start, Duration::from_secs(2)).await {
+        Ok(Termination::Escalated)
+    } else {
+        Ok(Termination::Survived)
+    }
 }
 
 /// True once nothing holds the supervisor singleton lock, bounded by
@@ -764,20 +799,36 @@ pub async fn restart_daemon(
         });
     }
 
-    match send_signal(old_pid, libc::SIGTERM) {
-        SignalResult::Sent | SignalResult::AlreadyGone => {}
-        SignalResult::Failed(reason) => {
-            return Err(RestartError::SigtermFailed {
-                pid: old_pid,
-                reason,
-            })
-        }
+    // Terminate, escalate, verify: wait on the PID, not the socket. A socket
+    // that stops answering is an absence check with two failure modes (x-9627,
+    // the 2026-08-13 double-daemon): a daemon whose select loop starves the
+    // SIGTERM arm keeps serving through the whole bound, and a daemon that
+    // unlinked its socket but is still tearing down reads as gone while the
+    // pid is still ours. `terminate_confirmed` returns Exited (died on TERM or
+    // its pid was recycled), Escalated (SIGKILL needed), or Survived (refuse
+    // to claim a stop that did not happen).
+    let termination = terminate_confirmed(old_pid, recorded_start, RESTART_SIGTERM_GRACE).await?;
+    if termination == Termination::Survived {
+        return Err(RestartError::DidNotDie { pid: old_pid });
     }
-
-    if !await_socket_clear(home).await {
-        return Err(RestartError::DidNotExit {
+    // Both arms wait for the supervisor flock to dissolve before starting
+    // fresh, so start_fresh never binds while the old daemon still holds it.
+    if !await_lock_free(home).await {
+        return Err(RestartError::ForceDidNotFree {
             pid: old_pid,
-            secs: RESTART_SOCKET_TIMEOUT.as_secs(),
+            secs: FORCE_LOCK_TIMEOUT.as_secs(),
+        });
+    }
+    if termination == Termination::Escalated {
+        let new_pid = start_fresh(home, daemon_bin).await?;
+        return Ok(RestartOutcome {
+            old_pid: Some(old_pid),
+            new_pid,
+            forced: true,
+            note: Some(format!(
+                "pid {old_pid} kept serving {}s after SIGTERM; escalated to SIGKILL",
+                RESTART_SIGTERM_GRACE.as_secs()
+            )),
         });
     }
     // Do NOT unlink the socket here (codex P2, PR #472): once the clear window
@@ -795,6 +846,91 @@ pub async fn restart_daemon(
         forced: false,
         note: None,
     })
+}
+
+#[cfg(test)]
+mod restart_termination_tests {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+
+    /// Spawn a victim that ignores TERM (when `ignore_term`) and dies as an
+    /// ORPHAN: the perl parent forks and exits immediately, so the victim is
+    /// reparented to launchd, which reaps it the moment it dies. A direct
+    /// child of the test would sit as a zombie (its parent, the test, is
+    /// alive), and a zombie still answers kill(pid, 0), so the production
+    /// death probe would read it as alive forever. The old daemon's real
+    /// parent is a long-exited client, so production never sees this; the
+    /// orphan reproduces the launchd-reaped shape the probe expects.
+    /// The pid line is printed by the victim itself AFTER the disposition is
+    /// installed, so reading it races nothing.
+    fn spawn_victim(ignore_term: bool) -> (Child, u32) {
+        // No arg at all for the default-disposition case: an empty-string arg
+        // is still an @ARGV element, and one element is truthy in perl.
+        let mut cmd = Command::new("perl");
+        cmd.arg("-e")
+            .arg("$|=1; my $pid=fork(); die \"fork: $!\" unless defined $pid; if(!$pid){ $SIG{TERM}='IGNORE' if @ARGV; print \"$$\\n\"; sleep 60; exit 0 } exit 0")
+            .stdout(Stdio::piped());
+        if ignore_term {
+            cmd.arg("ignore");
+        }
+        let mut perl = cmd.spawn().expect("spawn victim parent");
+        // One LINE, never read_to_string: the victim inherits the pipe write
+        // end, so EOF arrives only when the victim itself exits.
+        use std::io::BufRead;
+        let mut out = String::new();
+        std::io::BufReader::new(perl.stdout.take().unwrap())
+            .read_line(&mut out)
+            .expect("read victim pid");
+        let pid: u32 = out.trim().parse().expect("victim pid is a number");
+        (perl, pid)
+    }
+
+    fn cleanup(perl: &mut Child, pid: u32) {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = perl.wait();
+    }
+
+    #[tokio::test]
+    async fn terminate_confirmed_escalates_when_sigterm_is_ignored() {
+        let (mut midman, pid) = spawn_victim(true);
+        let start = crate::daemon::process_start_time(pid);
+        let t = terminate_confirmed(pid, start, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(matches!(t, Termination::Escalated), "got {t:?}");
+        let waited = midman.wait().is_ok();
+        assert!(
+            waited,
+            "the midman exits once the SIGKILLed victim is reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminate_confirmed_reads_exited_when_the_daemon_dies_on_term() {
+        let (mut midman, pid) = spawn_victim(false);
+        let start = crate::daemon::process_start_time(pid);
+        let t = terminate_confirmed(pid, start, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(matches!(t, Termination::Exited), "got {t:?}");
+        let _ = midman.wait();
+    }
+
+    #[tokio::test]
+    async fn terminate_confirmed_never_escalates_a_pid_whose_start_time_no_longer_matches() {
+        // AC1-ERR: the recorded start time no longer matches at the grace
+        // bound -> the pid was recycled; no SIGKILL for a stranger.
+        let (mut midman, pid) = spawn_victim(true);
+        let t = terminate_confirmed(pid, Some(1), Duration::from_secs(1))
+            .await
+            .unwrap();
+        let untouched = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        cleanup(&mut midman, pid);
+        assert!(matches!(t, Termination::Exited), "got {t:?}");
+        assert!(untouched, "the recycled-pid occupant was never signalled");
+    }
 }
 
 #[cfg(test)]
