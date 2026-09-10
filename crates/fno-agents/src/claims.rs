@@ -257,6 +257,11 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     "config-optout",
     "flight",
     "gate",
+    // `test:suite` (test_run.rs): a caller with no explicit `--claims-root`
+    // and no FNO_CLAIMS_ROOT/HOME in its environment must not hard-fail the
+    // claim lookup - it degrades to the machine-wide root like every other
+    // global key, never to "cannot resolve a root at all".
+    "test",
 ];
 
 /// Dotted configuration keys whose opt-out values are backed by global claims.
