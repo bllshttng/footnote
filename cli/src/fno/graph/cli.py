@@ -11971,35 +11971,6 @@ cli.command("rank")(_cmd_rank)
 
 # -- archive --
 
-_ARCHIVE_SKIP_REASONS = (
-    "referenced-by-open-node",
-    "related-peer-not-archived",
-    "too-recent",
-    "no-parseable-timestamp",
-)
-
-
-def _archive_bucket_counts(skipped: list) -> dict[str, int]:
-    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
-
-    Zero-filled so the receipt always names all four buckets (): a run
-    that holds back 0 for a reason reads as "checked, none held", not as an
-    absent line a reader has to interpret as either "zero" or "not measured".
-    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
-    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
-    (and in groom's regex sum over these lines) instead of vanishing.
-    """
-    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
-    for s in skipped:
-        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
-    return held
-
-
-def _receipt_reason_order(held: dict[str, int]) -> list[str]:
-    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
-    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
-
-
 @cli.command(
     "archive",
     hidden=True,
@@ -12031,9 +12002,13 @@ def cmd_archive(
         GraphCorruptError,
     )
     from fno.graph.archive import (
+        _archive_bucket_counts,
+        _last_sweep_line,
+        _receipt_reason_order,
         merge_into_archive,
         partition_for_archive,
         release_soft_edges,
+        retire_stale_postmortems,
         stamp_archived_at,
     )
 
@@ -12060,6 +12035,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
+        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -12087,11 +12063,13 @@ def cmd_archive(
             pass
 
     if not apply:
-        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        entries, retired = retire_stale_postmortems(read_graph(_graph_path()), now)
+        to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
+        typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
         # Every run emits, dry-run included: a leg that went silent must stay
@@ -12100,9 +12078,11 @@ def cmd_archive(
         _emit_swept_event(len(to_archive), _archive_bucket_counts(skipped), mode="dry-run")
         return
 
-    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0}
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0, "retired": 0}
 
     def mutator(entries):
+        entries, retired = retire_stale_postmortems(entries, now)
+        receipt["retired"] = len(retired)
         to_archive, remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
@@ -12136,6 +12116,10 @@ def cmd_archive(
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+    if receipt["retired"]:
+        typer.echo(
+            f"Retired {receipt['retired']} stale postmortem receipt(s) (closed by age rule)"
+        )
     _echo_receipt(receipt["moved"], receipt["held"], receipt["stripped"])
     _emit_swept_event(receipt["moved"], receipt["held"], receipt["stripped"])
 

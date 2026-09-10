@@ -161,6 +161,18 @@ def test_classify_cancel_is_archived() -> None:
     assert disposition == DISPOSITION_ARCHIVE and cand is None
 
 
+def test_classify_done_terminal_is_archived_even_with_wedge_text() -> None:
+    """A success terminal is a healthy session's receipt: consumed, no node, no
+    inbox line. The wedge regex matches pasted assistant prose constantly, so a
+    Done* reason must never reach it (35 of 62 landed rows were DonePRGreen)."""
+    for reason in ("DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneUnreviewed"):
+        disposition, cand = classify_postmortem(
+            _item("split-brain stale claim wedge", subkind=reason)
+        )
+        assert disposition == DISPOSITION_ARCHIVE, f"{reason} must not land"
+        assert cand is None
+
+
 def test_classify_wedge_text_is_node() -> None:
     disposition, cand = classify_postmortem(
         _item("worker hit a split-brain after respawn", subkind="NoProgress")

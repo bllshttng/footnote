@@ -263,6 +263,8 @@ Dry-run by default: prints how many would move and why some are held back. ``--a
 
 Every run's receipt names all four held-back buckets plus the soft-edge strip count, and every run emits a ``graph_archive_swept`` event, dry-run included: a leg that runs daily and reports bare "ok" is indistinguishable from one that never ran - the count that matters is often the held-back one, not the moved one.
 
+Two receipt additions close the "did the sweep stop?" gap. The receipt ends with a ``last sweep:`` line dated from the archive's newest ``archived_at`` stamp (the marker a sweep writes when it moves rows), because the archive's newest ``completed_at`` always trails today by the age gate and reads as a stall to anyone comparing it to the clock. And ``--apply`` first retires stale postmortem receipts: open ``idea`` rows minted by the retro postmortem pass (the ``retro-triage source_pr=None`` trailer in their details) that no human touched within 30 days are closed as ``done`` with a ``retired: stale-postmortem-receipt`` marker. Queued, claimed, deferred, and any non-idea row is untouched. Retirement composes with the sweep: the closed receipt becomes an ordinary terminal row the age gate removes from the working graph a month later. Without the rule, finalize's per-session completion evals pile up forever - 61 open receipts once produced 750 of the graph's near-duplicate pairs.
+
 ## cmd_unarchive
 
 Move one node from graph-archive.json back into the working graph.
