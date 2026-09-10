@@ -28,7 +28,7 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `daemon_young`: A daemon-scheduled arm reads `pending`, not red, while the daemon is up less than twice the interval. The first window has not elapsed.
 - `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
 - `daemon_down`: The daemon is not running.
-- `tick_timeout`: The pr-watch tick timed out before this arm ran. See `pr_watch_merge`.
+- `tick_timeout`: The pr-watch tick broke (timeout or error) before this arm ran. See `pr_watch_merge`.
 - `scheduler_silent`: No pr-watch tick inside 2x interval. Run `fno do pr watch status`.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 

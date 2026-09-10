@@ -348,12 +348,16 @@ pub enum DaemonFacts {
 /// whether the arm or its scheduler broke.
 pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
     let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
-    let pm_fresh_timeout =
-        pm.is_some_and(|r| !r.stale && r.skip_reason.as_deref() == Some("timeout"));
+    let pm_fresh_failure = pm.is_some_and(|r| {
+        !r.stale
+            && r.skip_reason
+                .as_deref()
+                .is_some_and(|s| FAILURE_SKIPS.contains(&s))
+    });
     let pm_stale = pm.is_some_and(|r| r.stale);
     for row in rows.iter_mut() {
         if row.stale {
-            let cause = stale_cause(row, daemon, pm_fresh_timeout, pm_stale)
+            let cause = stale_cause(row, daemon, pm_fresh_failure, pm_stale)
                 .unwrap_or_else(|| "unexplained".to_string());
             if cause == "daemon_young" {
                 row.stale = false;
@@ -374,7 +378,7 @@ pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
 fn stale_cause(
     row: &ArmStatus,
     daemon: &DaemonFacts,
-    pm_fresh_timeout: bool,
+    pm_fresh_failure: bool,
     pm_stale: bool,
 ) -> Option<String> {
     let sched = row.scheduler.as_deref();
@@ -393,7 +397,7 @@ fn stale_cause(
         return None;
     }
     if sched == Some(SCHED_LAUNCHD) {
-        if row.arm != "pr_watch_merge" && pm_fresh_timeout {
+        if row.arm != "pr_watch_merge" && pm_fresh_failure {
             return Some("tick_timeout".to_string());
         }
         if pm_stale {
@@ -415,7 +419,7 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
         "stale_daemon" => "daemon predates the installed build; run fno agents restart".to_string(),
         "daemon_down" => "daemon not running".to_string(),
         "tick_timeout" => {
-            "pr-watch tick timed out before this arm ran; see pr_watch_merge".to_string()
+            "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
         }
         "scheduler_silent" => {
             "no pr-watch tick inside 2x interval; run fno do pr watch status".to_string()
@@ -840,6 +844,47 @@ mod tests {
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("scheduler_silent"));
         drop(guard);
+    }
+
+    #[test]
+    fn explain_blames_an_errored_tick_like_a_timed_out_one() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // pr_watch_merge ticked fresh but its run errored; king_wake is stale.
+        // Any failure-token skip (not just timeout) blames the tick.
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:58:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("error"),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-04T09:33:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
+        assert!(
+            kw.line.contains("the pr-watch tick broke"),
+            "line: {}",
+            kw.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
