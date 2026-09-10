@@ -347,3 +347,40 @@ async fn rm_refusal_falls_back_to_stop_when_the_mux_ref_has_no_session() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// A whitespace-only session is the same malformed-ref class: no runnable
+/// address, so the refusal keeps today's message.
+#[tokio::test]
+async fn rm_refusal_falls_back_when_the_mux_session_is_blank() {
+    let home = short_home("rmblankmux");
+    let mut row = ask_row("blank-pane-worker", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Live;
+    row.harness = Some("codex".into());
+    row.mux = Some(state::MuxRef {
+        session: "   ".into(),
+        pane_id: 33,
+    });
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "blank-pane-worker"}));
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a non-claude row must not read the claude roster"),
+        &|_| panic!("a refusal must not reach claude rm"),
+        &|_, _| panic!("a refusal must not reach mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let message = &response.error().unwrap().message;
+    assert!(
+        message.contains("fno agents stop blank-pane-worker"),
+        "must fall back to today's message: {message}"
+    );
+    assert!(
+        !message.contains("fno mux pane kill"),
+        "must not print a command with a hole in it: {message}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

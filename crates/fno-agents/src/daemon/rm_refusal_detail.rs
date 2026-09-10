@@ -20,7 +20,7 @@ pub(crate) fn live_row_refusal(
     warnings: &str,
     pane: Option<(&str, u64)>,
 ) -> String {
-    let pane = pane.filter(|(session, _)| !session.is_empty());
+    let pane = pane.filter(|(session, _)| !session.trim().is_empty());
     if harness_name != "claude" {
         if let Some((session, pane_id)) = pane {
             // stop cannot serve a pane worker (ruling d-658e6834), so name
