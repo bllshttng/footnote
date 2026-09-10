@@ -31,6 +31,7 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
+mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod roster_death;
 pub(crate) use self::blocking_bound::directory_bytes;
@@ -6750,10 +6751,10 @@ async fn handle_rm_with(
     // row whose pane the probe cannot find is provably gone - the pane is that
     // row's ONE live ref - and a claude row whose roster state is terminal or
     // whose roster pid is provably gone is finished even though Claude keeps
-    // it listed. Anything less than proof keeps refusing, and `--force`
-    // remains the only escape. One death verdict for the whole gate, shared
-    // with the reaper: a merge cleanup whose stop cleared on it must not be
-    // refused by the very next `fno agents rm`.
+    // it listed. Anything less keeps refusing, and `--force` remains the only
+    // escape. One death verdict for the whole gate, shared with the reaper: a
+    // merge cleanup whose stop cleared on it must not be refused by the very
+    // next `fno agents rm`.
     let provably_gone = claude_agents
         .as_ref()
         .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
@@ -6785,6 +6786,7 @@ async fn handle_rm_with(
         );
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
+    let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
     let harness_outcome = off_executor(|| {
         cascade_harness_session_result_with(
             &entry,
@@ -6897,6 +6899,7 @@ async fn handle_rm_with(
     {
         Ok(dropped) => dropped,
         Err(e) => {
+            codex_index_capture.restore_on_registry_failure();
             return Response::err(
                 req.id,
                 state_error_code(&e),
@@ -10351,110 +10354,6 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_still_refuses_a_stored_live_pane_row_when_the_probe_is_unknown() {
-        // Fail-closed: a probe that errored, timed out, or parsed badly proves
-        // nothing. The refusal and the row both stay.
-        let home = short_home("rmpaneunknown");
-        let mut row = ask_row("maybe-pane-worker", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("opencode".into());
-        row.status = AgentStatus::Live;
-        row.mux = Some(state::MuxRef {
-            session: "main".into(),
-            pane_id: 76,
-        });
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "maybe-pane-worker"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| panic!("non-Claude row must not read the Claude list"),
-            &|_| panic!("non-Claude row must not call claude rm"),
-            &|_, _| panic!("a refused row must not reach the pane kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let error = response.error().expect("a stored-live row must be refused");
-        assert!(error.message.contains("still live"), "{}", error.message);
-        // Positive markers (x-d19e): the refusal names the safe verb and the
-        // cost of forcing past it; the override lives in --help, never here.
-        // For a row with a mux ref the safe verb is the pane kill (ruling
-        // d-658e6834): stop cannot serve a pane worker.
-        assert!(
-            error.message.contains("fno mux pane kill main:76"),
-            "{}",
-            error.message
-        );
-        assert!(
-            error.message.contains("stop cannot serve it"),
-            "{}",
-            error.message
-        );
-        assert!(!error.message.contains("--force"), "{}", error.message);
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_still_refuses_a_stored_live_pane_row_when_the_pane_is_present() {
-        // A live pane is a live worker; the refusal must stand.
-        let home = short_home("rmpanepresent");
-        let mut row = ask_row("live-pane-worker", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("opencode".into());
-        row.status = AgentStatus::Live;
-        row.mux = Some(state::MuxRef {
-            session: "main".into(),
-            pane_id: 76,
-        });
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "live-pane-worker"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| panic!("non-Claude row must not read the Claude list"),
-            &|_| panic!("non-Claude row must not call claude rm"),
-            &|_, _| panic!("a refused row must not reach the pane kill"),
-            &|_, _| PaneProbe::Present,
-        )
-        .await;
-
-        let error = response.error().expect("a stored-live row must be refused");
-        assert!(error.message.contains("still live"), "{}", error.message);
-        // Positive markers (x-d19e): same contract as the probe-unknown arm.
-        assert!(
-            error.message.contains("fno mux pane kill main:76"),
-            "{}",
-            error.message
-        );
-        assert!(
-            error.message.contains("stop cannot serve it"),
-            "{}",
-            error.message
-        );
-        assert!(!error.message.contains("--force"), "{}", error.message);
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

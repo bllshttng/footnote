@@ -384,3 +384,103 @@ async fn rm_refusal_falls_back_when_the_mux_session_is_blank() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+#[tokio::test]
+async fn rm_still_refuses_a_stored_live_pane_row_when_the_probe_is_unknown() {
+    // Fail-closed: a probe that errored, timed out, or parsed badly proves
+    // nothing. The refusal and the row both stay.
+    let home = short_home("rmpaneunknown");
+    let mut row = ask_row("maybe-pane-worker", Some("2020-01-01T00:00:00Z"));
+    row.harness = Some("opencode".into());
+    row.status = AgentStatus::Live;
+    row.mux = Some(state::MuxRef {
+        session: "main".into(),
+        pane_id: 76,
+    });
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "maybe-pane-worker"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("non-Claude row must not read the Claude list"),
+        &|_| panic!("non-Claude row must not call claude rm"),
+        &|_, _| panic!("a refused row must not reach the pane kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let error = response.error().expect("a stored-live row must be refused");
+    assert!(error.message.contains("still live"), "{}", error.message);
+    // Positive markers (x-d19e): the safe verb for a mux-ref row is the
+    // pane kill (d-658e6834); the override lives in --help, never here.
+    assert!(
+        error.message.contains("fno mux pane kill main:76"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("stop cannot serve it"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("--force"), "{}", error.message);
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn rm_still_refuses_a_stored_live_pane_row_when_the_pane_is_present() {
+    // A live pane is a live worker; the refusal must stand.
+    let home = short_home("rmpanepresent");
+    let mut row = ask_row("live-pane-worker", Some("2020-01-01T00:00:00Z"));
+    row.harness = Some("opencode".into());
+    row.status = AgentStatus::Live;
+    row.mux = Some(state::MuxRef {
+        session: "main".into(),
+        pane_id: 76,
+    });
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "live-pane-worker"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("non-Claude row must not read the Claude list"),
+        &|_| panic!("non-Claude row must not call claude rm"),
+        &|_, _| panic!("a refused row must not reach the pane kill"),
+        &|_, _| PaneProbe::Present,
+    )
+    .await;
+
+    let error = response.error().expect("a stored-live row must be refused");
+    assert!(error.message.contains("still live"), "{}", error.message);
+    // Positive markers (x-d19e): same contract as the probe-unknown arm.
+    assert!(
+        error.message.contains("fno mux pane kill main:76"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("stop cannot serve it"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("--force"), "{}", error.message);
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
