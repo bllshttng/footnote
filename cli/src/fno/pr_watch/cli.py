@@ -394,6 +394,7 @@ def tick() -> None:
     from fno.config_cli import post_merge_readiness
     from fno.pr_watch._dispatch import current_tick_phase, set_tick_phase
     from fno.pr_watch._dispatch import tick as _tick
+    from fno.pr_watch._install import tick_end_bits
 
     started = time.monotonic()
     # Entry is recorded before anything that can hang: settings load, imports,
@@ -1133,12 +1134,15 @@ def tick() -> None:
         # corresponds to a pr_watch_tick (the liveness watermark) having fired.
         _emit_event("pr_watch_tick_end", end_data)
         # Arms-readout row for the dispatch legs (or why they never ran): same
-        # finally contract as the end record; skip is the outcome token.
+        # finally contract as the end record; skip is the outcome token. The
+        # detail names the phase only when the tick broke, so a healthy-looking
+        # phase cannot dress up a failed outcome.
+        bits = tick_end_bits(end_data)
         _emit_tick_row("pr_watch_merge", interval_s=cfg.interval_seconds,
                        acted=int(getattr(result, "acted", 0) or 0),
                        skip_reason=outcome if outcome in
                        ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
-                       detail=f"outcome={outcome} phase={end_data.get('phase')}")
+                       detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
 
     if timed_out:
         raise typer.Exit(code=_TICK_TIMEOUT_EXIT)
