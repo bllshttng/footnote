@@ -184,8 +184,9 @@ def _stamp_spawned_session_row(
         )
         return
     if not phase:
-        # A verb cmd_spawn could not label (a /think worker is neither do nor
-        # review). A guessed label would lie on an append-only record.
+        # A verb cmd_spawn could not label (arbitrary prose, unknown verbs;
+        # infer_phase already names do, review, blueprint, and think). A
+        # guessed label would lie on an append-only record.
         print(
             f"spawn: session row open skipped for {node_id} "
             f"(phase unknown for the message verb; pass --session-phase); "
