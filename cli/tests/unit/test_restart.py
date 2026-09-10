@@ -149,7 +149,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     """A real daemon-restart failure fails the command (scripts must see it)."""
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=3)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=3, stdout="", stderr="daemon boom"),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
@@ -161,7 +163,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
 def test_restart_json_summary(monkeypatch) -> None:
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=0)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
@@ -419,3 +423,155 @@ def test_is_revivable_predicate() -> None:
     assert restart.is_revivable({"harness": "claude", "session_id": None}) is False
     assert restart.is_revivable({"harness": "claude"}) is False
     assert restart.is_revivable({}) is False
+
+
+def _quiet_keeper_leg(monkeypatch) -> None:
+    """No keepers discovered: the keeper leg is a no-op."""
+    from fno.agents import keeper_lane as _kl
+
+    class _EmptyLane:
+        observations: list = []
+
+    monkeypatch.setattr(_kl, "discover", lambda **k: _EmptyLane())
+    from fno.graph import store as _store
+
+    monkeypatch.setattr(_store, "cycle_keepers", lambda socks, **k: [])
+
+
+def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> None:
+    """AC6-HP: a stale store keeper moves to a new pid, no mux server is
+    killed, and the last stdout line starts with the ok verdict."""
+    from fno.agents import keeper_lane as _kl
+    from fno.graph import store as _store
+    from pathlib import Path as _Path
+
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    class _Lane:
+        observations = [
+            types.SimpleNamespace(
+                pid=11,
+                lane="store",
+                sock=_Path("/tmp/k.store.sock"),
+                session="s",
+                cwd=None,
+                age_s=1.0,
+                child_pids=(),
+                sock_state="listener",
+                claimed_by=None,
+                registry_ok=True,
+            ),
+            types.SimpleNamespace(
+                pid=12,
+                lane="pane",
+                sock=_Path("/tmp/p.sock"),
+                session="p",
+                cwd=None,
+                age_s=1.0,
+                child_pids=(),
+                sock_state="listener",
+                claimed_by=None,
+                registry_ok=True,
+            ),
+        ]
+
+    monkeypatch.setattr(_kl, "discover", lambda **k: _Lane())
+    monkeypatch.setattr(
+        _kl, "sock_identify", lambda sock: ("listener", {"drift": "drifted"})
+    )
+    monkeypatch.setattr(
+        _store,
+        "cycle_keepers",
+        lambda socks, **k: [
+            {
+                "graph": "/tmp/graph.json",
+                "old_pid": 11,
+                "new_pid": 99,
+                "result": "cycled",
+            }
+        ],
+    )
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 0, result.output
+    assert "store keeper /tmp/graph.json pid 11 -> 99 (stale build)" in result.output
+    assert "1 pane keeper(s) run an older build" in result.output
+    assert "kept with their panes" in result.output
+    assert not any("kill-server" in c for c in calls), "no mux kill"
+    last = [ln for ln in result.output.splitlines() if ln.strip()][-1]
+    assert last.startswith("fno agents restart: ok - "), last
+
+
+def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
+    """AC6-ERR: a failed daemon restart ends on a FAILED verdict line that
+    names the daemon error text, exit 1."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="daemon pid 5 survived SIGKILL"
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+    _quiet_keeper_leg(monkeypatch)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
+    assert "survived SIGKILL" in lines[-1], "the daemon error text rides the verdict"
+
+
+def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
+    """AC6-EDGE: a keeper that answers Shutdown busy is spared, named, and
+    the verb exits 1 - a spared keeper is NOT healed."""
+    from fno.agents import keeper_lane as _kl
+    from fno.graph import store as _store
+    from pathlib import Path as _Path
+
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls := []))
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    class _Lane:
+        observations = [
+            types.SimpleNamespace(
+                pid=11,
+                lane="store",
+                sock=_Path("/tmp/k.store.sock"),
+                session="s",
+                cwd=None,
+                age_s=1.0,
+                child_pids=(),
+                sock_state="listener",
+                claimed_by=None,
+                registry_ok=True,
+            )
+        ]
+
+    monkeypatch.setattr(_kl, "discover", lambda **k: _Lane())
+    monkeypatch.setattr(
+        _kl, "sock_identify", lambda sock: ("listener", {"drift": "drifted"})
+    )
+    monkeypatch.setattr(
+        _store,
+        "cycle_keepers",
+        lambda socks, **k: [
+            {
+                "graph": "/tmp/graph.json",
+                "old_pid": 11,
+                "new_pid": 11,
+                "result": "spared: a mutation is in flight",
+            }
+        ],
+    )
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1, result.output
+    assert "spared" in result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]

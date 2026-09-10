@@ -252,19 +252,86 @@ def restart_command(
             daemon_cmd = [str(binary), "restart"]
             if force:
                 daemon_cmd.append("--force")
-            rc = subprocess.run(daemon_cmd, timeout=120).returncode
+            # stderr is captured so a failed restart's reason reaches the
+            # verdict line (x-f188 change 6): the failure must never sit on
+            # a stream the success-shaped output hides.
+            daemon_proc = subprocess.run(
+                daemon_cmd, capture_output=True, text=True, timeout=120
+            )
+            rc = daemon_proc.returncode
         except (OSError, subprocess.SubprocessError) as exc:
             result["daemon"] = "failed"
             say(f"fno agents restart: could not run fno-agents restart ({exc})", err=True)
             failures.append(f"daemon: {exc}")
         else:
+            if daemon_proc.stderr:
+                typer.echo(daemon_proc.stderr, err=True)
             if rc == 0:
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")
             else:
+                daemon_detail = (daemon_proc.stderr or daemon_proc.stdout or "").strip().splitlines()
+                detail = f": {daemon_detail[-1]}" if daemon_detail else ""
                 result["daemon"] = f"failed:{rc}"
-                say(f"fno agents restart: fno-agents restart exited {rc}", err=True)
-                failures.append(f"daemon: exit {rc}")
+                say(
+                    f"fno agents restart: fno-agents restart exited {rc}{detail}",
+                    err=True,
+                )
+                failures.append(f"daemon: exit {rc}{detail}")
+
+    # 1b. Store keepers (x-f188 change 6): cycle the stale ones. A store
+    # cycle ends nothing a person can see - the graph on disk survives - so
+    # this leg is NOT behind --mux. Stale pane/thread keepers are reported
+    # as KEPT, not failed: nothing can refresh one on demand; it goes
+    # current when its pane ends.
+    try:
+        from fno.agents import keeper_lane as _kl
+        from fno.graph import store as _store
+
+        store_socks: list = []
+        stale_pane_keepers = 0
+        for obs in _kl.discover().observations:
+            if obs.lane == "store" and obs.sock is not None:
+                store_socks.append(obs.sock)
+            elif obs.sock is not None:
+                _state, reply = _kl.sock_identify(obs.sock)
+                if isinstance(reply, dict) and reply.get("drift") == "drifted":
+                    stale_pane_keepers += 1
+        result["pane_keepers_stale"] = stale_pane_keepers
+        cycled = _store.cycle_keepers(store_socks, only_stale=True)
+        result["store_keepers"] = cycled
+        for c in cycled:
+            if c["result"] == "current":
+                continue
+            if c["result"].startswith("spared"):
+                say(
+                    f"fno agents restart: store keeper {c['graph']} spared "
+                    f"({c['result'].removeprefix('spared: ')}); it was NOT refreshed.",
+                    err=True,
+                )
+                failures.append(
+                    f"store keeper: {c['graph']} spared ({c['result'].removeprefix('spared: ')})"
+                )
+            elif c["result"] == "cycled":
+                say(
+                    f"fno agents restart: store keeper {c['graph']} pid "
+                    f"{c['old_pid']} -> {c['new_pid']} (stale build)."
+                )
+            else:
+                say(
+                    f"fno agents restart: store keeper {c['graph']} shut down but "
+                    "did not come back (graph file absent?).",
+                    err=True,
+                )
+                failures.append(f"store keeper: {c['graph']} did not respawn")
+    except Exception as exc:  # noqa: BLE001 - a census failure is advisory
+        say(f"fno agents restart: store keeper check failed ({exc}); skipped.", err=True)
+    if result.get("pane_keepers_stale"):
+        n = result["pane_keepers_stale"]
+        say(
+            f"fno agents restart: {n} pane keeper(s) run an older build; kept with "
+            "their panes, current when each pane ends."
+        )
 
     # 2. Mux servers. ONLY live sessions are restart targets; stale/unqueryable
     # rows are reported, never killed (killing a non-live socket is meaningless
@@ -406,8 +473,26 @@ def restart_command(
                 "with `fno mux kill-server <name>`, or `fno agents restart --mux` for all."
             )
 
+    result["pane_keepers_stale"] = result.get("pane_keepers_stale", 0)
+    result["store_keepers"] = result.get("store_keepers", [])
     result["ok"] = not failures
+    result["verdict"] = "ok" if not failures else "FAILED"
     if json_out:
         typer.echo(json.dumps(result))
+    else:
+        # One honest verdict line, always last on stdout (x-f188 change 6):
+        # a success-shaped log must never precede a failure the reader only
+        # finds behind a nonzero exit.
+        if failures:
+            typer.echo(f"fno agents restart: FAILED - {'; '.join(failures)}")
+        else:
+            cycled_n = len([c for c in result["store_keepers"] if c["result"] == "cycled"])
+            kept_n = result["pane_keepers_stale"]
+            summary = f"daemon {result['daemon']}"
+            if cycled_n:
+                summary += f"; {cycled_n} stale store keeper(s) cycled"
+            if kept_n:
+                summary += f"; {kept_n} stale pane keeper(s) kept with their panes"
+            typer.echo(f"fno agents restart: ok - {summary}")
     if failures:
         raise typer.Exit(1)
