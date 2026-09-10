@@ -326,18 +326,24 @@ fn parse_duration_to_seconds(v: &toml::Value) -> Option<i64> {
             if let Ok(secs) = s.parse::<i64>() {
                 return if secs > 0 { Some(secs) } else { None };
             }
-            let (digits, unit) = s.split_at(s.len().saturating_sub(1));
+            // Byte-slice only on a known ASCII unit suffix - never on a bare
+            // trailing-byte count, which can land mid multi-byte UTF-8
+            // character (e.g. an operator typo like "5é") and panic.
+            let (mult, digits) = if let Some(d) = s.strip_suffix('s') {
+                (1, d)
+            } else if let Some(d) = s.strip_suffix('m') {
+                (60, d)
+            } else if let Some(d) = s.strip_suffix('h') {
+                (3600, d)
+            } else if let Some(d) = s.strip_suffix('d') {
+                (86400, d)
+            } else {
+                return None;
+            };
             if digits.is_empty() {
                 return None;
             }
             let n: i64 = digits.parse().ok()?;
-            let mult = match unit {
-                "s" => 1,
-                "m" => 60,
-                "h" => 3600,
-                "d" => 86400,
-                _ => return None,
-            };
             let secs = n.checked_mul(mult)?;
             if secs > 0 {
                 Some(secs)
@@ -500,8 +506,13 @@ pub fn workspace_paths(cwd: &Path) -> HashMap<String, String> {
 /// expand a leading `~`, then collapse `.`/`..`/duplicate separators
 /// lexically (no filesystem access, matching normpath).
 fn normalize_path(raw: &str) -> String {
-    let expanded: String = if let Some(rest) = raw.strip_prefix("~/") {
+    // A bare "~" expands like "~/" with an empty rest, matching Python's
+    // os.path.expanduser (which treats both the same), not just the
+    // slash-prefixed form.
+    let expanded: String = if raw == "~" || raw.starts_with("~/") {
+        let rest = raw.strip_prefix('~').unwrap().trim_start_matches('/');
         match std::env::var_os("HOME") {
+            Some(home) if rest.is_empty() => home.to_string_lossy().into_owned(),
             Some(home) => format!("{}/{}", home.to_string_lossy(), rest),
             None => raw.to_string(),
         }
@@ -1610,6 +1621,24 @@ path = "/repo/alpha"
         .unwrap();
         let paths = workspace_paths(tmp.path());
         assert_eq!(paths.get("alpha").map(String::as_str), Some("/repo/alpha"));
+    }
+
+    #[test]
+    fn normalize_path_expands_a_bare_tilde_like_expanduser() {
+        let _env = env_guard();
+        std::env::set_var("HOME", "/Users/tester");
+        assert_eq!(normalize_path("~"), "/Users/tester");
+        assert_eq!(normalize_path("~/repo"), "/Users/tester/repo");
+    }
+
+    #[test]
+    fn parse_duration_to_seconds_never_panics_on_a_non_ascii_suffix() {
+        // A malformed operator value ending mid multi-byte UTF-8 character
+        // must fall back to None, never panic the process.
+        let v = toml::Value::String("5\u{e9}".to_string());
+        assert_eq!(parse_duration_to_seconds(&v), None);
+        let v = toml::Value::String("5m".to_string());
+        assert_eq!(parse_duration_to_seconds(&v), Some(300));
     }
 
     #[test]

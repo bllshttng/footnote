@@ -1395,14 +1395,10 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
     let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
     let mut targets = Vec::new();
     for territory in territories {
-        // A rung-2 territory roots at the first member epic's own project
-        // (the converge core fans out across projects at dispatch time); a
-        // project territory roots at the project itself.
-        let root_project = if territory.rung == 2 {
-            territory.project.clone()
-        } else {
-            territory.project.clone()
-        };
+        // `Territory::project` already carries the right root for both cases
+        // (the first member epic's own project at rung 2, the project itself
+        // at rungs 0/1 - see `resolve_territories`), so there is one path.
+        let root_project = territory.project.clone();
         if root_project.is_empty() || territory.cwd.is_empty() {
             continue; // unrootable: skipped, never guessed
         }
