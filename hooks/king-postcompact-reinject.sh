@@ -4,7 +4,9 @@
 # The crown survives a compaction (crown_level / crown_scope live on the agent
 # registry row) but the operating discipline that came with it does not, so a
 # post-compact king still holds real authority with no rules for using it and
-# the operator re-teaches it by hand. This hook re-teaches it mechanically.
+# the operator re-teaches it by hand. This hook re-teaches it mechanically. It
+# also reads back the crown's precompact canon handoff doc: the judgment halves
+# it holds survive the compact in no other channel.
 #
 # Carrier: shared with target-postcompact-reinject.sh in
 # scripts/lib/postcompact-carrier.sh - on Claude SessionStart(source=="compact")
@@ -107,6 +109,56 @@ _(truncated at ${FAQ_MAX_BYTES}B; \`fno agents king faq list --scope \"${CROWN_S
 ## This crown's FAQ
 
 $FAQ_ENTRIES"
+    fi
+fi
+
+# Canon read-back: the PreCompact hook wrote this crown's rolling handoff doc,
+# and the judgment halves it holds (merge order, open decisions, gaps,
+# workarounds) exist in no other channel - the session that wrote them is
+# gone after the compact, and a successor resolves the SAME scope-keyed doc.
+# Only the session-filled blocks ride back: the mechanical halves are stale by
+# definition (they describe the pre-compact world), and an unfilled heading
+# still carries its default placeholder, recognizable by its signature text.
+# Bounded like the FAQ (byte cap) and degrade-safe: no resolvable doc, no doc
+# on disk, or nothing filled means no section, never a failed hook.
+CANON_MAX_BYTES=4000
+if [[ -n "$CROWN_SCOPE" ]]; then
+    CANON_PATH="$(fno config paths handoff --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+    if [[ -n "$CANON_PATH" && -f "$CANON_PATH" ]]; then
+        CANON_SECTIONS="$(awk '
+            /^## / { heading = $0; next }
+            /<!-- fno:session -->/ { grab = 1; buf = ""; next }
+            grab && /<!-- \/fno:session -->/ {
+                grab = 0
+                if (buf ~ /[^[:space:]]/ && buf !~ /Nothing external knows this/) {
+                    print ""
+                    print heading
+                    printf "%s", buf
+                }
+                next
+            }
+            grab { buf = buf $0 "\n" }
+        ' "$CANON_PATH" 2>/dev/null)"
+        CANON_BYTES="$(printf '%s' "$CANON_SECTIONS" | wc -c | tr -d ' ')"
+        if [[ "$CANON_BYTES" -gt "$CANON_MAX_BYTES" ]]; then
+            # Same UTF-8-safe cut as the FAQ: decode, drop the trailing
+            # partial character, never split one mid-sequence.
+            CANON_SECTIONS="$(printf '%s' "$CANON_SECTIONS" | python3 -c "
+import sys
+sys.stdout.write(sys.stdin.buffer.read(${CANON_MAX_BYTES}).decode('utf-8', errors='ignore'))
+")
+
+_(truncated at ${CANON_MAX_BYTES}B; \`${CANON_PATH}\` has the rest)_"
+        fi
+        if [[ -n "$(printf '%s' "$CANON_SECTIONS" | tr -d '[:space:]')" ]]; then
+            CONTEXT="$CONTEXT
+
+## Your crown's handoff (written before the compact)
+
+$CANON_SECTIONS
+
+Full canon doc: \`${CANON_PATH}\`."
+        fi
     fi
 fi
 
