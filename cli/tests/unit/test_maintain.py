@@ -1651,3 +1651,167 @@ def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
         [{"id": "x-fix", "sessions": []}], fixes, set()
     )
     assert applied == []
+
+
+# --- leg 9: abandoned do rows (x-f714) --------------------------------------
+
+_CLAUDE_SID = "9f06a492-1111-4222-8333-444455556666"
+
+
+def _write_transcript(tmp_path, monkeypatch, sid, records):
+    """A real fixture transcript under a temp projects root, wired in as the
+    resolver default so the prover reads files, not mocks."""
+    root = tmp_path / "projects" / "-some-worktree"
+    root.mkdir(parents=True)
+    (root / f"{sid}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records)
+    )
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+
+def _do_record(role, text, stamp):
+    return {
+        "type": role,
+        "timestamp": stamp,
+        "message": {"role": role, "content": [{"type": "text", "text": text}]},
+    }
+
+
+def test_do_row_session_gone_true_on_quiet_disengaged_tail(tmp_path, monkeypatch):
+    """Positive control: quiet past the bar AND a <promise> tail -> gone, with
+    the quiet duration named."""
+    from datetime import datetime, timezone
+
+    quiet_at = "2026-09-07T10:00:00Z"
+    _write_transcript(
+        tmp_path, monkeypatch, _CLAUDE_SID,
+        [
+            _do_record("user", "build the thing", quiet_at),
+            _do_record("assistant", "<promise>MISSION COMPLETE: shipped</promise>", quiet_at),
+        ],
+    )
+    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    gone, reason = m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
+    )
+    assert gone is True
+    assert "quiet 4320m" in reason
+    assert "tail not engaged" in reason
+
+
+def test_do_row_session_gone_holds_on_active_transcript(tmp_path, monkeypatch):
+    """Positive control for the refusal: a transcript whose last event is
+    inside the bar is held as active, never reaped."""
+    from datetime import datetime, timezone
+
+    fresh_at = "2026-09-10T09:55:00Z"
+    _write_transcript(
+        tmp_path, monkeypatch, _CLAUDE_SID,
+        [_do_record("assistant", "still mid-task", fresh_at)],
+    )
+    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    gone, reason = m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
+    )
+    assert (gone, reason) == (False, "transcript active")
+
+
+def test_do_row_session_gone_holds_when_transcript_unresolved(tmp_path, monkeypatch):
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "absent")
+    assert m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "transcript unresolved")
+
+
+def test_do_row_session_gone_holds_when_transcript_unreadable(tmp_path, monkeypatch):
+    _write_transcript(tmp_path, monkeypatch, _CLAUDE_SID, [])
+    p = tmp_path / "projects" / "-some-worktree" / f"{_CLAUDE_SID}.jsonl"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    assert m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "transcript unreadable")
+
+
+def test_do_row_session_gone_holds_opencode_without_a_file():
+    """An opencode row can never be proven gone here: the harness is held by
+    name, before any file lookup."""
+    assert m.do_row_session_gone(
+        "opencode", "sess_abc", "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "harness not file-backed")
+
+
+def _do_node(nid, sid=_CLAUDE_SID, **over):
+    base = {
+        "id": nid,
+        "title": nid,
+        "status": "in_progress",
+        "locked_by": None,
+        "cwd": "/some/worktree",
+        "sessions": [
+            {"phase": "do", "harness": "claude", "session_id": sid,
+             "started_at": "2026-09-09T15:46:29Z"}
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def _gone_prover(harness, sid, cwd, *, quiet_after_s, now_s):
+    return True, "transcript quiet 999m, tail not engaged"
+
+
+def _active_prover(harness, sid, cwd, *, quiet_after_s, now_s):
+    return False, "transcript active"
+
+
+def test_detect_abandoned_do_rows_stamps_a_proven_gone_row():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-gone1")],
+        live_claimed=set(), live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert [(r.node, r.verdict) for r in rows] == [("x-gone1", "gone")]
+
+
+def test_detect_abandoned_do_rows_holds_a_live_claim():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-clm01")],
+        live_claimed={"x-clm01"}, live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert len(rows) == 1
+    assert rows[0].verdict == "held"
+    assert "live claim" in rows[0].reason
+
+
+def test_detect_abandoned_do_rows_holds_a_rostered_worker():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-wrk01")],
+        live_claimed=set(), live_worked={"x-wrk01": ["worker-a"]},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows[0].verdict == "held"
+    assert "live roster worker worker-a" in rows[0].reason
+
+
+def test_detect_abandoned_do_rows_skips_a_locked_node():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-lck01", locked_by="someone")],
+        live_claimed=set(), live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows == []
+
+
+def test_detect_abandoned_do_rows_carries_the_prover_verdict():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-hld01")],
+        live_claimed=set(), live_worked={},
+        prover=_active_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows[0].verdict == "held"
+    assert rows[0].reason == "transcript active"

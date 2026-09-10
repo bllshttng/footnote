@@ -2051,3 +2051,120 @@ def run_validity_sweep(
         stale=sum(1 for r in rows if r.stale),
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Leg 9: abandoned do rows (deterministic, --apply only) (x-f714)
+# ---------------------------------------------------------------------------
+
+# The harnesses resolve_transcript_path can find a transcript FILE for
+# (cli/src/fno/provenance/observed.py). An opencode do row can never be proven
+# gone here, so it is always held and named in the report.
+_FILE_BACKED_HARNESSES = frozenset({"claude", "codex"})
+
+
+def do_row_session_gone(
+    harness: object,
+    session_id: object,
+    cwd: object,
+    *,
+    quiet_after_s: float,
+    now_s: float,
+) -> "tuple[bool, str]":
+    """Transcript-truth proof that an open do row's session is gone.
+
+    The Rust settle's done+merged gate can never see an open do row (the row
+    is what holds its node in_progress), so this prover is the observer that
+    population was missing. True only on positive evidence: a resolved
+    transcript file whose last event is older than ``quiet_after_s`` and
+    whose tail classifies as not engaged. Every other answer is ``False``
+    with the reason NAMED, so an operator can still run
+    ``fno backlog session reap-open`` by hand - a missing transcript is a
+    hold, never a death certificate. Never raises.
+    """
+    try:
+        if harness not in _FILE_BACKED_HARNESSES:
+            return False, "harness not file-backed"
+        from fno.provenance.observed import resolve_transcript_path
+
+        path = resolve_transcript_path(harness, session_id, cwd)
+        if path is None:
+            return False, "transcript unresolved"
+        from fno.agents.watchdog import finished_with_the_tree, tail_facts
+
+        facts = tail_facts(session_id, cwd, agent=harness)
+        if facts is None:
+            return False, "transcript unreadable"
+        if finished_with_the_tree(facts, now_s, quiet_after_s):
+            quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
+            return True, f"transcript quiet {quiet_m}m, tail not engaged"
+        return False, "transcript active"
+    except Exception:  # noqa: BLE001 - a proof must never break the sweep
+        return False, "transcript unreadable"
+
+
+@dataclass
+class AbandonedDoRow:
+    node: str
+    harness: object
+    session_id: object
+    verdict: str  # "gone" | "held"
+    reason: str
+
+
+def detect_abandoned_do_rows(
+    entries: list[dict],
+    *,
+    live_claimed: "set[str]",
+    live_worked: "dict[str, list[str]]",
+    prover: Callable,
+    now_s: float,
+    quiet_after_s: float,
+) -> "list[AbandonedDoRow]":
+    """Non-terminal, unclaimed nodes carrying an open do row, each stamped.
+
+    Pure over its arguments (the claims and roster readers are injected), the
+    way ``detect_failure_defers`` takes ``events``. Two vetoes outrank the
+    transcript proof - a live claim or a live roster worker holds the row no
+    matter what the transcript says. Every candidate appears in the returned
+    list, held ones included: a hold is a named fact for the operator, not a
+    silent skip.
+    """
+    from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
+
+    out: list[AbandonedDoRow] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str) or not nid:
+            continue
+        if e.get("status") in TERMINAL_RUNGS or e.get("superseded_by"):
+            continue
+        if e.get("locked_by"):
+            continue
+        for row in e.get("sessions") or []:
+            if not is_open_do_row(row):
+                continue
+            harness = row.get("harness")
+            sid = row.get("session_id")
+            if nid in live_claimed:
+                out.append(AbandonedDoRow(nid, harness, sid, "held", "live claim"))
+                continue
+            workers = live_worked.get(nid)
+            if workers:
+                out.append(
+                    AbandonedDoRow(
+                        nid, harness, sid, "held",
+                        f"live roster worker {', '.join(workers)}",
+                    )
+                )
+                continue
+            gone, reason = prover(
+                harness, sid, e.get("cwd"),
+                quiet_after_s=quiet_after_s, now_s=now_s,
+            )
+            out.append(
+                AbandonedDoRow(nid, harness, sid, "gone" if gone else "held", reason)
+            )
+    return out
