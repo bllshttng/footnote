@@ -1071,6 +1071,11 @@ struct PaneEntry {
     /// This positive refusal marker is sweepable; it is not inferred from an
     /// absent registry row.
     refused_worker: Option<String>,
+    /// True when this pane was adopted at a fresh id because the pane key its
+    /// keeper socket carries could not be reused (zero, or already live). Set
+    /// only at keeper re-adoption; a send to an unreconciled pane is refused
+    /// rather than delivered to whatever the number now names.
+    unreconciled: bool,
     /// (x-d401) When this pane last produced PTY output, stamped on the drain
     /// path itself so a pane with no `pane wait` watcher still records activity
     /// (`note_pane_output` returns early with zero subscribers, which is why
@@ -3616,6 +3621,7 @@ impl Core {
                 account,
                 resume_target,
                 refused_worker,
+                unreconciled: false,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
                 nudge_due: None,
@@ -7791,9 +7797,26 @@ impl Core {
     /// a pane to wait on.
     fn keeper_readopt(&mut self) {
         let sockets = crate::pty::keeper_sockets(&self.session_name);
-        for sock in sockets {
-            let Ok(id) = self.reserve_pane_id() else {
-                break;
+        for (key, sock) in sockets {
+            // The birth pane id is the socket stem's key: adopt at it whenever
+            // it is reusable. Only key 0 or a key already live under a pane
+            // falls back to a fresh id, and that pane then reads unreconciled.
+            let (id, reconciled) = if key != 0 && !self.panes.contains_key(&key) {
+                (key, true)
+            } else {
+                let reason = if key == 0 {
+                    "pane key 0 is not adoptable".to_string()
+                } else {
+                    format!("pane {key} is already live")
+                };
+                let Ok(fresh) = self.reserve_pane_id() else {
+                    break;
+                };
+                self.notice_all(format!(
+                    "keeper readopt: {} carries pane key {key} but {reason}; adopting at fresh pane {fresh} as unreconciled",
+                    sock.display()
+                ));
+                (fresh, false)
             };
             match crate::pty::adopt_keeper_socket(
                 &sock,
@@ -7811,8 +7834,8 @@ impl Core {
                 Ok(crate::pty::KeeperAdopt::SeatHeld) => {
                     // A live keeper whose subscriber seat is still held: a
                     // server mid-death. Leave the socket alone - the pane is
-                    // real and the next start adopts it - and say so. The
-                    // reserved id simply goes unused.
+                    // real and the next start adopts it - and say so. Any
+                    // freshly reserved id simply goes unused.
                     self.notice_all(format!(
                         "keeper readopt: {} still holds a subscriber seat; left for the next start",
                         sock.display()
@@ -7882,6 +7905,11 @@ impl Core {
                     if !adoption.ring.is_empty() {
                         if let Some(entry) = self.panes.get_mut(&id) {
                             entry.vt.feed(&adoption.ring);
+                        }
+                    }
+                    if !reconciled {
+                        if let Some(entry) = self.panes.get_mut(&id) {
+                            entry.unreconciled = true;
                         }
                     }
                     self.keeper_adopted.push(AdoptedKeeper {
