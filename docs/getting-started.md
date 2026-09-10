@@ -46,7 +46,7 @@ In any Claude Code session:
 /plugin install fno@footnote
 ```
 
-The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `brew install bllshttng/fno/fno`, or `cargo install fno`. Every one of these channels lands the same complete set: the Rust `fno` front door, the Python CLI (`fno-py`), and the three agent binaries. Full options: the [README](../README.md).
+The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel, which bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route instead: it builds the Rust front door with your Rust toolchain, and the front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
 
 ### Windows (WSL2)
 
@@ -106,7 +106,7 @@ fno config unset config.auto_merge.enabled          # remove a key (reverts to i
 fno config doctor                                    # what resolved, and any suspicious values
 ```
 
-`fno config set` also takes a whole block as JSON when you need it: `fno config set config.review '{"required_bots":["chatgpt-codex-connector"]}'`.
+`fno config set` also takes a whole block as JSON when you need it: `fno config set config.review '{"github_apps":["chatgpt-codex-connector"]}'`.
 
 ### The settings you'll touch first
 
@@ -114,7 +114,9 @@ These are real keys in `config.toml` (run `fno config get <key>` to read any of 
 
 | Key | What it does | Default |
 |-----|--------------|---------|
-| `config.review.required_bots` | External review bots that must approve before `target` calls a PR done | none (no gate) |
+| `config.review.github_apps` | External review bots that must approve before `target` calls a PR done | none (no gate) |
+| `config.review.posture` | How much review a code PR needs before it can merge (nine-rung ladder) | `self_review` |
+| `config.review.max_rounds` | Review rounds per PR, counted across its whole life | `2` |
 | `config.review.external_reviewers` | Which reviewer(s) `pr check` waits on (e.g. `gemini`, `codex`) | none |
 | `config.auto_merge.enabled` | Let `target` merge a PR itself once review passes | `false` |
 | `config.target.defaults.max_iterations` | How many times `target` retries before stopping | `40` |
@@ -132,7 +134,9 @@ Budget and skip behavior are not config keys; they're flags you pass to a run, f
 /fno:target "add a health check endpoint that returns server status"
 ```
 
-Target explores the design, plans it, implements with TDD, runs the internal review, and opens the PR. Watch it or walk away; it won't quit until the PR is open and CI is green. With no `config.review.required_bots` set there is no external-review gate; pin a bot there to make target also wait for a review pass.
+Target explores the design, plans it, implements with TDD, runs the internal review, and opens the PR. Watch it or walk away; it won't quit until the PR is open and CI is green. The internal review is the configured inline lane: one head-pinned reviewer by default (`config.review.posture` floors at `self_review`), with at most `config.review.max_rounds` rounds (default 2). With no `config.review.github_apps` set there is no external-bot gate; name a bot there to make target also wait for that review.
+
+A green, reviewed PR is the finish line, not a merge. Target merges on its own only when you set `config.auto_merge.enabled` (default `false`); otherwise it stops and the merge is yours.
 
 ### Option B: drive it step by step
 
@@ -161,7 +165,7 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 | Command | What it's for |
 |---------|---------------|
 | `/fno:review` | Review a diff before you push. Default is the owned lane: one inline reviewer that emits a head-pinned attestation; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
-| `/fno:pr create` | Open a PR from your commits (a Haiku worker writes the description). |
+| `/fno:pr create` | Open a PR from your commits (a routed pr-create worker writes the description). |
 | `/fno:pr check` | Poll for the external review bot, then implement its feedback. |
 | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |
 
@@ -186,11 +190,15 @@ Each agent runs its own loop; Claude, Codex, and Gemini, one project.
 
 ### Keep going past one feature
 
-```
-/fno:megawalk          # walk the backlog, shipping ready work until it's done or out of budget
+The backlog is the queue. Capture work, see what's ready, ship it:
+
+```bash
+fno backlog idea "add webhook retries"   # capture work as a backlog node
+fno backlog next                          # what's ready to ship now
+/fno:target <node-id>                     # ship a ready node end to end
 ```
 
-`megawalk` reads a dependency graph (`fno backlog ...` manages it) and picks what ships next. Optional; `/fno:target "feature"` runs end to end with no backlog required.
+To work a whole board instead of one node: `/fno:target bg --all-ready` dispatches every ready, non-deferred node as background workers, and `fno backlog advance` (opt-in, merge-triggered) dispatches a node's dependents once its PR merges. The backlog is optional; `/fno:target "feature"` runs end to end with no backlog required.
 
 ## Keeping fno up to date
 

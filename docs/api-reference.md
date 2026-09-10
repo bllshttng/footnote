@@ -1,12 +1,12 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # footnote Plugin - API Reference
 
-The **footnote** plugin is an autonomous development workflow for Claude Code that takes features from idea to shipped PR. It provides 26 skills, 12 agents, and a hook system that work together as a pipeline: think, spec, do, review, ship.
+The **footnote** plugin is an autonomous development workflow for Claude Code that takes features from idea to shipped PR. It provides 24 skills, 17 agents, and a hook system that work together as a pipeline: think, plan, do, review, ship.
 
 - **Repository**: `footnote/`
 - **Plugin manifest**: `.claude-plugin/plugin.json`
 - **Author**: Jason Noah Choi
-- **Version**: 1.0.0
+- **Version**: 0.3.2
 
 ---
 
@@ -43,11 +43,9 @@ The core pipeline - from idea to shipped PR.
 | Skill | Command | Model | Purpose |
 |-------|---------|-------|---------|
 | `think` | `/fno:think` | inherit | Brainstorming and design exploration with BDD criteria |
-| `blueprint` | `/fno:blueprint "feature"` | inherit | Implementation planning with wave execution strategy. Use `--full` for BDD acceptance criteria |
-| `execute` | `/fno:execute` | inherit | Lightweight single-session plan execution. Supports `--resume` and `--retry <task-id>` |
-| `operator` | `/fno:operator` | inherit | Heavy multi-phase wave orchestration with subagent dispatch |
+| `blueprint` | `/fno:blueprint "feature"` | inherit | Implementation planning with wave execution strategy. Use `--full` for BDD acceptance criteria. Writes the plan and stops; building starts when you point `/fno:target` at it |
+| `execute` | `/fno:execute` | inherit | Plan execution. Routes between single-session execution (`flat`, default) and wave orchestration (`waves`; alias `/fno:operator`). Supports `--resume` and `--retry <task-id>` |
 | `target` | `/fno:target "feature"` | inherit | Autonomous end-to-end pipeline (think, blueprint, do, review, ship). Also accepts a plan path to skip think/blueprint |
-| `megawalk` | `/fno:megawalk` | inherit | Multi-session task orchestration from a vision document |
 
 #### target Pipeline Stages
 
@@ -58,13 +56,13 @@ Input ("feature" or path/to/plan)
   -> do (execute waves, spawn subagents)
   -> review (the owned lane: one inline reviewer, head-pinned attestation)
   -> goal-verification (3-level check)
-  -> create-pr (fork to Haiku)
+  -> create-pr (routed pr-create worker)
   -> <promise> tag signals completion
 ```
 
-#### do / operator Differences
+#### execute: flat vs waves
 
-| Aspect | `/fno:execute` | `/fno:operator` |
+| Aspect | `flat` (default) | `waves` (alias `/fno:operator`) |
 |--------|------------------|--------------------|
 | Weight | Lightweight, in-session | Heavy, multi-agent |
 | Orchestration | Reads 00-INDEX.md, runs waves inline | Spawns subagent per task via orchestrator.py |
@@ -78,7 +76,8 @@ Pre-implementation analysis and documentation.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `audit` | `/fno:audit` | Multi-perspective completeness analysis of a feature or plan |
-| `what-if` | `/fno:what-if` | Scenario exploration, edge cases, and failure mode analysis |
+
+`what-if` is a route of think, not a separate skill: `/fno:think what-if "X"` stress-tests failure modes; `panel` runs a multi-persona debate.
 
 ### Execution Skills
 
@@ -87,8 +86,7 @@ Building, testing, fixing, and verifying code.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `tdd` | `/fno:tdd` | Test-driven development enforcement (red-green-refactor) |
-| `fix` | `/fno:fix` | Autonomous fix loop - max 15 iterations, auto-reverts on regression |
-| `debug` | `/fno:debug` | Scientific method bug hunting with hypothesis loop |
+| `fix` | `/fno:fix` | Autonomous fix loop - max 15 iterations, auto-reverts on regression. The `investigate` route runs the scientific-method hypothesis loop |
 | `speculate` | `/fno:speculate` | Run N parallel variations of an approach and pick the best |
 
 #### fix Loop Protocol
@@ -121,8 +119,9 @@ Code quality, testing, and PR management.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `review` | `/fno:review` | The owned lane: one inline reviewer works every angle, verifies findings, and emits a head-pinned attestation; `peer` adds a cross-model second opinion |
-| `check-pr` | `/fno:check-pr` | Polls for external reviewer feedback and implements changes |
-| `create-pr` | `/fno:create-pr` | Creates PR with description. Runs in fork context on Haiku |
+| `pr` | `/fno:pr create` | Opens a PR from your commits; a routed pr-create worker writes the description |
+| `pr` | `/fno:pr check` | Polls for external reviewer feedback and implements changes |
+| `pr` | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, file follow-ups |
 
 #### The review specialist agents
 
@@ -144,9 +143,9 @@ Configuration, analysis, and operational tools.
 | Skill | Command | Purpose |
 |-------|---------|---------|
 | `setup` | `/fno:setup` | Interactive config.toml configuration wizard |
-| `codemap` | `/fno:codemap` | AST-based structural analysis with PageRank (god nodes, orphans, module boundaries) |
 | `ship-docs` | `/fno:ship-docs` | Architecture documentation generation |
-| `git-worktrees` | `/fno:git-worktrees` | Git worktree creation and management |
+
+Two former skills are now CLI verbs: `fno doctor codemap` (AST-based structural analysis with PageRank: god nodes, orphans, module boundaries) and `fno agents workspace worktree` (worktree lifecycle: status, cleanup, archive).
 
 #### Multi-repo features
 
@@ -237,16 +236,17 @@ UNBLOCKS_AFTER: <prerequisite>    # if BLOCKED
 | Agent | Model | Color | Tools | Purpose |
 |-------|-------|-------|-------|---------|
 | `tournament-debugger` | sonnet | red | Read, Grep, Glob, Bash | Parallel hypothesis testing - multiple agents compete to find root cause |
-| `roadmap-generator` | opus | green | Read, Write, Edit, Bash, Grep, Glob | Generates prioritized task backlog from vision documents for megawalk |
+| `roadmap-generator` | opus | green | Read, Write, Edit, Bash, Grep, Glob | Generates a prioritized task backlog from a vision document for multi-session execution |
 ---
 
 ## Commands
 
-Slash commands in `commands/` (1 total). These are user-facing entry points that invoke skills.
+Slash commands in `commands/` (2 total). These are user-facing entry points that invoke skills.
 
 | Command | File | Purpose |
 |---------|------|---------|
 | `/fno:cancel-target` | `cancel-target.md` | Stop active target loop (removes state file) |
+| `/fno:fno-me` | `fno-me.md` | Join this session to the fno mesh |
 
 ---
 
@@ -433,27 +433,22 @@ Task specification passed to subagents. Contains the specific task an agent shou
 
 ### config.toml
 
-Project-level configuration created by `/fno:setup`.
+Project-level configuration created by `/fno:setup`, layered over `~/.fno/config.toml`. The keys below are the ones a first run touches; `fno config schema --markdown` is the complete reference.
 
-```yaml
-workspace:
-  projects:
-    - path: /path/to/frontend
-      name: frontend
-      type: nextjs
-    - path: /path/to/backend
-      name: backend
-      type: supabase
-  github_org: my-org
+```toml
+[review]
+posture = "self_review"      # merge floor on the nine-rung review ladder
+github_apps = []             # external bot logins that must review
+max_rounds = 2               # review rounds per PR, across its whole life
 
-reviewer:
-  provider: gemini | coderabbit | claude
-  auto_request: true
+[auto_merge]
+enabled = false              # merge once CI is green AND the posture is satisfied
 
-roles:
-  - name: "facility admin"
-    description: "Manages facility compliance"
+[target.defaults]
+max_iterations = 40
 ```
+
+Read or write any key with `fno config get|set|unset <key>` (atomic, schema-checked).
 
 ### Plugin Manifest
 
@@ -462,7 +457,7 @@ roles:
 ```json
 {
   "name": "footnote",
-  "version": "1.0.0",
+  "version": "0.3.2",
   "description": "Development workflow that integrates brainstorming, planning, and E2E testing.",
   "author": { "name": "Jason Noah Choi" },
   "keywords": ["testing", "e2e", "playwright", "bdd", "acceptance-criteria",
@@ -493,10 +488,10 @@ The orchestrator routes tasks to specialized agents based on keywords in the tas
 
 | Keywords | Routed Agent |
 |----------|-------------|
-| frontend, react, ui, component, tailwind | target (frontend profile) |
-| backend, api, supabase, auth, database | target (backend profile) |
-| devops, docker, ci/cd, deploy, terraform | target (devops profile) |
-| etl, pipeline, data, analytics | target (data profile) |
+| frontend, react, ui, component, tailwind | `frontend-executor` (impeccable pipeline) |
+| backend, api, supabase, auth, database | `archer` (default) |
+| devops, docker, ci/cd, deploy, terraform | `archer` (default) |
+| etl, pipeline, data, analytics | `archer` (default) |
 
 ---
 
@@ -514,6 +509,8 @@ When execution agents encounter issues not covered by the plan:
 ---
 
 ## Installation
+
+Release installs (marketplace plugin, `fno.sh`, `uv`, Homebrew) are covered in the [README](../README.md) and [getting started](getting-started.md). The forms below are for developing footnote from a clone - they are not the supported release channels.
 
 ### Development Mode (recommended)
 
