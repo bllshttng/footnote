@@ -325,6 +325,14 @@ pub fn run_test_run(args: &[String]) -> i32 {
         .clone()
         .or_else(crate::claims::global_claims_root);
 
+    // One deadline for the whole call, admission wait included: a caller's
+    // --timeout bounds total wall time, not just the run once admitted. Two
+    // separately-computed windows (wait-for-claim, then a fresh run window)
+    // let total wall time reach ~2x the configured timeout under claim
+    // contention, silently blowing through an outer CI job timeout sized to
+    // the same value.
+    let overall_deadline = Instant::now() + opts.timeout;
+
     // A nested invocation inherits the outer admission rather than
     // re-acquiring: it never touches the outer claim and never multiplies
     // the outer concurrency budget, because it never becomes a NEW claim
@@ -332,8 +340,9 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let nested = nested_owner();
     let mut claimed = false;
     if nested.is_none() {
-        let deadline = Instant::now() + opts.timeout;
-        if let Err(code) = acquire_suite_claim(&run_id, &holder, claims_root.as_deref(), deadline) {
+        if let Err(code) =
+            acquire_suite_claim(&run_id, &holder, claims_root.as_deref(), overall_deadline)
+        {
             return code;
         }
         claimed = true;
@@ -370,8 +379,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
         ],
     );
 
-    let run_deadline = Instant::now() + opts.timeout;
-    let wait_result = wait_bounded(&mut child, run_deadline);
+    let wait_result = wait_bounded(&mut child, overall_deadline);
 
     // ALWAYS attempted, success or failure or timeout or signal - this line
     // is the fix: ownership of cleanup does not depend on which of those
