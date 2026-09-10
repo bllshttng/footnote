@@ -250,8 +250,10 @@ class ClaimAdapter:
     def is_node_live(self, node_id: str) -> bool:
         """Return True when the node has a live session claim.
 
-        Fails SAFE: on exception, returns True (treat as live) to avoid
-        double-dispatch onto a node a live /target session owns.
+        The read routes by key to the global root, so a live node claim is
+        seen from any cwd; only an exception falls back to True (treat as
+        live) to avoid double-dispatch onto a node a live /target session
+        owns.
         """
         try:
             info = claim_status(f"node:{node_id}")

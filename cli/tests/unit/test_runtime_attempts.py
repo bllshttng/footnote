@@ -153,3 +153,14 @@ def test_runtime_terminal_node_not_interrupted(tmp_path, monkeypatch):
         claim_state_fn=lambda nid: _claim("stale"),
     )
     assert rows[0]["attempt_state"] == "stale"
+
+
+def test_default_claim_state_routes_to_global_root(tmp_path, monkeypatch):
+    """Regression (x-74aa): the rootless read routes by key, so a claim at the
+    global root answers live, never the repo space's free."""
+    from fno.claims import acquire_claim
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    monkeypatch.setattr("fno.paths.space_dir", lambda: tmp_path / "space")
+    acquire_claim(f"node:{NODE}", holder="target-session:sid-1")
+    assert ra._default_claim_state(NODE).get("state") == "live"
