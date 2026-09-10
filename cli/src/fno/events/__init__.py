@@ -32,6 +32,7 @@ import os
 import re as _re
 import secrets as _secrets
 import sys as _sys
+from threading import RLock as _RLock
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
@@ -177,6 +178,7 @@ if TYPE_CHECKING:
     PROTOCOL_OUTCOME_ON = cast(set[str], None)
 
 _schema_loaded = False
+_schema_lock = _RLock()
 _SCHEMA_PUBLIC_NAMES = frozenset(
     {
         "SCHEMA",
@@ -204,61 +206,64 @@ def _ensure_schema_loaded() -> None:
     global _schema_loaded, _schema_load_error
     if _schema_loaded:
         return
-    _schema_loaded = True
-    try:
-        schema = _load_schema()
-        validate_retention_schema(schema)
-        globals().update(
-            SCHEMA=schema,
-            EVENT_TYPES={e["name"]: e for e in schema.get("event_types", [])},
-            ENVELOPE_REQUIRED=schema["envelope"]["required"],
-            MAX_DATA_BYTES=schema.get("limits", {}).get("max_data_bytes", 65536),
-            DATA_SIZE_ENCODING=schema.get("limits", {}).get("data_size_encoding", ""),
-            ALLOWED_SOURCES=set(schema["envelope"]["properties"]["source"]["enum"]),
-            ALLOWED_SOURCE_PATTERNS=[
-                _re.compile(p)
-                for p in schema["envelope"]["properties"]["source"].get("patterns", [])
-            ],
-            ALLOWED_GATES=set(schema.get("gates", [])),
-            RETENTION_DEFAULT=schema.get("retention", {}).get("default", "durable"),
-            RETENTION_MINIMUM_TTL_HOURS=int(
-                schema.get("retention", {}).get("minimum_ephemeral_ttl_hours", 672)
-            ),
-        )
-        if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
-            raise SchemaUnavailableError(
-                f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
+    with _schema_lock:
+        if _schema_loaded:
+            return
+        try:
+            schema = _load_schema()
+            validate_retention_schema(schema)
+            globals().update(
+                SCHEMA=schema,
+                EVENT_TYPES={e["name"]: e for e in schema.get("event_types", [])},
+                ENVELOPE_REQUIRED=schema["envelope"]["required"],
+                MAX_DATA_BYTES=schema.get("limits", {}).get("max_data_bytes", 65536),
+                DATA_SIZE_ENCODING=schema.get("limits", {}).get("data_size_encoding", ""),
+                ALLOWED_SOURCES=set(schema["envelope"]["properties"]["source"]["enum"]),
+                ALLOWED_SOURCE_PATTERNS=[
+                    _re.compile(p)
+                    for p in schema["envelope"]["properties"]["source"].get("patterns", [])
+                ],
+                ALLOWED_GATES=set(schema.get("gates", [])),
+                RETENTION_DEFAULT=schema.get("retention", {}).get("default", "durable"),
+                RETENTION_MINIMUM_TTL_HOURS=int(
+                    schema.get("retention", {}).get("minimum_ephemeral_ttl_hours", 672)
+                ),
             )
-        # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
-        family = schema.get("protocol_family", {})
-        globals().update(
-            PROTOCOL_FAMILY_TYPES=set(family.get("types", [])),
-            PROTOCOL_FAMILY_VERSION=family.get("version", 1),
-            PROTOCOL_ENVELOPE_ALLOWED=set(family.get("envelope", {}).get("allowed", [])),
-            PROTOCOL_ENVELOPE_REQUIRED=list(family.get("envelope", {}).get("required", [])),
-            PROTOCOL_OUTCOME_ENUM=set(family.get("outcome", {}).get("enum", [])),
-            PROTOCOL_OUTCOME_ON=set(family.get("outcome", {}).get("present_on", [])),
-        )
-    except SchemaUnavailableError as _exc:
-        globals().update(
-            SCHEMA=None,
-            EVENT_TYPES=None,
-            ENVELOPE_REQUIRED=[],
-            MAX_DATA_BYTES=65536,
-            DATA_SIZE_ENCODING="",
-            ALLOWED_SOURCES=set(),
-            ALLOWED_SOURCE_PATTERNS=[],
-            ALLOWED_GATES=set(),
-            RETENTION_DEFAULT="durable",
-            RETENTION_MINIMUM_TTL_HOURS=672,
-            PROTOCOL_FAMILY_TYPES=set(),
-            PROTOCOL_FAMILY_VERSION=1,
-            PROTOCOL_ENVELOPE_ALLOWED=set(),
-            PROTOCOL_ENVELOPE_REQUIRED=[],
-            PROTOCOL_OUTCOME_ENUM=set(),
-            PROTOCOL_OUTCOME_ON=set(),
-        )
-        _schema_load_error = _exc
+            if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
+                raise SchemaUnavailableError(
+                    f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
+                )
+            # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
+            family = schema.get("protocol_family", {})
+            globals().update(
+                PROTOCOL_FAMILY_TYPES=set(family.get("types", [])),
+                PROTOCOL_FAMILY_VERSION=family.get("version", 1),
+                PROTOCOL_ENVELOPE_ALLOWED=set(family.get("envelope", {}).get("allowed", [])),
+                PROTOCOL_ENVELOPE_REQUIRED=list(family.get("envelope", {}).get("required", [])),
+                PROTOCOL_OUTCOME_ENUM=set(family.get("outcome", {}).get("enum", [])),
+                PROTOCOL_OUTCOME_ON=set(family.get("outcome", {}).get("present_on", [])),
+            )
+        except SchemaUnavailableError as _exc:
+            globals().update(
+                SCHEMA=None,
+                EVENT_TYPES=None,
+                ENVELOPE_REQUIRED=[],
+                MAX_DATA_BYTES=65536,
+                DATA_SIZE_ENCODING="",
+                ALLOWED_SOURCES=set(),
+                ALLOWED_SOURCE_PATTERNS=[],
+                ALLOWED_GATES=set(),
+                RETENTION_DEFAULT="durable",
+                RETENTION_MINIMUM_TTL_HOURS=672,
+                PROTOCOL_FAMILY_TYPES=set(),
+                PROTOCOL_FAMILY_VERSION=1,
+                PROTOCOL_ENVELOPE_ALLOWED=set(),
+                PROTOCOL_ENVELOPE_REQUIRED=[],
+                PROTOCOL_OUTCOME_ENUM=set(),
+                PROTOCOL_OUTCOME_ON=set(),
+            )
+            _schema_load_error = _exc
+        _schema_loaded = True
 
 
 def __getattr__(name: str) -> Any:

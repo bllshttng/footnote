@@ -114,6 +114,33 @@ assert "SCHEMA" in events.__dict__
     assert result.returncode == 0, result.stderr
 
 
+def test_events_first_access_is_thread_safe():
+    """Concurrent first accesses cannot observe partially loaded exports."""
+    result = _run_py(
+        """
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+import fno.events as events
+
+load = events._load_schema
+def slow_load():
+    time.sleep(0.05)
+    return load()
+events._load_schema = slow_load
+barrier = threading.Barrier(8)
+names = ["SCHEMA", "EVENT_TYPES"] * 4
+def read(name):
+    barrier.wait()
+    return getattr(events, name)
+with ThreadPoolExecutor(max_workers=8) as pool:
+    values = list(pool.map(read, names))
+assert all(values)
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR: misconfigured lazy entry fails loud
 # ---------------------------------------------------------------------------
