@@ -458,7 +458,7 @@ def test_resolve_degrades_out_of_range_epoch_to_absent_stamp(tmp_path, monkeypat
     monkeypatch.setattr(
         session_truth,
         "_transcript_age_s",
-        lambda *a, **k: (1_700_000_000_000.0, 0.0),
+        lambda *a, **k: (1_700_000_000_000.0, 0.0, "mtime"),
     )
 
     session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
@@ -492,6 +492,7 @@ def test_transcript_age_degrades_out_of_range_epoch_as_a_pair(monkeypatch, tmp_p
     )
 
     assert session_truth._transcript_age_s("opencode", "s", "/c", None, None, None) == (
+        None,
         None,
         None,
     )
@@ -586,6 +587,9 @@ def test_truth_verb_json_carries_the_last_event_pair(tmp_path, monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["last_message"] == "on the pytest run now"
     assert payload["last_event_at"]  # absolute ISO8601, present on the wire
+    # The wire names the instrument too: this fixture carries no timestamps,
+    # so the reading rode the labelled mtime fallback.
+    assert payload["last_activity_basis"] == "mtime"
 
 
 # ---------------------------------------------------------------------------
@@ -1150,4 +1154,192 @@ def test_resolve_session_truth_peer_mail_does_not_clear_question(tmp_path):
     truth = resolve_session_truth("w1", resolve=lambda h: (sess, []), projects_root=tmp_path, now_s=None)
     assert truth["state"] == "your-move"
     assert "<fno_mail" in truth["last_message"]
+
+
+# ---------------------------------------------------------------------------
+# last_activity_basis: the age names its instrument (x-54cf)
+#
+# The file mtime OVERSTATES liveness, never understates it: trailing
+# untimestamped records (last-prompt, cost state) keep touching the file while
+# the conversation is silent - measured never negative, median +20 minutes,
+# maximum +240 hours over 311 claude transcripts. The age now comes from the
+# newest timestamped entry in the tail the classifier already read, and every
+# fallback names itself.
+# ---------------------------------------------------------------------------
+
+def _write_skewed_transcript(
+    projects_root: Path, cwd: str, sid: str, now_s: float, entry_age_s: float
+) -> Path:
+    """Newest timestamped entry ``entry_age_s`` old, mtime fresh.
+
+    Produced the way production produces the skew: dated turns, then an
+    untimestamped trailing record that touches the file and dates nothing,
+    then a fresh utime.
+    """
+    import os
+    from datetime import datetime, timezone
+
+    slug = cwd.replace("/", "-").replace(".", "-")
+    d = projects_root / slug
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{sid}.jsonl"
+    stamp = datetime.fromtimestamp(now_s - entry_age_s, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    lines = [
+        json.dumps({"type": "user", "timestamp": stamp, "message": {
+            "role": "user", "content": [{"type": "text", "text": "go"}]}}),
+        json.dumps({"type": "assistant", "timestamp": stamp, "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "grinding on"}]}}),
+        # The record class that lies to mtime: it freshens the file stat and
+        # carries no timestamp the conversation can be aged by.
+        json.dumps({"type": "last-prompt"}),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    os.utime(path, (now_s, now_s))
+    return path
+
+
+def test_skew_reports_the_entry_age_not_the_file_age(tmp_path):
+    """mtime reads 0s, the newest entry reads 1h: the entry wins and the
+    reading names its instrument."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-54cf-0000-0000-000000000001"
+    now_s = 2_000_000_000.0
+    _write_skewed_transcript(tmp_path, cwd, sid, now_s, entry_age_s=3600)
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=now_s
+    )
+
+    assert abs(result["last_activity_age_s"] - 3600) <= 5
+    assert result["last_activity_basis"] == "last-entry"
+    assert result["state"] == "working"  # 1h is inside the 2h stalled window
+
+
+def test_positive_control_a_fresh_entry_reads_fresh_in_the_same_run(tmp_path):
+    """Same reader, 10s-old entry, same run: the age tracks the input. A
+    reader that returns a plausible number for every input proves nothing."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-54cf-0000-0000-000000000002"
+    now_s = 2_000_000_000.0
+    _write_skewed_transcript(tmp_path, cwd, sid, now_s, entry_age_s=10)
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=now_s
+    )
+
+    assert result["last_activity_age_s"] < 60
+    assert result["last_activity_basis"] == "last-entry"
+
+
+def test_a_tail_without_timestamps_falls_back_and_names_mtime(tmp_path):
+    import os
+
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-54cf-0000-0000-000000000003"
+    path = _write_claude_transcript(tmp_path, cwd, sid, ["pre-timestamp turn"])
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
+    )
+
+    # The one reading that can still overstate liveness is labelled as such.
+    assert result["last_activity_age_s"] == 100
+    assert result["last_activity_basis"] == "mtime"
+    assert result["last_event_at"] == "2023-11-14T22:13:20Z"
+
+
+def test_opencode_age_names_the_db_basis(tmp_path, monkeypatch):
+    """opencode keeps the MAX(time_updated) reading and its own basis name."""
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth, "_opencode_activity_epoch", lambda sid, p: 1_700_000_000.0
+    )
+
+    class _RT:
+        resolved = True
+        kind = "opencode-db"
+        transcript_path = str(tmp_path / "store.db")
+
+    monkeypatch.setattr(
+        "fno.provenance.resolver.resolve_transcript", lambda *a, **k: _RT()
+    )
+
+    epoch, age, basis = session_truth._transcript_age_s(
+        "opencode", "s", "/c", None, None, 1_700_000_100.0
+    )
+    assert (epoch, age, basis) == (1_700_000_000.0, 100.0, "opencode-db")
+
+
+def test_claude_record_carries_its_timestamp():
+    """The claude parser keeps the record's timestamp the way the codex parser
+    already does, so the age can come from the tail instead of a stat."""
+    from fno.agents.peek import _parse_claude_record
+
+    rec = {
+        "type": "assistant",
+        "timestamp": "2026-09-09T20:00:00Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    }
+    assert _parse_claude_record(rec).timestamp == "2026-09-09T20:00:00Z"
+    del rec["timestamp"]
+    assert _parse_claude_record(rec).timestamp is None
+
+
+def test_newest_entry_epoch_reads_the_newest_timestamped_line(tmp_path):
+    from datetime import datetime, timezone
+
+    from fno.agents.session_truth import newest_entry_epoch
+
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z",
+                            "message": {}}),
+                json.dumps({"type": "assistant", "timestamp": "2026-01-01T01:00:00Z",
+                            "message": {}}),
+                # Untimestamped trailing record and a torn line: neither dates
+                # anything, neither breaks the read.
+                json.dumps({"type": "last-prompt"}),
+                '{"type":"assist',
+            ]
+        )
+        + "\n"
+    )
+    expected = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc).timestamp()
+    assert newest_entry_epoch(path) == expected
+
+
+def test_newest_entry_epoch_none_without_timestamps_or_file(tmp_path):
+    from fno.agents.session_truth import newest_entry_epoch
+
+    bare = tmp_path / "bare.jsonl"
+    bare.write_text(json.dumps({"type": "last-prompt"}) + "\n")
+    assert newest_entry_epoch(bare) is None
+    assert newest_entry_epoch(tmp_path / "absent.jsonl") is None
+
+
+def test_render_truth_names_the_basis():
+    from fno.agents.session_truth import render_truth
+
+    line = render_truth(
+        {"handle": "w1", "state": "stalled", "reason": None,
+         "last_activity_age_s": 48 * 3600, "last_activity_basis": "last-entry",
+         "session_id": "s", "suggestions": []}
+    )
+    assert line.endswith("by last-entry)")
+    assert "2d" in line
 

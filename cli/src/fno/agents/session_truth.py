@@ -135,12 +135,16 @@ def _transcript_age_s(
     codex_sessions_dir: Optional[Path],
     now_s: Optional[float],
     transcript_path: Optional[Path] = None,
-) -> tuple[Optional[float], Optional[float]]:
-    """``(activity_epoch, age_s)``, either half None if unknowable.
+) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    """``(activity_epoch, age_s, basis)``, all three None if unknowable.
 
     The epoch is returned alongside the age derived from it so the caller can
     emit an absolute stamp and a relative age from the SAME read; computing them
     from two reads is how a stamp and an age disagree about one transcript.
+    ``basis`` names the instrument that answered - ``mtime`` (a file stat,
+    which OVERSTATES liveness: trailing untimestamped records keep the file
+    young while the conversation is silent, x-54cf) or ``opencode-db`` (the
+    store's newest message time).
 
     Uses the x-a472 transcript resolver (content-aware across all project dirs),
     so a jsonl age reflects the LIVE transcript, not a stale stub. For opencode
@@ -151,6 +155,7 @@ def _transcript_age_s(
     try:
         if agent in {"claude", "codex"} and transcript_path is not None:
             mtime = transcript_path.stat().st_mtime
+            basis = "mtime"
         else:
             from fno.provenance.resolver import resolve_transcript
 
@@ -162,28 +167,82 @@ def _transcript_age_s(
                 codex_sessions_dir=codex_sessions_dir,
             )
             if not rt.resolved or not rt.transcript_path:
-                return None, None
+                return None, None, None
             if rt.kind == "opencode-db":
                 activity_mtime = _opencode_activity_epoch(
                     session_id, Path(rt.transcript_path)
                 )
                 if activity_mtime is None:
-                    return None, None
+                    return None, None, None
                 mtime = activity_mtime
+                basis = "opencode-db"
             else:
                 mtime = Path(rt.transcript_path).stat().st_mtime
+                basis = "mtime"
     except Exception:  # noqa: BLE001 — any read failure -> age unknown (working)
-        return None, None
+        return None, None, None
     now = now_s if now_s is not None else time.time()
     # An epoch datetime cannot represent (a corrupt opencode time_updated, say)
-    # degrades the WHOLE pair, not just the stamp: `max(0.0, now - mtime)` on a
+    # degrades the WHOLE triple, not just the stamp: `max(0.0, now - mtime)` on a
     # far-future epoch would claim a measured age of 0 beside a null stamp,
     # the fresh-vs-absent disagreement this paired return exists to prevent.
     try:
         datetime.fromtimestamp(mtime, tz=timezone.utc)
     except (ValueError, OverflowError, OSError):
-        return None, None
-    return mtime, max(0.0, now - mtime)
+        return None, None, None
+    return mtime, max(0.0, now - mtime), basis
+
+
+def _record_stamp_epoch(ts: str) -> Optional[float]:
+    """ISO transcript stamp -> epoch seconds, or None.
+
+    Mirrors the positive control's parser (``watchdog._record_epoch``) so the
+    two readers cannot disagree about one stamp."""
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+#: Tail depth for :func:`newest_entry_epoch`, same bound as the watchdog's
+#: tick read: the newest entry is always near the end.
+_ENTRY_TAIL_BYTES = 256 * 1024
+
+
+def newest_entry_epoch(path: Path) -> Optional[float]:
+    """Newest top-level ``timestamp`` in a jsonl transcript, in epoch SECONDS.
+
+    The transcript-age primitive the file stat must not be: trailing records
+    (last-prompt, cost state) are appended with NO timestamp field, so mtime
+    keeps the file young while the conversation is silent - measured never
+    negative, median +20 minutes, maximum +240 hours over 311 claude
+    transcripts (x-54cf). Reads the same bounded tail
+    ``watchdog.tail_entries`` reads and takes the newest parseable stamp.
+    None when the file is unreadable or carries no timestamped entry at all;
+    the caller then falls back (and names the fallback via
+    ``last_activity_basis``)."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - _ENTRY_TAIL_BYTES))
+            chunk = fh.read()
+        lines = chunk.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if size > _ENTRY_TAIL_BYTES and lines:
+        lines = lines[1:]  # a mid-file seek lands inside a line; drop it
+    newest: Optional[float] = None
+    for line in lines:
+        try:
+            ts = json.loads(line).get("timestamp")
+        except Exception:  # noqa: BLE001 - a torn/foreign line is not data
+            continue
+        if not ts:
+            continue
+        epoch = _record_stamp_epoch(ts)
+        if epoch is not None and (newest is None or epoch > newest):
+            newest = epoch
+    return newest
 
 
 def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
@@ -261,14 +320,17 @@ def resolve_session_truth(
     """Resolve ``handle`` and classify its transcript tail. Never raises.
 
     Returns ``{handle, state, reason, last_activity_age_s, last_event_at,
-    last_message, session_id, observed_model, harness_title, suggestions}``.
+    last_activity_basis, last_message, session_id, observed_model,
+    harness_title, suggestions}``.
     ``state`` is one of done | watching | your-move | working | stalled |
     unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
     activity and ``last_message`` the flattened text of the LAST turn (compact
     ``[tool_use: name]`` markers included, whitespace collapsed, capped at 200
     chars) - both None on every unknown path, because an unread transcript must
-    render as unread, never as fresh; ``observed_model`` is the five-variant
+    render as unread, never as fresh; ``last_activity_basis`` names the
+    instrument the age came from (``last-entry`` | ``mtime`` | ``opencode-db``);
+    ``observed_model`` is the five-variant
     reading documented on :func:`observed_model` and is present on every path,
     including the ``unknown`` ones (a row that cannot be classified still
     renders)."""
@@ -285,6 +347,7 @@ def resolve_session_truth(
             "reason": reason,
             "last_activity_age_s": None,
             "last_event_at": None,
+            "last_activity_basis": None,
             "last_message": None,
             "session_id": session_id,
             "observed_model": observed or {"kind": "no-transcript"},
@@ -316,21 +379,6 @@ def resolve_session_truth(
         )
     )
     observed = observed_model(agent, transcript_path)
-
-    # Stat BEFORE reading the tail, so a write that lands between the two reads
-    # can only make the stamp OLDER than the message it describes - the message
-    # may then include a record the stamp predates, which understates freshness.
-    # The other order lets a mid-flight append make an old line read as freshly
-    # emitted, which is the dangerous direction for this pair.
-    mtime, age = _transcript_age_s(
-        agent,
-        sid,
-        cwd,
-        projects_root,
-        codex_sessions_dir,
-        now_s,
-        transcript_path,
-    )
     try:
         records = recent_records(
             agent,
@@ -347,6 +395,38 @@ def resolve_session_truth(
     if not records:
         return unknown("no-records", session_id=sid, observed=observed)
 
+    # The age comes from the tail ALREADY read above: its newest parseable
+    # Record.timestamp. Trailing untimestamped records (last-prompt, cost
+    # state) keep touching the file without dating the conversation, so the
+    # file stat reports the session as more alive than it is - measured never
+    # negative, median +20 minutes, maximum +240 hours (x-54cf). The stat is
+    # only the labelled fallback for a tail with no timestamped record at all;
+    # whichever instrument answered is served as ``last_activity_basis``.
+    epoch: Optional[float] = None
+    basis: Optional[str] = None
+    if agent in {"claude", "codex"}:
+        for rec in reversed(records):
+            if not rec.timestamp:
+                continue
+            stamp_epoch = _record_stamp_epoch(rec.timestamp)
+            if stamp_epoch is not None:
+                epoch = stamp_epoch
+                basis = "last-entry"
+                break
+    if epoch is None:
+        epoch, age, basis = _transcript_age_s(
+            agent,
+            sid,
+            cwd,
+            projects_root,
+            codex_sessions_dir,
+            now_s,
+            transcript_path,
+        )
+    else:
+        now = now_s if now_s is not None else time.time()
+        age = max(0.0, now - epoch)
+
     # Classify the LAST turn, not the last assistant turn: a trailing user turn
     # must clear a stale assistant promise/question (see classify_tail).
     # Peer mail turns (role == "peer") do not clear operator/assistant state.
@@ -356,8 +436,8 @@ def resolve_session_truth(
     try:
         last_event_at = (
             None
-            if mtime is None
-            else datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+            if epoch is None
+            else datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
         )
@@ -367,16 +447,17 @@ def resolve_session_truth(
         # break the never-raises contract and take the whole list render down
         # with one corrupt reading.
         last_event_at = None
-    # The stamp and the message describe the same tail: the absolute stamp comes
-    # from the same epoch the age was derived from and is taken before the tail
-    # is read, so the pair cannot disagree about when the transcript last moved
-    # in the dangerous direction.
+    # The stamp and the age describe the same tail: both derive from the one
+    # epoch above, so the pair cannot disagree about when the transcript last
+    # moved. ``last_activity_basis`` names the instrument that epoch came from,
+    # so a supervisor reading a stale age can see which reader answered.
     return {
         "handle": handle,
         "state": state,
         "reason": None,
         "last_activity_age_s": None if age is None else int(age),
         "last_event_at": last_event_at,
+        "last_activity_basis": basis,
         "last_message": " ".join((last.text or "").split())[:200] or None,
         "session_id": sid,
         "observed_model": observed,
@@ -476,7 +557,9 @@ def render_truth(result: dict[str, Any]) -> str:
         return line
     age = _humanize_age(result.get("last_activity_age_s"))
     model = _model_clause(result.get("observed_model"))
+    basis = result.get("last_activity_basis")
+    suffix = f" by {basis}" if basis else ""
     return (
         f"truth {handle}: {state}{model} "
-        f"({_EVIDENCE.get(state, '')}, last activity {age} ago)"
+        f"({_EVIDENCE.get(state, '')}, last activity {age} ago{suffix})"
     )

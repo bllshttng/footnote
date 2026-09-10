@@ -4021,6 +4021,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
             "reason",
             "last_activity_age_s",
             "last_event_at",
+            "last_activity_basis",
             "last_message",
             "session_id",
             "observed_model",
