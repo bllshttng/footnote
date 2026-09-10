@@ -638,7 +638,10 @@ def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
 
 
 def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
-    """Append one control row proving ``msg_id`` reached ``recipient``'s transcript."""
+    """Append one control row proving ``msg_id`` reached ``recipient``'s transcript.
+
+    The row is control traffic that no inbox renders; it only proves delivery.
+    """
     env = Envelope.new(
         from_=sender,
         to=recipient,
@@ -652,8 +655,9 @@ def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
 
 def landed_ids(msgs: list[Envelope]) -> set[str]:
     """Ids proven landed by a same-sender/recipient ``record_landed`` row (mirrors
-    ``withdrawn_ids``). The control row's own id is never added -- unlike a
-    withdrawal, a landed message must stay visible."""
+    ``withdrawn_ids``). The control row's own id is never added, and the two
+    facts stay separate: the acknowledged message stays visible to its
+    recipient, and the acknowledging row is control traffic that no inbox renders."""
     by_id = {m.id: m for m in msgs}
     out: set[str] = set()
     for m in msgs:
