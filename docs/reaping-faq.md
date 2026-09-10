@@ -146,7 +146,7 @@ The asymmetry matters (`gc.rs:152-155`). A recorded status that is not `merged` 
 
 ### active
 
-The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`gc.rs:333-335`, `gc.rs:805`). The session is live in the only sense the law allows. Wait past the window. If the session is truly done, stop it yourself.
+The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs:349`, `gc.rs:333-335`). The session is live in the only sense the law allows. Wait past the window. If the session is truly done, stop it yourself.
 
 ### graph unreadable
 
