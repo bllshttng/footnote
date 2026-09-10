@@ -426,6 +426,278 @@ def _live_mux_sessions(
     ]
 
 
+component_row_restarts = {
+    "daemon": ("restarts", "workers and panes"),
+    "store-keeper": ("cycles; the next read respawns it", "the graph on disk"),
+    "pane-keeper": (
+        "kept",
+        "its pane; current only when that pane ends",
+    ),
+    "thread-keeper": (
+        "kept",
+        "its pane; current only when that pane ends",
+    ),
+}
+
+
+def _mux_on_restart(panes: int) -> str:
+    if panes > 0:
+        return f"kept; only `--mux` replaces it, ending {panes} shell(s)"
+    return "kept; auto-restarts (pane-less)"
+
+
+def _started_before_rewrite(started_at: Optional[float], exe: Optional[Path]) -> bool:
+    """Stale when the process started before its executable was last
+    written. The only reading a pre-self-report build can give (x-f188
+    change 5): callers are the pre-report keeper fallback and the mux
+    server row, and it retires when crates/fno can depend on fno-agents
+    and every Identify carries ``drift``."""
+    if not started_at or exe is None:
+        return False
+    try:
+        return float(started_at) < exe.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _proc_identity(pid: Optional[int]) -> "tuple[Optional[str], Optional[float]]":
+    """(exe, create_time) via psutil, best-effort."""
+    if not pid:
+        return None, None
+    try:
+        import psutil
+
+        proc = psutil.Process(int(pid))
+        return proc.exe(), proc.create_time()
+    except Exception:  # noqa: BLE001 - a vanished pid is not a census fault
+        return None, None
+
+
+def _daemon_census_row(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]",
+) -> dict:
+    """The daemon's row, read from ``fno-agents status --json``'s drift
+    field (x-f188 change 4). A failed call reads unknown with the failure
+    named, never current."""
+    row = {
+        "component": "daemon",
+        "pid": None,
+        "name": "agents home",
+        "exe": None,
+        "started_at": None,
+        "verdict": "unknown",
+        "evidence": "status call failed",
+        "on_restart": component_row_restarts["daemon"][0],
+        "survives": component_row_restarts["daemon"][1],
+    }
+    try:
+        from fno import rust_binary
+
+        if os.environ.get("FNO_AGENTS_RUNTIME", "auto").strip().lower() == "rust":
+            binary = rust_binary.resolve_binary()
+        else:
+            binary = rust_binary.resolve_installed_binary()
+    except Exception as exc:  # noqa: BLE001 - the failure IS the finding
+        row["evidence"] = f"binary resolve failed: {exc}"
+        return row
+    if binary is None:
+        row["evidence"] = "no fno-agents binary resolved"
+        return row
+    row["exe"] = str(binary)
+    try:
+        proc = runner(
+            [str(binary), "status", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        row["evidence"] = f"status call failed: {exc}"
+        return row
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        row["evidence"] = (
+            f"status exited {proc.returncode}: {detail[-1] if detail else 'no output'}"
+        )
+        return row
+    try:
+        payload = json.loads(proc.stdout or "")
+    except (TypeError, ValueError) as exc:
+        row["evidence"] = f"status reply unparseable: {exc}"
+        return row
+    if not isinstance(payload, dict):
+        row["evidence"] = "status reply is not an object"
+        return row
+    daemon = payload.get("daemon")
+    if isinstance(daemon, dict):
+        row["pid"] = daemon.get("pid")
+    drift = payload.get("drift")
+    if drift == "fresh":
+        row["verdict"] = "current"
+        row["evidence"] = "build self-report"
+    elif drift == "drifted":
+        row["verdict"] = "stale"
+        row["evidence"] = "build self-report"
+    else:
+        row["evidence"] = "status reply carries no drift field (pre-report daemon)"
+    return row
+
+
+_COMPONENT_OF_LANE = {"pane": "pane-keeper", "thread": "thread-keeper", "store": "store-keeper"}
+
+
+def _keeper_census_rows() -> "list[dict]":
+    """One row per live keeper across all three lanes, classified from the
+    Identify reply's drift self-report; a reply without one (a pre-report
+    build) falls back to start-time vs binary mtime. Keepers sharing a
+    socket are listed as duplicates; change 2 retires them."""
+    from fno.agents import keeper_lane
+
+    lane = keeper_lane.discover()
+    if lane.broken:
+        return [
+            {
+                "component": "keeper-census",
+                "pid": None,
+                "name": None,
+                "exe": None,
+                "started_at": None,
+                "verdict": "unknown",
+                "evidence": f"keeper discovery failed: {lane.broken_reason}",
+                "on_restart": "unknown",
+                "survives": "unknown",
+            }
+        ]
+    rows: list[dict] = []
+    seen_socks: "dict[str, str]" = {}
+    for obs in lane.observations:
+        component = _COMPONENT_OF_LANE.get(obs.lane, "pane-keeper")
+        exe, started_at = _proc_identity(obs.pid)
+        verdict = "unknown"
+        evidence = "no Identify answer"
+        if obs.sock is not None:
+            state, reply = keeper_lane.sock_identify(obs.sock)
+            drift = reply.get("drift") if isinstance(reply, dict) else None
+            if drift == "drifted":
+                verdict, evidence = "stale", "build self-report"
+            elif drift == "fresh":
+                verdict, evidence = "current", "build self-report"
+            elif reply is not None:
+                # A reply with no drift key is a keeper built before the
+                # self-report; its start time is the only reading it gives.
+                if _started_before_rewrite(started_at, Path(exe) if exe else None):
+                    verdict, evidence = "stale", "predates build self-report"
+                else:
+                    verdict, evidence = (
+                        "current",
+                        "started at-or-after the binary was written",
+                    )
+            else:
+                evidence = f"no Identify answer (socket state: {state})"
+        else:
+            evidence = "argv declares no socket"
+        name = str(obs.session) if obs.session else (str(obs.sock) if obs.sock else None)
+        if obs.sock is not None:
+            key = str(obs.sock)
+            if key in seen_socks:
+                evidence += f"; duplicate keeper on {key} (seat held by pid {seen_socks[key]})"
+            else:
+                seen_socks[key] = str(obs.pid)
+        on_restart, survives = component_row_restarts[component]
+        rows.append(
+            {
+                "component": component,
+                "pid": obs.pid,
+                "name": name,
+                "exe": exe,
+                "started_at": started_at,
+                "verdict": verdict,
+                "evidence": evidence,
+                "on_restart": on_restart,
+                "survives": survives,
+            }
+        )
+    return rows
+
+
+def _mux_census_rows(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]",
+) -> "list[dict]":
+    """One row per live mux server, classified from the change-4 pid
+    sidecar via start-time vs the installed front-door binary's mtime
+    (crates/fno cannot depend on fno-agents, so there is no self-report
+    here yet)."""
+    fno_bin = _cargo_installed_mux() or shutil.which("fno")
+    if not fno_bin:
+        return []
+    try:
+        proc = runner(
+            [str(fno_bin), "mux", "ls", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except (TypeError, ValueError):
+        return []
+    out: "list[dict]" = []
+    for r in rows:
+        if not isinstance(r, dict) or r.get("state") != "live":
+            continue
+        panes = r.get("panes") or 0
+        pid = r.get("pid")
+        started_at = None
+        exe = Path(fno_bin)
+        if pid:
+            try:
+                import psutil
+
+                started_at = psutil.Process(int(pid)).create_time()
+            except Exception:  # noqa: BLE001 - a vanished pid is not a fault
+                started_at = None
+        if _started_before_rewrite(started_at, exe):
+            verdict, evidence = "stale", "predates build self-report"
+        elif started_at is not None:
+            verdict, evidence = "current", "started at-or-after the binary was written"
+        else:
+            verdict, evidence = "unknown", "no pid sidecar and no readable start time"
+        out.append(
+            {
+                "component": "mux-server",
+                "pid": pid,
+                "name": r.get("session"),
+                "exe": str(fno_bin),
+                "started_at": started_at,
+                "verdict": verdict,
+                "evidence": evidence,
+                "on_restart": _mux_on_restart(int(panes) if isinstance(panes, int) else 0),
+                "survives": f"{panes} panes" if panes else "no panes",
+            }
+        )
+    return out
+
+
+def running_components(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> "list[dict]":
+    """One row per long-lived process (x-f188 change 5): daemon, store
+    keepers, pane keepers, thread keepers, mux servers. Each row names
+    what a restart does to it and what survives, so no surface has to
+    promise one thing and mean another. Best-effort: a failed probe reads
+    ``unknown`` with the failure named, never ``current``."""
+    rows: "list[dict]" = [_daemon_census_row(runner)]
+    rows.extend(_keeper_census_rows())
+    rows.extend(_mux_census_rows(runner))
+    return rows
+
+
 def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:

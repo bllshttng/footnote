@@ -2319,14 +2319,28 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
-    # Running-process freshness (x-e6dd): a mux server that predates the installed
-    # binary is still speaking the old proto - it survives an upgrade by design and
-    # silently blocks agent dispatch until restarted. Advisory only.
+    # Wire-floor freshness (x-e6dd): this verdict is the WIRE, not the build
+    # (x-f188): a below-floor server cannot be attached to by this client at
+    # all. Build staleness is the census below. Advisory only.
     for sess in result.get("mux_server_stale") or []:
         out(
-            f"fno doctor: mux server '{sess}' is running an older build than the installed "
-            "`fno`; run `fno agents restart` to cut it over (auto-heals pane-less servers; "
+            f"fno doctor: mux server '{sess}' is below the wire compatibility floor; "
+            "run `fno agents restart` to cut it over (auto-heals pane-less servers; "
             "add `--mux` to also end servers with live panes)."
+        )
+
+    # Running-process census (x-f188): one line per stale row, naming what a
+    # restart does and what survives. Advisory only.
+    for row in result.get("running_components") or []:
+        if not isinstance(row, dict) or row.get("verdict") != "stale":
+            continue
+        name = row.get("name") or "unnamed"
+        pid = row.get("pid")
+        pid_text = f" pid {pid}" if pid else ""
+        out(
+            f"fno doctor: {row.get('component')} '{name}'{pid_text} is running an older "
+            f"build ({row.get('evidence')}); on restart: {row.get('on_restart')}; "
+            f"keeps {row.get('survives')}."
         )
 
     # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.
@@ -4079,6 +4093,10 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # OLD proto after an upgrade. Binary staleness is above; this is the running
     # PROCESS. Never changes status/exit.
     result["mux_server_stale"] = _update.stale_mux_servers()
+
+    # Advisory running-process census (x-f188): one row per long-lived
+    # process, stale rows rendered below. Never changes status/exit.
+    result["running_components"] = _update.running_components()
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()

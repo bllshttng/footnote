@@ -2856,3 +2856,101 @@ def test_component_lines_name_repair_and_unknown_instrument() -> None:
     assert any("repair: cargo install --path /x --bins" in line for line in lines), lines
     assert any("hung on `version --json`" in line for line in lines), lines
     assert not any("fno-agents: fresh" in line for line in lines)
+
+
+def test_running_components_daemon_row_reads_the_drift_field(monkeypatch) -> None:
+    """AC5: the daemon row reads change 4's drift field, names pid and the
+    fixed on_restart/survives text."""
+    monkeypatch.setattr(update, "_keeper_census_rows", lambda: [])
+    monkeypatch.setattr(update, "_mux_census_rows", lambda runner: [])
+
+    def _run(cmd, **kwargs):
+        assert cmd[1:2] == ["status"]
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"daemon": {"pid": 42}, "drift": "drifted"}),
+            stderr="",
+        )
+
+    rows = update.running_components(runner=_run)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["component"] == "daemon"
+    assert row["pid"] == 42
+    assert row["verdict"] == "stale"
+    assert row["evidence"] == "build self-report"
+    assert row["on_restart"] == "restarts"
+    assert row["survives"] == "workers and panes"
+
+
+def test_running_components_daemon_failure_reads_unknown(monkeypatch) -> None:
+    """AC5-ERR: a failed status call reads unknown with the failure named,
+    never current."""
+    monkeypatch.setattr(update, "_keeper_census_rows", lambda: [])
+    monkeypatch.setattr(update, "_mux_census_rows", lambda runner: [])
+
+    def _run(cmd, **kwargs):
+        return types.SimpleNamespace(returncode=7, stdout="", stderr="boom")
+
+    row = update.running_components(runner=_run)[0]
+    assert row["component"] == "daemon"
+    assert row["verdict"] == "unknown"
+    assert "boom" in row["evidence"] or "7" in row["evidence"]
+
+
+def test_running_components_keeper_predates_self_report(monkeypatch, tmp_path) -> None:
+    """AC5-EDGE: an Identify reply with no drift key + a worker binary
+    rewritten after started_at reads stale with evidence naming the
+    fallback."""
+    import types as _types
+
+    binary = tmp_path / "fno-agents-worker"
+    binary.write_bytes(b"newer build")
+    observed = _types.SimpleNamespace(
+        pid=7,
+        lane="store",
+        sock=Path("/tmp") / f"fno-x188e-{os.getpid()}.sock",
+        session="sess",
+        cwd=None,
+        age_s=10.0,
+        child_pids=(),
+        sock_state="listener",
+        claimed_by=None,
+        registry_ok=True,
+    )
+
+    class _FakeLane:
+        broken = False
+        broken_reason = None
+        observations = [observed]
+
+    monkeypatch.setattr(
+        update, "_proc_identity", lambda pid: (str(binary), 1.0)
+    )
+    monkeypatch.setattr(
+        "fno.agents.keeper_lane.discover", lambda **kwargs: _FakeLane()
+    )
+    monkeypatch.setattr(
+        "fno.agents.keeper_lane.sock_identify",
+        lambda sock: ("listener", {"v": 1}),
+    )
+    monkeypatch.setattr(update, "_daemon_census_row", lambda runner: {"component": "daemon", "verdict": "unknown"})
+    monkeypatch.setattr(update, "_mux_census_rows", lambda runner: [])
+
+    rows = update.running_components(runner=lambda *a, **k: None)
+    keeper_rows = [r for r in rows if r["component"] == "store-keeper"]
+    assert len(keeper_rows) == 1
+    assert keeper_rows[0]["verdict"] == "stale"
+    assert keeper_rows[0]["evidence"] == "predates build self-report"
+    assert keeper_rows[0]["on_restart"] == "cycles; the next read respawns it"
+    assert keeper_rows[0]["survives"] == "the graph on disk"
+
+
+def test_running_components_mux_row_uses_pane_count(monkeypatch) -> None:
+    """The mux row's restart text names what --mux would end."""
+    monkeypatch.setattr(update, "_keeper_census_rows", lambda: [])
+    monkeypatch.setattr(update, "_daemon_census_row", lambda runner: {"component": "daemon", "verdict": "unknown"})
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update.shutil, "which", lambda name: None)
+    rows = update.running_components(runner=lambda *a, **k: None)
+    assert [r["component"] for r in rows] == ["daemon"], "no mux rows without the mux binary"

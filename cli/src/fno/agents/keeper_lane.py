@@ -29,6 +29,7 @@ death, and that rule is inherited, not relaxed.
 from __future__ import annotations
 
 import errno as _errno
+import json
 import socket
 import time
 from dataclasses import dataclass, field
@@ -98,21 +99,17 @@ class KeeperObs:
     registry_ok: bool = True
 
 
-def sock_state_of(sock: Optional[Path]) -> str:
-    """Probe one keeper socket with the keeper's own frame codec.
+def sock_identify(sock: Optional[Path]) -> "tuple[str, Optional[dict]]":
+    """Probe one keeper socket; return ``(state, parsed Identify reply)``.
 
-    ``UNREADABLE`` for a keeper whose argv declared no socket. ``ABSENT`` when
-    the file is gone. Connect refused is ``NO_LISTENER``. A connection that
-    accepts gets one ``Identify`` (tag 4, empty payload) and
-    ``PROBE_BUDGET_S`` to answer (tag 5, JSON): answered is ``LISTENER``,
-    everything else is ``SILENT``. Frame layout mirrors
-    ``dispatch._keeper_identify`` and ``crates/fno-agents/src/pane_keeper.rs``:
-    u8 tag | u32 LE payload length | payload.
+    The reply is the census's build self-report (x-f188): a ``drift`` key
+    read here replaces start-time guessing. ``None`` beside every state
+    except a parsed ``LISTENER`` answer.
     """
     if sock is None:
-        return UNREADABLE
+        return UNREADABLE, None
     if not sock.exists():
-        return ABSENT
+        return ABSENT, None
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(PROBE_BUDGET_S)
     try:
@@ -123,10 +120,10 @@ def sock_state_of(sock: Optional[Path]) -> str:
         # check, which is the absent shape. Any other errno - permission,
         # resource exhaustion - leaves the listener unproven.
         if exc.errno == _errno.ECONNREFUSED:
-            return NO_LISTENER
+            return NO_LISTENER, None
         if exc.errno == _errno.ENOENT:
-            return ABSENT
-        return UNREACHABLE
+            return ABSENT, None
+        return UNREACHABLE, None
     # Everything AFTER a successful connect is the conversation, and every
     # way it can fail - recv timeout, reset, close, garbage - is SILENT.
     # ``socket.timeout`` is an OSError subclass; reading the whole block as
@@ -138,7 +135,7 @@ def sock_state_of(sock: Optional[Path]) -> str:
         while time.monotonic() < deadline:
             chunk = s.recv(4096)
             if not chunk:
-                return SILENT  # closed without answering
+                return SILENT, None  # closed without answering
             buf += chunk
             while len(buf) >= 5:
                 tag = buf[0]
@@ -147,18 +144,21 @@ def sock_state_of(sock: Optional[Path]) -> str:
                     break
                 if tag == 5:  # IdentifyReply
                     try:
-                        import json
-
-                        json.loads(buf[5 : 5 + length])
-                        return LISTENER
+                        return LISTENER, json.loads(buf[5 : 5 + length])
                     except ValueError:
-                        return SILENT
+                        return SILENT, None
                 buf = buf[5 + length :]
-        return SILENT  # accepted and stayed quiet past the bound
+        return SILENT, None  # accepted and stayed quiet past the bound
     except OSError:
-        return SILENT
+        return SILENT, None
     finally:
         s.close()
+
+
+def sock_state_of(sock: Optional[Path]) -> str:
+    """The state half of :func:`sock_identify`, for callers that want no
+    reply body."""
+    return sock_identify(sock)[0]
 
 
 def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[str, str]:

@@ -692,3 +692,71 @@ def test_a_filtered_apply_all_never_collects_keepers(monkeypatch) -> None:
     full = runner.invoke(agents_app, ["watchdog", "--apply-all"])
     assert full.exit_code == 0, full.output
     assert calls, "the full --apply-all collects keepers"
+
+
+def test_sock_identify_returns_the_parsed_reply() -> None:
+    """x-f188 change 5: the probe hands back the Identify reply body, not
+    just the state - the census reads ``drift`` from it instead of
+    guessing from start times."""
+    import json as _json
+    import socket as _socket
+    import struct
+    import threading
+
+    sock = Path("/tmp") / f"fno-x188a-{os.getpid()}.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(str(sock))
+    srv.listen(1)
+    reply_body = _json.dumps(
+        {"v": 1, "keeper_pid": 1, "drift": "drifted"}
+    ).encode()
+    frame = b"\x05" + struct.pack("<I", len(reply_body)) + reply_body
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(64)
+        conn.sendall(frame)
+        conn.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    state, reply = kl.sock_identify(sock)
+    t.join(timeout=2)
+    srv.close()
+    assert state == kl.LISTENER
+    assert reply == {"v": 1, "keeper_pid": 1, "drift": "drifted"}
+
+
+def test_sock_state_of_still_returns_bare_state() -> None:
+    """The str API is unchanged for every existing caller."""
+    assert kl.sock_state_of(Path("/tmp") / f"fno-x188d-{os.getpid()}.sock") == kl.ABSENT
+    assert kl.sock_state_of(None) == kl.UNREADABLE
+
+
+def test_sock_identify_absent_and_unparseable() -> None:
+    """Absent reads (ABSENT, None); a garbage reply is SILENT, not a crash."""
+    import socket as _socket
+    import struct
+    import threading
+
+    state, reply = kl.sock_identify(Path("/tmp") / f"fno-x188c-{os.getpid()}.sock")
+    assert state == kl.ABSENT and reply is None
+
+    sock = Path("/tmp") / f"fno-x188b-{os.getpid()}.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(str(sock))
+    srv.listen(1)
+    frame = b"\x05" + struct.pack("<I", 2) + b"{)"
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(64)
+        conn.sendall(frame)
+        conn.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    state, reply = kl.sock_identify(sock)
+    t.join(timeout=2)
+    srv.close()
+    assert state == kl.SILENT and reply is None
