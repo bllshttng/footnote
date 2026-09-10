@@ -123,10 +123,13 @@ fno do review --assess-assurance --policy-size "$NODE_SIZE" ${RISK_SURFACES}
 The verdict is JSON (`policy`, `satisfied`, `effective`, `reason`). Exit `3`
 means an unsatisfied **high-assurance** policy: the change touches a high-risk
 surface (a merge/review gate, auth, secrets, a migration, money) but no
-different-family reviewer can be established (unknown implementer identity or no
-diverse capacity). Do NOT treat that PR as clean - it is BLOCKED pending
-operator resolution: configure a different-family reviewer / provider account,
-or (if the risk classification is wrong) correct the node's risk surfaces. The
+different-family reviewer can be established. Exit 3 means the change needs a
+reviewer this session cannot produce. Report it to the operator
+(`<help reason="assurance" ...>` in a target run, mail otherwise) with the
+verdict JSON. Never spawn a reviewer session or thread. Law d-d4b4293e: review
+runs in the session that did the work, and crossing a harness earns no lane.
+The remedies are the operator's: a ruling that reopens a lane, an external bot
+in `config.review.required_bots`, or a corrected risk surface on the node. The
 portable / diverse-preferred / full-sigma policies always exit `0`: one
 subscription reviews via same-family fresh-context and different-family capacity
 is a preference, never a paywall.
