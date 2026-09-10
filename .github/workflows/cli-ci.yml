@@ -144,9 +144,10 @@ jobs:
           # The ceiling needs headroom over its own estimate, or a packet that
           # runs one percent over its price dies on every push (measured
           # 2026-09-09: a 15-estimate Rust packet was killed at 22m44s twice
-          # with every test passing). Half again the estimate, clamped at 75:
-          # the clamp must stay above estimate x this factor for any real
-          # packet, or the fit assertion refuses to run the packet at all.
+          # with every test passing). Half again the estimate, clamped at 75.
+          # The fit assertion refuses a packet whose estimate exceeds the
+          # ceiling itself, so the effective bound is: estimates above 75
+          # refuse, everything under runs with half-again room.
           echo "timeout_minutes=$(( est * 3 / 2 > 75 ? 75 : est * 3 / 2 ))" >> "$GITHUB_OUTPUT"
 
     outputs:
