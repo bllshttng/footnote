@@ -176,9 +176,8 @@ TARGET_NO_MATCH=0
 # Set ONLY when no manifest file exists at all (the "else" branch below), never
 # when one exists but names a foreign session/harness: a resident manifest
 # already has an owner to scan its own distress, and scanning here too would
-# invoke the binary against a stop this session does not own (x-3567's T6/T13
-# regression: a foreign-transcript or foreign-harness stop must never touch
-# the binary).
+# invoke the binary against a stop this session does not own - a
+# foreign-transcript or foreign-harness stop must never touch the binary.
 PRE_MANIFEST_NO_FILE=0
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     RESIDENT_SESSION_ID=$(sed -n 's/^fno_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
