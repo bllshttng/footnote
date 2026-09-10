@@ -47,6 +47,11 @@ QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
 GATE_CLAIM_TTL_MS = 5 * 60 * 1000
+#: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
+#: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
+#: `claim status`/`release --force` read `<space>/claims/spawn-gate.lock`
+#: while the gate held `~/.fno/claims/spawn-gate.lock` and both lied.
+GATE_CLAIM_KEY = "gate:spawn"
 #: How long to tolerate an UNBROKEN run of failed mutex acquisitions before
 #: proceeding unserialized. The mutex is a check->dispatch serializer, not a
 #: state owner: a spawner that dies inside the critical section leaves it
@@ -847,7 +852,7 @@ class GateGuard:
         if self._gate_holder is None:
             return
         holder = self._gate_holder
-        if not _release_claim_bounded("spawn-gate", holder):
+        if not _release_claim_bounded(GATE_CLAIM_KEY, holder):
             return
         self._gate_holder = None
 
@@ -879,7 +884,7 @@ def _release_claim_bounded(key: str, holder: str) -> bool:
             last_error = exc
             if attempt + 1 < CLAIM_RELEASE_ATTEMPTS:
                 time.sleep(0.01)
-    label = "gate mutex" if key == "spawn-gate" else f"worker reservation {key}"
+    label = "gate mutex" if key == GATE_CLAIM_KEY else f"worker reservation {key}"
     _warn(f"spawn-gate: could not release {label}: {last_error}")
     return False
 
@@ -899,7 +904,7 @@ def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
 
         try:
             acquire_claim(
-                "spawn-gate",
+                GATE_CLAIM_KEY,
                 holder,
                 ttl_ms=GATE_CLAIM_TTL_MS,
                 root=_gate_claims_root(),

@@ -698,7 +698,8 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate,
             "_footprint_cause_evidence",
-            lambda: mutex_held_when_probed.append("spawn-gate" in released) or None,
+            lambda: mutex_held_when_probed.append(spawn_gate.GATE_CLAIM_KEY in released)
+            or None,
             raising=False,
         )
 
@@ -1381,7 +1382,7 @@ class TestRunGate:
             "fno.claims.core.acquire_claim",
             lambda *args, **kwargs: (
                 True
-                if args[0] == "spawn-gate"
+                if args[0] == spawn_gate.GATE_CLAIM_KEY
                 else (_ for _ in ()).throw(OSError("claim store denied"))
             ),
         )
@@ -1431,7 +1432,7 @@ class TestRunGate:
 
         guard.release()
 
-        assert attempts == {"spawn-gate": 3, "worker:peer": 3}
+        assert attempts == {spawn_gate.GATE_CLAIM_KEY: 3, "worker:peer": 3}
         assert guard._gate_holder is None
         assert guard._worker_key is None
 

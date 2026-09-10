@@ -506,7 +506,7 @@ pub fn run_gate(
         // Serialize check→dispatch under the spawn-gate mutex so N concurrent
         // spawners at cap-1 can't all pass. Not held across the wait sleep.
         let mut acquired_mutex = match claims::acquire(
-            "spawn-gate",
+            "gate:spawn",
             &holder,
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
@@ -561,7 +561,7 @@ pub fn run_gate(
         }
 
         if acquired_mutex {
-            guard.gate_key = Some(("spawn-gate".to_string(), holder.clone()));
+            guard.gate_key = Some(("gate:spawn".to_string(), holder.clone()));
             let mut warnings = Vec::new();
             let slots = slot_count(registry_path, &mut warnings);
             last_slots = slots;
@@ -1636,7 +1636,7 @@ MemAvailable:    8000000 kB\n";
 
         // Hold the mutex as somebody else, exactly as a corpse would.
         let held = claims::acquire(
-            "spawn-gate",
+            "gate:spawn",
             "spawn-gate:999999:ghost",
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
@@ -1655,7 +1655,7 @@ MemAvailable:    8000000 kB\n";
         // would be FREE, run_gate would sail through, and this test would pass
         // while exercising none of the branch it exists to pin.
         let contended = claims::acquire(
-            "spawn-gate",
+            "gate:spawn",
             "spawn-gate:probe",
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
@@ -1679,7 +1679,7 @@ MemAvailable:    8000000 kB\n";
             },
         );
         let elapsed = started.elapsed();
-        let _ = claims::release("spawn-gate", "spawn-gate:999999:ghost", Some(&root), None);
+        let _ = claims::release("gate:spawn", "spawn-gate:999999:ghost", Some(&root), None);
         std::env::remove_var("FNO_CLAIMS_ROOT");
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
