@@ -6,9 +6,9 @@ landed in no sessions array. Coverage:
 
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
     row carrying the WORKER's harness session id (never the spawner's, never
-    the 8-hex short id). Phase: a /target-family message stamps do (the
-    worker's claim-acquire stamp fills the same row), anything else stamps
-    review.
+    the 8-hex short id). Phase: the message's work shape labels the row -
+    /target-family stamps do, review verbs stamp review, blueprint and think
+    verbs stamp their planning phases; unlabelable prose stamps nothing.
   - AC1-fallback: a review-verb prompt naming exactly ONE node id (no --node)
     opens the same row; prose or a two-id prompt arms nothing.
   - AC1-ERR: a review prompt naming an unresolvable id exits 0 with a named
@@ -360,6 +360,46 @@ def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
     rows = _node_rows()
     assert len(rows) == 1
     assert rows[0]["phase"] == "think"
+
+
+def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid) -> None:
+    """A /fno:blueprint worker names a blueprint planner: the row stamps the
+    planning phase instead of skipping."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:blueprint x-5baf",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "blueprint"
+
+
+def test_spawn_codex_blueprint_spelling_stamps_blueprint(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """The codex spelling travels on the normalized form: `$fno:blueprint`
+    stamps the same planning row the slash spelling does."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "$fno:blueprint the plan doc",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "blueprint"
 
 
 def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
