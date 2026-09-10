@@ -467,6 +467,31 @@ def base_lineage_check(
 
 
 @pr_app.command(
+    "merge-result-check",
+    hidden=True,
+    help=(
+        "Compile the merge result of <pr_number> against its base: git "
+        "merge-tree, then the repo-wide ruff + mypy step on that tree. Two "
+        "green parents can merge red when git joins hunks that never met on "
+        "one machine. Exit 0 ok, 3 red (rebase, fix, push, retry), 4 unknown "
+        "(a probe failed), 127 git or gh missing."
+    ),
+)
+def merge_result_check(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+) -> None:
+    from fno.pr import _merge_result
+    from fno.pr._proc import ToolMissing
+
+    try:
+        rc = _merge_result.run_merge_result_check(pr_number)
+    except ToolMissing as exc:
+        typer.echo(f"fno do pr merge-result-check: {exc.tool} not found on PATH", err=True)
+        rc = 127
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "coverage-check",
     hidden=True,
     help=(
