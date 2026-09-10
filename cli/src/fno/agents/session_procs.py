@@ -120,22 +120,10 @@ def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
     return out
 
 
-def codex_rollout_pid_map(
-    session_ids: set[str], *, timeout: float = 5.0
-) -> dict[str, int]:
-    """codex session id -> pid of the process holding that thread's rollout.
+def codex_rollout_pid_map(session_ids: set[str], *, timeout: float = 5.0) -> dict[str, int]:
+    """codex session id -> pid of the process holding that thread's rollout (x-9958).
 
-    Codex threads have no claude-style roster, so the rollout fd IS the
-    identity: the same evidence ``_codex_session_id_for_pid`` reads forward
-    from a known pid, walked here in reverse from the session id (x-9958 Task
-    3). The session id comes from the rollout's own session_meta record, never
-    the filename UUID, which is not always the session id in older layouts.
-
-    The walk stays inside codex-named processes because a whole-machine
-    open-file scan prices every caller, and the spawn gate reads this map on
-    its critical path. Best-effort by design: psutil missing, a walk timeout,
-    or an unreadable rollout all mean ``{}``, which undercounts - callers must
-    treat it as "unknown", never as "no sessions".
+    Codex threads have no claude-style roster, so the rollout fd IS the identity; the id is read from each rollout's own session_meta record, never the filename UUID, which is not always the session id. The walk stays inside codex-named processes because a whole-machine open-file scan prices every caller. Best-effort by design: psutil missing, a spent timeout, or an unreadable rollout all mean ``{}``, which undercounts - callers read that as unknown, never as no sessions.
     """
     wanted = {sid for sid in session_ids if sid}
     if not wanted:
@@ -150,8 +138,7 @@ def codex_rollout_pid_map(
     deadline = time.monotonic() + max(float(timeout), 0.0)
     for proc in psutil.process_iter(["name"]):
         try:
-            name = str(proc.info.get("name") or "").lower()
-            if "codex" not in name:
+            if "codex" not in str(proc.info.get("name") or "").lower():
                 continue
             files = proc.open_files()
         except Exception:  # noqa: BLE001 - one unreadable process is not a state
@@ -161,10 +148,9 @@ def codex_rollout_pid_map(
             if not (base.startswith("rollout-") and base.endswith(".jsonl")):
                 continue
             try:
-                payload = _codex_session_meta(Path(file.path))
+                sid = (_codex_session_meta(Path(file.path)) or {}).get("id")
             except Exception:  # noqa: BLE001 - a rotated/deleted rollout proves nothing
                 continue
-            sid = payload.get("id") if payload else None
             if isinstance(sid, str) and sid in wanted and sid not in out:
                 out[sid] = proc.pid
         if time.monotonic() >= deadline:
