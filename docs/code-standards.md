@@ -387,7 +387,7 @@ When a target agent encounters something not in the plan, these rules determine 
 
 ## Promise Tag Pattern
 
-Autonomous loops (target, megawalk) complete when the output contains a `<promise>` tag. This is the only mechanism for signaling loop completion.
+Autonomous loops (target) complete on a `<promise>` tag in the output. This is the only mechanism for signaling loop completion.
 
 ### Format
 

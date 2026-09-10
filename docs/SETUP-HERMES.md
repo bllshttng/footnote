@@ -1,6 +1,6 @@
 # Install footnote under hermes-agent
 
-Run footnote skills - especially the loop family (target, megawalk, operator) - under hermes instead of Claude Code.
+Run footnote skills - especially the loop family (target, execute) - under hermes instead of Claude Code.
 
 ## Prerequisites
 

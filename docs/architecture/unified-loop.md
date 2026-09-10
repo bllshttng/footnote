@@ -1,9 +1,10 @@
 # Unified Loop Runtime
 
-**Epic:** step 5, control-plane collapse
-**Group 1 shipped:** runtime + target driver + exec shim
-**Group 2 shipped:** megawalk driver
-**Group 3:** planned - see "What lands later" below
+- **Epic:** step 5, control-plane collapse
+- **Group 1 shipped:** runtime + target driver + exec shim
+- **Group 2 shipped:** megawalk driver (driver arm removed 2026-08-03, see "The megawalk driver" below)
+- **Group 3:** planned - see "What lands later" below
+
 **Sibling doc:** [control-plane-loop.md](control-plane-loop.md) - the stop-hook decision verb INSIDE a session
 
 ## Scope
@@ -432,7 +433,7 @@ All checks run before any dispatch. A failed preflight never starts the walk.
 | Check | Error path |
 |---|---|
 | Manifest exists (`.fno/target-state.md`) | exit 1, "run /target first to initialize" |
-| `--driver` is in whitelist (`claude-code`, `hermes`, `openclaw`; megawalk uses its own verb) | exit 2, whitelist names stated |
+| `--driver` is in whitelist (`claude-code`, `hermes`, `openclaw`, `opencode`) | exit 2, whitelist names stated |
 | Driver lib file exists (`scripts/lib/driver-<name>.sh`) | exit 2, path stated |
 | Lib defines `driver_invoke` (bash probe) | exit 2, "driver_invoke missing" |
 | Driver binary is on PATH | exit 77, binary name stated |
@@ -461,7 +462,9 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 ---
 
-## The megawalk driver (group 2)
+## The megawalk driver (group 2, removed)
+
+> **Removed 2026-08-03.** The `--driver megawalk` arm and `loop_megawalk.rs` are deleted ([path-census.md](path-census.md)). So are the `/megawalk` skill and the `fno megawalk` verbs. The backlog walk today runs through `/fno:target <node>` per node and `/fno:target bg --all-ready` for the ready board. Merge-triggered `fno backlog advance` and the active-backlog daemon ([active-backlog-dispatcher.md](active-backlog-dispatcher.md)) cover the rest. The sections below are the design record.
 
 ### MegawalkQueue
 
@@ -521,18 +524,18 @@ Two new event kinds join the loop stream. Schema in `events-schema.yaml` only; N
 | `walk_paused` | Walk policy triggered a pause | `policy` ("consecutive_failures" or "p0_failed"), `detail` (unit ids involved) |
 | `node_closed` | Unit close recorded | `unit_id`, `session_id`, `reason`, `close` ("closed", "parked", "refused", or "awaiting-merge"), `detail` |
 
-**Legacy event migration.** The Python walker emitted ~29 kinds into `megawalk-events.jsonl` (deleted in task 2.4). Representative mappings: `node_complete` -> `node_closed{close:closed}`, `walker_paused` -> `walk_paused`, `consecutive_failures_paused` -> `walk_paused{policy:consecutive_failures}`, `backlog_empty` -> `loop_terminated{reason:NoWork}`. The full prune ledger is the comment block in `loop_megawalk.rs`. `megawalk-events.jsonl` as a write target is dead; the prune ledger records each legacy kind's fate for auditors.
+**Legacy event migration.** The Python walker emitted ~29 kinds into `megawalk-events.jsonl` (deleted in task 2.4). Representative mappings: `node_complete` -> `node_closed{close:closed}`, `walker_paused` -> `walk_paused`, `consecutive_failures_paused` -> `walk_paused{policy:consecutive_failures}`, `backlog_empty` -> `loop_terminated{reason:NoWork}`. The full prune ledger was the comment block in `loop_megawalk.rs` (removed with the driver, removal trail in [path-census.md](path-census.md)). `megawalk-events.jsonl` as a write target is dead. The prune ledger records each legacy kind's fate for auditors.
 
-### Front door
+### Front door (removed)
 
-`/megawalk` (the Claude Code skill) launches `fno-agents loop run --driver megawalk` in the background and streams `.fno/events.jsonl` to show progress. `fno megawalk watch` (`megawalk_tui`) renders the canonical journal at ~1Hz via a Rich TUI. There is no separate `megawalk-events.jsonl`; the single `events.jsonl` is the authoritative walk record.
+The `/megawalk` skill launched `fno-agents loop run --driver megawalk` in the background and streamed `.fno/events.jsonl` to show progress. `fno megawalk watch` (`megawalk_tui`) rendered the canonical journal at ~1Hz via a Rich TUI. Both are gone with the driver. There is no separate `megawalk-events.jsonl`. The single `events.jsonl` remains the authoritative loop record.
 
 ---
 
 ## The megatron driver (removed)
 
-The megatron fleet-orchestration driver (`loop_megatron.rs`, `cli/src/fno/megatron/`, the `/megatron` skill, and the `--driver megatron` arm) was removed in the cutlist. `-C` spawn-into-project plus auto-worktree now covers multi-repo work, and a multi-repo feature is modeled as one backlog node per project linked by `blocked_by`, each shipping its own PR. The unified loop now exposes two drivers: `target` and `megawalk`.
+The megatron fleet-orchestration driver (`loop_megatron.rs`, `cli/src/fno/megatron/`, the `/megatron` skill, and the `--driver megatron` arm) was removed in the cutlist. `-C` spawn-into-project plus auto-worktree now covers multi-repo work. A multi-repo feature is one backlog node per project linked by `blocked_by`, each shipping its own PR. The megawalk arm is also removed (above). The unified loop's live driver is `target`. The `king` and `reign` walk arms joined later in their own loop files.
 
 ### Batch-queue deprecation (task 3.2)
 
-The `/batch-queue` command surface was removed (it was deprecated in the step-5 collapse, then dropped in the OSS-launch cleanup). The backlog subsumes it: `fno backlog intake` + `rank`/`blocked_by` + `/megawalk` express "run these plans in order" with claims and gh-cross-checked closes that the batch queue never had. The exit-12 `fno loop` stub was removed in the same change (zero callers; the group-2 grep and this group's re-grep both confirmed).
+The `/batch-queue` command surface was removed (it was deprecated in the step-5 collapse, then dropped in the OSS-launch cleanup). The backlog subsumes it: `fno backlog intake` + `rank`/`blocked_by` + `/fno:target bg --all-ready` express "run these plans in order" with claims and gh-cross-checked closes that the batch queue never had. The exit-12 `fno loop` stub was removed in the same change (zero callers, confirmed by two greps).

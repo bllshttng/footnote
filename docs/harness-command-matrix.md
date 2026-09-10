@@ -188,7 +188,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 
 | Verb | Caller | What it does |
 |------|---|---|
-| `loop` | operator / dispatcher | Unified cross-session driver loop (`--driver target\|megawalk`). |
+| `loop` | operator / dispatcher | Unified cross-session driver loop (`--driver target`; the megawalk arm was removed). |
 | `loop-check` | stop hook | The in-session stop/allow decision from external truth (PR, CI, review bots, budget). |
 | `finalize` | loop-check terminal-allow | Idempotent ledger record + ship-time plan stamp. |
 | `kill-check` | loop | Evaluate a plan's `kill_criteria`. |
