@@ -246,6 +246,50 @@ def test_the_store_hands_back_the_snapshot_it_read(tmp_path) -> None:
     assert [e.get("id") for e in seen] == ["x-0d08"]
 
 
+# --- the sender is a resolvable handle, never a literal ----------------------
+
+
+def test_send_pointer_stamps_the_callers_own_handle(monkeypatch) -> None:
+    """Provenance is looked up by from_name, so the sender must be this
+    session's own handle: a literal that matches no registry row ships
+    harness=unknown with no from_session."""
+    from types import SimpleNamespace
+
+    import fno.agents.dispatch as dispatch_mod
+    from fno.harness_identity import canonical_handle
+
+    session = "a1535d0b88424e4dbcafd733b8defc9c"
+    seen: dict = {}
+
+    def fake_send(address, body, provider, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(delivery="hosted", msg_id="msg-abc12345")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
+    monkeypatch.setattr(note_notify, "own_session", lambda: session)
+    assert note_notify.send_pointer("sess-worker", "body") == "hosted msg-abc12345"
+    assert seen["from_name"] == canonical_handle(session)
+
+
+def test_send_pointer_without_identity_keeps_the_default_and_still_sends(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import fno.agents.dispatch as dispatch_mod
+
+    seen: dict = {}
+
+    def fake_send(address, body, provider, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(delivery="durable", msg_id="msg-abc12345")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
+    monkeypatch.setattr(note_notify, "own_session", lambda: None)
+    assert note_notify.send_pointer("sess-worker", "body") == "durable msg-abc12345"
+    assert seen["from_name"] == "fno"
+
+
 # --- the verb: delivery is the default, --quiet is the opt-out ---------------
 
 
