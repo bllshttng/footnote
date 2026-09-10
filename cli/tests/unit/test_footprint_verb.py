@@ -38,6 +38,11 @@ def no_worker_roots(monkeypatch):
         "_live_shared_serve_root_pids",
         lambda **_kwargs: (set(), None),
     )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
+    )
 
 
 def _fake_runner(
@@ -631,7 +636,9 @@ def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
 def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
     """x-a457: an unrouted row whose worker claim store positively reports no
     live holder is a corpse row. The 14 rows that kept this box's spawn gate
-    refusing were exactly this population - claims expired, rows still live."""
+    refusing were exactly this population - claims expired, rows still live.
+    The harness is one with no shared daemon, so the row rides the per-row
+    witness path (x-cb2b moved pidless codex rows to the daemon verdict)."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -639,7 +646,7 @@ def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> No
         status="live",
         pid=None,
         pid_start_time=None,
-        harness="codex",
+        harness="luna",
         short_id="",
         name="t-stale-lane",
     )
@@ -877,7 +884,9 @@ def test_live_root_pids_spends_no_advancing_probes_on_a_spent_deadline(monkeypat
 def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) -> None:
     """A pane burns CPU inside the mux server process the reading attributes;
     whatever the probe answers, the pane adds no unattributed cost. Only an
-    answer the mux could NOT give leaves the cost unproven."""
+    answer the mux could NOT give leaves the cost unproven. The harness is
+    one with no shared daemon, so the row rides the pane-probe path (x-cb2b
+    moved pidless codex rows to the daemon verdict)."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -885,7 +894,7 @@ def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) ->
         status="live",
         pid=None,
         pid_start_time=None,
-        harness="codex",
+        harness="luna",
         short_id="",
         name="t-pane",
         mux={"session": "main", "pane_id": 7},
@@ -1624,6 +1633,142 @@ def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
     assert isinstance(error, doctor_footprint.AttributionGap)
     assert "codex" in error.text
     assert "w1 (node=unknown)" in error.text
+
+
+def test_codex_app_server_serve_attributes_a_live_root(monkeypatch, tmp_path) -> None:
+    """x-cb2b: the fno-harness-daemon state file names a live root; that pid
+    joins the attributed roots and the verdict reads live."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": 910, "processStartToken": 555}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 910 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({910}, "live")
+
+
+def test_codex_app_server_serve_accepts_alternate_token_spellings(
+    monkeypatch, tmp_path
+) -> None:
+    """The Rust reader (codex_inject.rs parse_state) tolerates several token
+    spellings; the Python reader answers the same words, so one provider
+    spelling variant cannot gap the fleet."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": 913, "process_start_time": 557}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 913 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({913}, "live")
+
+
+def test_codex_app_server_serve_falls_back_to_the_provider_pid_file(
+    monkeypatch, tmp_path
+) -> None:
+    """No fno state file, but the provider's own app-server.pid names a live
+    root: the fallback oracle attributes it, liveness proven without a token."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "app-server.pid").write_text(
+        json.dumps({"pid": 912}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 912 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({912}, "live")
+
+
+def test_codex_app_server_serve_survives_a_malformed_state(monkeypatch, tmp_path) -> None:
+    """x-cb2b: a malformed codex state file with no readable fallback never
+    kills the reading; the serve answers unreadable and the caller degrades
+    its rows to a gap."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert doctor_footprint._codex_app_server_serve(set()) == (set(), "unreadable")
+
+
+def test_pidless_codex_row_rides_a_live_shared_daemon(monkeypatch):
+    """x-cb2b, the falsifiable discriminator: one live pidless codex row with
+    a live app-server verdict is ATTRIBUTED, not a gap, so the refusal this
+    node names (a later spawn denied while naming that row) cannot fire."""
+    from fno import doctor_footprint
+
+    def refused(*args, **kwargs):
+        raise AssertionError("a live daemon verdict must not spend the row chain")
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", refused)
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", refused)
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "live"}
+    )
+    assert roots == set()
+    assert error is None
+
+
+def test_pidless_codex_row_stays_a_gap_under_an_unreadable_daemon(monkeypatch):
+    """Fail closed: with the daemon verdict unreadable the row falls through
+    to the per-row chain, and with no rollout, no advancing evidence and a
+    live claim witness it lands back in the named gap sentence."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", lambda _row: False)
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "unreadable"}
+    )
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "codex" in error.text
+    assert "w1 (node=unknown)" in error.text
+
+
+def test_pidless_unknown_harness_row_gains_nothing_from_daemon_verdicts(monkeypatch):
+    """A harness with no shared daemon still gaps regardless of verdict, so
+    the codex attribution buys no other row class a free pass."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("luna")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "live"}
+    )
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "luna" in error.text
 
 
 def test_pidless_unknown_harness_row_is_the_same_named_gap(monkeypatch):
