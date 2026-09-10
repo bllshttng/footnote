@@ -1880,10 +1880,14 @@ fn reap_pr_status_rows(
             continue;
         }
         let lock_path = path.with_extension("lock");
-        if !apply && !lock_path.exists() {
+        // A writer creates the sidecar before it touches the row, so no sidecar
+        // means no writer to serialize against. Requiring one here would strand
+        // every row whose lock aged out first: locks_retain_days is shorter than
+        // pr_status_cache_retain_days, and the lock family sweeps after this one.
+        if !lock_path.exists() {
             match opened_path_matches(&row, &path) {
                 Ok(true) => {
-                    record_state_file_action(&path, name, metadata.len(), age_s, false, summary)
+                    record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
                 }
                 Ok(false) => keep_state_file(summary, name, "path replaced"),
                 Err(error) => {
@@ -2340,6 +2344,44 @@ mod tests {
         assert!(!lock.exists());
         assert_eq!(summary.pr_status_cache.deleted, 2);
         assert_eq!(summary.pr_status_cache.kept.len(), 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The default windows retire a sidecar before its row is even eligible
+    /// (7 days against 14, lock family second). A row that outlives its lock
+    /// must still be reapable, or the family stops cleaning after one week.
+    #[test]
+    fn state_reap_still_removes_a_row_whose_lock_aged_out_first() {
+        let (base, home) = stale_state_home("row-outlives-lock");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&statuses).unwrap();
+        let row = statuses.join("42.json");
+        let lock = statuses.join("42.lock");
+        std::fs::write(&row, b"{}").unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&row, 10);
+        age_file(&lock, 10);
+
+        let first = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!lock.exists(), "the lock is past its 7-day window");
+        assert!(row.exists(), "the row is still inside its 14-day window");
+        assert_eq!(first.pr_status_cache.deleted, 1);
+
+        age_file(&row, 20);
+        let second = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!row.exists(), "an orphaned row must not outlive its window");
+        assert_eq!(second.pr_status_cache.deleted, 1);
+        assert!(second.pr_status_cache.kept.is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 
