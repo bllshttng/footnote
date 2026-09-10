@@ -2937,6 +2937,16 @@ def cmd_note(
         False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
+    read: list[str] = typer.Option(
+        [],
+        "--read",
+        help=(
+            "The command that produced a code fact in this note. It is RUN "
+            "at record time and its output stored on the note. Repeatable; "
+            "pair a zero with a control: a second read aimed at something "
+            "known to be present."
+        ),
+    ),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
@@ -2945,6 +2955,12 @@ def cmd_note(
     king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
     fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
+    from fno.decide.evidence import (
+        UnresolvableCitationError,
+        note_evidence,
+        unmeasured_note_warning,
+        warn_if_note_is_long,
+    )
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
 
@@ -2953,7 +2969,18 @@ def cmd_note(
         typer.echo("Error: note text is empty", err=True)
         raise typer.Exit(code=1)
 
+    # A citation the repo contradicts refuses BEFORE the append, quiet or not
+    # (a silent annotation is still a fact on the node). An unmeasured claim
+    # only warns: this verb advises, never refuses a body.
+    try:
+        read_rows, claims = note_evidence(text, list(read))
+    except UnresolvableCitationError as exc:
+        typer.echo(f"Error: note refused: {exc}", err=True)
+        raise typer.Exit(code=1)
+
     note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    if read_rows:
+        note["reads"] = read_rows
     try:
         identity = resolve_self_identity()
     except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
@@ -2967,7 +2994,9 @@ def cmd_note(
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
-    _warn_if_note_is_long(text)
+    warn_if_note_is_long(text)
+    if claims:
+        typer.echo(unmeasured_note_warning(claims), err=True)
     if json_output:
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
@@ -2981,30 +3010,6 @@ def cmd_note(
             receipts = [(f"notify FAILED {task_id}: {exc}", True)]
         for line, undelivered in receipts:
             typer.echo(line, err=undelivered or json_output)
-
-
-def _warn_if_note_is_long(text: str) -> None:
-    """Advise on a long note, never refuse one.
-
-    Why uncapped, and why the blunt multiplier:
-    docs/architecture/backlog-graph-verb-contracts.md.
-    """
-    from fno import style
-
-    try:
-        from fno.config import load_settings
-
-        cap = load_settings().style.word_cap.encounter
-    except Exception:  # noqa: BLE001 - an advisory must never break a write
-        cap = style.MESSAGE_WORD_CAP
-    count = style.word_count(text)
-    if count <= cap * 4:
-        return
-    typer.echo(
-        f"note appended ({count} words). Long evidence belongs in a plan doc; "
-        "a note carrying a path is cheaper for every later reader.",
-        err=True,
-    )
 
 
 @cli.command("encounter", hidden=True)

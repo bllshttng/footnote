@@ -1995,6 +1995,73 @@ def test_update_completion_note_unknown_node_errors(tmp_graph):
     assert r.exit_code != 0
 
 
+# --- note evidence (x-90fa): a note is a fact on the node ───────────────────
+
+
+def _note_node():
+    node_id = json.loads(_invoke("backlog", "add", "NoteTarget").output)["id"]
+    return node_id
+
+
+def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph):
+    """AC18-ERR: exit 1, nothing appended, nothing mailed."""
+    node_id = _note_node()
+
+    r = _invoke(
+        "backlog", "note", node_id,
+        "cli/src/fno/law.py:99999 is the classifier",
+    )
+
+    assert r.exit_code == 1, r.output
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
+def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph):
+    """AC19-HP: the note verb advises, never refuses a body."""
+    node_id = _note_node()
+
+    r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines")
+
+    assert r.exit_code == 0, r.output
+    assert "unmeasured code fact" in r.stderr, r.stderr
+    assert "--read" in r.stderr, r.stderr
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"][0]["text"] == "the drain loop is 167 lines"
+
+
+def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph):
+    """AC20-HP: executed reads land on the note beside ts/text."""
+    node_id = _note_node()
+
+    r = _invoke(
+        "backlog", "note", node_id, "advance.py is 200 lines",
+        "--read", "echo measured",
+        "--json",
+    )
+
+    assert r.exit_code == 0, r.output
+    assert "unmeasured" not in r.stderr, r.stderr
+    note = json.loads(r.stdout)["note"]
+    assert note["reads"][0]["cmd"] == "echo measured"
+    assert note["reads"][0]["exit"] == 0
+
+
+def test_quiet_still_refuses_a_contradicted_citation(tmp_graph):
+    """AC21-EDGE: a silent annotation is still a fact on the node."""
+    node_id = _note_node()
+
+    r = _invoke(
+        "backlog", "note", node_id,
+        "cli/src/fno/law.py:99999 is the classifier",
+        "--quiet",
+    )
+
+    assert r.exit_code == 1, r.output
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
 # --- --parent setter ---
 
 def _add_with_parent_chain(g: Path) -> tuple[str, str, str]:
