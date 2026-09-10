@@ -11299,9 +11299,11 @@ def cmd_maintain(
         _maintain_cfg = load_settings().backlog.maintain
         staleness_days = _maintain_cfg.staleness_days
         max_failed_attempts = _maintain_cfg.max_failed_attempts
+        abandoned_do_row_hours = _maintain_cfg.abandoned_do_row_hours
     except Exception:
         staleness_days = 30
         max_failed_attempts = 3
+        abandoned_do_row_hours = 24
     stale = _maintain.detect_stale_ideas(entries, staleness_days)
 
     # G1 stale-ready quarantine leg (): the propose-only mirror of the
@@ -11344,6 +11346,28 @@ def cmd_maintain(
         defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
+
+    # Leg 9: abandoned do rows (x-f714). An open do row wedges its node
+    # in_progress, and in_progress hides the row from the Rust settle's
+    # done+merged gate - the population that strands had no observer. Live
+    # claims and the roster veto first; the transcript prover is positive
+    # evidence only, so a row it cannot read is held and NAMED, never reaped.
+    # A roster read that fails closed refuses this leg (strict), never the
+    # whole sweep.
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+
+        abandoned_rows = _maintain.detect_abandoned_do_rows(
+            entries,
+            live_claimed=claimed,
+            live_worked=live_worked_node_ids(strict=True, entries=entries),
+            prover=_maintain.do_row_session_gone,
+            now_s=datetime.now(timezone.utc).timestamp(),
+            quiet_after_s=abandoned_do_row_hours * 3600,
+        )
+    except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
+        typer.echo(f"warning: abandoned-do-row leg skipped: {exc}", err=True)
+        abandoned_rows = []
 
     # --- apply (deterministic legs only) ---
     applied_rescope: list[str] = []
@@ -11492,6 +11516,37 @@ def cmd_maintain(
 
         locked_mutate_graph(_graph_path(), mutator)
 
+    # --- leg 9 apply: reap the proven-gone do rows (x-f714) ---
+    # Each reap is its own locked store op keyed on the exact row identity,
+    # so a row that raced between detect and reap simply does not remove and
+    # the receipt says so. The same blast cap as the defer legs bounds the
+    # pass; the remainder is named, never silently dropped.
+    applied_reaps: list[dict] = []
+    reap_truncated = 0
+    if apply:
+        gone_rows = [r for r in abandoned_rows if r.verdict == "gone"]
+        if len(gone_rows) > _maintain.AUTO_DEFER_BLAST_CAP:
+            reap_truncated = len(gone_rows) - _maintain.AUTO_DEFER_BLAST_CAP
+            gone_rows = gone_rows[: _maintain.AUTO_DEFER_BLAST_CAP]
+        from fno.graph.store import reap_open_session_record
+
+        for cand in gone_rows:
+            try:
+                rep = reap_open_session_record(
+                    _graph_path(), cand.node,
+                    phase="do", harness=cand.harness, session_id=cand.session_id,
+                )
+                applied_reaps.append(
+                    {
+                        "node_id": cand.node,
+                        "row_removed": bool(rep.get("row_removed")),
+                        "status_after": rep.get("status_after"),
+                        "reason": cand.reason,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                typer.echo(f"warning: do-row reap of {cand.node} failed: {exc}", err=True)
+
     # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
     # Runs even under --apply as proposal-only; a single analyzer call reviews the
     # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
@@ -11579,6 +11634,14 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
         "stale_ready_truncated": stale_ready_truncated,
+        "abandoned_do_rows": len(applied_reaps) if apply else len(abandoned_rows),
+        "abandoned_do_row_nodes": applied_reaps
+        if apply
+        else [
+            {"node_id": r.node, "verdict": r.verdict, "reason": r.reason}
+            for r in abandoned_rows
+        ],
+        "abandoned_do_row_truncated": reap_truncated,
     }
     try:
         from fno.health_monitor import append_history
@@ -11641,6 +11704,20 @@ def cmd_maintain(
             "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
             "session_harness_fixes": _maintain.shape_fix_payload(
                 shape_fixes, applied_shape_fixes, apply),
+            "abandoned_do_rows": {
+                "applied": applied_reaps,
+                "candidates": [
+                    {
+                        "node_id": r.node,
+                        "harness": r.harness,
+                        "session_id": r.session_id,
+                        "verdict": r.verdict,
+                        "reason": r.reason,
+                    }
+                    for r in abandoned_rows
+                ],
+                "truncated": reap_truncated,
+            },
         }
         if validity_result is not None:
             payload["validity"] = {
@@ -11751,6 +11828,32 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
+    reap_by_node = {r["node_id"]: r for r in applied_reaps}
+    if apply:
+        typer.echo(
+            f"abandoned-do-rows reaped {len(applied_reaps)} of {len(abandoned_rows)} candidate(s)"
+        )
+    else:
+        typer.echo(f"abandoned-do-row candidates {len(abandoned_rows)}")
+    for r in abandoned_rows:
+        if apply and r.node in reap_by_node:
+            rep = reap_by_node[r.node]
+            typer.echo(
+                f"  reaped do row {r.node} ({r.harness} {str(r.session_id)[:8]}): "
+                f"row_removed {str(rep['row_removed']).lower()}, "
+                f"status_after {rep['status_after']} ({r.reason})"
+            )
+        else:
+            verb = "would reap" if r.verdict == "gone" else "holds"
+            typer.echo(
+                f"  {verb} do row {r.node} ({r.harness} {str(r.session_id)[:8]}): {r.reason}"
+            )
+    if reap_truncated:
+        typer.echo(
+            f"  NOTE: abandoned-do-row blast cap hit - {reap_truncated} further "
+            f"gone row(s) NOT reaped this run "
+            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
+        )
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
