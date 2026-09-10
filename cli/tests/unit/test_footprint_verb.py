@@ -1662,6 +1662,53 @@ def test_shared_serve_attributes_live_codex_app_server(monkeypatch, tmp_path) ->
     assert serves["codex-app-server"] == "live"
 
 
+def test_shared_serve_accepts_alternate_token_spellings(monkeypatch, tmp_path) -> None:
+    """The Rust reader (codex_inject.rs parse_state) tolerates several token
+    spellings; the Python reader answers the same words, so one provider
+    spelling variant cannot gap the fleet."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": 913, "process_start_time": 557}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 913 else None,
+    )
+
+    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
+
+    assert roots == {913}
+    assert error is None
+    assert serves["codex-app-server"] == "live"
+
+
+def test_shared_serve_falls_back_to_the_provider_pid_file(monkeypatch, tmp_path) -> None:
+    """No fno state file, but the provider's own app-server.pid names a live
+    root: the fallback oracle attributes it, liveness proven without a token."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "app-server.pid").write_text(
+        json.dumps({"pid": 912}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 912 else None,
+    )
+
+    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
+
+    assert roots == {912}
+    assert error is None
+    assert serves["codex-app-server"] == "live"
+
+
 def test_shared_serve_survives_malformed_codex_state(monkeypatch, tmp_path) -> None:
     """x-cb2b Part A: a malformed codex state file with no readable fallback
     never kills the reading; the serve answers unreadable and the caller

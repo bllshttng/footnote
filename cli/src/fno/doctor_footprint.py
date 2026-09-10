@@ -245,6 +245,19 @@ def _row_is_advancing(row: Any) -> bool:
 _SHARED_DAEMON_BY_HARNESS: dict[str, str] = {"codex": "codex-app-server"}
 
 
+def _first_positive_int(record: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    """The first positive integer among ``keys``, or None.
+
+    Mirrors the token tolerance of the Rust reader (``codex_inject.rs``
+    ``parse_state``): the provider has spelled this field several ways.
+    """
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
 def _shared_daemon_label(row: Any) -> str | None:
     """Name the shared daemon hosting this row's work, or None.
 
@@ -514,12 +527,12 @@ def _shared_serve_verdict(
     """
     roots: set[int] = set()
     fatal = descriptor["fatal"]
-    oracles: list[tuple[Path, str, str | None]] = [
-        (descriptor["state"], descriptor["pid_key"], descriptor["token_key"])
+    oracles: list[tuple[Path, str, tuple[str, ...]]] = [
+        (descriptor["state"], descriptor["pid_key"], descriptor["token_keys"])
     ]
     oracles += [tuple(fb) for fb in descriptor["fallbacks"]]
     all_absent = True
-    for path, pid_key, token_key in oracles:
+    for path, pid_key, token_keys in oracles:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -535,19 +548,12 @@ def _shared_serve_verdict(
                 return roots, "shared serve root discovery unavailable", "unreadable"
             continue
         pid = record.get(pid_key)
-        token = record.get(token_key) if token_key is not None else None
+        token = _first_positive_int(record, token_keys)
         if (
             not isinstance(pid, int)
             or isinstance(pid, bool)
             or pid <= 0
-            or (
-                token_key is not None
-                and (
-                    not isinstance(token, int)
-                    or isinstance(token, bool)
-                    or token <= 0
-                )
-            )
+            or (bool(token_keys) and token is None)
         ):
             all_absent = False
             if fatal:
@@ -600,7 +606,7 @@ def _live_shared_serve_root_pids(
                 "label": "opencode-serve",
                 "state": paths.agents_home_dir() / "opencode-serve.json",
                 "pid_key": "pid",
-                "token_key": "pid_start",
+                "token_keys": ("pid_start",),
                 "fatal": True,
                 "fallbacks": [],
             },
@@ -608,14 +614,19 @@ def _live_shared_serve_root_pids(
                 "label": "codex-app-server",
                 "state": codex_home / "app-server-daemon" / "fno-harness-daemon.json",
                 "pid_key": "pid",
-                "token_key": "processStartToken",
+                "token_keys": (
+                    "processStartToken",
+                    "process_start_time",
+                    "startTime",
+                    "processStartTime",
+                ),
                 "fatal": False,
                 "fallbacks": [
                     # The provider's own pid file carries no start token.
                     (
                         codex_home / "app-server-daemon" / "app-server.pid",
                         "pid",
-                        None,
+                        (),
                     ),
                 ],
             },
