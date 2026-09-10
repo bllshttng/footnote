@@ -1623,18 +1623,7 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
         return; // the clock itself unreadable: prune nothing
     };
     let window_secs = retain_days.saturating_mul(86_400);
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                keep_state_file(
-                    summary,
-                    state_path(shared_root, dir),
-                    format!("read entry failed: {error}"),
-                );
-                continue;
-            }
-        };
+    for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
