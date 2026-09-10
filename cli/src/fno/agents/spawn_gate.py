@@ -1020,17 +1020,24 @@ def _refuse_provider_cap(
     _refuse(EXIT_PROVIDER_CAP, receipt)
 
 
-def _refuse_gate_mutex(provider: Optional[str], error: BaseException) -> NoReturn:
+def _refuse_gate_fault(
+    provider: Optional[str],
+    error: BaseException,
+    *,
+    reason: str = "gate_mutex_unavailable",
+) -> NoReturn:
     """The claims-layer fault refusal: the gate could not serialize the
-    decision, so no count was measured and no cap may be named. Keeps
-    EXIT_PROVIDER_CAP so exit-code consumers are unaffected."""
+    decision, so no count was measured and no cap may be named. The reason
+    names the claim site that faulted (the gate mutex, a worker lane
+    reservation), never a cap. Keeps EXIT_PROVIDER_CAP so exit-code
+    consumers are unaffected."""
     _warn(
-        f"spawn-gate: provider {provider}, gate mutex unavailable ({error}); "
+        f"spawn-gate: provider {provider}, {reason.replace('_', ' ')} ({error}); "
         "refusing; no worker launched"
     )
     receipt: dict[str, object] = {
         "status": "refused",
-        "reason": "gate_mutex_unavailable",
+        "reason": reason,
         "provider": provider,
         "error": str(error),
     }
@@ -1559,7 +1566,10 @@ def _take_headless_slot(
         )
     except ProviderCountUnavailable as exc:
         guard.release()
-        _refuse_gate_mutex(route_provider or "unknown", exc)
+        # A worker-slot claim fault is not the gate mutex; name the site.
+        _refuse_gate_fault(
+            route_provider or "unknown", exc, reason="lane_reservation_unavailable"
+        )
     guard.release_gate_mutex()
 
 
@@ -1770,7 +1780,7 @@ def run_gate(
                 else _acquire_gate_mutex(holder)
             )
         except ProviderCountUnavailable as exc:
-            _refuse_gate_mutex(route_provider or "unknown", exc)
+            _refuse_gate_fault(route_provider or "unknown", exc)
         if acquired:
             mutex_blocked_since = None
         else:
@@ -1798,16 +1808,18 @@ def run_gate(
                     # Contention is a peer or a corpse, never a full cap: the
                     # cap read is the thing the mutex protects, so unlike the
                     # uncapped arm this path may not proceed unserialized.
-                    # Steal a dead gate (claim_status never raises; a free or
-                    # stale state is a corpse) and re-acquire on the next
-                    # pass, still serialized. A LIVE holder keeps queueing to
-                    # QUEUE_TIMEOUT_S.
+                    # Steal a dead gate (claim_status never raises; free or
+                    # stale is a corpse, and a corrupted file serializes
+                    # nobody - claims are written atomically, so corruption
+                    # means the file is damaged, not held) and re-acquire on
+                    # the next pass, still serialized. A LIVE holder keeps
+                    # queueing to QUEUE_TIMEOUT_S.
                     from fno.claims.core import claim_status, force_release_claim
 
                     state = claim_status(
                         GATE_CLAIM_KEY, root=_gate_claims_root()
                     ).get("state")
-                    if state in ("free", "stale"):
+                    if state in ("free", "stale", "corrupted"):
                         force_release_claim(
                             GATE_CLAIM_KEY,
                             "spawn-gate held past the wait budget by a dead holder",
@@ -1829,7 +1841,7 @@ def run_gate(
                     provider_slots = provider_live_count(route_provider or "")
                 except ProviderCountUnavailable as exc:
                     guard.release_gate_mutex()
-                    _refuse_gate_mutex(route_provider or "unknown", exc)
+                    _refuse_gate_fault(route_provider or "unknown", exc)
                 if provider_slots >= provider_cap:
                     guard.release_gate_mutex()
                     _refuse_provider_cap(

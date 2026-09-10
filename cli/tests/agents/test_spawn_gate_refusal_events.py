@@ -142,7 +142,7 @@ def test_mutex_fault_refusal_names_the_mutex_not_the_cap(journal: Path) -> None:
     fault = spawn_gate.ProviderCountUnavailable("spawn mutex is busy")
 
     with pytest.raises(spawn_gate.GateRefused) as excinfo:
-        spawn_gate._refuse_gate_mutex("zai", fault)
+        spawn_gate._refuse_gate_fault("zai", fault)
 
     assert excinfo.value.code == spawn_gate.EXIT_PROVIDER_CAP, (
         "exit-code consumers are unaffected by the reason split"

@@ -1024,6 +1024,41 @@ class TestRunGate:
         assert "provider_cap" not in err
         guard.release()
 
+    def test_capped_arm_steals_a_corrupted_gate_claim(
+        self, monkeypatch, capsys
+    ):
+        """A corrupted lockfile serializes nobody: claims are written
+        atomically, so corruption means the file is damaged, not held."""
+        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
+        calls: list[bool] = []
+
+        def _acquire(_holder, *, fail_closed=False):
+            calls.append(fail_closed)
+            return len(calls) > 1  # contended once, then the steal lands
+
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "corrupted"},
+        )
+        steals: list[str] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append(key),
+        )
+        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
+
+        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
+
+        assert steals == [spawn_gate.GATE_CLAIM_KEY]
+        guard.release()
+
     def test_dequeue_ram_recheck_refuses(self, monkeypatch):
         """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
         _settings(monkeypatch, max_live=1, min_free_gb=4.0)
@@ -1461,7 +1496,7 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
         refused = capsys.readouterr().err
         assert "provider zai" in refused
-        assert "gate mutex unavailable" in refused
+        assert "lane reservation unavailable" in refused
         assert "claim store denied" in refused
         assert "provider_cap" not in refused
 
