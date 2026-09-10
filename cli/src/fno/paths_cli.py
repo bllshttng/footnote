@@ -174,7 +174,16 @@ def handoff(
         if key == "crown-":
             raise typer.BadParameter("a crown scope is required (--scope)")
         directory = handoffs_dir()
-        existing = sorted(directory.glob(f"*-{key}.md"), key=lambda p: p.stat().st_mtime)
+
+        def _mtime(path: Path) -> float:
+            # A concurrent refresh can unlink between glob and stat; a vanished
+            # candidate sorts oldest and the writer recreates the file anyway.
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
         filename = existing[-1].name if existing else f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
         typer.echo(filename if name_only else str(directory / filename))
         return

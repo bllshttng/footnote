@@ -395,7 +395,14 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # doc already exists or not.
         CANON_DOC=""
         if command -v fno >/dev/null 2>&1; then
-            CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+            # The same door precompact-canon-doc.sh uses: a scoped crown's
+            # rolling doc is scope-keyed, so this ask must name THAT file or
+            # the king's judgment lands where the pipeline never reads.
+            if [[ -n "$CROWN_SCOPE" ]]; then
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
+            else
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+            fi
         fi
         _king_doc_ask="fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
         if [[ -n "$CANON_DOC" ]]; then

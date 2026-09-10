@@ -212,7 +212,9 @@ if not os.path.isabs(p):
     p = os.path.join(cwd or os.getcwd(), p)
 if not os.path.isabs(h):
     h = os.path.join(cwd or os.getcwd(), h)
-sys.exit(0 if os.path.normpath(p) == os.path.normpath(h) else 1)
+# realpath, not normpath: the handoffs dir resolves through the vault symlink,
+# and a session holding the post-symlink spelling must still match.
+sys.exit(0 if os.path.realpath(p) == os.path.realpath(h) else 1)
 ' "$p" "$CWD" "$HANDOFF_PATH" 2>/dev/null
 }
 
