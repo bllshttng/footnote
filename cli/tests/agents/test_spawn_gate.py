@@ -972,6 +972,52 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
         assert "proceeding unserialized" not in capsys.readouterr().err
 
+    def test_capped_arm_steals_a_dead_gate_and_reacquires(self, monkeypatch, capsys):
+        """AC: a capped provider facing a CORPSE steals it and re-acquires.
+
+        The capped arm used to refuse on the first contended read
+        (reason: provider_cap) while the uncapped arm queued - so every
+        target spawn was refused and every blueprint spawn succeeded, same
+        machine, same minute. Contention is a peer or a corpse, never a cap.
+        """
+        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
+        acquire_calls: list[bool] = []
+
+        def _acquire(_holder, *, fail_closed=False):
+            acquire_calls.append(fail_closed)
+            return len(acquire_calls) > 1  # contended once, then the steal lands
+
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "stale"},
+        )
+        steals: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append((key, reason)),
+        )
+        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
+
+        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
+
+        assert steals == [
+            (
+                spawn_gate.GATE_CLAIM_KEY,
+                "spawn-gate held past the wait budget by a dead holder",
+            )
+        ]
+        assert acquire_calls == [True, True], "capped arm stays fail_closed"
+        err = capsys.readouterr().err
+        assert "provider_cap" not in err
+        guard.release()
+
     def test_dequeue_ram_recheck_refuses(self, monkeypatch):
         """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
         _settings(monkeypatch, max_live=1, min_free_gb=4.0)
@@ -1274,16 +1320,31 @@ class TestRunGate:
             )
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
 
-    def test_provider_cap_never_queues_on_a_busy_mutex(self, monkeypatch, capsys):
+    def test_capped_arm_queues_behind_a_live_holder_and_never_says_provider_cap(
+        self, monkeypatch, capsys
+    ):
+        """AC: a LIVE holder is a live peer; queue to the timeout, and the
+        refusal must never name the cap the gate never read. The old
+        behavior refused on the FIRST contended read with
+        reason: provider_cap, count: null - a cause it never measured."""
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: False
+            spawn_gate, "_acquire_gate_mutex", lambda _h, **_k: False
         )
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "live"},
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.15)
+
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("zai-now", "pane", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        refused = capsys.readouterr().err
-        assert "current count unavailable" in refused and "queued" not in refused
+
+        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
+        assert exc.value.receipt is not None
+        assert exc.value.receipt["reason"] != "provider_cap"
 
     def test_provider_count_requires_positive_liveness_and_skips_exited(
         self, monkeypatch

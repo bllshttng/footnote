@@ -1757,14 +1757,6 @@ def run_gate(
         if acquired:
             mutex_blocked_since = None
         else:
-            if provider_cap is not None:
-                _refuse_provider_cap(
-                    route_provider or "unknown",
-                    provider_cap,
-                    error=ProviderCountUnavailable(
-                        "spawn mutex is busy; current count cannot be serialized"
-                    ),
-                )
             now = time.monotonic()
             if mutex_blocked_since is None:
                 mutex_blocked_since = now
@@ -1785,12 +1777,34 @@ def run_gate(
                 }
                 _refuse(EXIT_NO_WAIT, receipt)
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
-                _warn(
-                    f"spawn-gate: gate mutex still held after "
-                    f"{int(MUTEX_WAIT_BUDGET_S)}s (holder likely died mid-gate); "
-                    f"proceeding unserialized"
-                )
-                acquired = True
+                if provider_cap is not None:
+                    # Contention is a peer or a corpse, never a full cap: the
+                    # cap read is the thing the mutex protects, so unlike the
+                    # uncapped arm this path may not proceed unserialized.
+                    # Steal a dead gate (claim_status never raises; a free or
+                    # stale state is a corpse) and re-acquire on the next
+                    # pass, still serialized. A LIVE holder keeps queueing to
+                    # QUEUE_TIMEOUT_S.
+                    from fno.claims.core import claim_status, force_release_claim
+
+                    state = claim_status(
+                        GATE_CLAIM_KEY, root=_gate_claims_root()
+                    ).get("state")
+                    if state in ("free", "stale"):
+                        force_release_claim(
+                            GATE_CLAIM_KEY,
+                            "spawn-gate held past the wait budget by a dead holder",
+                            root=_gate_claims_root(),
+                        )
+                        mutex_blocked_since = None
+                        continue
+                else:
+                    _warn(
+                        f"spawn-gate: gate mutex still held after "
+                        f"{int(MUTEX_WAIT_BUDGET_S)}s (holder likely died mid-gate); "
+                        f"proceeding unserialized"
+                    )
+                    acquired = True
         if acquired:
             guard._gate_holder = holder
             if provider_cap is not None:
