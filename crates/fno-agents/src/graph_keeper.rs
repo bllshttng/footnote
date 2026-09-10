@@ -16,10 +16,11 @@
 //! `{"id": n, "ok": false, "error": {"kind": ..., "message": ...}}`.
 //!
 //! Unlike the pane keeper's single subscriber, every connection is served
-//! concurrently: reads share, writes serialize on the state mutex and the
-//! bounded flock. A store RPC must never starve a concurrent client or a
-//! SIGTERM (the `gc_sweep` lesson, x-d78a): each request runs on its own
-//! thread, and the accepting loop never blocks on request work.
+//! concurrently: reads share the state gate (`RwLock` read guards), writes
+//! exclude on it (`write` guards) and on the bounded flock. A store RPC must
+//! never starve a concurrent client or a SIGTERM (the `gc_sweep` lesson,
+//! x-d78a): each request runs on its own thread, and the accepting loop never
+//! blocks on request work.
 //!
 //! Reapability is a release condition (the 2026-09-01 seven-unreaped-keepers
 //! measurement): this lane declares itself the way keeper_lane.py discovers
@@ -34,7 +35,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// The store keeper frame protocol version. Bump on any frame-shape change.
@@ -192,15 +193,16 @@ fn read_one_frame(stream: &mut UnixStream) -> Incoming {
     }
 }
 
-/// The keeper's shared state. Writes serialize here; reads take the same
-/// mutex because a read mid-publish would otherwise observe a half-written
-/// file.
+/// The keeper's shared state. Writes exclude here; reads hold shared guards,
+/// so concurrent reads overlap and every read still waits out an in-flight
+/// publish rather than observing one.
 struct StoreState {
     graph: PathBuf,
     canonical: bool,
     lock_timeout: Duration,
-    /// Serializes the read-modify-write cycles across client threads.
-    write_gate: Mutex<()>,
+    /// Readers share, writers exclude: read guards for handlers that only
+    /// read the owned graph, write guards for the ones that publish.
+    gate: RwLock<()>,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
 }
 
@@ -231,7 +233,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         graph: cfg.graph.clone(),
         canonical: cfg.canonical,
         lock_timeout: cfg.lock_timeout,
-        write_gate: Mutex::new(()),
+        gate: RwLock::new(()),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
     });
     let started_at = std::time::SystemTime::now()
@@ -547,7 +549,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .cloned()
             .unwrap_or_default(),
         _ => {
-            let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
             graph_store::read_defaulted(&state.graph, false)?
         }
     };
@@ -570,7 +572,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
 /// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
 /// diagnoses without writing.
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     let strict = params
         .get("strict")
         .and_then(Value::as_bool)
@@ -624,7 +626,7 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
 /// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
     use std::io::Read as _;
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     let mut file = std::fs::File::open(&state.graph)
         .map_err(|e| StoreError::Unreadable(state.graph.display().to_string(), format!("{e}")))?;
     let mut bytes = Vec::new();
@@ -636,7 +638,7 @@ fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     let version = file_version(&state.graph);
     let entries = graph_store::read_defaulted(&state.graph, false)?;
     remember_snapshot(state, &version, &entries);
@@ -685,7 +687,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         .and_then(Value::as_array)
         .ok_or_else(|| StoreError::Invalid("commit needs entries".into()))?
         .clone();
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
     let outcome = graph_store::locked_mutate(
         &state.graph,
         MutateInput {
@@ -907,7 +909,9 @@ fn handle_read_archive(state: &StoreState, params: &Value) -> Result<Value, Stor
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("read_archive needs a path".into()))?;
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    // Deliberately no state gate: the archive is a foreign path from the
+    // request params, never the owned graph, so taking the gate here would
+    // block owned-graph writers on an unrelated file. Do not re-add the lock.
     match graph_store::read_defaulted(std::path::Path::new(archive), false) {
         Ok(entries) => Ok(json!({
             "entries": entries,
@@ -1795,7 +1799,8 @@ fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Resu
 }
 
 /// Run one typed op through the full locked cycle: snapshot, apply, publish.
-/// The write_gate serializes this against every other keeper-side cycle, and
+/// The gate's write guard excludes this against every other keeper-side
+/// cycle, and
 /// the base-version check still guards against a FOREIGN writer (an old
 /// Python leg, a hand edit) that touched the file after the read.
 ///
@@ -1811,7 +1816,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         .ok_or_else(|| StoreError::Invalid("op needs a name".into()))?;
     let p = params.get("params").cloned().unwrap_or(Value::Null);
     let client_base = params.get("base_version").and_then(Value::as_str);
-    let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
     let base = graph_store::file_content_version(&state.graph);
     if let Some(expected) = client_base {
         if base != expected {
@@ -1904,7 +1909,7 @@ mod tests {
             graph,
             canonical: false,
             lock_timeout: Duration::from_secs(2),
-            write_gate: Mutex::new(()),
+            gate: RwLock::new(()),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
@@ -1963,6 +1968,104 @@ mod tests {
         }
     }
 
+    fn read_state(graph: &std::path::Path) -> StoreState {
+        StoreState {
+            graph: graph.to_path_buf(),
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            gate: RwLock::new(()),
+        }
+    }
+
+    #[test]
+    fn two_reads_hold_shared_guards_at_once_and_a_write_still_excludes() {
+        // AC1: the positive marker is the second read guard being acquired
+        // while the first is held; on the old Mutex this call would have
+        // returned Err (and the fleet's reads serialized on it).
+        let state = read_state(std::path::Path::new("/nonexistent/graph.json"));
+        let g1 = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        let g2 = state.gate.try_read();
+        assert!(g2.is_ok(), "a second read guard must share with the first");
+        drop(g2);
+        let w = state.gate.try_write();
+        assert!(
+            w.is_err(),
+            "a writer must not enter while readers hold the gate"
+        );
+        drop(g1);
+        assert!(
+            state.gate.try_write().is_ok(),
+            "the gate frees when the read guard drops"
+        );
+    }
+
+    #[test]
+    fn a_read_waits_out_an_in_flight_commit_and_never_sees_half_of_one() {
+        // AC2: while a write guard is held (a commit's publish window), a
+        // read blocks; when the guard drops, the read completes against the
+        // published file. Asserted on the positive marker (the read finishing
+        // only after release), never on a timeout absence.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"before\"}]}",
+        )
+        .unwrap();
+        let state = Arc::new(read_state(&graph));
+        let gate = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            let _w = gate.gate.write().unwrap_or_else(|e| e.into_inner());
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(
+                &gate.graph.clone(),
+                "{\"entries\": [{\"id\": \"x-1\", \"title\": \"after\"}]}",
+            )
+            .unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let reader_state = Arc::clone(&state);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let reply = handle_read(&reader_state, &json!({})).unwrap();
+            let _ = tx.send(reply);
+        });
+        // Positive marker: the read cannot finish while the writer holds the
+        // gate (writer is at ~30ms of its 150ms hold here).
+        assert!(
+            rx.recv_timeout(Duration::from_millis(60)).is_err(),
+            "a read must not complete while a commit's write guard is held"
+        );
+        let _ = writer.join();
+        let reply = rx.recv().unwrap();
+        let body = reply.to_string();
+        assert!(
+            body.contains("after"),
+            "the read must observe the published write: {body}"
+        );
+    }
+
+    #[test]
+    fn an_archive_read_never_blocks_on_the_owned_graphs_gate() {
+        // AC3: the archive is a foreign path from the request params; the
+        // positive marker is the read completing while a write guard on the
+        // OWNED graph is held (the deleted lock would have blocked here).
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\"entries\": []}").unwrap();
+        let archive = dir.path().join("archive.json");
+        std::fs::write(
+            &archive,
+            "{\"entries\": [{\"id\": \"x-arch\", \"title\": \"archived\"}]}",
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        let _w = state.gate.write().unwrap_or_else(|e| e.into_inner());
+        let reply = handle_read_archive(&state, &json!({"path": archive.display().to_string()}));
+        assert!(reply.is_ok(), "{reply:?}");
+        assert!(reply.unwrap().to_string().contains("x-arch"));
+    }
+
     #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
         let dir = tempfile::tempdir().unwrap();
@@ -2007,8 +2110,12 @@ mod tests {
             graph: graph.clone(),
             canonical: false,
             lock_timeout: Duration::from_secs(2),
+<<<<<<< HEAD
             write_gate: Mutex::new(()),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+=======
+            gate: RwLock::new(()),
+>>>>>>> e57667940 (feat(store): reads share the keeper gate, writes exclude)
         };
         let stale = json!({
             "name": "update_fields",
