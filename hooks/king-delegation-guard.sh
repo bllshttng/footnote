@@ -10,11 +10,13 @@
 # The unblock authority (directive point 6) is an allowlist read by eye, not
 # a judgement per call: fno agents claim, fno agents mail, the backlog levers
 # (encounter, update, undefer, supersede, note, advance, rank), fno inbox,
-# fno doctor event emit, and any write whose path resolves inside the plans
+# fno doctor event emit, any write whose path resolves inside the plans
 # directory (king-for-a-day authors quick plans for small in-scope nodes;
-# plan-location-guard polices where those land). A bare `fno ...` verb needs
-# no carveout: the Bash branch keys on shell write operators, and a verb that
-# writes state internally binds no redirect.
+# plan-location-guard polices where those land), and the crown's own handoff
+# doc (a king fills its judgment halves there; writer, guard and postcompact
+# reader resolve the same path through fno config paths handoff --scope). A
+# bare `fno ...` verb needs no carveout: the Bash branch keys on shell write
+# operators, and a verb that writes state internally binds no redirect.
 #
 # NEVER blocks by accident. Any failure to read the payload, the registry,
 # the manifest, or the config exits 0 and allows - the compact-hook contract
@@ -184,10 +186,40 @@ if [[ -z "$PLANS_DIR" ]]; then
     _approve
 fi
 
+# ── 6b. Handoff exemption: the crown's own canon doc stays writable. A king
+#      fills its judgment halves and records its rulings there; refusing it
+#      leaves the doc written at PreCompact with no author. Resolved through
+#      the same verb the precompact hook uses -- the scope form for a crowned
+#      session -- so writer, guard and postcompact reader agree on one path.
+HANDOFF_PATH=""
+if [[ -n "$CROWN_SCOPE" ]]; then
+    HANDOFF_PATH="$(fno config paths handoff --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+else
+    HANDOFF_PATH="$(fno config paths handoff --session-id "$SID" 2>/dev/null || true)"
+fi
+if [[ -z "$HANDOFF_PATH" ]]; then
+    # Same never-block bucket as the plans resolver: the handoff path is a
+    # config read, and a config read that fails allows rather than blocks.
+    _approve
+fi
+in_handoff() {
+    local p="$1"
+    [[ -n "$p" ]] || return 1
+    printf '%s' "$p" | python3 -c '
+import os, sys
+p, cwd, h = sys.argv[1], sys.argv[2], sys.argv[3]
+if not os.path.isabs(p):
+    p = os.path.join(cwd or os.getcwd(), p)
+if not os.path.isabs(h):
+    h = os.path.join(cwd or os.getcwd(), h)
+sys.exit(0 if os.path.normpath(p) == os.path.normpath(h) else 1)
+' "$p" "$CWD" "$HANDOFF_PATH" 2>/dev/null
+}
+
 # ── 7. Decision ───────────────────────────────────────────────────────────────
 case "$TOOL" in
   Edit|Write|NotebookEdit)
-    if in_plans_dir "$FILE_PATH"; then
+    if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH"; then
         _approve
     fi
     _block
@@ -282,6 +314,9 @@ sys.stdout.write("\n".join(t for t in targets if t))
         case "$p" in
           /dev|/dev/*) continue ;;  # writes no source: null, tty, fd dups
         esac
+        if in_handoff "$p"; then
+            continue  # the crown's own canon doc stays writable
+        fi
         if ! in_plans_dir "$p"; then
             ALLOW=0
             break
