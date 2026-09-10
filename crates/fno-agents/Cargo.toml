@@ -43,8 +43,9 @@ path = "src/bin/worker.rs"
 # question; fno-agents calls them, it does not restate them. Direction is
 # acyclic: fno never links fno-agents (it shells the binary at runtime), and
 # tests feed a refusal's printed command to the real parser rather than a
-# copy of its grammar.
-fno = { path = "../fno" }
+# copy of its grammar. The version requirement is publish-mandatory; the
+# caret spans the shared 0.3 release line the two crates ship in lockstep.
+fno = { path = "../fno", version = "0.3.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
