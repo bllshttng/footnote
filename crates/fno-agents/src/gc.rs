@@ -78,6 +78,24 @@ pub struct GcRow {
     /// live; relayed here so the keep is named by the policy, never silently
     /// dropped. `None` when nothing holds.
     pub confirm_hold: Option<KeepReason>,
+    /// The harness-published terminal state for this session (`done`,
+    /// `stopped`, `failed`), when the harness publishes one (x-2774 change
+    /// 1). `None` covers both "not terminal" and "no such instrument":
+    /// neither is evidence.
+    pub session_terminal: Option<String>,
+    /// A LIVE newer registry row resolves the same node this row does
+    /// (x-2774 change 3), formatted `{name} (created {ts})`. The node's
+    /// openness justifies that row, not this one.
+    pub superseded_by_live_peer: Option<String>,
+    /// The open node's RECORDED `merge_status` reads `merged` (x-2774
+    /// change 6): the status field can lag the merge by minutes when
+    /// reconcile is slow. Recorded evidence outranks the lagging status.
+    pub node_merged: bool,
+    /// The row's own pid answered ESRCH (x-2774 change 8): a provably dead
+    /// process. Death overrides transcript recency - a dead process writes
+    /// nothing, so a fresh mtime without a living writer is an artifact -
+    /// but an absent or unanswerable pid never does: only ESRCH is death.
+    pub pid_gone: bool,
 }
 
 /// The statuses that complete a PLANNING assignment: the plan was written
@@ -87,6 +105,13 @@ pub struct GcRow {
 /// revision assignment stays outstanding).
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
+
+/// Node statuses that are NOT active work. A parked or never-started node
+/// is not evidence that a session is alive, so it does not shield one
+/// (x-2774 change 6). `superseded` is deliberately absent: a superseded
+/// node's work moved elsewhere and the row's own supersession is a registry
+/// question, not a node-status one.
+pub const INACTIVE_NODE_STATUSES: [&str; 2] = ["deferred", "idea"];
 
 /// WHICH gate is holding a [`GcAction::Keep`] row. Every keep is named - a
 /// row that is stuck and invisible is the failure mode this enum exists to
@@ -217,6 +242,11 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // replanning worker inherits no completion an earlier blueprint
             // wrote. An absent or empty closed set fails closed, exactly as
             // the empty-status guard below does.
+            // x-2774: the lane keeps precedence over the session-shaped
+            // releases below - a bp- row the releases would free but whose
+            // own assignment is still outstanding (AC3-EDGE, the idea-node
+            // hold) stays outstanding. Every change-1/3/6 acceptance row is
+            // a non-planner row, so their outcomes are unchanged.
             if let Some(assignments) = &row.planning {
                 // An EMPTY status set fails closed: a lane that fires on a
                 // vacuous all() would retire a row the graph could not
@@ -237,6 +267,38 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                         ),
                     };
                 }
+                if !assignments.is_empty() {
+                    // AC3-EDGE: an assignment that never reached a
+                    // planning-complete status holds the row - the plan it
+                    // was dispatched to write never landed. The x-2774
+                    // releases below do not steal this hold: an unfinished
+                    // planning assignment is work, whatever the node's
+                    // status says.
+                    return (
+                        GcAction::Keep,
+                        Some(KeepReason::OpenWork {
+                            node: node.clone(),
+                            status: status.clone(),
+                        }),
+                    );
+                }
+            }
+            // x-2774 changes 1, 3, 6, 8: open NODE state alone is not
+            // evidence a SESSION is alive. Four positive facts say this
+            // row's own story is over, and each falls through to the same
+            // grace gate a done node takes (the transcript gates keep this
+            // from being a blanket sweep):
+            // - the harness publishes a terminal state for the session;
+            // - a live newer registry row resolves the same node;
+            // - the node is parked (deferred) or never started (idea);
+            // - the node's recorded merge_status already reads merged.
+            // Dead pid is change 8 and rides the grace gate itself.
+            if row.session_terminal.is_some()
+                || row.superseded_by_live_peer.is_some()
+                || INACTIVE_NODE_STATUSES.contains(&status.as_str())
+                || row.node_merged
+            {
+                return grace_gate(row, grace_secs);
             }
             (
                 GcAction::Keep,
@@ -255,7 +317,12 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     match row.transcript_age_s {
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-        Some(age) if age <= grace_secs => (GcAction::Keep, Some(KeepReason::Active { age_s: age })),
+        // x-2774 change 8: a provably dead pid (ESRCH) overrides recency.
+        // Recency without a living writer is not liveness; only ESRCH
+        // revokes it, never an absent or unanswerable pid.
+        Some(age) if age <= grace_secs && !row.pid_gone => {
+            (GcAction::Keep, Some(KeepReason::Active { age_s: age }))
+        }
         Some(_) => (GcAction::Retire, None),
     }
 }
@@ -1094,6 +1161,10 @@ mod tests {
             planning: None,
             planning_closed: Vec::new(),
             confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
         }
     }
 
@@ -1345,7 +1416,7 @@ mod tests {
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1441,7 +1512,7 @@ mod tests {
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1775,5 +1846,108 @@ mod tests {
         );
         assert_eq!(transcript_age_s(None, now), None);
         assert_eq!(transcript_age_s(Some(&[]), now), None);
+    }
+
+    // ── x-2774: the reaper asks the session, not only the node ──────────
+
+    /// An open-work row that is quiet past the grace - the shape the old
+    /// policy held forever.
+    fn open_row(status: &str) -> GcRow {
+        GcRow {
+            work: WorkState::Open {
+                node: "N1".into(),
+                status: status.into(),
+            },
+            ..retiring()
+        }
+    }
+
+    /// Change 1: the harness publishing a terminal state overrides the
+    /// open-work keep. The grace gate still rules: a fresh transcript keeps
+    /// under `active`, and a non-terminal state keeps under open work.
+    #[test]
+    fn terminal_session_state_releases_the_open_work_keep() {
+        let mut row = open_row("in_review");
+        row.session_terminal = Some("done".into());
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+
+        row.transcript_age_s = Some(10);
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 }),),
+            "a terminal state never sweeps a transcript inside the grace"
+        );
+        // A non-terminal state never reaches this field: the population
+        // site filters through is_terminal_roster_state, covered at sweep
+        // level by x2774_terminal_harness_state_releases_an_open_work_row.
+    }
+
+    /// Change 3: a live newer peer on the same node releases the shield.
+    #[test]
+    fn a_live_newer_peer_releases_the_open_work_keep() {
+        let mut row = open_row("in_review");
+        row.superseded_by_live_peer = Some("newer (created 2026-09-09T23:00:00Z)".into());
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+    }
+
+    /// Change 6: a parked or never-started node is not evidence a session
+    /// is alive. `in_review` still holds a non-planner row.
+    #[test]
+    fn an_inactive_node_status_releases_the_open_work_keep() {
+        for status in ["deferred", "idea"] {
+            let row = open_row(status);
+            assert_eq!(
+                gc_decide(&row, GRACE),
+                (GcAction::Retire, None),
+                "status {status} is not active work"
+            );
+        }
+        assert!(matches!(
+            gc_decide(&open_row("in_review"), GRACE),
+            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+        ));
+    }
+
+    /// Change 6: a recorded merge the node status lags is not active work.
+    #[test]
+    fn a_recorded_merge_releases_the_open_work_keep() {
+        let mut row = open_row("in_progress");
+        row.node_merged = true;
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+    }
+
+    /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,
+    /// but never transcript UNRESOLVED - absence is not quiet even for a
+    /// dead pid, because a dead pid says nothing about the transcript.
+    #[test]
+    fn a_dead_pid_overrides_recency_but_not_unresolved() {
+        let mut row = retiring();
+        row.transcript_age_s = Some(100);
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 100 })),
+        );
+        row.pid_gone = true;
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+
+        let mut unresolved = retiring();
+        unresolved.transcript_age_s = None;
+        unresolved.pid_gone = true;
+        assert_eq!(
+            gc_decide(&unresolved, GRACE),
+            (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
+            "dead pid does not make an unreadable transcript quiet"
+        );
+    }
+
+    /// Change 1, inverse: no terminal state, live transcript - the row
+    /// keeps. The release is never a blanket sweep.
+    #[test]
+    fn a_live_session_on_an_open_node_keeps_its_row() {
+        let row = open_row("in_review");
+        assert!(matches!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+        ));
     }
 }

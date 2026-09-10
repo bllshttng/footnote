@@ -33,7 +33,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         let open_work: Vec<Value> = summary
             .kept_open_work
             .iter()
-            .map(|(id, node, status)| json!({"id": id, "node": node, "status": status}))
+            .map(|(id, node, status, reader)| {
+                json!({"id": id, "node": node, "status": status, "reader": reader})
+            })
             .collect();
         let active: Vec<Value> = summary
             .kept_active
@@ -150,8 +152,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (not a spawn row: {why})\n"));
     }
     for id in &summary.kept_no_provenance {
+        // x-2774 change 4: this line used to emit an unbalanced paren and a
+        // literal backslash-n; invisible only while the bucket measured
+        // empty. One spelling with every other kept line.
         out.push_str(&format!(
-            "  kept {id} ({}\\n",
+            "  kept {id} ({})\n",
             crate::gc::KeepReason::NoProvenance.as_str()
         ));
     }
@@ -163,8 +168,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  kept {id} (pr state contradicts: {node} {detail})\n"
         ));
     }
-    for (id, node, status) in &summary.kept_open_work {
-        out.push_str(&format!("  kept {id} (open work: {node} {status})\n"));
+    for (id, node, status, reader) in &summary.kept_open_work {
+        out.push_str(&format!(
+            "  kept {id} (open work: {node} {status}; read via {reader})\n"
+        ));
     }
     for (id, node) in &summary.kept_open_do_row {
         out.push_str(&format!("  kept {id} (open do row on done node: {node})\n"));
@@ -522,19 +529,68 @@ mod tests {
     #[test]
     fn reap_names_open_work_with_its_node_and_status() {
         let s = GcSummary {
-            kept_open_work: vec![("b1".into(), "N3".into(), "in_review".into())],
+            kept_open_work: vec![(
+                "b1".into(),
+                "N3".into(),
+                "in_review".into(),
+                "sessions".into(),
+            )],
             ..Default::default()
         };
         let text = render_reap(&s, false, false);
         assert!(
-            text.contains("  kept b1 (open work: N3 in_review)"),
+            text.contains("  kept b1 (open work: N3 in_review; read via sessions)"),
             "{text}"
         );
         let out = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(
             v["kept_open_work"],
-            json!([{"id": "b1", "node": "N3", "status": "in_review"}])
+            json!([{"id": "b1", "node": "N3", "status": "in_review", "reader": "sessions"}])
+        );
+    }
+
+    /// x-2774 change 4: the no-provenance keep line carries a closing paren
+    /// and a real newline. The old spelling emitted an unbalanced paren and
+    /// a literal backslash-n; invisible only while the bucket measured
+    /// empty.
+    #[test]
+    fn reap_no_provenance_line_is_well_formed() {
+        let s = GcSummary {
+            kept_no_provenance: vec!["d1".into()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        let line = text
+            .lines()
+            .find(|l| l.contains("kept d1"))
+            .expect("the keep line renders");
+        assert!(
+            line.starts_with("  kept d1 (no provenance:") && line.ends_with(')'),
+            "{line}"
+        );
+        assert!(
+            !text.contains("\\n"),
+            "no literal backslash-n in stdout: {text}"
+        );
+    }
+
+    /// x-2774 change 2: a terminal-state retirement names the session state
+    /// and the reader in the basis; the all-done basis is byte-identical to
+    /// its old string.
+    #[test]
+    fn reap_retired_bases_spell_their_answer() {
+        let s = GcSummary {
+            retired: vec![(
+                "a1".into(),
+                "session terminal: harness state done (via sessions); node N3 in_review".into(),
+            )],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("session terminal: harness state done"),
+            "{text}"
         );
     }
 
@@ -558,7 +614,12 @@ mod tests {
         // within-grace, uncorroborated, or backstop.
         let s = GcSummary {
             retired: vec![("a1".into(), "every named node done: N1".into())],
-            kept_open_work: vec![("b1".into(), "N3".into(), "in_review".into())],
+            kept_open_work: vec![(
+                "b1".into(),
+                "N3".into(),
+                "in_review".into(),
+                "sessions".into(),
+            )],
             kept_active: vec![("c1".into(), 10)],
             kept_no_provenance: vec!["d1".into()],
             ..Default::default()
