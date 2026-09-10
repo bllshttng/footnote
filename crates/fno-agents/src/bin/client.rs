@@ -1343,7 +1343,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
             }
         }
     }
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(fno_agents::scrape::fno_bin())
         .args(&args)
         .output()
         .map_err(|e| {
@@ -1396,7 +1396,7 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
 /// to it. Returns the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("fno")
+    let err = std::process::Command::new(fno_agents::scrape::fno_bin())
         .arg("agents")
         .args(args)
         .env("FNO_AGENTS_RUNTIME", "python")
@@ -2430,7 +2430,7 @@ fn run_reap(rest: &[String]) -> i32 {
 /// not reimplemented. Fail-closed: a spawn failure, a non-zero exit, or an
 /// unparsable receipt is `Unread`, never a measured zero (AC3-EDGE).
 fn run_mux_sweep(dry_run: bool) -> fno_agents::reap_render::MuxSweep {
-    let mut cmd = std::process::Command::new("fno");
+    let mut cmd = std::process::Command::new(fno_agents::scrape::fno_bin());
     cmd.args([
         "mux",
         "workspace",
@@ -3816,7 +3816,7 @@ fn fetch_discovered_sessions(
         // No outer deadline to subtract from: this path has no caller-supplied
         // budget, so the wait it may have spent changes nothing about the run.
         |_spent| {
-            let mut cmd = Command::new("fno");
+            let mut cmd = Command::new(fno_agents::scrape::fno_bin());
             cmd.args(&argv);
             cmd.env("FNO_AGENTS_RUNTIME", "python");
             // Fail-open by contract, and the same rule the latch needs: only a
