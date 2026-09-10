@@ -1418,6 +1418,7 @@ impl RemovalAuditContext {
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
+pub(crate) use crate::liveness_sweep::apply_reconcile_change;
 pub(crate) use crate::row_truth::{
     apply_title_changes, batched_row_probes, fold_positive_death, row_truth_handle,
     row_truth_handles, served_fresh_liveness, title_changes,
@@ -7290,67 +7291,10 @@ where
         changes.push(ReconcileChange {
             name: entry.name.clone(),
             new_status,
-            new_liveness: match measured {
-                Ok(true) => Some("alive"),
-                Ok(false) => Some("dead"),
-                Err(_) => Some("unmeasured"),
-            },
+            new_liveness: crate::liveness_sweep::served_word(entry, &measured, &mut pid_live),
         });
     }
     (changes, out)
-}
-
-/// Apply one planned reconcile change to its registry row. Always freshens
-/// `last_reconciled_at` (the probe was *attempted*, so `CHECKED` rotates even on
-/// an inconclusive/no-change probe). On a status change, sets the new status and
-/// -- when it is terminal `Exited` -- nulls `pid`/`pid_start_time` so `list`/
-/// `--json` never surfaces a pid that no longer belongs to the agent (Locked
-/// Decision #7: a stale pid is exactly the misleading liveness signal this work
-/// removes; forensics live in the event log, not a dangling registry pid). The
-/// pid is cleared only on `Exited` (the lone terminal status reconcile produces)
-/// -- an `Orphaned` row keeps its pid, which is still the live-but-unowned
-/// process an operator may want to `ps`/signal while investigating the orphan.
-/// The `Exited` transition also stamps `exited_at`: `last_reconciled_at` rotates
-/// on every probe, so it is a CHECKED stamp, not a transition stamp, and the only
-/// timestamp a reader can attribute to the exit itself is one written here.
-fn apply_reconcile_change(
-    e: &mut RegistryEntry,
-    new_status: Option<AgentStatus>,
-    new_liveness: Option<&str>,
-    now: &str,
-) {
-    e.last_reconciled_at = Some(now.to_string());
-    if let Some(word) = new_liveness {
-        // The sweep is the ONLY writer of the served pair: a probe
-        // answer is a fact about the moment it measured, so it carries its
-        // stamp with it.
-        e.liveness = Some(word.to_string());
-        e.liveness_measured_at = Some(now.to_string());
-    }
-    if let Some(s) = new_status {
-        e.status = s;
-        if matches!(s, AgentStatus::Exited) {
-            e.pid = None;
-            e.pid_start_time = None;
-            e.exited_at = Some(now.to_string());
-            // Ordered exit teardown (E3.3, AC-X2-4): clear the inside-leg
-            // authority on exit so a stale `working` never wins after the pane
-            // is gone. The completion event is published by the caller BEFORE
-            // this write (publish completion -> clear authority). A scraped
-            // verdict dies with the pane for the same reason.
-            e.inside_leg = None;
-            e.screen_state = None;
-        }
-        if matches!(s, AgentStatus::Orphaned) {
-            // x-5d96 (codex P2, PR 1329): the transition just re-decided the
-            // row's liveness from current evidence, so any `exited_at` it
-            // carried is a stamp from an earlier, falsified reading. Keeping
-            // it would let gc age the row on a clock that started before the
-            // re-decision and skip the grace window at its first real
-            // dead-observation. Cleared, gc stamps fresh.
-            e.exited_at = None;
-        }
-    }
 }
 
 /// Publish one inside-leg completion event for a row that is about to be marked
@@ -11721,6 +11665,69 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             "a pid-less mux pane defers to store liveness (orphan), not immortal"
         );
         assert_eq!(out.orphans, vec!["pidless-pane".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs() {
+        // AC3: a claude pane row carries a pid and NO session id, so
+        // ClaudeProvider::reachability refuses it ("no session id in entry").
+        // The old mapping served `unmeasured` on every Err whatever the pid
+        // said - a live 13h44m pane and a dead one read the same. The served
+        // word follows the pid for pane rows; the status transition keeps
+        // today's rule (an Err probe never flips status).
+        let mk = |name: &str, pid: Option<u32>| {
+            let mut e = rentry(name, AgentStatus::Live, None);
+            e.mux = Some(crate::state::MuxRef {
+                session: "main".into(),
+                pane_id: 7,
+            });
+            e.pid = pid;
+            e
+        };
+        let mut interactive = mk("interactive-live", Some(4244));
+        interactive.mux = None;
+        interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let entries = vec![
+            mk("live-pane", Some(4242)),
+            mk("dead-pane", Some(4243)),
+            mk("pidless-pane", None),
+            interactive,
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Err(probe_err()),
+            || false,
+            |e| e.name == "live-pane" || e.name == "interactive-live",
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true,
+        );
+        assert_eq!(
+            changes[0].new_liveness,
+            Some("alive"),
+            "a live pane pid serves alive even on an Err probe"
+        );
+        assert_eq!(
+            changes[1].new_liveness,
+            Some("dead"),
+            "a dead pane pid serves dead even on an Err probe"
+        );
+        assert_eq!(
+            changes[2].new_liveness,
+            Some("unmeasured"),
+            "a pid-less pane keeps today's Err mapping"
+        );
+        assert_eq!(
+            changes[3].new_liveness,
+            Some("alive"),
+            "an interactive host's served word follows its pid too"
+        );
+        for ch in &changes {
+            assert_eq!(ch.new_status, None, "an Err probe never flips status");
+        }
+        assert!(out.orphans.is_empty());
     }
 
     #[test]

@@ -113,6 +113,7 @@ pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
 pub mod king_termination;
+pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
