@@ -126,6 +126,40 @@ PASSTHROUGH_PANE_ONLY = (
     "(the default) or drop them."
 )
 
+#: A claude thread spawned with no message starts with no prompt: claude's job
+#: state reads `needs: send a prompt to start` and the row holds a worker slot
+#: for nothing. Printed by the seam (explicit substrate, both runtimes) and by
+#: cmd_spawn (resolved substrate).
+SEEDLESS_THREAD_REFUSAL = (
+    "refusing a claude thread spawn with no message. Claude starts that session "
+    "with no prompt, it waits for one forever, and its row holds a worker slot. "
+    "Put the work in the message: fno agents spawn '/fno:target {node}' "
+    "--name {name} --node {node} --substrate thread. A resume needs no message: "
+    "pass --resume <uuid>. No worker launched."
+)
+
+
+def seedless_thread_refusal(
+    harness: Optional[str],
+    substrate: Optional[str],
+    message: Optional[str],
+    *,
+    resume: Optional[str] = None,
+    crown: bool = False,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+) -> Optional[str]:
+    """The refusal text for a fresh claude thread spawn with no message, else None.
+
+    A resume continues a transcript and a crown spawn gets the reign verb typed
+    later in dispatch, so neither needs a message here.
+    """
+    if harness != "claude" or substrate not in ("thread", "bg"):
+        return None
+    if (message or "").strip() or resume or crown:
+        return None
+    return SEEDLESS_THREAD_REFUSAL.format(name=name or "<name>", node=node or "<node>")
+
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 

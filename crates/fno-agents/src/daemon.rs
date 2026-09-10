@@ -6717,20 +6717,6 @@ async fn handle_rm_with(
     } else {
         None
     };
-    if claude_agents
-        .as_ref()
-        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
-        .and_then(|row| row.state.as_deref())
-        == Some("blocked")
-    {
-        return Response::err(
-            req.id,
-            ErrorCode::Busy,
-            format!(
-                "agent {name} is blocked (model outage); rotate it to another model rather than reaping it."
-            ),
-        );
-    }
     // The stored enum is what fno last WROTE, not what is true: a session torn
     // down by hand never updates it. Two truths prove the row gone, each with
     // its own fail-closed posture. A claude row absent from the `claude agents
@@ -10209,51 +10195,6 @@ mod tests {
 
         assert!(response.result().is_some());
         assert_eq!(called.into_inner().unwrap(), vec!["cccc3333"]);
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_refuses_blocked_claude_row_with_rotation_remedy() {
-        let home = short_home("rmblocked");
-        let mut row = claude_rm_row(
-            "blocked-worker",
-            "dddd4444",
-            "dddd4444-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(
-            1,
-            "agent.rm",
-            json!({"name": "blocked-worker", "force": true}),
-        );
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("blocked")),
-                ])
-            },
-            &|_| panic!("blocked row must not reach claude rm"),
-            &|_, _| panic!("blocked row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(message.contains("rotate"));
-        assert!(!message.contains("--force"));
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

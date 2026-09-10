@@ -12,7 +12,6 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -1148,16 +1147,17 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
 
     # bg substrate: still the binary's lane. The seam marker rides straight
     # after the verb (x-90a9 task 0.1): it asserts the crossing upstream.
+    # A message rides along: a claude thread spawn with none is refused first.
     result = CliRunner().invoke(
         app,
-        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg"],
+        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg", "hello"],
     )
     assert result.exit_code == 99
     assert len(captured) == 1
     argv = captured[0]
     assert argv[0] == "spawn"
     assert argv[1].startswith("--defaults-applied=")
-    assert argv[2:] == ["--name", "worker", "--harness", "claude", "--substrate", "bg"]
+    assert argv[2:] == ["--name", "worker", "--harness", "claude", "--substrate", "bg", "hello"]
 
 
 def test_is_role_bearing_spawn_predicate() -> None:

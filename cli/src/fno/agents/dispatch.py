@@ -2054,16 +2054,14 @@ class SpawnResult:
     short_id: str
     reply: Optional[str] = None
     effective_message: Optional[str] = None
-    # v23 (x-2019): the requested-vs-observed verdict, carried to the receipt.
     # ``{"requested": ..., "observed": ...}`` when the spawn-time check found
-    # the session running something else; None means unknown-or-match, never a
-    # fabricated negative (a fresh spawn whose transcript has no sample yet
-    # says nothing).
+    # another model; None is unknown-or-match, never a fabricated negative.
     model_substituted: Optional[dict] = None
-    # x-04ce: the row's launch-account fact plus WHO chose it; None = nothing
-    # concrete to attribute.
+    # The row's launch-account fact plus WHO chose it; None = nothing to attribute.
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
+    # Why claude's job state never recorded the prompt; None = recorded.
+    seed_unverified: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -2884,10 +2882,7 @@ def dispatch_spawn(
             )
             ctx_token = _DISPATCH_CTX.set(ctx_for_dispatch)
             try:
-                # Started event (pairs with the helpers' agent_ask_done /
-                # agent_ask_failed). Lived in dispatch_ask's routing before
-                # Task 1.1 removed the create branch; restored here so the
-                # spawn create keeps the started/done pair (codex P2 PR #457).
+                # Started event: pairs with the helpers' agent_ask_done / agent_ask_failed.
                 _emit_ev(
                     "agent_ask_started",
                     name=name,
@@ -2980,17 +2975,21 @@ def dispatch_spawn(
                         node=node,
                         route_model=route_model,
                     )
+                    from fno.agents.harnesses._claude_session_registry import seed_unverified_reason
                     return SpawnResult(
                         kind="created",
                         name=name,
                         provider="claude",
                         short_id=created.short_id,
                         effective_message=effective_message,
-                        # getattr: `created` is any ask-path result, including
-                        # duck-typed stubs minted before the field existed.
+                        # getattr: `created` may be a duck-typed stub minted before the field.
                         model_substituted=getattr(created, "model_substituted", None),
                         launch_account=row_launch_account,
                         launch_account_source=row_launch_account_source,
+                        seed_unverified=(
+                            seed_unverified_reason(created.short_id, account_env)
+                            if message.strip() else None
+                        ),
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm
