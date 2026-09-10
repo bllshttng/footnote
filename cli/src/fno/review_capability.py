@@ -289,12 +289,10 @@ def resolve_skill_presence(
 ) -> tuple[Status, str]:
     """Is the named skill resolvable on `harness`? One probe, two callers.
 
-    Shared by the reviewer gate and the dispatch verb registry. `context`
-    names the config surface the caller resolves for, so the unavailable
-    reason points at the right key. Three outcomes: found -> satisfiable,
-    absent with at least one root readable -> unavailable (the caller
-    refuses, naming the roots searched), anything unanswerable ->
-    unverifiable, which degrades rather than bricking a run.
+    Shared by the reviewer gate and the dispatch verb registry; `context`
+    names the config surface in the unavailable reason. Three outcomes:
+    found -> satisfiable, absent with one root readable -> unavailable,
+    unanswerable -> unverifiable (degrades rather than bricking a run).
     """
     proceed = "Proceeding - if the gate does go unmet, run the skill by hand"
     if harness != "claude":

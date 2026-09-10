@@ -1438,9 +1438,7 @@ def resolve_dispatch(
                     f"{chosen_harness!r}; config.dispatch.verb_registry declares "
                     f"it on: {', '.join(sorted(descriptor.invocations))}"
                 )
-            template = (descriptor.invocations or {}).get(
-                chosen_harness, descriptor.invocation
-            )
+            template = (descriptor.invocations or {}).get(chosen_harness, descriptor.invocation)
             if descriptor.takes_node_id:
                 template = f"{template} {{id}}"
             else:

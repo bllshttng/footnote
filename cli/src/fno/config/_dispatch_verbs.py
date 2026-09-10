@@ -1,6 +1,6 @@
 """The dispatch verb registry model: an outside skill as a descriptor, not a
-bare string. Field for field it mirrors ``ReviewerDescriptor``; the lookup
-union drops any key naming a shipped or allowlisted verb."""
+bare string. Mirrors ``ReviewerDescriptor``; the lookup union drops any key
+naming a shipped or allowlisted verb."""
 from __future__ import annotations
 
 from dataclasses import dataclass
