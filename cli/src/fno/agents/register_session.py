@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from fno.agents.reachability import Reachability
 
 from fno.agents import events
-from fno.agents.mux_spawn import mux_server_env
+from fno.agents.mux_server import mux_server_env
 from fno.agents.registry import heal_mux_ref, register_existing_session, restamp_harness_session_id
 from fno.agents.spawn_defaults import resolve_lane_vendor
 

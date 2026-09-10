@@ -442,9 +442,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     // Nested same-server guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
     // terminal mode change. `FNO_SERVER` (and the legacy `FNO_SESSION`) is
     // set in every pane the server spawns, so target == env means "attaching
-    // to the server I am already inside" - an instant hall of mirrors.
-    // Different-server nesting is allowed (the flag already beat the env in
-    // resolution).
+    // to the server I am already inside"; other servers may nest.
     if crate::mux_cli::env_server().as_deref() == Some(session) {
         return Err(format!(
             "already inside mux server {session:?} (FNO_SERVER is set). \
