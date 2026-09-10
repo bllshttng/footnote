@@ -2426,6 +2426,9 @@ fn place_thread_portal_after_spawn_routes_through_fno_bin() {
     // a stubbed binary receives the exact `mux thread` argv, so tests and
     // non-PATH installs never depend on a PATH `fno` (scrape.rs:867 pattern).
     let dir = std::env::temp_dir().join(format!("fno-c4d5-{}", std::process::id()));
+    // A crashed prior run on a reused pid would leave a stale argv log the
+    // stub appends onto; clear the dir so the assert only reads this run.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let stub = dir.join("fno-stub.sh");
     let argv_path = dir.join("argv.txt");
