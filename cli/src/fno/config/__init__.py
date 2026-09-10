@@ -68,6 +68,7 @@ from fno.config._graph import GraphBlock
 # size budget and shrink-only); re-exported under the names every caller and
 # test already imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
+from fno.config.source_attribution import resolve_source as resolve_source
 from fno.config._loader import _settings_key as _settings_key
 from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, StateReapBlock, SweepKeys
 from fno.config._test import TestBlock
@@ -5246,88 +5247,6 @@ def describe_settings_for_repo(root: Optional[Path] = None) -> list[Path]:
     candidate it is.
     """
     return _candidate_paths(Path(root) if root is not None else None)
-
-
-def resolve_source(
-    key: str, root: Optional[Path] = None
-) -> Optional[tuple[Path, list[Path]]]:
-    """Which config file decided ``key``: ``(decider, overridden)`` or None.
-
-    Consumes the SAME aliased layers :func:`load_settings` merges (via
-    :func:`_aliased_layers`), in the same order, and attributes the key by
-    REPLAYING the loader's merge: the decider is the file whose merge changed
-    the key's value under the loader's own semantics - deep-merge
-    highest-wins-per-key plus the post-merge ``_unwrap_config_dict`` flatten,
-    where a ``config:``-wrapped block beats flat top-level keys. Presence per
-    layer alone would mis-attribute exactly there: a flat project key that the
-    wrapped global's block overrides at unwrap would name the project as
-    decider while the model serves the global's value.
-
-    The worktree-local ``config.local.toml`` enters as the highest layer
-    through the same allowlist filter the loader applies, so a dropped
-    non-allowlisted key can never masquerade as a source. A value that arrived
-    through the legacy spelling reports the file that actually holds it (the
-    alias ran per layer inside the shared collector).
-
-    None = no file sets the key (the value is a built-in default).
-    """
-    candidates = _candidate_paths(root)
-    layers = list(_aliased_layers(tuple(candidates)))
-    if candidates:
-        local_path = candidates[0].parent / "config.local.toml"
-        if local_path.is_file() and not local_path.is_symlink():
-            local_parsed, lok = _load_raw(local_path)
-            if lok:
-                override = _worktree_local_override(local_parsed)
-                if override:
-                    layers.insert(0, (local_path.resolve(), override))
-
-    _MISSING = object()
-
-    def _get(dotted: str, data: object) -> object:
-        node: object = data
-        for part in dotted.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return _MISSING
-            node = node[part]
-        return node
-
-    def _value(data: object) -> object:
-        for v in variants:
-            got = _get(v, data)
-            if got is not _MISSING:
-                return got
-        return _MISSING
-
-    # The same prefix tolerance get_cmd applies to lookups: a bare
-    # `review.required_bots` and a legacy `config.`-prefixed spelling are one key.
-    variants = [key, key[len("config.") :]] if key.startswith("config.") else [key, f"config.{key}"]
-
-    # Replay lowest precedence first, loader order. A worktree's .fno/config.toml
-    # is often a symlink to the canonical checkout's; candidate.resolve()
-    # collapses both chain tiers onto one path, and the same file must not
-    # replay twice and "override" itself.
-    seen: set[Path] = set()
-    setters: list[Path] = []
-    decider: Optional[Path] = None
-    merged: dict[str, object] = {}
-    prev: object = _MISSING
-    for path, parsed in reversed(layers):
-        if path in seen:
-            continue
-        seen.add(path)
-        if _value(_unwrap_config_dict(parsed)) is not _MISSING:
-            setters.append(path)
-        merged = _deep_merge(merged, parsed)
-        now = _value(_unwrap_config_dict(merged))
-        if now is not _MISSING and now != prev:
-            decider = path
-        if now is not _MISSING:
-            prev = now
-    if not setters:
-        return None
-    assert decider is not None  # the first setter introduces the value: a change
-    return (decider, [p for p in setters if p != decider])
 
 
 def agents_headless_yolo(provider: str) -> bool:
