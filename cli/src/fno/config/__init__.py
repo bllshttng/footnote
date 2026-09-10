@@ -4229,8 +4229,7 @@ class ConfigBlock(BaseModel):
     preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
-    # Repo-wide ship-gate probes enforced by the Rust loop-check gate.
-    # alongside a plan's own `done_probes`; it refuses DonePRGreen unless both
+    # Repo-wide ship-gate probes join plan `done_probes`; both must pass.
     # pass. A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so
     # the source must stay a gitignored, operator-authored file: a tracked
     # probe list would make cloning a repo remote code execution.

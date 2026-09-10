@@ -733,9 +733,9 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         .ok_or_else(|| StoreError::Invalid("commit_rows needs removed ids".into()))?
         .iter()
         .map(|id| {
-            id.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| StoreError::Invalid("commit_rows removed id must be a string".into()))
+            id.as_str().map(str::to_string).ok_or_else(|| {
+                StoreError::Invalid("commit_rows removed id must be a string".into())
+            })
         })
         .collect::<Result<_, _>>()?;
     if let Some(id) = removed.iter().find(|id| touched.contains(*id)) {
@@ -746,7 +746,10 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     }
     touched.extend(removed.iter().cloned());
 
-    let _gate = state.write_gate.lock().unwrap_or_else(|error| error.into_inner());
+    let _gate = state
+        .write_gate
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let current_version = file_version(&state.graph);
     let current = graph_store::read_defaulted(&state.graph, false)?;
     if current_version != base_version {
