@@ -42,6 +42,24 @@ def _operator_shell_identity(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_worked_authority(monkeypatch):
+    """Answer the worked authority available-but-empty in every test.
+
+    The strict worked-authority gate refuses every dispatch when the roster
+    read fails, and CI has no harness binaries, so dispatch tests passed on a
+    developer machine (real fleet answers) and failed in CI (read raises).
+    Patching the authority itself keeps the layers beneath it real: roster
+    join tests bind the function directly, fleet fakes at ``fleet_rows`` and
+    identity pins between the claims modules all stay untouched. A test that
+    installs its own map, or raises to exercise the degrade, patches after
+    this one and wins.
+    """
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids", lambda *a, **kw: {}
+    )
+
+
+@pytest.fixture(autouse=True)
 def _sandbox_project_spaces(tmp_path, monkeypatch):
     """Keep project space state out of the developer's real ~/.fno/spaces.
 
