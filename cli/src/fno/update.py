@@ -855,6 +855,9 @@ def _build_update_guidance(
     revivable: int,
     revivable_known: bool,
     degraded_reason: Optional[str],
+    running_stale: int = 0,
+    restartable: int = 0,
+    pane_kept: int = 0,
 ) -> str:
     """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
@@ -876,6 +879,15 @@ def _build_update_guidance(
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
     if not update_ready and revs_known:
+        if running_stale > 0:
+            # x-f188 change 7: "up to date" was the axis that reported no
+            # action while stale processes ran (x-f1f4). The branch no
+            # longer returns early on it.
+            return (
+                f"installed {rev_label} is current; {running_stale} running process(es) are "
+                f"older builds - restart cycles {restartable}, keeps {pane_kept} pane "
+                "keeper(s) on the old build until their panes end"
+            )
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if degraded_reason:
@@ -892,6 +904,12 @@ def _build_update_guidance(
         )
 
     if not update_ready:
+        if running_stale > 0:
+            return (
+                f"installed {rev_label} is current; {running_stale} running process(es) are "
+                f"older builds - restart cycles {restartable}, keeps {pane_kept} pane "
+                "keeper(s) on the old build until their panes end"
+            )
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if wire_bump:
@@ -1001,6 +1019,29 @@ def update_readiness(
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
+    # Running-process census (x-f188 change 7): the third axis. The TUI
+    # renders these rows and computes nothing (Locked Decision 6).
+    census = running_components(runner)
+    # running_rows, never `running`: that name is the python interpreter
+    # string the python_tool field carries further down.
+    running_rows = [
+        {k: r.get(k) for k in ("component", "name", "verdict", "on_restart", "survives")}
+        for r in census
+    ]
+    running_stale = sum(1 for r in census if r.get("verdict") == "stale")
+    restartable = sum(
+        1
+        for r in census
+        if r.get("verdict") == "stale"
+        and str(r.get("on_restart", "")).startswith(("restarts", "cycles"))
+    )
+    pane_kept = sum(
+        1
+        for r in census
+        if r.get("verdict") == "stale"
+        and r.get("component") in ("pane-keeper", "thread-keeper")
+    )
+
     degraded_reason = "; ".join(degraded) if degraded else None
 
     guidance = _build_update_guidance(
@@ -1017,6 +1058,9 @@ def update_readiness(
         revivable=revivable,
         revivable_known=revivable_known,
         degraded_reason=degraded_reason,
+        running_stale=running_stale,
+        restartable=restartable,
+        pane_kept=pane_kept,
     )
 
     # None (not 0) when the underlying fetch never happened - a count fno never
@@ -1058,6 +1102,8 @@ def update_readiness(
         "changelog": changelog,
         "guidance": guidance,
         "degraded": degraded_reason,
+        "running": running_rows,
+        "running_stale": running_stale,
     }
 
 

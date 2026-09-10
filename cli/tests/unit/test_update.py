@@ -2341,6 +2341,7 @@ def _make_runner(mux_rows=None, mux_rc=0, agent_rows=None, agent_rc=0):
 def test_update_readiness_no_bump_wire_unchanged(monkeypatch, tmp_path) -> None:
     """AC1-HP: wire unchanged -> not a bump, guidance names surviving shells."""
     _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}]
     )
@@ -2362,6 +2363,7 @@ def test_update_readiness_pre_floor_wire_is_a_bump(monkeypatch, tmp_path) -> Non
     wire-59 server refuses a v60 client however the floor numbers read. The
     binary's own `stale` verdict is the truth readiness consumes."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[
             {"session": "main", "state": "live", "panes": 14, "wire_version": 59, "stale": True}
@@ -2379,6 +2381,7 @@ def test_update_readiness_older_wire_without_stale_field_is_a_bump(monkeypatch, 
     """An older fno that emits no `stale` field falls back to equality for
     the same reason: a pre-floor generation refuses any != client."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 59}]
     )
@@ -2396,6 +2399,7 @@ def test_update_readiness_downgrade_wire_is_a_bump(monkeypatch, tmp_path) -> Non
     comparison the readiness probe answers "wire unchanged, shells survive"
     on exactly the install that breaks them."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "new", "state": "live", "panes": 14, "wire_version": 61}]
     )
@@ -2412,6 +2416,7 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     """AC2-HP: differing wire_version -> bump, guidance names ended shells and
     revivable worker count."""
     _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
@@ -2439,6 +2444,7 @@ def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path
     must not inflate the `--revive` count - same candidate scope as
     `_revive_orphans`' `pre_live` snapshot in restart.py."""
     _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
@@ -2455,6 +2461,7 @@ def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path
 def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> None:
     """AC3-HP: installed_rev == source_rev -> update_ready False."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rows=[])
 
     result = update.update_readiness(runner=runner)
@@ -2468,6 +2475,7 @@ def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> N
     input, never asserts shells survive, and never states a false shell count -
     a fetch that never happened is not evidence of zero live shells."""
     _readiness_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2490,6 +2498,7 @@ def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path)
     not the "unknown, treated as a bump" line reserved for a genuinely
     unreadable wire. A degraded `agents list` is unrelated to the wire."""
     _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rc=1,
@@ -2518,6 +2527,7 @@ def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_
     monkeypatch.setattr(doctor, "_source_rev", lambda source: "bbb2222")
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rows=[])
 
     result = update.update_readiness(runner=runner)
@@ -2592,6 +2602,7 @@ def test_update_readiness_not_ready_ignores_unrelated_degraded_input(monkeypatch
     "treated as a wire bump ... at risk" guidance - there is no update for
     anything to be at risk from."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2608,6 +2619,7 @@ def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tm
     `shells`/`revivable` directly (not parsing `guidance`) must not see a false
     zero for a count that was never fetched."""
     _readiness_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1, agent_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2954,3 +2966,49 @@ def test_running_components_mux_row_uses_pane_count(monkeypatch) -> None:
     monkeypatch.setattr(update.shutil, "which", lambda name: None)
     rows = update.running_components(runner=lambda *a, **k: None)
     assert [r["component"] for r in rows] == ["daemon"], "no mux rows without the mux binary"
+
+
+def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path) -> None:
+    """x-f188 AC7 (Python half): up to date + stale running processes -> the
+    guidance no longer returns early; it names what restart cycles and what
+    it keeps."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
+    monkeypatch.setattr(
+        update,
+        "running_components",
+        lambda runner: [
+            {
+                "component": "daemon",
+                "name": "agents home",
+                "verdict": "stale",
+                "on_restart": "restarts",
+                "survives": "workers and panes",
+            },
+            {
+                "component": "pane-keeper",
+                "name": "main-1991",
+                "verdict": "stale",
+                "on_restart": "kept",
+                "survives": "its pane; current only when that pane ends",
+            },
+            {
+                "component": "store-keeper",
+                "name": "g",
+                "verdict": "current",
+                "on_restart": "cycles; the next read respawns it",
+                "survives": "the graph on disk",
+            },
+        ],
+    )
+    monkeypatch.setattr(update, "running_components_runner_passthrough", True, raising=False)
+    runner = _make_runner(mux_rows=[])
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is False
+    assert result["running_stale"] == 2
+    assert len(result["running"]) == 3
+    assert "installed aaa1111 is current" in result["guidance"]
+    assert "2 running process(es) are older builds" in result["guidance"]
+    assert "restart cycles 1" in result["guidance"]
+    assert "keeps 1 pane keeper(s)" in result["guidance"]

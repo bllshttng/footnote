@@ -1351,6 +1351,10 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
+    /// (x-f188) A queued `fno agents restart` and its one-in-flight bound,
+    /// mirroring the sweep pair.
+    restart_agents_want: bool,
+    restart_inflight: bool,
     /// A sweep verb is in flight; one at a time, so a second tap queues
     /// nothing and is told so.
     sweep_inflight: bool,
@@ -2162,6 +2166,10 @@ pub(crate) enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
+    /// (x-f188 change 7) Queue `fno agents restart` off the UI loop. Never
+    /// `--mux`, never `--force`: the modal named what survives, and the tap
+    /// is the confirmation.
+    RestartAgents,
     /// Probe `mux workspace prune --dry-run` once and open the centered
     /// sweep-threads choice modal from its counts. Both halves of the prune
     /// (surplus pristine tabs, dead member rows) live behind this one entry.
@@ -2307,6 +2315,25 @@ struct UpdateReadiness {
     changelog: Vec<String>,
     guidance: String,
     degraded: Option<String>,
+    /// One row per running long-lived process (x-f188 change 7). Tolerated
+    /// absent so a payload from an older fno still parses; an empty list
+    /// offers no restart action.
+    #[serde(default)]
+    running: Vec<RunningRow>,
+    #[serde(default)]
+    running_stale: usize,
+}
+
+/// One census row the modal renders: what a restart does to this process
+/// and what survives it. The TUI renders and computes nothing (Locked
+/// Decision 6, installed-fno-staleness.md); every string comes from Python.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct RunningRow {
+    component: String,
+    name: Option<String>,
+    verdict: String,
+    on_restart: String,
+    survives: String,
 }
 
 /// The result of one `fno doctor update --check` probe: parsed
@@ -2384,6 +2411,15 @@ fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPop
             rows.push(entry("⬆", "update ready"));
             actions.push(AuxAction::OpenUpdate);
         }
+        // x-f188 change 7: stale long-lived processes are their own reason
+        // to open the modal, even with no update pending.
+        Some(UpdateOutcome::Ok(r)) if r.running_stale > 0 => {
+            rows.push(entry(
+                "⬆",
+                &format!("restart: {} stale, panes kept", r.running_stale),
+            ));
+            actions.push(AuxAction::OpenUpdate);
+        }
         // A successfully-parsed probe (Python always exits 0) can still be
         // internally degraded (e.g. `fno mux ls` failed inside the check).
         // Without this arm that state falls to `_ => {}` and the menu shows
@@ -2435,6 +2471,36 @@ fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
             }
             rows.push(PopupRow::Rule);
             rows.push(PopupRow::Header(r.guidance.clone()));
+            // x-f188 change 7: one row per stale process naming what a
+            // restart does and what survives, then the fixed promise. The
+            // tap is the confirmation, because the modal named every effect.
+            let stale: Vec<&RunningRow> = r
+                .running
+                .iter()
+                .filter(|row| row.verdict == "stale")
+                .collect();
+            if !stale.is_empty() {
+                rows.push(PopupRow::Rule);
+                for row in &stale {
+                    let name = row.name.as_deref().unwrap_or("unnamed");
+                    rows.push(PopupRow::Header(format!(
+                        "{} {}: {}; keeps {}",
+                        row.component, name, row.on_restart, row.survives
+                    )));
+                }
+                rows.push(PopupRow::Header(
+                    "restart keeps every pane. pane keepers stay on the old build \
+                     until their pane ends."
+                        .into(),
+                ));
+                rows.push(PopupRow::Rule);
+                rows.push(PopupRow::Entry {
+                    glyph: "↻".into(),
+                    label: "restart now (keeps panes)".into(),
+                    hint: String::new(),
+                    enabled: true,
+                });
+            }
         }
         Some(UpdateOutcome::Degraded(reason)) => {
             rows.push(PopupRow::Header(format!("update check failed: {reason}")));
@@ -2443,11 +2509,16 @@ fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
             rows.push(PopupRow::Header("update check has not run yet".into()));
         }
     }
+    let mut actions = Vec::new();
+    if matches!(outcome, Some(UpdateOutcome::Ok(r)) if !r.running.iter().filter(|row| row.verdict == "stale").collect::<Vec<_>>().is_empty())
+    {
+        actions.push(AuxAction::RestartAgents);
+    }
     AuxPopup {
         popup: Popup::new(rows, Anchor::Center)
             .title("update")
             .footer("esc close"),
-        actions: Vec::new(),
+        actions,
     }
 }
 
@@ -2460,6 +2531,40 @@ fn begin_sweep_apply(view: &mut View, scope: SweepScope) {
     } else {
         view.sweep_action = Some(SweepAction::Apply(scope));
     }
+}
+
+/// Run `fno agents restart` off the UI loop (x-f188 change 7) and return
+/// its verdict line for the notice: the last `fno agents restart:` stdout
+/// line the verb printed, whatever it said. Text mode, never --json: the
+/// verdict line IS the human receipt. Never --mux, never --force.
+async fn run_restart_verb() -> String {
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
+        .args(["agents", "restart"])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Above the daemon restart's own worst case (30s SIGTERM grace + 2s
+    // SIGKILL + 5s lock + a fresh start), so the verb is never cut off
+    // mid-escalation by the UI's bound.
+    let fut = crate::process_admission::tokio_output(&mut command);
+    let output = match tokio::time::timeout(Duration::from_secs(90), fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return format!("restart spawn failed: {e}"),
+        Err(_) => return "restart timed out after 90s".into(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("fno agents restart:"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| {
+            if output.status.success() {
+                "restart finished without a verdict line".into()
+            } else {
+                format!("restart exited {} with no verdict line", output.status)
+            }
+        })
 }
 
 /// Run one `mux workspace prune` verb off the UI thread: a `--dry-run --json`
@@ -2703,6 +2808,8 @@ impl View {
             update_probe_want: false,
             update_probe_inflight: false,
             sweep_action: None,
+            restart_agents_want: false,
+            restart_inflight: false,
             sweep_inflight: false,
         }
     }
@@ -10673,6 +10780,11 @@ async fn attach_and_run(
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
+    // (x-f188) The queued `fno agents restart` runs off the UI loop and
+    // reports back its verdict line. One at a time (the View's inflight
+    // flag); the notice is the receipt.
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // The resource meter's sampler reports its one-line reading here, same
     // last-wins shape. The task itself is spawned by the toggle (and once at
     // startup when config enables the meter) and exits through the view's
@@ -10804,6 +10916,17 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let outcome = probe_update_readiness().await;
                 let _ = tx.send(outcome);
+            });
+        }
+        // (x-f188) Kick a wanted agents restart off the UI loop, at most
+        // one in flight.
+        if view.restart_agents_want && !view.restart_inflight {
+            view.restart_agents_want = false;
+            view.restart_inflight = true;
+            let tx = restart_tx.clone();
+            tokio::spawn(async move {
+                let verdict = run_restart_verb().await;
+                let _ = tx.send(verdict);
             });
         }
         // Kick a wanted sweep verb off the UI loop, at most one in flight.
@@ -11362,6 +11485,15 @@ async fn attach_and_run(
                 view.update_probe_inflight = false;
                 view.update_outcome = Some(outcome);
                 view.refresh_open_sideline_menu();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(verdict) = restart_rx.recv() => {
+                // (x-f188) The restart verdict line lands as a notice: the
+                // last stdout line the verb printed, whatever it said.
+                view.restart_inflight = false;
+                view.set_notice(verdict);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -14080,6 +14212,16 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
+        AuxAction::RestartAgents => {
+            // x-f188 change 7: the modal named every effect; the tap is the
+            // confirmation. Close the popup, queue the verb off the UI loop.
+            view.aux = None;
+            if view.restart_inflight {
+                view.set_notice("a restart is already running".into());
+            } else {
+                view.restart_agents_want = true;
+            }
+        }
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
