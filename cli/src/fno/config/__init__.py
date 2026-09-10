@@ -68,6 +68,7 @@ from fno.config._graph import GraphBlock
 # size budget and shrink-only); re-exported under the names every caller and
 # test already imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
+from fno.config.source_attribution import resolve_source as resolve_source
 from fno.config._loader import _settings_key as _settings_key
 from fno.config._sweeps import ReapBlock, ReapReceiptsBlock, StateReapBlock, SweepKeys
 from fno.config._test import TestBlock
@@ -5246,11 +5247,6 @@ def describe_settings_for_repo(root: Optional[Path] = None) -> list[Path]:
     candidate it is.
     """
     return _candidate_paths(Path(root) if root is not None else None)
-
-
-# The loader-replay source attribution lives in its own module; the chain
-# helpers above are the package namespace it replays against.
-from fno.config.source_attribution import resolve_source as resolve_source
 
 
 def agents_headless_yolo(provider: str) -> bool:
