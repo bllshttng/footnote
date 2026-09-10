@@ -1072,12 +1072,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| rung_base.trim_start_matches("agents.profiles.").to_string());
-        let plan_path = payload
-            .get("node")
-            .and_then(|n| n.get("plan_path"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let (slot_verb, note) = effective_work_kind(&work_verb, !plan_path.trim().is_empty());
+        let (slot_verb, note) = effective_work_kind(&work_verb);
         if let Some(note) = note {
             chain.push(json!(note));
         }
@@ -1947,21 +1942,11 @@ fn native_view_for(harness: &str) -> Option<&'static str> {
     }
 }
 
-/// Rust owns the work-kind ruling: a planless target
-/// performs planning and qualifies against the blueprint slot, while the
-/// command stays target. A planned target, think, blueprint, review, crown
-/// and every ops stage qualify against their own slots.
-fn effective_work_kind(work_verb: &str, plan_present: bool) -> (String, Option<String>) {
-    let verb = work_verb.trim().to_lowercase();
-    match verb.as_str() {
-        "target" if !plan_present => (
-            "blueprint".to_string(),
-            Some(format!(
-                "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)"
-            )),
-        ),
-        other => (other.to_string(), None),
-    }
+/// x-ebd2: the derived verb is the phase authority. The old planless-target ->
+/// blueprint rewrite lived here and is retired: the Python layer derives the
+/// workflow verb before this call, so the work verb IS the slot verb.
+fn effective_work_kind(work_verb: &str) -> (String, Option<String>) {
+    (work_verb.trim().to_lowercase(), None)
 }
 
 /// Print stdout/stderr and return the exit code. Used by `bin/client.rs`.
@@ -2880,6 +2865,7 @@ mod tests {
                                         "model": "glm", "route": "zai,glm"}},
             "slot_by_verb": {"blueprint": {"rung_base": "agents.profiles.blueprint",
                                            "lanes_raw": ["glm-x"]}},
+            "work_verb": "blueprint",
             "policy": {"enforce_inventory": true, "operator_access": "remote"},
             "capacity": {"claude": {"state": "ok", "accounts": {}}},
         }));
@@ -3142,32 +3128,45 @@ mod tests {
     }
 
     #[test]
-    fn strict_planless_target_rides_the_blueprint_slot_and_names_the_work_kind() {
+    fn strict_planless_target_stays_the_target_slot() {
+        // x-ebd2: the derived verb is the phase authority; a planless target
+        // no longer rewrites to the blueprint slot - the walk reads the target
+        // slot's own lane and picks it.
         let out = resolve_slot_payload(&strict_payload(json!({
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["sol-x"],
+                },
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+            },
             "declared_rows": {
                 "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
                            "operator_view": "claude-native"},
-                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
-                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+                "sol-x": {"name": "sol-x", "harness": "codex", "model": "gpt-strong",
+                          "operator_view": "codex-native"},
             },
             "capacity": {"claude": {"state": "ok", "window": "w",
-                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+                                    "accounts": {}, "evidence": {}, "resets": {}}},
         })));
         assert_eq!(out["status"], "pick");
         assert_eq!(out["candidate"]["model"], "claude-opus-5");
-        assert_eq!(out["candidate"]["policy"]["work_kind"], "blueprint");
+        assert_eq!(out["candidate"]["policy"]["work_kind"], "target");
         assert_eq!(out["candidate"]["policy"]["operator_access"], "unknown");
-        assert!(
-            chain_of(&out)
-                .iter()
-                .any(|l| l
-                    .contains("planless target -> blueprint eligibility (command stays target)"))
-        );
+        assert!(!chain_of(&out)
+            .iter()
+            .any(|l| l.contains("blueprint eligibility")));
     }
 
     #[test]
     fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
         let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
             "declared_rows": {
                 "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
                            "operator_view": "claude-native"},
@@ -3274,6 +3273,7 @@ mod tests {
     #[test]
     fn strict_mislabeled_native_view_refuses() {
         let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
             "slot_by_verb": {
                 "blueprint": {
                     "rung_base": "agents.profiles.blueprint",
@@ -3308,6 +3308,7 @@ mod tests {
     #[test]
     fn strict_capacity_terminal_keeps_the_queue_vocabulary_and_kind() {
         let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
             "declared_rows": {
                 "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
                            "operator_view": "claude-native"},

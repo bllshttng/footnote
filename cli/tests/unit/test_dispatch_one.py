@@ -506,6 +506,25 @@ def test_resolve_explicit_brief_still_wins_over_auto(monkeypatch):
     assert out["brief_source"] == "explicit"
 
 
+def test_resolve_honors_an_out_of_family_stored_verb(monkeypatch):
+    """x-ebd2 LD2: an out-of-family stored verb (/think) keeps declared
+    precedence through the resolve door - the lifecycle table abstains on it
+    instead of deriving target/blueprint from the node's lifecycle."""
+    import json
+
+    monkeypatch.setattr(
+        dispatch, "_lookup_node",
+        lambda ref: {
+            "id": "x-9", "difficulty": "high", "dispatch_verb": "/fno:think",
+        },
+    )
+    r = _resolve_cli("--node", "x-9", "-J")
+    assert r.exit_code == 0
+    out = json.loads(r.stdout)
+    assert out["command"] == "/think x-9"
+    assert out["verb"] is None  # the lifecycle abstained; declared verb ran
+
+
 def test_resolve_no_node_no_brief_is_none(monkeypatch):
     """No node + no brief -> no auto-resolve, brief_source=none, no TARGET_BRIEF."""
     import json

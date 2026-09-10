@@ -172,12 +172,18 @@ def cmd_resolve(
     def _resolve(target_harness: Optional[str]) -> dict:
         from fno.graph.ladder import plan_rung as _node_plan_rung
 
+        # x-ebd2 LD2/LD5: the node's STORED verb rides as audit input - an
+        # out-of-family declaration (/think) keeps declared precedence through
+        # the abstain path; a family value reconciles through the table.
+        stored_verb = (
+            str((rec or {}).get("dispatch_verb") or "").strip() or None
+        ) if rec else None
         return resolve_dispatch(
             harness=target_harness,
             substrate=substrate,
             node_id=node,
             command=command,
-            verb=verb,
+            verb=verb or stored_verb,
             # x-ebd2: node lifecycle context; the derived verb is the phase
             # authority and the stage table reads its profile row.
             difficulty=(rec or {}).get("difficulty") if node else None,
@@ -402,6 +408,9 @@ def _cutover_command(
         return resolve_dispatch(
             harness=harness or "",
             node_id=node_id,
+            verb=(
+                str((rec or {}).get("dispatch_verb") or "").strip() or None
+            ) if rec else None,
             merge_posture="no-merge",
             difficulty=(rec or {}).get("difficulty"),
             plan_rung=_node_plan_rung(rec).value if rec else None,

@@ -279,8 +279,8 @@ def resolve_slot(
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
     verbatim, and a missing or failing binary is a named refusal. ``work_verb``
-    is the ORIGINAL dispatch command (a planless target plans: the command
-    stays target while the slot is blueprint); it defaults to ``verb``. The
+    is the original dispatch command, audit-only since x-ebd2: the derived
+    verb IS the command, so it defaults to ``verb`` and never diverges. The
     third element is the walk's own verdict word: armed, unarmed, or a hold.
     Callers that need the structured refusal pass ``meta``; it is filled with
     the verb's ``refusal_terminal`` object when the answer carries one."""
@@ -487,7 +487,7 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 def _slot_profiles_table(settings: object) -> dict[str, Any]:
     """Every dispatched verb's slot as JSON: the owner picks the EFFECTIVE
-    work kind's slot from this table (a planless target rides blueprint)."""
+    work kind's slot from this table (the derived verb owns the phase, x-ebd2)."""
     out: dict[str, Any] = {}
     try:
         for verb in SLOT_VERBS:
@@ -538,8 +538,8 @@ def _slot_payload(
         node_payload = {
             "difficulty": node.get("difficulty"),
             "priority": node.get("priority"),
-            # Plan-presence evidence: the work-kind owner reads presence, never
-            # plan quality, and needs it even when the model axis is occupied.
+            # Audit evidence for the slot reader; the phase itself is decided
+            # by the derived verb (x-ebd2), never re-derived here.
             "plan_path": str(node.get("plan_path") or ""),
         }
     payload: dict[str, Any] = {
