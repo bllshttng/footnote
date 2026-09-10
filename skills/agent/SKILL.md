@@ -58,8 +58,8 @@ no `/target` wrap, no build inference. The focused core:
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
-| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-61df): default `pane` (owned-PTY drivable); `substrate thread` -> persistent thread; `substrate headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
-| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
+| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-61df): default `thread` where the harness seats one (persistent, portal view; `pane` placement flags or a `--` fence imply pane); `substrate pane` -> owned-PTY drivable; `substrate headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
+| `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `thread`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno agents mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `ask <name> "..."` | parse + refuse-empty + honest reply relay | `fno agents ask` - sync deliver into a live worker + reply-wait poll; reply on stdout | free |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
@@ -88,7 +88,7 @@ otherwise the whole argument is the spawn payload.
 
 ### Providers (all three are first-class)
 
-Default is claude on the `pane` substrate. When the user names a non-default provider, a `thread`/`headless` substrate, or a one-shot Q&A, load [references/workflow-routes.md](references/workflow-routes.md) for the provider/substrate matrix and per-provider receipt shapes; the default-path invariants hold everywhere: every spawn captures the worker's full resume UUID (best-effort) into the registry, and a codex/agy exec worker is a single autonomous pass, never loop-grade.
+Default is claude on the `thread` substrate. When the user names a non-default provider, a `thread`/`headless` substrate, or a one-shot Q&A, load [references/workflow-routes.md](references/workflow-routes.md) for the provider/substrate matrix and per-provider receipt shapes; the default-path invariants hold everywhere: every spawn captures the worker's full resume UUID (best-effort) into the registry, and a codex/agy exec worker is a single autonomous pass, never loop-grade.
 
 ### Inputs (dashless grammar - phone-first)
 
@@ -415,7 +415,7 @@ normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
 only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
 thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
 one-shot `claude -p` / `codex --exec` / `agy -p`);
-an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
+an empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam; pass `--portal N` to open the view with the spawn.
 Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 

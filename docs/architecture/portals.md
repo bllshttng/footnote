@@ -25,6 +25,7 @@ The tiling primitive already existed. The tab menu offers Join Left, Join Right,
 | Door | Gesture |
 |---|---|
 | CLI, spawn | `fno agents spawn --substrate thread --portal N` (one call; `--tab`/`--split` honored on a fresh open), or `fno mux thread <name> --portal N`. Omitted is portal 0. |
+| CLI, default spawn | A bare `fno agents spawn` seats a thread wherever the harness seats one and, from inside a mux, opens portal 0 on it automatically. `--portal N` names another index. |
 | Sideline, portal 0 | Enter (or a click) on a paneless live row. |
 | Sideline, a new portal | `P` opens the next free index. |
 | Layout | The existing Join actions tile open portals. |
