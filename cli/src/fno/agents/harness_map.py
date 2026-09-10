@@ -1149,12 +1149,96 @@ PERMISSION_MODE_HELP = (
 _VALID_SUBSTRATES = ("thread", "headless", "pane")
 _LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
-_DEFAULT_ALLOWED_VERBS = ("/target", "/think")
+_DEFAULT_ALLOWED_VERBS = ("/target", "/think", "/blueprint")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
 # Decision 9 / epic Boundaries). Oversized -> explicit error, never truncation.
 _BRIEF_MAX_BYTES = 8192
 # The default command is per-harness now (each harness's `dispatch_command` in
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
+
+
+#: The verbs the x-ebd2 lifecycle table owns. A declared verb outside this
+#: family (/think, a configured custom verb) abstains and keeps declared
+#: precedence; the table only ever answers target or blueprint.
+_TARGET_FAMILY_VERBS = ("/target", "/blueprint")
+
+
+def resolve_effective_verb(
+    *,
+    verb: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    plan_rung: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    """One conditional owns the target/blueprint workflow-verb decision (x-ebd2).
+
+    Two moments, two keys; neither answers the other's moment.
+
+    INTAKE - no plan exists (``plan_rung == "none"``), so there is no plan
+    status to read and operator law d-834b6ff1 keys on difficulty: ``low``
+    dispatches straight to ``/target`` (planless low is the system working,
+    not a defect); ``medium``/``high`` blueprint on a frontier lane first,
+    then a separate /target builds the resulting plan.
+
+    RE-DISPATCH - a linked plan exists, so its rung decides: ``idea``/
+    ``design`` keep ``/blueprint`` (the draft is unfinished); ``ready``/
+    ``in_progress``/``in_review`` advance to ``/target`` (re-planning finished
+    work is the x-aa4c defect).
+
+    ``verb`` (the node's stored dispatch_verb) is audit input, never lifecycle
+    truth: a target/blueprint-family value is reconciled through the same
+    table and the decision names both spellings, so correctness never depends
+    on the blueprint session closing having rewritten the graph field. A verb
+    OUTSIDE the family abstains - the caller's declared-verb rung keeps it.
+
+    Returns ``(canonical_verb, decision)``. A ``None`` verb means the table
+    abstains: no node context (``plan_rung is None``; the bare resolver keeps
+    the target template for capability introspection) or an out-of-family
+    declared verb.
+
+    Raises :class:`DispatchResolveError` when the node context is positive but
+    unanswerable: an ``unreadable``/``done``/``superseded`` plan, or a planless
+    node whose difficulty is absent or not one of low/medium/high.
+
+    ``plan_rung`` is a ``graph.ladder.Rung`` VALUE string, so this resolver
+    stays pure and never imports the graph package."""
+    raw_verb = (verb or "").strip()
+    if raw_verb.startswith("/fno:"):
+        raw_verb = "/" + raw_verb[len("/fno:"):]
+    if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
+        return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
+    if plan_rung is None:
+        return None, "verb=lifecycle(no-node-context)"
+    rung = plan_rung.strip().lower()
+    if rung == "none":
+        d = (difficulty or "").strip().lower()
+        if d not in ("low", "medium", "high"):
+            raise DispatchResolveError(
+                "dispatch verb cannot be derived: the node has no plan "
+                f"(plan rung none) and its difficulty reads {difficulty!r}; "
+                "law d-834b6ff1 derives it from difficulty (low|medium|high) "
+                "at intake (x-ebd2)"
+            )
+        answer = "/target" if d == "low" else "/blueprint"
+        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
+    elif rung in ("idea", "design"):
+        answer = "/blueprint"
+        note = f"verb=lifecycle(plan {rung} -> /blueprint"
+    elif rung in ("ready", "in_progress", "in_review"):
+        answer = "/target"
+        note = f"verb=lifecycle(plan {rung} -> /target"
+    elif rung in ("unreadable", "done", "superseded"):
+        raise DispatchResolveError(
+            "dispatch verb cannot be derived: the linked plan reads rung "
+            f"{rung!r}, which is not dispatchable (x-ebd2); fix the plan's "
+            "status or the node's plan_path"
+        )
+    else:
+        raise DispatchResolveError(
+            f"unknown plan rung {plan_rung!r}; expected a graph.ladder.Rung value"
+        )
+    if raw_verb and raw_verb != answer:
+        note += f"; stored dispatch_verb {raw_verb} reconciled"
+    return answer, note + ")"
 
 
 def resolve_dispatch(
@@ -1164,6 +1248,8 @@ def resolve_dispatch(
     node_id: Optional[str] = None,
     command: Optional[str] = None,
     verb: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    plan_rung: Optional[str] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1204,12 +1290,23 @@ def resolve_dispatch(
     unsupported autonomous ``pane``, an unknown trigger or substrate, or an
     empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
     (for tests)."""
+    decision: list[str] = []
+    # x-ebd2: the lifecycle rung derives the effective workflow verb BEFORE the
+    # config read, so the stage table resolves the DERIVED verb's profile row
+    # (agents.profiles.blueprint vs .target) instead of the raw stored verb's.
+    # An explicit command bypasses the table entirely: reconcile and the other
+    # explicit doors spell their own verb and are never re-derived.
+    lifecycle_verb: Optional[str] = None
+    if command is None or not command.strip():
+        lifecycle_verb, lifecycle_note = resolve_effective_verb(
+            verb=verb, difficulty=difficulty, plan_rung=plan_rung
+        )
+        decision.append(lifecycle_note)
     cfg = (
         dict(dispatch_cfg)
         if dispatch_cfg is not None
-        else _load_dispatch_cfg(settings, verb=verb)
+        else _load_dispatch_cfg(settings, verb=lifecycle_verb or verb)
     )
-    decision: list[str] = []
     chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
     if chosen_trigger not in ("autonomous", "attended"):
         raise DispatchResolveError(
@@ -1305,6 +1402,32 @@ def resolve_dispatch(
     if command is not None and command.strip():
         template = command.strip()
         decision.append("command=explicit")
+    elif lifecycle_verb is not None:
+        # The lifecycle table answered: the derived verb is this dispatch's
+        # phase authority (x-ebd2). A derived /target renders through the SAME
+        # rungs as the builtin (config template above the per-harness
+        # dispatch_command, merge posture from the grant) so a low-difficulty
+        # planless node dispatches byte-identically to the pre-x-ebd2 shape. A
+        # derived /blueprint renders its own verb: the operator's target
+        # template is a target-phase contract and does not apply.
+        if lifecycle_verb == "/target":
+            _cmd = cfg.get("command")
+            _allow_merge = (
+                cfg.get("auto_merge") is True or posture == "allow"
+            ) and posture != "no-merge"
+            template = (
+                _cmd if isinstance(_cmd, str) and _cmd
+                else dispatch_command(chosen_harness, allow_merge=_allow_merge)
+            ).strip()
+            if cfg.get("command"):
+                decision.append("command=config(derived-target)")
+            else:
+                decision.append(
+                    f"command=derived-target({'merge' if _allow_merge else 'no-merge'})"
+                )
+        else:
+            template = f"{lifecycle_verb} {{id}}"
+            decision.append(f"command=derived({lifecycle_verb})")
     elif verb is not None:
         chosen_verb = verb.strip()
         if not chosen_verb:
@@ -1427,6 +1550,10 @@ def resolve_dispatch(
         "harness": chosen_harness,
         "substrate": chosen_substrate,
         "command": resolved_command,
+        # x-ebd2: the lifecycle-derived canonical verb, or None when the table
+        # abstained (bare resolve, explicit command, out-of-family declared
+        # verb) - the raw source state stays in the caller's verb_source.
+        "verb": lifecycle_verb,
         "command_surface": caps["command_surface"],
         "permission_bypass": list(caps["permission_bypass"]),
         "resume": caps["resume"],
