@@ -73,10 +73,12 @@ mod retire_session;
 mod row_set;
 mod shutdown_capture;
 mod squad_persistence;
+mod keeper_adopt;
 mod squad_sync;
 mod truth_probe;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
+use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
 use self::truth_probe::TruthReading;
 use self::truth_probe::{probe_truth_map, TruthProbeLatch, TRUTH_PROBE_EVERY};
 
@@ -1115,24 +1117,6 @@ fn refused_worker_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_REFUSED_WORKER=")
 }
 
-/// Resolve the `fno-agents-worker` binary the keeper lane execs. Shared
-/// shape with `fno_agents_bin` via `paired_bin`: env override, installed
-/// sibling, dev-tree target dir, PATH.
-fn keeper_worker_bin() -> std::path::PathBuf {
-    crate::digest_overlay::paired_bin("FNO_AGENTS_WORKER_BIN", "fno-agents-worker")
-}
-
-/// A pane this server re-adopted from a surviving keeper at startup, before
-/// any stored member is knowable. Restore binds it to its member (or gives
-/// it a tab of its own); `placed` is the once-only guard for that binding.
-#[derive(Clone)]
-struct AdoptedKeeper {
-    pane: u64,
-    child_pid: Option<u32>,
-    argv: Vec<String>,
-    cwd: String,
-    placed: bool,
-}
 
 /// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
@@ -7800,232 +7784,6 @@ impl Core {
     /// in the sideline without stealing the view. Per-squad failure isolation:
     /// a squad that cannot even open a shell is skipped with a notice, never a
     /// crash (AC2-FR: a degraded restore leaves a fully usable session).
-    /// Re-adopt surviving keeper panes at server start, BEFORE restore runs
-    /// (an ordering constraint, not a preference: restore must see adopted
-    /// panes as already-live members so it binds them instead of spawning
-    /// replacements). For each socket: handshake with a short timeout, build
-    /// the Keeper shell, replay the detached window into a fresh grid, and
-    /// stage the adoption for restore to bind. A socket with nothing live
-    /// behind it is unlinked and NAMED - it is a dead keeper's leftover, not
-    /// a pane to wait on.
-    fn keeper_readopt(&mut self) {
-        let sockets = crate::pty::keeper_sockets(&self.session_name);
-        for (key, sock) in sockets {
-            // The birth pane id is the socket stem's key: adopt at it whenever
-            // it is reusable. Only key 0 or a key already live under a pane
-            // falls back to a fresh id, and that pane then reads unreconciled.
-            let (id, reconciled) = if key != 0 && !self.panes.contains_key(&key) {
-                (key, true)
-            } else {
-                let reason = if key == 0 {
-                    "pane key 0 is not adoptable".to_string()
-                } else {
-                    format!("pane {key} is already live")
-                };
-                let Ok(fresh) = self.reserve_pane_id() else {
-                    break;
-                };
-                self.notice_all(format!(
-                    "keeper readopt: {} carries pane key {key} but {reason}; adopting at fresh pane {fresh} as unreconciled",
-                    sock.display()
-                ));
-                (fresh, false)
-            };
-            match crate::pty::adopt_keeper_socket(
-                &sock,
-                id,
-                self.out_tx.clone(),
-                self.exit_tx.clone(),
-            ) {
-                Ok(crate::pty::KeeperAdopt::NoListener) => {
-                    let _ = std::fs::remove_file(&sock);
-                    self.notice_all(format!(
-                        "keeper readopt: {} had no live keeper behind it; removed",
-                        sock.display()
-                    ));
-                }
-                Ok(crate::pty::KeeperAdopt::SeatHeld) => {
-                    // A live keeper whose subscriber seat is still held: a
-                    // server mid-death. Leave the socket alone - the pane is
-                    // real and the next start adopts it - and say so. Any
-                    // freshly reserved id simply goes unused.
-                    self.notice_all(format!(
-                        "keeper readopt: {} still holds a subscriber seat; left for the next start",
-                        sock.display()
-                    ));
-                }
-                Ok(crate::pty::KeeperAdopt::Adopted(adoption)) => {
-                    let str_list = |key: &str| -> Vec<String> {
-                        adoption
-                            .reply
-                            .get(key)
-                            .and_then(serde_json::Value::as_array)
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    };
-                    let str_field = |key: &str| -> String {
-                        adoption
-                            .reply
-                            .get(key)
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string()
-                    };
-                    let num_field = |key: &str| -> u16 {
-                        adoption
-                            .reply
-                            .get(key)
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(24)
-                            .clamp(1, u16::MAX as u64) as u16
-                    };
-                    let argv = str_list("argv");
-                    let cwd = str_field("cwd");
-                    let child_pid = adoption
-                        .reply
-                        .get("child_pid")
-                        .and_then(serde_json::Value::as_u64)
-                        .map(|p| p as u32);
-                    let rows = num_field("rows");
-                    let cols = num_field("cols");
-                    if let Err(e) = self.register_pane(
-                        id,
-                        adoption.shell,
-                        rows,
-                        cols,
-                        node_from_argv(&argv),
-                        agent_self_from_argv(&argv),
-                        cwd.clone(),
-                        cmd_from_argv(&argv),
-                        account_from_argv(&argv),
-                        resume_target_from_argv(&argv),
-                        refused_worker_from_argv(&argv),
-                    ) {
-                        self.notice_all(format!(
-                            "keeper readopt: {} refused registration ({e}); child was not adopted",
-                            sock.display()
-                        ));
-                        continue;
-                    }
-                    // The detached window (AC3-HP): the keeper replayed its
-                    // ring during the handshake; feed it before any layout
-                    // push so the first frame the operator sees carries it.
-                    if !adoption.ring.is_empty() {
-                        if let Some(entry) = self.panes.get_mut(&id) {
-                            entry.vt.feed(&adoption.ring);
-                        }
-                    }
-                    if !reconciled {
-                        if let Some(entry) = self.panes.get_mut(&id) {
-                            entry.unreconciled = true;
-                        }
-                    }
-                    self.keeper_adopted.push(AdoptedKeeper {
-                        pane: id,
-                        child_pid,
-                        argv,
-                        cwd,
-                        placed: false,
-                    });
-                    self.notice_all(format!(
-                        "keeper readopt: re-adopted pane {id} (child pid {}) from {}",
-                        child_pid
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "?".into()),
-                        sock.display()
-                    ));
-                }
-                Err(e) => {
-                    // A keeper that refuses the handshake is wedged or speaks
-                    // an incompatible protocol: name it and keep adopting the
-                    // rest. The socket STAYS - a live listener is the pane's
-                    // only address, and unlinking it strands a running child
-                    // with no path to re-adopt it (the same leave-alone policy
-                    // as SeatHeld). The next start retries the handshake; a
-                    // socket whose keeper is actually gone lands in the
-                    // NoListener arm above and is removed there.
-                    self.notice_all(format!(
-                        "keeper readopt: {} refused adoption ({e}); left in place for the next start",
-                        sock.display()
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Bind one stored worker member to its re-adopted pane, once. The join
-    /// is the member's own identity read back out of the pane's argv: the
-    /// registered worker name (FNO_AGENT_SELF) or the resumed session id.
-    /// Returns the pane and registers the `worker_pane` mapping restore's
-    /// reconcile-first resume relies on, so a later resume FOCUSES the
-    /// adopted pane instead of spawning a second writer.
-    fn take_adopted_for_member(&mut self, m: &crate::squad_store::StoredMember) -> Option<u64> {
-        let worker = m.worker.as_deref();
-        let session_id = m.harness_session_id.as_deref();
-        let hit = self.keeper_adopted.iter_mut().find(|a| {
-            if a.placed {
-                return false;
-            }
-            let by_name = worker.is_some() && agent_self_from_argv(&a.argv).as_deref() == worker;
-            let by_session =
-                session_id.is_some() && resume_target_from_argv(&a.argv).as_deref() == session_id;
-            by_name || by_session
-        });
-        let a = hit?;
-        a.placed = true;
-        Some(a.pane)
-    }
-
-    /// Place any adopted pane restore's member walk did not bind (its stored
-    /// member is gone, or the store held no squads at all). A live pane must
-    /// never be left dangling without a tab: one tab each, named from the
-    /// pane's command, inside the squad owning its cwd (else home).
-    fn place_adopted_leftovers(&mut self, home_sid: u64) {
-        let unplaced: Vec<AdoptedKeeper> = self
-            .keeper_adopted
-            .iter()
-            .filter(|a| !a.placed)
-            .cloned()
-            .collect();
-        for a in unplaced {
-            let owner = self
-                .session
-                .squads
-                .iter()
-                .find(|s| !a.cwd.is_empty() && s.owns_path(&a.cwd))
-                .map(|s| s.id)
-                .unwrap_or(home_sid);
-            if self.session.squad(owner).is_none() {
-                continue;
-            }
-            let cmd = cmd_from_argv(&a.argv).unwrap_or_else(|| "pane".into());
-            let tid = self.session.mint_tab_id();
-            let tab = Tab {
-                name: Some(cmd),
-                id: tid,
-                root: Node::Leaf(a.pane),
-                focus: a.pane,
-            };
-            let Some(sq) = self.session.squads.iter_mut().find(|s| s.id == owner) else {
-                continue;
-            };
-            sq.tabs.push(tab);
-            if let Some(entry) = self.keeper_adopted.iter_mut().find(|x| x.pane == a.pane) {
-                entry.placed = true;
-            }
-            self.notice_all(format!(
-                "keeper readopt: pane {} (child pid {}) placed in its own tab; no stored member matches it",
-                a.pane,
-                a.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-            ));
-        }
-    }
-
     fn restore_squads(&mut self, rows: u16, cols: u16, home_sid: u64) {
         // Heal the store before reading (x-e447): the old random-mint identity
         // let a repo's home squad append a row per mux restart. The write side
@@ -10633,30 +10391,17 @@ impl Core {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
-        // Fail closed: a pane whose identity did not reconcile is never typed
-        // into blind - the number may name a different occupant than its label
-        // claims. A mis-delivered send is worse than a refused one. A pane with
-        // no label at all is an operator shell and is untouched.
-        if entry.unreconciled {
-            let host = entry.name.as_deref().unwrap_or("<no label>");
-            return ServerMsg::Err {
-                code: err_code::TARGET_IDENTITY_MISMATCH,
-                msg: format!(
-                    "pane {pane} carries label {host}; its birth pane id could not be reused, so it was adopted at a fresh id and its identity never reconciled; re-address by session id through `fno mux where`"
-                ),
-            };
-        }
-        if expected_identity.is_none() {
-            if let (Some(host), Ok(rows)) = (entry.name.as_deref(), agents.as_deref()) {
-                if self.fno_id_for_pane_with_agents(pane, rows).is_none() {
-                    return ServerMsg::Err {
-                        code: err_code::TARGET_IDENTITY_MISMATCH,
-                        msg: format!(
-                            "pane {pane} carries label {host} but no session id resolves for it; re-address by session id through `fno mux where`"
-                        ),
-                    };
-                }
-            }
+        if let Some(refusal) = self.pane_send_identity_gate(
+            pane,
+            entry.name.as_deref(),
+            entry.unreconciled,
+            expected_identity,
+            match &agents {
+                Ok(rows) => Ok(rows.as_slice()),
+                Err(reason) => Err(*reason),
+            },
+        ) {
+            return refusal;
         }
         if let Some(expected) = expected_identity {
             let host = entry.name.as_deref().unwrap_or("<unknown>");
@@ -16095,6 +15840,10 @@ mod tests {
     // shrink-only under the file-budget gate. Moved verbatim.
     mod server_restore_tests;
     mod shutdown_tests;
+    // The keeper re-adoption test family, same treatment.
+    mod keeper_adopt_tests;
+    // The pane_send fail-closed gate family.
+    mod pane_send_gate_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
@@ -16867,51 +16616,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
-        // Fail closed: a pane adopted at a fresh id is refused even unaddressed.
-        // The assertion is the refusal itself, never "the bytes did not land".
-        let (mut core, pane) = template_core();
-        {
-            let entry = core.panes.get_mut(&pane).unwrap();
-            entry.name = Some("bp-f8b1-unplanned".into());
-            entry.unreconciled = true;
-        }
-        match core.pane_send(pane, b"payload", false, None, Ok(Vec::new())) {
-            ServerMsg::Err { code, msg } => {
-                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
-                assert!(
-                    msg.contains(&format!("pane {pane}")),
-                    "names the pane: {msg}"
-                );
-                assert!(
-                    msg.contains("bp-f8b1-unplanned"),
-                    "names the label it carries: {msg}"
-                );
-                assert!(msg.contains("fno mux where"), "names the way out: {msg}");
-            }
-            other => panic!("expected unreconciled refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pane_send_refuses_a_labelled_pane_whose_identity_resolves_nothing() {
-        // The measured incident shape: a worker label, a readable registry,
-        // and no session id joining the two. A plain send used to type
-        // straight into whatever the pty now held.
-        let (mut core, pane) = template_core();
-        core.session_name = "sess".into();
-        core.panes.get_mut(&pane).unwrap().name = Some("drifter".into());
-        let elsewhere = agent_in("sess", pane + 500, Some(AgentBadge::Done), false);
-        match core.pane_send(pane, b"payload", false, None, Ok(vec![elsewhere])) {
-            ServerMsg::Err { code, msg } => {
-                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
-                assert!(msg.contains("drifter"), "names the label: {msg}");
-                assert!(msg.contains("fno mux where"), "names the way out: {msg}");
-            }
-            other => panic!("expected unresolved-identity refusal, got {other:?}"),
-        }
-    }
 
     #[test]
     fn watch_only_bg_row_surfaces_while_foreign_pane_is_skipped() {
@@ -24319,52 +24023,6 @@ mod tests {
         assert!(core.unique_worker_pane_by_name("reused-name").is_err());
     }
 
-    #[test]
-    fn member_pane_reads_the_recorded_pane_id_first_and_falls_through_when_it_is_gone() {
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let recorded = core.spawn_pane(24, 80, "/a").unwrap();
-        let joined = core.spawn_pane(24, 80, "/a").unwrap();
-        core.worker_session_pane
-            .insert(("codex".into(), "session-one".into()), joined);
-        let member = crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: Some("t-worker".into()),
-            harness: Some("codex".into()),
-            harness_session_id: Some("session-one".into()),
-            pane_id: Some(recorded),
-        };
-        assert_eq!(
-            core.member_pane(&member),
-            Some(recorded),
-            "a recorded live pane id wins over the derived join"
-        );
-        let gone = crate::squad_store::StoredMember {
-            pane_id: Some(joined + 100),
-            ..member.clone()
-        };
-        assert_eq!(
-            core.member_pane(&gone),
-            Some(joined),
-            "a dead recorded id falls through to the member's own session join"
-        );
-        let stranger = crate::squad_store::StoredMember {
-            harness_session_id: Some("session-two".into()),
-            ..gone.clone()
-        };
-        assert_eq!(
-            core.member_pane(&stranger),
-            None,
-            "a dead recorded id never lands on another worker's pane"
-        );
-    }
-
-    #[test]
     fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
         // (x-b029) AC3-HP: a pane the daemon re-homed through the resume path
         // resolves its fno_id from the (harness, session) record the resume
@@ -26492,173 +26150,6 @@ mod tests {
         KeeperProcess(child)
     }
 
-    #[test]
-    fn keeper_readopt_adopts_the_surviving_child_and_binds_it_to_its_member() {
-        let Some(bin) = keeper_test_bin() else {
-            eprintln!(
-                "SKIPPING keeper_readopt_adopts_the_surviving_child_and_binds_it_to_its_member: \
-                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
-            );
-            return;
-        };
-        let dir = crate::proto::mux_dir().join("panes");
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("kt-3.sock");
-        let _ = std::fs::remove_file(&sock);
-        // The provider argv carries the worker name exactly the mesh wrapper
-        // carries it, so the re-adopt join runs the real parser.
-        let keeper = spawn_keeper_for_test(
-            &bin,
-            &sock,
-            &["env", "FNO_AGENT_SELF=t-keeper-worker", "sleep", "300"],
-        );
-        // The keeper binds asynchronously; the sweep scans what EXISTS, so
-        // wait for the socket before sweeping (a real server start meets
-        // keepers that are minutes old, never milliseconds).
-        let bound = Instant::now();
-        while !sock.exists() {
-            assert!(
-                bound.elapsed() < Duration::from_secs(10),
-                "keeper never bound its socket"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
-        let mut core = empty_core();
-        core.session_name = "kt".to_string();
-        core.keeper_readopt();
-
-        assert_eq!(core.panes.len(), 1, "the live keeper became one pane");
-        assert_eq!(
-            core.keeper_adopted.len(),
-            1,
-            "the adoption is staged for restore"
-        );
-        let pane = core.keeper_adopted[0].pane;
-        assert_eq!(
-            pane, 3,
-            "the pane is adopted at the id its socket stem carries"
-        );
-        assert!(
-            !core.panes[&pane].unreconciled,
-            "a reused birth id is reconciled"
-        );
-        let child_pid = core.keeper_adopted[0]
-            .child_pid
-            .expect("the adopt names the child pid");
-        assert_ne!(
-            child_pid,
-            keeper.0.id(),
-            "the recorded pid is the CHILD's, never the keeper's"
-        );
-        assert_eq!(
-            core.panes[&pane].pty.child_pid(),
-            Some(child_pid),
-            "pane ls will read the child pid"
-        );
-        assert_eq!(
-            core.panes[&pane].name.as_deref(),
-            Some("t-keeper-worker"),
-            "the pane is named from the argv's worker token"
-        );
-
-        // The restore-side join: the member binds by the worker name read
-        // back out of the adopted argv, once, and a stranger never binds.
-        let member = crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: Some("/tmp".into()),
-            worker: Some("t-keeper-worker".into()),
-            harness: Some("claude".into()),
-            harness_session_id: Some("sess-1".into()),
-            pane_id: None,
-        };
-        assert_eq!(
-            core.take_adopted_for_member(&member),
-            Some(pane),
-            "the member's pane is the adopted one"
-        );
-        assert_eq!(
-            core.take_adopted_for_member(&member),
-            None,
-            "the binding is once-only"
-        );
-    }
-
-    #[test]
-    fn keeper_readopt_adopts_at_a_fresh_unreconciled_id_when_the_birth_id_is_taken() {
-        let Some(bin) = keeper_test_bin() else {
-            eprintln!(
-                "SKIPPING keeper_readopt_adopts_at_a_fresh_unreconciled_id_when_the_birth_id_is_taken: \
-                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
-            );
-            return;
-        };
-        let dir = crate::proto::mux_dir().join("panes");
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("ku-3.sock");
-        let _ = std::fs::remove_file(&sock);
-        let _keeper = spawn_keeper_for_test(
-            &bin,
-            &sock,
-            &["env", "FNO_AGENT_SELF=t-keeper-taken", "sleep", "300"],
-        );
-        let bound = Instant::now();
-        while !sock.exists() {
-            assert!(
-                bound.elapsed() < Duration::from_secs(10),
-                "keeper never bound its socket"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
-
-        let mut core = empty_core();
-        core.session_name = "ku".to_string();
-        core.shells = vec!["/bin/cat".into()];
-        core.next_pane_id = 3;
-        let squatter = core.spawn_pane(24, 80, "/tmp").unwrap();
-        assert_eq!(squatter, 3, "the birth id is occupied before the sweep");
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.keeper_readopt();
-
-        assert_eq!(core.keeper_adopted.len(), 1, "the live keeper is adopted");
-        let pane = core.keeper_adopted[0].pane;
-        assert_ne!(pane, squatter, "an occupied birth id is never reused");
-        assert!(
-            core.panes[&pane].unreconciled,
-            "a fresh-id adoption is marked unreconciled"
-        );
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("ku-3.sock") && notices.contains("as unreconciled"),
-            "the fallback names the socket and the outcome: {notices}"
-        );
-    }
-
-    #[test]
-    fn keeper_readopt_unlinks_a_socket_with_no_live_keeper_and_names_it() {
-        let dir = crate::proto::mux_dir().join("panes");
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("kt-9.sock");
-        std::fs::write(&sock, b"").unwrap(); // a dead keeper's leftover
-
-        let mut core = empty_core();
-        core.session_name = "kt".to_string();
-        core.keeper_readopt();
-
-        assert!(
-            !sock.exists(),
-            "a socket with nothing behind it is removed, not waited on"
-        );
-        assert!(
-            core.panes.is_empty(),
-            "no pane is minted for a stale socket"
-        );
-    }
 
     #[test]
     fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
