@@ -1308,9 +1308,8 @@ def cmd_spawn(
         "--portal",
         help=(
             "Open a portal on the spawned THREAD after the receipt (index "
-            "0-255): the view into the worker. Thread-only - a pane hosts its "
-            "own view and a one-shot exits before it can be viewed. A spawn "
-            "from inside a mux that takes the built-in thread default opens "
+            "0-255): the view into the worker. Thread-only. A spawn from "
+            "inside a mux that takes the built-in thread default opens "
             "portal 0 unless you name another index."
         ),
     ),
@@ -1502,9 +1501,8 @@ def cmd_spawn(
     # receipts stay byte-parity-locked with the Rust client, so they don't
     # carry it.
 
-    # The substrate axis (x-2c27): headless is the ergonomic shortcut and wins
-    # over an explicit --substrate (x-c772); an empty value resolves through
-    # built-in default: thread where seated, else pane.
+    # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
+    # an empty value resolves to the built-in default (thread where seated).
     if headless:
         substrate = "headless"
     if not substrate:
@@ -2540,8 +2538,7 @@ def cmd_spawn(
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
     if portal is not None and substrate == "bg" and spawn_succeeded:
-        # Post-receipt placement: the receipt is the truth, so a placement
-        # failure never recolors the spawn verdict.
+        # Post-receipt placement; a failure never recolors the spawn verdict.
         from fno.agents.spawn_defaults import place_thread_portal
 
         place_thread_portal(result.name, portal)
