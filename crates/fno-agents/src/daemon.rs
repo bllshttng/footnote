@@ -2408,10 +2408,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
-                // Serve-only liveness tick (x-e05d): the served pair is the
-                // sweep's measurement, refreshed every SERVED_LIVENESS_CADENCE
-                // with no lifecycle write. Off-loop behind a one-in-flight
-                // gate, like the reaper above; the tick is event-silent.
+                // Serve-only liveness tick: the served pair is the sweep's
+                // measurement, refreshed every SERVED_LIVENESS_CADENCE with
+                // no lifecycle write. Off-loop behind a one-in-flight gate,
+                // like the reaper above; the tick is event-silent.
                 let codex_threads_for_liveness = Arc::clone(&ctx.codex_threads);
                 crate::liveness_sweep::maybe_sweep(
                     &mut last_liveness_sweep,
@@ -8058,24 +8058,32 @@ pub(crate) fn run_reconcile_sweep(
     // rows are simply deferred to the next tick, the same fairness the probe
     // loop itself relies on. Best-effort and non-fatal otherwise: an I/O
     // failure here must never fail the sweep that already wrote the registry.
-    let progress_path = home.roster_progress_json();
-    for ch in &changes {
-        if start.elapsed() >= RECONCILE_SWEEP_BUDGET {
-            break;
-        }
-        let Some(e) = entries.iter().find(|e| e.name == ch.name) else {
-            continue;
-        };
-        if e.cwd.is_empty() {
-            continue;
-        }
-        if let Err(err) =
-            crate::roster_progress::refresh_row(&progress_path, &e.name, Path::new(&e.cwd), &now)
-        {
-            eprintln!(
-                "reconcile: roster-progress refresh failed for {}: {err}",
-                e.name
-            );
+    // Full-only: the serve-only tick runs every 60s, and per-minute git/gh
+    // subprocess churn for a stamp the tick does not serve is load the
+    // measurement never asked for.
+    if matches!(mode, SweepMode::Full) {
+        let progress_path = home.roster_progress_json();
+        for ch in &changes {
+            if start.elapsed() >= RECONCILE_SWEEP_BUDGET {
+                break;
+            }
+            let Some(e) = entries.iter().find(|e| e.name == ch.name) else {
+                continue;
+            };
+            if e.cwd.is_empty() {
+                continue;
+            }
+            if let Err(err) = crate::roster_progress::refresh_row(
+                &progress_path,
+                &e.name,
+                Path::new(&e.cwd),
+                &now,
+            ) {
+                eprintln!(
+                    "reconcile: roster-progress refresh failed for {}: {err}",
+                    e.name
+                );
+            }
         }
     }
 
