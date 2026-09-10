@@ -131,7 +131,7 @@ python3 "${REPO_ROOT}/scripts/lib/stamp-plan.py" graduate \
   --plan-path "$PLAN_PATH"
 ```
 
-`graduate` is conditional: it reads `expected_url_count` from the frontmatter, counts the current `urls` list, and only flips `in_review` to `done` when the count is met. On intermediate ships of a cross-project plan it exits 0 without touching the file. The graph.json sync follows a `done` transition.
+`graduate` is conditional. It reads `expected_url_count` from the frontmatter and counts the current `urls` list. At the full count, `in_review` flips to `done`. On intermediate ships of a cross-project plan it exits 0 without touching the file. The graph.json sync follows a `done` transition.
 
 ### 3. Stop-hook backfill
 

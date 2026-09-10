@@ -22,7 +22,7 @@ projects, sleeping between drains. Config-gated, default-off, fail-safe.
 
 Footnote's headless loop is already a deterministic dispatcher: `run_loop` pulls `queue.next()`, hands the unit to `dispatcher.run(unit)`, and moves on. Selection is a pure rule (status, dependencies, priority lane key, claim lease) with no relatedness judgment anywhere on the path. The gap was that the loop is *invocation-scoped*: a human starts a target run, or arms merge-triggered auto-continue, and the loop terminates on `NoWork`. This feature adds the **always-on** behavior so the board drains itself.
 
-The motivating defect: when a foreground reasoning agent sits in the dispatcher seat ("work the backlog"), it invents an unprompted thematic-coherence filter ("this node has nothing to do with the last one, I won't fire it") that fires inconsistently and sometimes wrongly. This design removes the reasoning agent from the firing decision entirely: firing becomes a rule the daemon executes, and any legitimate scoping is a **deterministic** gate (project scope, `--mission`, `blocked_by` edges), never an LLM inference.
+The motivating defect: a foreground reasoning agent in the dispatcher seat ("work the backlog") invents an unprompted thematic-coherence filter. One shape: "this node has nothing to do with the last one, so I will not fire it." The filter fires inconsistently and sometimes wrongly. This design removes the reasoning agent from the firing decision entirely. Firing becomes a rule the daemon executes. Any legitimate scoping is a **deterministic** gate (project scope, `--mission`, `blocked_by` edges), never an LLM inference.
 
 ## Shape
 
@@ -99,13 +99,13 @@ config.active_backlog (master switch) + epics with mission_active=true
 
 ## The single-owner contract
 
-Walker exclusion is now enforced **per dependent root, inside the converge core**, not at the daemon tick. `fno backlog advance --epic` calls `_walker_live_at(root)` for each child before dispatching it, so a live `walker:<root>` claim on a given project makes the converge core skip that project's children while other projects keep dispatching. The retired `/megawalk` walker was the claim's original writer. With it gone the check stands as a defensive guard, and node/dispatch claim dedup (`node:<id>` / `dispatch:<id>`) inside the converge core keeps the daemon and a manual dispatch from both launching the same node.
+Walker exclusion is now enforced **per dependent root, inside the converge core**, not at the daemon tick. `fno backlog advance --epic` calls `_walker_live_at(root)` for each child before dispatching it. A live `walker:<root>` claim on a project makes the converge core skip that project's children while other projects keep dispatching. The retired `/megawalk` walker was the claim's original writer. With it gone the check stands as a defensive guard. Node/dispatch claim dedup (`node:<id>` / `dispatch:<id>`) inside the converge core keeps the daemon and a manual dispatch from both launching the same node.
 
-> **Coarseness note (tracked follow-up).** `advance_epic` also checks the *epic repo's* walker once before enumerating children, so a live `walker:` claim in the epic's own repo can pause the whole mission. Refining this to per-root only is a deferred item. See the mission-drain hardening follow-up.
+> **Coarseness note (tracked follow-up).** `advance_epic` also checks the *epic repo's* walker once before enumerating children. A live `walker:` claim in the epic's own repo can pause the whole mission. Refining this to per-root only is a deferred item. See the mission-drain hardening follow-up.
 
 ## Relationship to the retired megawalk walker
 
-The daemon inherits the trigger layer the retired megawalk walker used to own. The walker's engine (selection, live-claims filter, park-exclusion, lane order) is gone with `loop_megawalk.rs`. What survives is the same outcome through composable pieces: `fno backlog next` owns selection (the same rule the walker shelled), merge-triggered `fno backlog advance` and headless `loop run` cover the invocation-scoped triggers, and the resident daemon is the always-on owner of the drain. The manual board-wide trigger is `/fno:target bg --all-ready`. The `walker:<cwd>` claim family stays honored so a stale claim can never double-fire a dispatch.
+The daemon inherits the trigger layer the retired megawalk walker used to own. The walker's engine (selection, live-claims filter, park-exclusion, lane order) is gone with `loop_megawalk.rs`. What survives is the same outcome through composable pieces. `fno backlog next` owns selection (the same rule the walker shelled). Merge-triggered `fno backlog advance` and headless `loop run` cover the invocation-scoped triggers. The resident daemon is the always-on owner of the drain. The manual board-wide trigger is `/fno:target bg --all-ready`. The `walker:<cwd>` claim family stays honored so a stale claim can never double-fire a dispatch.
 
 ## Operator receipts
 
