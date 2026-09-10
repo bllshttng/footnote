@@ -240,6 +240,7 @@ backlog unqueue	T1	backlog unqueue	0
 backlog unsupersede	T1	backlog unsupersede	0
 backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
 backlog view	T1	backlog view	3
+backlog worked	T1	backlog worked	2
 bundle check	T1	bundle check	11
 bundle lint	T1	bundle lint	2
 carveout add	T1	carveout add	27
