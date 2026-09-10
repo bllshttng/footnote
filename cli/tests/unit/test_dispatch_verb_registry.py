@@ -227,6 +227,23 @@ def test_registry_verb_required_skill_present_resolves(isolated: Path):
     assert out["command"] == "/sec-audit x-1"
 
 
+def test_registry_verb_skill_probe_reads_first_token(isolated: Path):
+    """The invocation may carry args; the probe reads the first token only,
+    never the tail - a two-token invocation must not refuse an installed skill."""
+    _install_skill(isolated / "project", "sec-audit")
+    cfg = {
+        "verb_registry": {
+            "/security-audit": DispatchVerbDescriptor(
+                invocation="/sec-audit --deep", requires="skill"
+            )
+        }
+    }
+    out = resolve_dispatch(
+        harness="claude", verb="/security-audit", node_id="x-1", dispatch_cfg=cfg
+    )
+    assert out["command"] == "/sec-audit --deep x-1"
+
+
 def test_bare_allowlist_path_is_unchanged():
     """Upgrade safety: a config setting only allowed_verbs resolves byte-identical.
     `/marketing` is not a shipped fno verb, so codex's normalizer passes the

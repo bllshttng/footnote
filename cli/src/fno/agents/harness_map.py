@@ -1426,7 +1426,12 @@ def resolve_dispatch(
         if descriptor is not None:
             # Registry verb: descriptor carries spelling, capability, claim.
             if descriptor.requires == "skill":
-                skill_name = descriptor.invocation.lstrip("/").split(":")[-1]
+                # Probe the invocation's FIRST token, never the tail: the
+                # verb may carry args, and the reviewer probe's _skill_id
+                # runs the same first-token contract. A malformed invocation
+                # falls back to the registry key.
+                head = descriptor.invocation.split()
+                skill_name = (head[0] if head else chosen_verb).lstrip("/").split(":")[-1]
                 status, reason = resolve_skill_presence(
                     skill_name, chosen_harness, context="config.dispatch.verb_registry"
                 )
