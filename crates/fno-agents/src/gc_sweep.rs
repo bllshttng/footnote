@@ -667,8 +667,8 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
 /// --json --all` snapshot. `Some(reason)` proves the session finished - the
 /// same standard rm's live gate accepts. A finished claude agent never
 /// leaves the roster; it stays listed with state `done`, so absence can
-/// never be the proof here. `blocked` is NOT terminal: the row may be
-/// rotated and resumed, so it holds.
+/// never be the proof here. `blocked` is NOT terminal: the session is
+/// waiting for input, so it holds.
 pub(crate) fn claude_death_reason(
     e: &state::RegistryEntry,
     agents: &crate::claude_roster::ClaudeAgentsSnapshot,
