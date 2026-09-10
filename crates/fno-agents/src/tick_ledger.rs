@@ -24,6 +24,12 @@ use crate::loop_runtime::Journal;
 /// The journal event type every arm writes once per run.
 pub const EVENT_TYPE: &str = "control_plane_tick";
 
+/// The launchd scheduler label the pr-watch-hosted arms write in their tick
+/// rows; the same string `cli/src/fno/pr_watch/cli.py` emits.
+pub const SCHED_LAUNCHD: &str = "launchd:sh.fno.pr-watcher";
+/// The daemon scheduler label the in-daemon arms write.
+pub const SCHED_DAEMON: &str = "daemon";
+
 /// One known arm and the default interval its staleness is judged against.
 /// The row's own `interval_s` field overrides the default, so an operator who
 /// tunes an arm's config keeps the verdict honest without touching this table.
@@ -33,6 +39,9 @@ pub const EVENT_TYPE: &str = "control_plane_tick";
 pub struct ArmSpec {
     pub arm: &'static str,
     pub default_interval_s: u64,
+    /// Who schedules this arm, so a never-ticked row names its scheduler and
+    /// `explain` can blame the tier that owns the silence.
+    pub scheduler: &'static str,
 }
 
 /// Every arm the readout shows, whether or not it has ever ticked.
@@ -40,38 +49,47 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
         arm: "king_wake",
         default_interval_s: 900,
+        scheduler: SCHED_LAUNCHD,
     },
     ArmSpec {
         arm: "watchdog",
         default_interval_s: 600,
+        scheduler: SCHED_LAUNCHD,
     },
     ArmSpec {
         arm: "pr_watch_merge",
         default_interval_s: 600,
+        scheduler: SCHED_LAUNCHD,
     },
     ArmSpec {
         arm: "active_backlog",
         default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
     },
     ArmSpec {
         arm: "auto_continue",
         default_interval_s: 1800,
+        scheduler: "session",
     },
     ArmSpec {
         arm: "notify_watch",
         default_interval_s: 300,
+        scheduler: SCHED_LAUNCHD,
     },
     ArmSpec {
         arm: "stop_hook",
         default_interval_s: 0,
+        scheduler: "hook:target-stop-hook",
     },
     ArmSpec {
         arm: "reap",
         default_interval_s: 60,
+        scheduler: SCHED_DAEMON,
     },
     ArmSpec {
         arm: "retire",
         default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
     },
 ];
 
@@ -136,6 +154,16 @@ pub struct ArmStatus {
     /// True when the arm never ticked, or its newest tick is older than twice
     /// its interval. Event-driven arms (interval 0) never read stale.
     pub stale: bool,
+    /// Fresh, but its newest run failed: the skip reason is itself a failure
+    /// token ([`FAILURE_SKIPS`]). Renders FAIL, not ok.
+    pub failing: bool,
+    /// Why a stale row is red, set by [`explain`]. `Some("unexplained")`
+    /// means the rules ran and found nothing - a written token, never an
+    /// absent field, so the reader can tell the rules ran.
+    pub cause: Option<String>,
+    /// The rendered readout line, filled by [`explain`] for every row, red or
+    /// not, so no consumer re-formats it.
+    pub line: String,
 }
 
 /// Fold every journal (plus `.1` rotations) into one row per known arm.
@@ -157,6 +185,7 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
         .map(|spec| {
             arm_status(
                 spec.arm,
+                Some(spec.scheduler),
                 spec.default_interval_s,
                 newest.get(spec.arm),
                 now_unix,
@@ -166,7 +195,7 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut extra: Vec<ArmStatus> = newest
         .keys()
         .filter(|arm| !KNOWN_ARMS.iter().any(|spec| spec.arm == *arm))
-        .map(|arm| arm_status(arm, 0, newest.get(arm), now_unix))
+        .map(|arm| arm_status(arm, None, 0, newest.get(arm), now_unix))
         .collect();
     extra.sort_by(|a, b| a.arm.cmp(&b.arm));
     rows.extend(extra);
@@ -235,15 +264,16 @@ fn scan_journal(path: &Path, newest: &mut HashMap<String, NewestTick>) {
 }
 
 fn arm_status(
-    arm: &str,
+    spec: &str,
+    spec_scheduler: Option<&str>,
     default_interval_s: u64,
     newest: Option<&NewestTick>,
     now_unix: u64,
 ) -> ArmStatus {
     let Some(tick) = newest else {
         return ArmStatus {
-            arm: arm.to_string(),
-            scheduler: None,
+            arm: spec.to_string(),
+            scheduler: spec_scheduler.map(|s| s.to_string()),
             last_ts: None,
             age_s: None,
             acted: None,
@@ -251,6 +281,9 @@ fn arm_status(
             detail: None,
             interval_s: default_interval_s,
             stale: default_interval_s > 0,
+            failing: false,
+            cause: None,
+            line: String::new(),
         };
     };
     let interval_s = tick
@@ -259,16 +292,25 @@ fn arm_status(
         .and_then(Value::as_u64)
         .unwrap_or(default_interval_s);
     let age_s = now_unix.saturating_sub(tick.ts_unix);
+    let stale = interval_s > 0 && age_s > interval_s * 2;
+    let skip_reason = str_field(&tick.data, "skip_reason");
+    let failing = !stale
+        && skip_reason
+            .as_deref()
+            .is_some_and(|r| FAILURE_SKIPS.contains(&r));
     ArmStatus {
-        arm: arm.to_string(),
+        arm: spec.to_string(),
         scheduler: str_field(&tick.data, "scheduler"),
         last_ts: Some(tick.ts.clone()),
         age_s: Some(age_s),
         acted: tick.data.get("acted").and_then(Value::as_u64),
-        skip_reason: str_field(&tick.data, "skip_reason"),
+        skip_reason,
         detail: str_field(&tick.data, "detail"),
         interval_s,
-        stale: interval_s > 0 && age_s > interval_s * 2,
+        stale,
+        failing,
+        cause: None,
+        line: String::new(),
     }
 }
 
@@ -276,6 +318,151 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
     data.get(field)
         .and_then(Value::as_str)
         .map(|s| s.to_string())
+}
+
+/// Skip reasons that mean the arm ran and its run failed - not that it chose
+/// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
+/// quota_skip pass through; timeout/error fail) and the king-wake and notify
+/// emitters' failure tokens. `degraded` is deliberately absent: one transient
+/// gh read failure must not turn a fresh row red.
+const FAILURE_SKIPS: &[&str] = &[
+    "timeout",
+    "error",
+    "wake_failed",
+    "sweep_failed",
+    "notify_failed",
+];
+
+/// What the reader holds about the daemon when it explains the rows. Computed
+/// once in the client's `run_status` from the status payload it already has.
+pub enum DaemonFacts {
+    Up { uptime_s: u64, drifted: bool },
+    Down,
+    Unknown,
+}
+
+/// Fill `cause` and `line` on every row. A stale row takes the first cause
+/// that holds; a never-ticked or overdue daemon arm on a young daemon reads
+/// `pending` instead of red. `unexplained` is written when no rule fires, so
+/// a red row names its reason instead of daring the operator to guess
+/// whether the arm or its scheduler broke.
+pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
+    let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
+    let pm_fresh_timeout =
+        pm.is_some_and(|r| !r.stale && r.skip_reason.as_deref() == Some("timeout"));
+    let pm_stale = pm.is_some_and(|r| r.stale);
+    for row in rows.iter_mut() {
+        if row.stale {
+            let cause = stale_cause(row, daemon, pm_fresh_timeout, pm_stale)
+                .unwrap_or_else(|| "unexplained".to_string());
+            if cause == "daemon_young" {
+                row.stale = false;
+            }
+            let hint = cause_hint(&cause, daemon);
+            row.cause = Some(cause.clone());
+            let mut line = render_row(row);
+            line.push_str(&format!(" cause={cause} ({hint})"));
+            row.line = line;
+        } else {
+            row.line = render_row(row);
+        }
+    }
+}
+
+/// The first cause that holds for a stale row, in table order; `None` leaves
+/// the row to `unexplained`.
+fn stale_cause(
+    row: &ArmStatus,
+    daemon: &DaemonFacts,
+    pm_fresh_timeout: bool,
+    pm_stale: bool,
+) -> Option<String> {
+    let sched = row.scheduler.as_deref();
+    if sched == Some(SCHED_DAEMON) {
+        if let DaemonFacts::Up { uptime_s, drifted } = *daemon {
+            if uptime_s <= row.interval_s * 2 {
+                return Some("daemon_young".to_string());
+            }
+            if drifted {
+                return Some("stale_daemon".to_string());
+            }
+        }
+        if matches!(daemon, DaemonFacts::Down) {
+            return Some("daemon_down".to_string());
+        }
+        return None;
+    }
+    if sched == Some(SCHED_LAUNCHD) {
+        if row.arm != "pr_watch_merge" && pm_fresh_timeout {
+            return Some("tick_timeout".to_string());
+        }
+        if pm_stale {
+            return Some("scheduler_silent".to_string());
+        }
+    }
+    None
+}
+
+/// The human hint appended after each cause token.
+fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
+    match cause {
+        "daemon_young" => match daemon {
+            DaemonFacts::Up { uptime_s, .. } => {
+                format!("daemon up {uptime_s}s, first window not elapsed")
+            }
+            _ => "daemon up, first window not elapsed".to_string(),
+        },
+        "stale_daemon" => "daemon predates the installed build; run fno agents restart".to_string(),
+        "daemon_down" => "daemon not running".to_string(),
+        "tick_timeout" => {
+            "pr-watch tick timed out before this arm ran; see pr_watch_merge".to_string()
+        }
+        "scheduler_silent" => {
+            "no pr-watch tick inside 2x interval; run fno do pr watch status".to_string()
+        }
+        _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
+    }
+}
+
+/// The per-row readout format, owned here so every consumer prints the same
+/// line. Verdict: STALE when stale, FAIL when failing, pending when the cause
+/// is daemon_young, else ok. The `cause=...` suffix is appended by `explain`.
+pub fn render_row(row: &ArmStatus) -> String {
+    let verdict = if row.stale {
+        "STALE"
+    } else if row.failing {
+        "FAIL"
+    } else if row.cause.as_deref() == Some("daemon_young") {
+        "pending"
+    } else {
+        "ok"
+    };
+    let age = match row.age_s {
+        Some(s) => format!("{s}s ago"),
+        None => "never".to_string(),
+    };
+    let skip = row
+        .skip_reason
+        .as_deref()
+        .map(|r| format!(" skip={r}"))
+        .unwrap_or_default();
+    let acted = row.acted.map(|n| format!(" acted={n}")).unwrap_or_default();
+    let scheduler = row
+        .scheduler
+        .as_deref()
+        .map(|s| format!(" via={s}"))
+        .unwrap_or_default();
+    let detail = row
+        .detail
+        .as_deref()
+        .map(|d| format!(" {d}"))
+        .unwrap_or_default();
+    format!(
+        "{arm:<16} {verdict:<5} {age:>10}{acted}{skip}{scheduler}{detail}",
+        arm = row.arm,
+        verdict = verdict,
+        age = age,
+    )
 }
 
 /// Parse the two `ts` shapes the journals carry: second precision
@@ -348,14 +535,21 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
-    fn tick_envelope(ts: &str, arm: &str, acted: u64, skip: Value, interval_s: u64) -> Value {
+    fn tick_envelope(
+        ts: &str,
+        arm: &str,
+        scheduler: &str,
+        acted: u64,
+        skip: Value,
+        interval_s: u64,
+    ) -> Value {
         json!({
             "ts": ts,
             "type": EVENT_TYPE,
             "source": "loop",
             "data": {
                 "arm": arm,
-                "scheduler": "daemon",
+                "scheduler": scheduler,
                 "acted": acted,
                 "skip_reason": skip,
                 "detail": null,
@@ -406,6 +600,7 @@ mod tests {
             &[tick_envelope(
                 "2026-09-04T10:00:00Z",
                 "king_wake",
+                SCHED_DAEMON,
                 0,
                 json!("no_crowned_target"),
                 900,
@@ -416,6 +611,7 @@ mod tests {
             &[tick_envelope(
                 "2026-09-04T11:00:00Z",
                 "king_wake",
+                SCHED_DAEMON,
                 1,
                 json!(null),
                 900,
@@ -426,6 +622,7 @@ mod tests {
             &[tick_envelope(
                 "2026-09-04T11:00:00.500Z",
                 "active_backlog",
+                SCHED_DAEMON,
                 3,
                 json!(null),
                 300,
@@ -455,6 +652,7 @@ mod tests {
             &[tick_envelope(
                 "2026-09-04T10:00:00Z",
                 "watchdog",
+                SCHED_DAEMON,
                 0,
                 json!("watchdog_off"),
                 300,
@@ -490,7 +688,7 @@ mod tests {
             if spec.default_interval_s == 0 {
                 assert!(
                     !row.stale,
-                    "event-driven arm {} never reads stale",
+                    "event-driven arm {} never reads red from quiet",
                     spec.arm
                 );
             } else {
@@ -499,6 +697,172 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An empty journal dir: every known arm reads never-ticked.
+    fn empty_journal() -> (TempGuard, PathBuf) {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&journal, "").unwrap();
+        (TempGuard(dir), journal)
+    }
+
+    /// Removes the temp dir on drop, so explain tests cannot leak state.
+    struct TempGuard(PathBuf);
+    impl Drop for TempGuard {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn explain_names_a_drifted_daemon_then_falls_through_to_unexplained() {
+        // The drifted case runs first: it proves the stale_daemon rule CAN
+        // fire before the second call proves the clean-daemon absence. A test
+        // that asserted only the absence would pass on a reader that never
+        // implemented the rule at all.
+        let (guard, journal) = empty_journal();
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal.clone()], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: true,
+            },
+        );
+        let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
+        assert_eq!(ab.cause.as_deref(), Some("stale_daemon"));
+        assert!(ab.stale);
+        assert!(ab.line.contains("STALE"), "line: {}", ab.line);
+        assert!(ab.line.contains("fno agents restart"), "line: {}", ab.line);
+
+        let mut rows = read_arms(&[journal], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+        );
+        let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
+        assert_eq!(ab.cause.as_deref(), Some("unexplained"));
+        assert!(ab.line.contains("STALE"), "line: {}", ab.line);
+        drop(guard);
+    }
+
+    #[test]
+    fn explain_pends_a_young_daemon_window_instead_of_red() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // active_backlog last ticked 900s ago (interval 300: overdue at 600).
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:45:00Z",
+                "active_backlog",
+                SCHED_DAEMON,
+                0,
+                json!(null),
+                300,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 120,
+                drifted: false,
+            },
+        );
+        let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
+        assert!(!ab.stale, "young daemon window clears the stale flag");
+        assert_eq!(ab.cause.as_deref(), Some("daemon_young"));
+        assert!(ab.line.contains("pending"), "line: {}", ab.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explain_blames_a_timed_out_tick_for_the_arms_after_it() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // pr_watch_merge ticked 100s ago and its tick timed out; king_wake's
+        // newest tick is 10000s old (interval 900: stale past 1800).
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:58:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-04T09:33:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(pm.failing, "a fresh timeout row is failing");
+        assert!(!pm.stale);
+        assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
+        assert!(kw.line.contains("STALE"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explain_names_a_down_daemon_for_daemon_arms() {
+        let (guard, journal) = empty_journal();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        explain(&mut rows, &DaemonFacts::Down);
+        let reap = rows.iter().find(|r| r.arm == "reap").unwrap();
+        assert_eq!(reap.cause.as_deref(), Some("daemon_down"));
+        assert!(reap.line.contains("STALE"), "line: {}", reap.line);
+        // A launchd arm blames its stalled scheduler tier, not the daemon:
+        // pr_watch_merge is itself stale, so the silence is scheduler-wide.
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("scheduler_silent"));
+        drop(guard);
+    }
+
+    #[test]
+    fn explain_names_scheduler_silent_when_the_whole_launchd_tier_stalled() {
+        let (guard, journal) = empty_journal();
+        // Everything never-ticked: pr_watch_merge is itself stale, so the
+        // other launchd arms blame the scheduler, not themselves.
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+        );
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("scheduler_silent"));
+        assert!(
+            kw.line.contains("fno do pr watch status"),
+            "line: {}",
+            kw.line
+        );
+        drop(guard);
     }
 
     #[test]
