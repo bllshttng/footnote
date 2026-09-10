@@ -1,6 +1,5 @@
 """The dispatch verb registry model: an outside skill as a descriptor, not a
-bare string. Mirrors ``ReviewerDescriptor``; the lookup union drops any key
-naming a shipped or allowlisted verb."""
+bare string. Mirrors ``ReviewerDescriptor``; lookup drops shipped spellings."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,8 +22,7 @@ class DispatchVerbDescriptor:
     asserts: Literal["pr", "doc", "invocation"] = "invocation"
 
 
-#: The built-in dispatch verbs. harness_map._DEFAULT_ALLOWED_VERBS mirrors
-#: this tuple; that module imports this one lazily and must stay cycle-free.
+#: The built-in dispatch verbs (harness_map mirrors this tuple; cycle-free).
 DEFAULT_DISPATCH_VERBS = ("/target", "/think", "/blueprint")
 
 
@@ -43,8 +41,8 @@ def resolvable_verbs(
     allowed: Optional[Sequence[str]] = None,
 ) -> dict[str, DispatchVerbDescriptor]:
     """The registry minus shipped spellings: a key canonicalizing to a built-in
-    or operator-allowlisted verb is dropped, so a shipped verb cannot be
-    redefined into a weaker descriptor."""
+    or allowlisted verb is dropped, so a shipped verb cannot be redefined
+    into a weaker descriptor."""
     allowed_canon = {
         canonical_verb_key(v)
         for v in (tuple(allowed) if allowed is not None else DEFAULT_DISPATCH_VERBS)

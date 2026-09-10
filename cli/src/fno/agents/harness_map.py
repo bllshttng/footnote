@@ -1426,10 +1426,8 @@ def resolve_dispatch(
         if descriptor is not None:
             # Registry verb: descriptor carries spelling, capability, claim.
             if descriptor.requires == "skill":
-                # Probe the invocation's FIRST token, never the tail: the
-                # verb may carry args, and the reviewer probe's _skill_id
-                # runs the same first-token contract. A malformed invocation
-                # falls back to the registry key.
+                # First token only (the verb may carry args; same contract as
+                # the reviewer probe); malformed falls back to the key.
                 head = descriptor.invocation.split()
                 skill_name = (head[0] if head else chosen_verb).lstrip("/").split(":")[-1]
                 status, reason = resolve_skill_presence(
@@ -1448,8 +1446,8 @@ def resolve_dispatch(
                 template = f"{template} {{id}}"
             else:
                 verb_declares_no_id = True
-            # The descriptor already spells the verb natively; the fno-namespace
-            # normalizer would mint a phantom `$fno:` skill from it.
+            # The descriptor already spells the verb natively; normalizing
+            # would mint a phantom `$fno:` skill from it.
             skip_normalize = True
             decision.append(
                 f"command=registry-verb({chosen_verb}, asserts={descriptor.asserts})"
