@@ -203,6 +203,39 @@ def test_get_prints_deciding_file_and_overridden_file(
     assert f"overrides {(tmp_path / 'global-config.toml')}" in r.stderr
 
 
+def test_get_equal_values_in_both_layers_credit_the_higher_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both files set the same value: the source line names the project file.
+
+    Change-only attribution credited the global file when the project
+    restated its value verbatim, and the source line read as "the global
+    overrode the local". The decider is the highest-precedence file that sets
+    the key, and an equal lower layer is not overridden.
+    """
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="[auto_merge]\nenabled = false\n",
+        global_="[auto_merge]\nenabled = false\n",
+    )
+
+    from fno.config import resolve_source
+
+    decided = resolve_source("auto_merge.enabled")
+    assert decided is not None
+    assert decided[0].resolve() == (tmp_path / "proj" / ".fno" / "config.toml").resolve()
+    assert decided[1] == []
+
+    from fno.cli import app
+
+    r = CliRunner().invoke(app, ["config", "get", "auto_merge.enabled"])
+    assert r.exit_code == 0
+    assert r.stdout.strip() == "False"
+    assert f"source: {(tmp_path / 'proj' / '.fno' / 'config.toml')}" in r.stderr
+    assert "overrides" not in r.stderr
+
+
 def test_get_source_line_without_lower_override_has_no_overrides_clause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

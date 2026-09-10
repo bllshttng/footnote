@@ -5255,13 +5255,19 @@ def resolve_source(
 
     Consumes the SAME aliased layers :func:`load_settings` merges (via
     :func:`_aliased_layers`), in the same order, and attributes the key by
-    REPLAYING the loader's merge: the decider is the file whose merge changed
-    the key's value under the loader's own semantics - deep-merge
-    highest-wins-per-key plus the post-merge ``_unwrap_config_dict`` flatten,
-    where a ``config:``-wrapped block beats flat top-level keys. Presence per
-    layer alone would mis-attribute exactly there: a flat project key that the
-    wrapped global's block overrides at unwrap would name the project as
-    decider while the model serves the global's value.
+    REPLAYING the loader's merge: the decider is the highest-precedence file
+    whose own value is the value the merge serves under the loader's own
+    semantics - deep-merge highest-wins-per-key plus the post-merge
+    ``_unwrap_config_dict`` flatten, where a ``config:``-wrapped block beats
+    flat top-level keys. Presence per layer alone would mis-attribute exactly
+    there: a flat project key that the wrapped global's block overrides at
+    unwrap would name the project as decider while the model serves the
+    global's value. Change detection alone had the mirror defect: a project
+    restating the global's value verbatim left the credit with the global, and
+    the source line read as the global overriding the local file.
+
+    The overridden list names the lower setters whose value the merge
+    discarded; a lower layer that set the same value is not overridden.
 
     The worktree-local ``config.local.toml`` enters as the highest layer
     through the same allowlist filter the loader applies, so a dropped
@@ -5308,7 +5314,7 @@ def resolve_source(
     # collapses both chain tiers onto one path, and the same file must not
     # replay twice and "override" itself.
     seen: set[Path] = set()
-    setters: list[Path] = []
+    setters: list[tuple[Path, object]] = []
     decider: Optional[Path] = None
     merged: dict[str, object] = {}
     prev: object = _MISSING
@@ -5316,18 +5322,24 @@ def resolve_source(
         if path in seen:
             continue
         seen.add(path)
-        if _value(_unwrap_config_dict(parsed)) is not _MISSING:
-            setters.append(path)
+        own = _value(_unwrap_config_dict(parsed))
+        if own is not _MISSING:
+            setters.append((path, own))
         merged = _deep_merge(merged, parsed)
         now = _value(_unwrap_config_dict(merged))
         if now is not _MISSING and now != prev:
+            decider = path
+        if own is not _MISSING and now is not _MISSING and own == now:
+            # This layer's own value is the value the merge serves, so it
+            # decides the key even when a lower file said the same thing.
             decider = path
         if now is not _MISSING:
             prev = now
     if not setters:
         return None
     assert decider is not None  # the first setter introduces the value: a change
-    return (decider, [p for p in setters if p != decider])
+    # An equal lower layer set the key but lost nothing, so it is not overridden.
+    return (decider, [p for p, own in setters if p != decider and own != prev])
 
 
 def agents_headless_yolo(provider: str) -> bool:
