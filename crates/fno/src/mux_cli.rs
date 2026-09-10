@@ -4707,10 +4707,10 @@ mod reseat_verb;
 pub use reseat_verb::reseat;
 // (v75, x-7649) The `fno mux retire-session` verb, same child-module pattern.
 mod retire_session;
+pub use retire_session::retire_session;
 
 #[cfg(not(test))]
 mod doctor_squads;
-pub use retire_session::retire_session;
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
 /// location. Reads the registry to find the hosting mux session, connects to
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure

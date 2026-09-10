@@ -54,8 +54,6 @@ pub(super) fn legacy_squads_newer_check() -> Check {
 }
 
 /// A dead squads store at the agents-home path (`~/.fno/agents/squads.json`)
-
-/// A dead squads store at the agents-home path (`~/.fno/agents/squads.json`)
 /// reads as authoritative precisely because it sits beside live agent files
 /// (registry.json IS authoritative there), and it produced one false report
 /// before anyone noticed. No code reads that spelling, so the file can only
@@ -104,6 +102,6 @@ pub(super) fn agents_squads_orphan_check() -> Check {
             orphan.display(),
             primary.display()
         ),
-        remedy: Some(format!("rm {}", orphan.display())),
+        remedy: Some(format!("rm '{}'", orphan.display())),
     }
 }
