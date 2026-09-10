@@ -682,6 +682,7 @@ fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String
     use sha2::Digest as _;
 
     let mut canonical = entries.to_vec();
+    graph_store::ensure_slugs(&mut canonical);
     graph_store::canonicalize_entries(&mut canonical);
     canonical
         .iter()
