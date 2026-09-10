@@ -442,7 +442,15 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     resolves to its SHARED SQLite store, whose mtime is the last write by ANY
     session; stamping that would be a plausible, near-always-wrong answer that
     nothing downstream could falsify. A null the receipt explains is better.
+
+    The stamp is the newest TIMESTAMPED entry, not the file mtime: trailing
+    untimestamped records keep the file young while the conversation is silent
+    (x-54cf), and ``row_contradiction`` cross-checks this stamp against truth's
+    ``last_event_at``, so both must be built from the same field. A transcript
+    with no timestamped entry falls back to the mtime - the same labelled
+    fallback truth uses - so the degenerate case cannot spawn a contradiction.
     """
+    from fno.agents.session_truth import newest_entry_epoch
     from fno.provenance.resolver import resolve_transcript
 
     try:
@@ -462,11 +470,13 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
             return None
         if resolved.kind != "jsonl":
             return None
-        mtime = Path(resolved.transcript_path).stat().st_mtime
+        epoch = newest_entry_epoch(Path(resolved.transcript_path))
+        if epoch is None:
+            epoch = Path(resolved.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 - a stamp is a nicety; adoption still lands
         return None
     return (
-        datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+        datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")

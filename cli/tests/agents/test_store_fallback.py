@@ -1059,3 +1059,38 @@ def test_adopt_refuses_a_shared_store_mtime_as_a_session_stamp(monkeypatch):
     hit = store_fallback.StoreHit(harness="opencode", session_id=sid, cwd="/repo/one")
     assert store_fallback._transcript_last_write(hit) is None
     assert calls == ["opencode"], "the resolver must still be consulted"
+
+
+def test_adopt_stamps_the_newest_entry_not_the_mtime(tmp_path):
+    """``last_message_at`` is the newest TIMESTAMPED entry, not the file mtime.
+
+    Trailing untimestamped records keep the file young while the conversation
+    is silent (x-54cf), and ``row_contradiction`` cross-checks this stamp
+    against truth's ``last_event_at`` - two fields here is how that comparison
+    fires on a healthy row.
+    """
+    from fno.agents import store_fallback
+
+    sid = "0badc0de-54cf-0000-0000-000000000004"
+    _write_claude_session(tmp_path, sid)
+    transcript = tmp_path / "projects" / "-repo-one" / f"{sid}.jsonl"
+    entry_epoch = 1_700_000_000.0
+    stamp_txt = datetime.datetime.fromtimestamp(
+        entry_epoch, tz=datetime.timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with transcript.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps({"type": "assistant", "sessionId": sid, "timestamp": stamp_txt,
+                        "message": {"role": "assistant",
+                                    "content": [{"type": "text", "text": "gone quiet"}]}})
+            + "\n"
+        )
+    hour_later = entry_epoch + 3600
+    os.utime(transcript, (hour_later, hour_later))
+
+    hit = store_fallback.StoreHit(harness="claude", session_id=sid, cwd="/repo/one")
+    entry = store_fallback.adopt_store_hit(hit, registry_path=tmp_path / "registry.json")
+
+    # The entry's stamp, not the mtime an hour fresher: mtime would read
+    # 2023-11-14T23:13:20Z.
+    assert entry.last_message_at == "2023-11-14T22:13:20Z"
