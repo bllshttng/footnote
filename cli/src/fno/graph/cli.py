@@ -11225,13 +11225,9 @@ def cmd_maintain(
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
     Deterministic legs apply under ``--apply``; the judgment legs (dedup,
-    drain-stale, cap-Now) only ever propose, regardless of ``--apply``. The
-    full leg list lives in docs/backlog-usage.md under "Health and hygiene".
-
-    Loop form: ``/loop 1d fno backlog maintain --apply``.
-
-    Best-effort: a malformed row is skipped, a single failed apply does not
-    abort the rest, and an empty graph is a clean no-op.
+    drain-stale, cap-Now) only ever propose. Full leg list + loop form:
+    docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
+    apply does not abort the rest; an empty graph is a clean no-op.
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph.statuses import recompute_statuses
