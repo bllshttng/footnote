@@ -53,6 +53,12 @@ if TYPE_CHECKING:
 from fno import paths
 from fno.agents import events
 from fno.agents import rm_directory_bytes
+from fno.agents.sender_provenance import (
+    _proven_self_sender,
+    _resolve_sender_entry,
+    _sender_provenance,
+    warn_sender_provenance_miss as _loud_sender_provenance,
+)
 from fno.agents import rm_notice
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
@@ -71,7 +77,6 @@ from fno.agents.registry import (
     TERMINAL_STATUSES,
     load_registry,
     mint_agent_entry,
-    resolve_agent_in,
     resolve_registered_agent_across_sources,
     update_registry,
 )
@@ -6254,80 +6259,6 @@ from fno.agents.mail_ctx import _MailCtx, _build_mail_ctx  # noqa: E402
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
 _WAKE_NAME_PREFIX = "wake-"
-
-
-def _resolve_sender_entry(
-    entries: list[AgentEntry], from_name: str
-) -> Optional[AgentEntry]:
-    """Resolve a fresh-send sender through the spawn-written registry row.
-
-    ``mail send`` passes the sender's canonical handle, while registry labels
-    are friendly names. Resolve all supported address forms and floor misses,
-    ambiguity, and legacy rows without a full session id to unproven values.
-    """
-    try:
-        return resolve_agent_in(entries, from_name).entry
-    except AgentResolutionError:
-        return None
-
-
-def _proven_self_sender(from_name: str) -> tuple[Optional[str], Optional[str]]:
-    """Proven sender identity when ``from_name`` is this session's own handle.
-
-    The auto-stamp puts the caller's head-8 handle in ``from_name``. Under
-    codex UUIDv7 that head is a truncated timestamp bucket, so a registered
-    same-bucket sibling can be the UNIQUE registry hit for it and registry
-    inference alone would stamp a stranger's full session id as
-    ``from_session``. When the ambient identity proves this process owns the
-    handle, its full id is already collision-free and wins - the same rule
-    ``resolve_self_session_id`` documents for the envelope's ``from_session``.
-    """
-    from fno.agents.self_stamp import resolve_self_identity
-
-    ident = resolve_self_identity()
-    session_id = getattr(ident, "session_id", None)
-    harness = getattr(ident, "harness", None)
-    if session_id and harness and canonical_handle(session_id) == from_name:
-        return harness, session_id
-    return None, None
-
-
-def _sender_provenance(
-    sender: Optional[AgentEntry],
-    from_name: str,
-    self_proof: Optional[tuple[Optional[str], Optional[str]]] = None,
-) -> tuple[Optional[str], Optional[str]]:
-    self_harness, self_session = (
-        self_proof if self_proof is not None else _proven_self_sender(from_name)
-    )
-    if self_session is not None:
-        return self_harness, self_session
-    if sender is None:
-        return None, None
-    return (
-        getattr(sender, "harness", None),
-        getattr(sender, "harness_session_id", None),
-    )
-
-
-def _loud_sender_provenance(
-    from_name: str, provider_from: Optional[str], from_session: Optional[str]
-) -> None:
-    """Say it when sender provenance floors to nothing.
-
-    A from_name matching no registry row and no ambient identity ships an
-    envelope every reader renders as harness=unknown with no from_session.
-    Delivery still proceeds - an unattended note must not die for lack of an
-    attributable sender - but the miss is no longer silent.
-    """
-    if provider_from is not None or from_session is not None:
-        return
-    events.emit("sender_provenance_unknown", from_name=from_name)
-    print(
-        f"warning: sender {from_name!r} resolved to no registry row and no "
-        "ambient identity; envelope provenance degrades to unknown",
-        file=sys.stderr,
-    )
 
 
 # Poll budget for the mux lane's content confirm (node x-1904, change 3),
