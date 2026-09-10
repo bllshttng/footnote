@@ -43,7 +43,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from fno.harness_identity import claude_transport_short_id
 
@@ -334,6 +334,36 @@ def _parse_state(state_path: Path) -> StateSnapshot:
         output_result=output.get("result") if isinstance(output, dict) else None,
         intent=raw.get("intent"),
     )
+
+
+SEED_WAIT_S = 5.0
+
+
+def seed_unverified_reason(
+    short_id: str,
+    env: Optional[Mapping[str, str]] = None,
+    timeout_s: float = SEED_WAIT_S,
+) -> Optional[str]:
+    """``None`` once claude's job state records the prompt, else why not.
+
+    ``claude --bg`` writes a non-empty ``intent`` before it returns. A session
+    started with no prompt reads ``intent: ""`` and waits for one forever. The
+    root follows ``CLAUDE_CONFIG_DIR`` (the spawn overlay, then ambient), the
+    same relocation claude applies to its whole config tree.
+    """
+    cfg = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    jobs_dir = (Path(cfg) if cfg else Path.home() / ".claude") / "jobs" / short_id
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            intent = read_state_json(jobs_dir).intent
+            if isinstance(intent, str) and intent.strip():
+                return None
+        except (OSError, json.JSONDecodeError):
+            pass
+        if time.monotonic() >= deadline:
+            return f"{jobs_dir / 'state.json'} records no prompt after {timeout_s:g}s"
+        time.sleep(0.2)
 
 
 def read_timeline_tail(jobs_dir: Path, offset: int) -> str:

@@ -646,6 +646,45 @@ def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
+def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
+    """Refuse a fresh claude thread spawn with no message before any worker launches.
+
+    Judges an explicit substrate only: an absent one routes to the Python
+    ``cmd_spawn`` (see :func:`_is_pane_substrate_spawn`), which judges the
+    resolved substrate with the same helper.
+    """
+    from fno.agents.spawn_defaults import (
+        _has_explicit_substrate,
+        _seed_of,
+        seedless_thread_refusal,
+    )
+
+    toks = list(args[1:])
+    substrate = _has_explicit_substrate(toks)
+    if substrate is None:
+        return
+    harness = (_spawn_flag_value(toks, "--harness", "-H") or "").strip().lower()
+    if not harness:
+        try:
+            from fno.harness_identity import resolve_harness_identity
+
+            harness = (resolve_harness_identity(os.environ).harness or "claude").lower()
+        except Exception:
+            harness = "claude"
+    refusal = seedless_thread_refusal(
+        harness,
+        substrate,
+        _seed_of(toks),
+        resume=_spawn_flag_value(toks, "--resume"),
+        crown=_has_flag(toks, "-k", ("--crown",)),
+        name=_spawn_flag_value(toks, "--name"),
+        node=_spawn_flag_value(toks, "--node"),
+    )
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -1477,6 +1516,7 @@ def make_agents_group_cls() -> type:
 
                         args = inject_spawn_defaults(args)
                         _refuse_codex_code_spawn_without_git_grant(args)
+                        _refuse_seedless_thread_spawn(args)
                     _export_worker_dirs_at_seam(args)
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)

@@ -1513,27 +1513,27 @@ def cmd_spawn(
             substrate = "pane"
         else:
             substrate = "thread"
-    # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
-    # --substrate headless; the spawn gate counts it as headless) but Python leaves
-    # it on the pane default. That only bites the routed lane, where the substrate
-    # decides whether the route is materialized at all: without this a routed
-    # `--once` reaches dispatch as claude+once+not-headless and dies on the
-    # "claude peers are persistent bg threads" refusal.
+    # `--once` is the pre-substrate spelling of headless, but Python leaves it on
+    # the pane default; a routed `--once` would then reach dispatch as
+    # claude+once+not-headless and die on the "persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
-    # composed-argv refusals live. The seam refuses the explicit-flag spelling
-    # for the Rust-routed lane; this is the same refusal for the Python lane,
-    # including a substrate that arrived by config default after the seam.
+    # x-1caa AC7: passthrough rides only the PANE argv; the seam covers explicit flags.
     if passthrough and (substrate != "pane" or once):
         from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
 
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    from fno.agents.spawn_defaults import resolve_spawn_gates
+    from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
+    seedless = seedless_thread_refusal(
+        harness, substrate, message, resume=resume, crown=bool(crown), name=name, node=node
+    )
+    if seedless:
+        print(f"fno agents spawn: {seedless}", file=sys.stderr)
+        raise typer.Exit(code=2)
 
     if output_format is not None and (
         harness != "claude" or substrate != "headless" or output_format != "json"
@@ -2573,22 +2573,15 @@ def cmd_spawn(
             if effective_message is not None
             else ""
         )
-        # provider/model axes: present only when an explicit route was applied
-        # (-P/--route) or a model named; absent otherwise. provider holds the
-        # model vendor, never a harness literal (the defect this corrects).
-        # `model` is the EFFECTIVE model: an explicit --model reaches claude as
-        # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
-        # wins the receipt too (see the pane branch above).
+        # provider/model appear only for an explicit route or model. provider is the
+        # vendor, never a harness; `model` is the EFFECTIVE model (--model wins).
         receipt_provider = route_provider or recorded_provider
         provider_field = (
             f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
         receipt_model = model or route_model
-        # v23 (x-2019): a receipt that prints `model` labels it - the request
-        # is not the effect, and an unlabeled token reads as an observation.
-        # When the spawn-time check caught a substitution, the receipt carries
-        # the marker naming both values (the stderr line and the row already
-        # carry them; this is the machine-readable copy).
+        # A receipt that prints `model` labels it: the request is not the effect.
+        # A caught substitution carries the marker naming both values.
         substitution = getattr(result, "model_substituted", None)
         if receipt_model and substitution:
             model_field = (
@@ -2603,10 +2596,15 @@ def cmd_spawn(
             )
         else:
             model_field = ""
+        seed = getattr(result, "seed_unverified", None)
+        seed_field = (
+            f', "seed": "unverified", "seed_unverified": {json.dumps(seed)}' if seed else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"harness": "{result.provider}"{provider_field}{model_field}, "status": "live"'
-            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}}}"
+            f'"harness": "{result.provider}"{provider_field}{model_field}, '
+            f'"status": "{"spawning" if seed else "live"}"'
+            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}{seed_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
