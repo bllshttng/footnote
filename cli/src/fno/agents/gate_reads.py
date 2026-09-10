@@ -1,5 +1,4 @@
-"""``fno agents gate-status``: the gate's read-only verdict, registered from
-here so the file-budget gate keeps ``agents/cli.py`` shrinking."""
+"""``fno agents gate-status``: the gate's read-only verdict; registered here so the file-budget gate keeps ``agents/cli.py`` shrinking."""
 from __future__ import annotations
 
 import json

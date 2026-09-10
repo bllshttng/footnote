@@ -1645,7 +1645,6 @@ def gate_settings() -> tuple:
     return cap, floor_gb, max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu, limits
 
 
-
 def run_gate(
     name: str,
     substrate: str,
@@ -2018,7 +2017,6 @@ def probe_capacity() -> dict:
                 )
     except Exception as exc:  # noqa: BLE001 - a broken reading is not saturation
         return {"verdict": "unknown", "reason": "reading_failed", "error": str(exc)}
-
     lanes: dict[str, dict[str, int]] = {}
     full: list[str] = []
     for provider, budget in sorted(limits.items()):
