@@ -1769,20 +1769,13 @@ def routing_enforcement_state(settings: object = None) -> str:
 
 # --------------------------------------------------------------------------- #
 # The CLI's substrate/portal posture gates, moved here from cmd_spawn (file
-# budget): the value gate + bg deprecation warning + thread->bg alias, the
-# monitor gate, and the post-receipt portal placement (the two-call seam's
-# second call, best-effort by contract - the worker receipt is already the
-# truth, so a placement failure is a named stderr line, never a failed spawn).
-# --------------------------------------------------------------------------- #
+# budget): the value gate + bg alias, the monitor gate, and the post-receipt
+# portal placement (best-effort: the receipt is the truth, a placement failure
+# never fails the spawn).
 
 
 def resolve_substrate_or_exit(substrate: str) -> str:
-    """Validate the substrate value and canonicalize ``thread`` to ``bg``.
-
-    Keep the lower-level spawn branches on the historical lane name while the
-    public vocabulary migrates. Exit 2 on a value outside the closed set; the
-    deprecated ``bg`` spelling warns and still works.
-    """
+    """Validate the substrate value; canonicalize ``thread`` to ``bg`` (warn)."""
     if substrate not in ("pane", "thread", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
@@ -1841,9 +1834,8 @@ def validate_monitor_or_exit(monitor, substrate, *, once, harness) -> None:
 def place_thread_portal(name: str, portal: int) -> None:
     """Open a portal on a spawned thread (the two-call seam's second call).
 
-    Best-effort by contract: the worker receipt is already the truth, so a
-    failure is a named stderr line pointing at the manual reach, never a
-    failed spawn - a retrying caller must not create a duplicate worker.
+    Best-effort by contract: the receipt is the truth, so a failure is a named
+    stderr line, never a failed spawn - a retry must not duplicate the worker.
     """
     import subprocess
 
