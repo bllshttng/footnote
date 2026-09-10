@@ -1244,3 +1244,41 @@ def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypa
         "graph mutated under us 5 times at /tmp/x1601-tx.json; retrying stopped"
     )
     assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
+
+def test_seat_owned_spawn_polls_for_the_incumbent(tmp_path, monkeypatch):
+    """x-f188 AC2-EDGE: the spawned keeper exits 3 (seat owned by an
+    incumbent); _client_for keeps polling and rides the incumbent instead of
+    raising spawn_failed."""
+    import socket as _socket
+    import threading
+    import time as _time
+
+    graph = tmp_path / "graph.json"
+    graph.write_text('{"entries": []}')
+    sock = store_mod.store_socket_for(graph)
+
+    class _Exit3Proc:
+        returncode = 3
+        args = ("fno-agents-worker", "--store-keeper")
+
+        def poll(self):
+            return 3
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(store_mod, "_spawn_keeper", lambda _path: _Exit3Proc())
+
+    def incumbent():
+        _time.sleep(0.3)
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(str(sock))
+        srv.listen(1)
+        _time.sleep(3.0)
+        srv.close()
+
+    threading.Thread(target=incumbent, daemon=True).start()
+    keeper = store_mod._client_for(graph)
+    assert keeper.sock == sock
+    srv_sock = sock
+    assert srv_sock.exists()

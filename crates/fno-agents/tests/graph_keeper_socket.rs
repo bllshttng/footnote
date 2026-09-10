@@ -219,9 +219,14 @@ fn keeper_keeps_serving_after_its_client_hangs_up() {
         "a second keeper on a live socket must refuse"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a second keeper exits EXIT_SEAT_OWNED=3: {stderr}"
+    );
     assert!(
-        stderr.contains("already has a live listener"),
-        "the refusal names the socket: {stderr}"
+        stderr.contains("owned by a live keeper"),
+        "the refusal names the socket and the owner: {stderr}"
     );
 }
 
@@ -288,4 +293,112 @@ fn read_file_returns_the_bytes_load_graph_validates() {
         result["sha256"].as_str().unwrap().starts_with("sha256:"),
         "the digest labels its algorithm"
     );
+}
+
+// x-f188 change 2: one store keeper per socket.
+// ---------------------------------------------------------------
+
+#[test]
+fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
+    // AC2-HP: four keepers race for one graph's socket; one seat wins and
+    // the other three exit 3 rather than each binding a second socket object
+    // onto an unlinked path. Measured 2026-09-10: three losers were still
+    // running on one socket, each holding a parsed 15MB graph.
+    let home = short_home("seat");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let mut keepers: Vec<Child> = (0..4)
+        .map(|_| {
+            Command::new(WORKER_BIN)
+                .args([
+                    "--store-keeper",
+                    "--sock",
+                    sock.to_str().unwrap(),
+                    "--graph",
+                    graph.to_str().unwrap(),
+                    "--session",
+                    "seat-race",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn racing keeper")
+        })
+        .collect();
+    wait_for_socket(&sock);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut exited_three = 0;
+    while Instant::now() < deadline {
+        exited_three = 0;
+        for k in keepers.iter_mut() {
+            if let Some(status) = k.try_wait().unwrap() {
+                assert_eq!(
+                    status.code(),
+                    Some(3),
+                    "a loser exits EXIT_SEAT_OWNED=3, got {status}"
+                );
+                exited_three += 1;
+            }
+        }
+        if exited_three == 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The seat winner still serves BEFORE any cleanup kill.
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let result = ok_result(rpc(&mut stream, 1, "read", json!({})));
+    assert_eq!(result["entries"].as_array().unwrap().len(), 0);
+    drop(stream);
+    for k in keepers.iter_mut() {
+        let _ = k.kill();
+        let _ = k.wait();
+    }
+    assert_eq!(exited_three, 3, "three losers must exit 3");
+}
+
+#[test]
+fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket() {
+    // AC2-ERR: when the path no longer names the inode this keeper bound,
+    // an idle keeper exits WITHOUT unlinking - the rebound socket (the new
+    // keeper's) stays in place.
+    let home = short_home("rebound");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let mut a = spawn_keeper("rebound-a", &graph, &sock);
+    wait_for_socket(&sock);
+    use std::os::unix::fs::MetadataExt;
+    let old_ino = std::fs::metadata(&sock).unwrap().ino();
+    // Another process rebinds the path: unlink, bind a fresh listener.
+    drop(UnixStream::connect(&sock).unwrap());
+    std::fs::remove_file(&sock).unwrap();
+    let reborn = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let new_ino = std::fs::metadata(&sock).unwrap().ino();
+    assert_ne!(old_ino, new_ino, "the rebind must produce a fresh inode");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exited = loop {
+        if let Some(status) = a.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "stale keeper never exited");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        exited.code().is_none() || exited.code() == Some(0),
+        "seat loss is a clean exit, got {exited}"
+    );
+    // The rebound socket still has a live listener behind it: A never
+    // unlinked what it does not own.
+    let probe = UnixStream::connect(&sock);
+    drop(reborn);
+    assert!(
+        probe.is_ok(),
+        "the new keeper's socket must survive A's exit"
+    );
+    // Keep the graph file's lock tidy for the fixture home.
+    let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+    let _ = old_ino;
 }
