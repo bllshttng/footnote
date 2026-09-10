@@ -1774,8 +1774,14 @@ def routing_enforcement_state(settings: object = None) -> str:
 # never fails the spawn).
 
 
-def resolve_substrate_or_exit(substrate: str) -> str:
-    """Validate the substrate value; canonicalize ``thread`` to ``bg`` (warn)."""
+def resolve_spawn_gates(substrate, portal, monitor, *, once, harness):
+    """Validate the substrate/portal/monitor posture; canonicalize thread->bg.
+
+    Exit 2 on a value outside the closed set, a portal that cannot open (a
+    portal is the pane a THREAD hosts: a pane hosts its own view, a one-shot
+    exits before it can be viewed), or a monitor combination without support
+    (exactly claude+zai on a pane). The deprecated ``bg`` spelling warns.
+    """
     if substrate not in ("pane", "thread", "bg", "headless"):
         print(
             f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
@@ -1790,29 +1796,17 @@ def resolve_substrate_or_exit(substrate: str) -> str:
         )
     if substrate == "thread":
         substrate = "bg"
-    return substrate
-
-
-def validate_portal_or_exit(portal, substrate) -> None:
-    """Refuse a portal that cannot open, before anything spawns."""
-    if portal is None:
-        return
-    if not 0 <= portal <= 255:
-        print(f"--portal takes an index 0-255 (got {portal})", file=sys.stderr)
-        raise SystemExit(2)
-    if substrate != "bg":
-        # A portal is the pane a thread hosts. A pane hosts its own view
-        # (nothing to place); a one-shot exits before it can be viewed.
-        print(
-            "--portal applies only to the thread substrate; a pane hosts "
-            "its own view and a one-shot exits before it can be viewed",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-
-def validate_monitor_or_exit(monitor, substrate, *, once, harness) -> None:
-    """The monitor gate: initial support is exactly claude+zai on a pane."""
+    if portal is not None:
+        if not 0 <= portal <= 255:
+            print(f"--portal takes an index 0-255 (got {portal})", file=sys.stderr)
+            raise SystemExit(2)
+        if substrate != "bg":
+            print(
+                "--portal applies only to the thread substrate; a pane hosts "
+                "its own view and a one-shot exits before it can be viewed",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     if monitor is not None and monitor != "happy":
         print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
         raise SystemExit(2)
@@ -1829,6 +1823,7 @@ def validate_monitor_or_exit(monitor, substrate, *, once, harness) -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
+    return substrate
 
 
 def place_thread_portal(name: str, portal: int) -> None:

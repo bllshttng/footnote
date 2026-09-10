@@ -1532,9 +1532,6 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    from fno.agents.spawn_defaults import resolve_substrate_or_exit, validate_portal_or_exit
-
-    substrate = resolve_substrate_or_exit(substrate)
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
     # composed-argv refusals live. The seam refuses the explicit-flag spelling
     # for the Rust-routed lane; this is the same refusal for the Python lane,
@@ -1545,10 +1542,11 @@ def cmd_spawn(
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    validate_portal_or_exit(portal, substrate)
-    from fno.agents.spawn_defaults import validate_monitor_or_exit
+    from fno.agents.spawn_defaults import resolve_spawn_gates
 
-    validate_monitor_or_exit(monitor, substrate, once=once, harness=harness)
+    substrate = resolve_spawn_gates(
+        substrate, portal, monitor, once=once, harness=harness
+    )
 
     if output_format is not None and (
         harness != "claude" or substrate != "headless" or output_format != "json"
