@@ -4688,6 +4688,15 @@ def cmd_dispatch_lanes(
         "-P",
         help="Pin the model vendor for every lane.",
     ),
+    source: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help=(
+            "Dispatch origin stamped into every lane worker's name (x-84b2): "
+            "the active-backlog daemon passes ab. An attended manual run "
+            "passes nothing."
+        ),
+    ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
 
@@ -4704,7 +4713,17 @@ def cmd_dispatch_lanes(
         DispatchFlagError,
         reject_empty_model,
     )
+    from fno.agents.naming import DISPATCH_SOURCES
     from fno.backlog.advance import dispatch_lanes
+
+    # x-84b2: an unknown source refuses at the door, never defaults.
+    if source is not None and source not in DISPATCH_SOURCES:
+        typer.echo(
+            f"dispatch-lanes: unknown --source {source!r}; known: "
+            f"{', '.join(sorted(DISPATCH_SOURCES))}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     try:
         model = reject_empty_model(model)
@@ -4748,6 +4767,7 @@ def cmd_dispatch_lanes(
         harness=harness,
         vendor=provider,
         report=fill,
+        source=source,
     )
     # dispatch_lanes fills every key before returning (both the no-selection and
     # completion paths write the report), so the shape is read directly.
@@ -8851,6 +8871,16 @@ def cmd_advance(
         "--provider",
         help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
     ),
+    source: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help=(
+            "Dispatch origin stamped into the worker name (x-84b2): ab "
+            "active-backlog daemon, ac merge continuation, sob spawn-on-"
+            "blueprint. Omit on an attended manual call: the name carries no "
+            "source segment."
+        ),
+    ),
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
 
@@ -8871,8 +8901,19 @@ def cmd_advance(
         reject_empty_model,
         resolve_dispatch_harness,
     )
+    from fno.agents.naming import DISPATCH_SOURCES
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
+
+    # x-84b2: an unknown source refuses at the door (exit 2, a usage error),
+    # never defaults - fabricating provenance is what the vocabulary stops.
+    if source is not None and source not in DISPATCH_SOURCES:
+        typer.echo(
+            f"advance: unknown --source {source!r}; known: "
+            f"{', '.join(sorted(DISPATCH_SOURCES))}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     # --explain returns BEFORE every dispatch path, including the pin validation
     # below: it is a read, so an unparseable --model must not stop it from
@@ -8965,6 +9006,7 @@ def cmd_advance(
                 model=model,
                 provider=provider,
                 continuation=continuation,
+                source=source,
             )
         return
     if stop or max_dispatch is not None or continuation:
@@ -9002,6 +9044,7 @@ def cmd_advance(
                 verbose=verbose,
                 model=model,
                 provider=provider,
+                source=source,
             )
             # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
             # Only meaningful with --closed (an edge source); the project-scoped
@@ -9015,6 +9058,7 @@ def cmd_advance(
                     verbose=verbose,
                     model=model,
                     provider=provider,
+                    source=source,
                 )
                 # G4: route the closed node's contract dependents to a reconcile pass
                 # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
@@ -9989,8 +10033,10 @@ def _reconcile_once(
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            _advance(closed_node_id=node_id, project=project, project_root=root)
-            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root)
+            # Merge continuation stamps ac into the worker names (x-84b2); the
+            # de-stub pass stamps its own rd at the spawn seam.
+            _advance(closed_node_id=node_id, project=project, project_root=root, source="ac")
+            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root, source="ac")
             dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
 
         # Post-mutation work outside the lock (mirrors `done`): stamp the plan

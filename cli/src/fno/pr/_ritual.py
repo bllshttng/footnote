@@ -500,7 +500,8 @@ class Ritual:
 
     def leg_advance(self) -> None:
         """Step 3b: merge-triggered next dispatch, bounded + progress (x-0d66)."""
-        argv = ["backlog", "advance", "-J", "--verbose"]
+        # --source ac (x-84b2): the merge continuation origin rides the name.
+        argv = ["backlog", "advance", "-J", "--verbose", "--source", "ac"]
         # x-59a6: no --closed here. `leg_stamp`'s reconcile call already ran
         # `_advance`/`advance_dependents` per CLOSED RECORD for every node this
         # PR's trailer bound, not only the first - `--closed` takes a SINGLE

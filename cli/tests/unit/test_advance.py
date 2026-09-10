@@ -1207,7 +1207,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
-    assert cmd[-2] == "target-ab-2222aaaa"
+    assert cmd[-2] == "t-ab-2222aaaa"
     assert cmd[-1] == "/target --no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
@@ -1520,40 +1520,43 @@ def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
 
 
 def test_worker_agent_name_carries_verb_id_and_slug():
-    # Provenance-carrying name: target-<full-node-id>-<slug>, degrading to
-    # target-<full-node-id> when the node has no slug.
+    # Provenance-carrying name (x-84b2): [<source>-]<verb>-<node>-<slug>,
+    # degrading to ...-<node> when the node has no slug. An attended manual
+    # launch (source=None) carries no source segment.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
-    assert adv._worker_agent_name("ab-2222aaaa", None) == "target-ab-2222aaaa"
-    assert adv._worker_agent_name("ab-2222aaaa", "") == "target-ab-2222aaaa"
+        "t-ab-2222aaaa-cargo-bootstrapper"
+    assert adv._worker_agent_name("ab-2222aaaa", None) == "t-ab-2222aaaa"
+    assert adv._worker_agent_name("ab-2222aaaa", "") == "t-ab-2222aaaa"
     # Parity with the shell dispatchers (codex P2 / gemini HIGH, PR #525): an
     # unsanitized title fallback (caps/spaces/punct) must normalize identically,
     # and a slug longer than the 30-char cut must truncate (graph slugs reach 48)
     # so the Python name never diverges from dispatch-node.sh's.
     assert adv._worker_agent_name("ab-2222aaaa", "Cargo Bootstrapper!!") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
+        "t-ab-2222aaaa-cargo-bootstrapper"
     assert adv._worker_agent_name("ab-2222aaaa", "x" * 35) == \
-        "target-ab-2222aaaa-" + "x" * 30
+        "t-ab-2222aaaa-" + "x" * 30
+    # A sourced daemon dispatch stamps its origin first.
+    assert adv._worker_agent_name(
+        "ab-2222aaaa", "cargo-bootstrapper", source="ab", verb_code="bp"
+    ) == "ab-bp-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_verb_qualifier_derives_bare_declared_verb():
-    assert adv._verb_qualifier("/fno:blueprint") == "blueprint"
-    assert adv._verb_qualifier("blueprint") == "blueprint"
-    assert adv._verb_qualifier("$fno:blueprint") == "fno-blueprint"
-    assert adv._verb_qualifier(None) is None
-    assert adv._verb_qualifier("") is None
-    assert adv._verb_qualifier("  ") is None
+    # RETIRED with x-84b2: the verb rides the name as a code. The retirement is
+    # loud, so a stale caller fails here instead of minting an unqualified name.
+    with pytest.raises(NotImplementedError):
+        adv._verb_qualifier("blueprint")
 
 
 def test_worker_agent_name_qualifier_keeps_prefix_contract():
-    # The verb lands in agent_name's qualifier slot: the name states which verb
-    # ran while every target-<node>- consumer match keeps holding.
-    name = adv._worker_agent_name("x-7aa8abc1", "daily-pass", qualifier="blueprint")
-    assert name == "target-x-7aa8abc1-blueprint-daily-pass"
-    assert name.startswith("target-x-7aa8abc1-")
-    # A node declaring no verb keeps today's exact name (no empty qualifier).
+    # x-84b2: the verb code replaced the qualifier slot. The blueprint verb
+    # lands as bp; the bare default is t.
+    assert adv._worker_agent_name(
+        "x-7aa8abc1", "daily-pass", verb_code="bp"
+    ) == "bp-x-7aa8abc1-daily-pass"
+    # A node declaring no verb keeps the manual t- name.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
+        "t-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
@@ -1564,12 +1567,11 @@ def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    # /think: an allowlisted verb exercises the same qualifier mechanics the
-    # resolver refuses for unlisted ones.
+    # /think: an allowlisted verb exercises the same code-mapping mechanics the
+    # vocabulary refuses for unlisted ones.
     adv._spawn_worker("x-7aa8abc1", None, "daily-pass", verb="/think")
     name = captured["cmd"][-2]
-    assert name.startswith("target-x-7aa8abc1-")
-    assert "think" in name
+    assert name.startswith("th-x-7aa8abc1-")
 
 
 def test_spawn_worker_name_includes_slug(monkeypatch):
@@ -1581,7 +1583,7 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper")
-    assert captured["cmd"][-2] == "target-ab-2222aaaa-cargo-bootstrapper"
+    assert captured["cmd"][-2] == "t-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
@@ -1600,6 +1602,47 @@ def test_spawn_worker_other_failure_raises_spawn_error(monkeypatch):
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
+
+
+def test_spawn_worker_refuses_source_reconcile_impossible_pair():
+    """x-84b2: a source other than rd can never ride a reconcile manifest."""
+    with pytest.raises(adv.SpawnError, match="impossible pair"):
+        adv._spawn_worker(
+            "x-7aa8abc1", None, "daily-pass",
+            source="ac", reconcile_manifest="/tmp/manifest.json",
+        )
+
+
+def test_spawn_worker_receipt_carries_the_registered_name(monkeypatch):
+    """x-84b2: the receipt's agent_name is the exact name passed to --name, so
+    every downstream event copies one mint instead of re-deriving a lookalike."""
+    captured = {}
+    receipt: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "x-7aa8abc1", None, "daily-pass", source="ab", verb="/blueprint",
+        node={"id": "x-7aa8abc1", "dispatch_verb": "", "difficulty": "high",
+              "plan_path": "", "priority": "p1"},
+        receipt=receipt,
+    )
+    minted = captured["cmd"][captured["cmd"].index("--name") + 1]
+    assert minted == "ab-bp-x-7aa8abc1-daily-pass"
+    assert receipt["agent_name"] == minted
+
+
+def test_spawn_worker_unknown_verb_word_refuses(monkeypatch):
+    """AC1-EDGE: an out-of-vocabulary verb refuses before spawn, never a t."""
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda cmd, **kw: pytest.fail("must not spawn"),
+    )
+    with pytest.raises(Exception, match="unknown dispatch verb"):
+        adv._spawn_worker("x-1", None, "s", verb="/impeccable")
 
 
 def test_spawn_worker_skips_noise_line_mentioning_short_id(monkeypatch):
@@ -3280,7 +3323,9 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
 
     node_id = "regready-pipeline-2c4f9a1b3d"
     slug = "path consolidation wave 0 delegate handoff"
-    assert len(f"target-{node_id}-{slug_component(slug)}") > MAX_LEN
+    # The sourced (daemon) form is the widest the seam mints; a naive assembly
+    # of THAT would overflow.
+    assert len(f"ab-bp-{node_id}-{slug_component(slug)}") > MAX_LEN
 
     calls = []
 
@@ -3289,13 +3334,13 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(node_id, "/w", slug)
+    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint")
 
     assert sid == "abc12345"
     assert len(calls) == 1  # exactly one worker launch requested
     name = calls[0][calls[0].index("--name") + 1]
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
-    assert name.startswith(f"target-{node_id}-")  # full node identity preserved
+    assert name == f"ab-bp-{node_id}-path-consolidation-wave-0-del"
 
 
 def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
@@ -3334,17 +3379,20 @@ def test_duplicate_dispatch_converges_on_one_dedup_name():
     # An exact expectation, not f(x) == f(x): a tautology holds for any
     # deterministic implementation, including one that returns "".
     assert adv._worker_agent_name(*args) == (
-        "target-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-de"
+        "t-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-dele"
     )
-    # A different lifecycle prefix stays distinct (G4 de-stub never collides).
-    assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, prefix="reconcile")
+    # A different source stays distinct (G4 de-stub never collides).
+    assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, source="rd")
 
 
 def test_filed_specimen_names_remain_byte_for_byte():
-    """The 43/45-char specimens from the node fit and must not change shape."""
+    """The 43/45-char specimens from the node fit; x-84b2 moves the shape."""
     assert adv._worker_agent_name("x-8096", "path-consolidation-wave-0-delegate") == (
-        "target-x-8096-path-consolidation-wave-0-dele"
+        "t-x-8096-path-consolidation-wave-0-dele"
     )
+    assert adv._worker_agent_name(
+        "x-8096", "path-consolidation-wave-0-delegate", source="rd"
+    ) == ("rd-t-x-8096-path-consolidation-wave-0-dele")
 
 
 # ---------------------------------------------------------------------------
@@ -3619,15 +3667,15 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
     )
 
     cases = [
-        # (node fields, expected command, expected name suffix, receipt verb,
+        # (node fields, expected command, expected name verb code, receipt verb,
         #  verb_source)
         (
             {"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
-            "/target --no-merge x-low", "target", "/target", "none-declared",
+            "/target --no-merge x-low", "t", "/target", "none-declared",
         ),
         (
             {"difficulty": "medium", "priority": "p1", "dispatch_verb": ""},
-            "/blueprint x-med", "blueprint", "/blueprint", "none-declared",
+            "/blueprint x-med", "bp", "/blueprint", "none-declared",
         ),
         (
             {
@@ -3635,7 +3683,7 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:target",
                 "plan_path": str(design_plan), "cwd": str(tmp_path),
             },
-            "/blueprint x-design", "blueprint", "/blueprint", "declared",
+            "/blueprint x-design", "bp", "/blueprint", "declared",
         ),
         (
             {
@@ -3643,10 +3691,10 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:blueprint",
                 "plan_path": str(ready_plan), "cwd": str(tmp_path),
             },
-            "/target --no-merge x-ready", "target", "/target", "declared",
+            "/target --no-merge x-ready", "t", "/target", "declared",
         ),
     ]
-    for i, (fields, command, suffix, verb, source) in enumerate(cases):
+    for i, (fields, command, verb_code, verb, source) in enumerate(cases):
         nid = command.split(" ")[-1]
         slug = f"matrix-{i}"
         captured, fake_run = _fake_spawn_run(f"sid-m{i}")
@@ -3658,9 +3706,8 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
         )
         assert captured["cmd"][-1] == command, (i, captured["cmd"][-1])
         name = captured["cmd"][captured["cmd"].index("--name") + 1]
-        expected_name = (
-            f"target-{nid}-{suffix}-{slug}" if suffix else f"target-{nid}-{slug}"
-        )
+        # x-84b2: the name states the verb as a code, no source on a bare call.
+        expected_name = f"{verb_code}-{nid}-{slug}"
         assert name == expected_name, (i, name)
         rows = [
             json.loads(line)

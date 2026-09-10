@@ -851,12 +851,15 @@ fn dispatch_mission(
         fno_cmd(&cfg.fno_bin)
             // --continuation: never reactivate the mission and retire an inactive
             // one, so an operator `--stop` between drain ticks is not undone.
+            // --source ab (x-84b2): the daemon origin rides every worker name.
             .args([
                 "backlog",
                 "advance",
                 "--epic",
                 &cfg.mission,
                 "--continuation",
+                "--source",
+                "ab",
                 "--json",
             ])
             .current_dir(&cfg.cwd)

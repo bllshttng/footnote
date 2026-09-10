@@ -2658,7 +2658,7 @@ def cmd_name(
         "", "--source", help="Dispatch source code (x-84b2); omit for an attended launch."
     ),
     verb: str = typer.Option(
-        "", "--verb", help="Dispatch verb code (t|bp|r|th|f); the x-84b2 form."
+        "", "--verb", help="Dispatch verb: a code (t|bp|r|th|f) or a work verb the bridge maps (/target, blueprint, ...)."
     ),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
@@ -2668,9 +2668,10 @@ def cmd_name(
     from a `cut -c1-64`, which shaves the uniqueness discriminator and collapses
     two dispatches onto one dedup token.
 
-    Two forms. The x-84b2 dispatch form passes `--verb` (and optionally
-    `--source`); the name is `[<source>-]<verb>-<node>`. The legacy form passes
-    a positional prefix and no `--verb`; behavior is unchanged.
+    Two forms. The x-84b2 dispatch form passes `--verb` (a code or a work-verb
+    word, which the vocabulary owner maps) and optionally `--source`; the name
+    is `[<source>-]<verb>-<node>`. The legacy form passes a positional prefix
+    and no `--verb`; behavior is unchanged.
 
     Exit 3 (NOT 2) is the naming refusal, including an unknown --source or
     --verb. Exit 2 is Click's usage error, which an `fno` too old to know this
@@ -2678,8 +2679,13 @@ def cmd_name(
     would read every ordinary node as unrepresentable and refuse the whole
     fleet on a stale install.
     """
-    from fno.agents.naming import AgentNameError, agent_name as _agent_name
-    from fno.agents.naming import dispatch_agent_name
+    from fno.agents.naming import (
+        DISPATCH_VERBS,
+        AgentNameError,
+        agent_name as _agent_name,
+        dispatch_agent_name,
+        verb_code_for,
+    )
 
     try:
         if verb or source:
@@ -2692,9 +2698,10 @@ def cmd_name(
             if not verb:
                 typer.echo("error: --source requires --verb", err=True)
                 raise typer.Exit(2)
+            verb_code = verb if verb in DISPATCH_VERBS else verb_code_for(verb)
             name = dispatch_agent_name(
                 source or None,
-                verb,
+                verb_code,
                 node_id,
                 slug=slug or None,
                 qualifier=qualifier or None,

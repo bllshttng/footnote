@@ -42,6 +42,41 @@ DISPATCH_SOURCES = frozenset(
 #: Dispatch verb codes, following the kings' prefixes.
 DISPATCH_VERBS = frozenset({"t", "bp", "r", "th", "f"})
 
+#: Harness-map work verb (the receipt's word) -> name code. One table here so
+#: no producer keeps a second mapping that can drift (x-84b2 Locked Decision 1).
+#: ``builtin`` is the no-declared-verb target path.
+WORK_VERB_CODES = {
+    "target": "t",
+    "blueprint": "bp",
+    "review": "r",
+    "research": "r",
+    "think": "th",
+    "fix": "f",
+    "builtin": "t",
+}
+
+
+def verb_code_for(word: Optional[str]) -> str:
+    """The dispatch verb code for a harness-map work-verb word.
+
+    Accepts the spellings the receipt carries: ``/target``,
+    ``/fno:blueprint``, ``$fno:blueprint``, ``blueprint``, ``builtin``. An
+    unknown word raises rather than defaulting to ``t``: fabricating
+    provenance is what the vocabulary exists to stop.
+    """
+    v = (word or "").strip()
+    if v.startswith("/fno:"):
+        v = v[len("/fno:"):]
+    elif v.startswith("$fno:"):
+        v = v[len("$fno:"):]
+    v = v.lstrip("/") or "target"
+    code = WORK_VERB_CODES.get(v)
+    if code is None:
+        raise AgentNameError(
+            f"unknown dispatch verb {word!r}; known: {', '.join(sorted(WORK_VERB_CODES))}"
+        )
+    return code
+
 #: First tokens that open a typed non-node identity rather than a graph node
 #: prefix. ``session-`` wins over the node-shape regex because a session
 #: handle can itself be node-shaped.
