@@ -507,7 +507,7 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
             Ok(settled) => return (settled, Vec::new()),
             Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
                 let _ = err;
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(settle_backoff_ms(attempt)));
             }
             Err(SettleRefusal::Retry(err)) => {
                 let reason =
@@ -520,6 +520,24 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
         }
     }
     unreachable!("every loop arm returns")
+}
+
+/// Full-jitter exponential delay before settle retry attempt `attempt + 1`,
+/// the shape x-1601 landed on the Python side (`_tx_backoff_secs`): sweepers
+/// are correlated by construction, so the flat 250 ms re-lined every loser
+/// up at the same instant. Uniform in [0, min(cap, base << attempt)].
+const SETTLE_BACKOFF_BASE_MS: u64 = 250;
+const SETTLE_BACKOFF_CAP_MS: u64 = 4_000;
+
+fn settle_backoff_ms(attempt: usize) -> u64 {
+    let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+    let mut buf = [0u8; 8];
+    // A failed entropy draw sleeps 0: the immediate retry this replaces,
+    // never a panic in a sweep thread.
+    if getrandom::fill(&mut buf).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(buf) % (bound + 1)
 }
 
 /// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
@@ -2467,6 +2485,25 @@ pub(crate) fn default_ledger_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settle_backoff_is_full_jitter_within_the_attempt_bound() {
+        // The x-1601 shape: uniform in [0, min(cap, base << attempt)], so two
+        // sweepers never re-line up on the same instant the way the flat 250
+        // ms sleep did.
+        for attempt in 0..7 {
+            let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+            for _ in 0..64 {
+                let delay = settle_backoff_ms(attempt);
+                assert!(delay <= bound, "attempt {attempt}: {delay} > {bound}");
+            }
+        }
+        // The cap holds at the ceiling no matter how far the shift climbs.
+        assert_eq!(
+            SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << 20),
+            SETTLE_BACKOFF_CAP_MS
+        );
+    }
 
     fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
         let base = std::env::temp_dir().join(format!(
