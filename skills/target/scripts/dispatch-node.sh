@@ -200,12 +200,6 @@ resolve_json="$(fno agents dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
 # fallback (repo rule) - a resolver that ever returned "" must read as absent.
 DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
 DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-# Per-harness command TEMPLATE (x-567d): a native skill invocation where one is
-# verified (claude `/target`, codex `$fno:target`, agy `/target`) or a prose
-# brief (opencode/gemini, which have no footnote slash surface). `{id}` is
-# substituted per node below. claude keeps its local tgt_cmd builder (FLAGS /
-# --allow-merge), so a missing template only matters for the non-claude lanes.
-DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
   reason="no autonomous substrate resolved (rc=$resolve_rc); set config.agents.profiles.target.provider to a harness with an autonomous substrate (deprecated config.dispatch.harness still reads for one release; run fno agents dispatch resolve --harness <name> to see what each supports)"
   fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
@@ -223,12 +217,11 @@ if [[ "$DISPATCH_SUBSTRATE" == "headless" ]]; then
     -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"$DISPATCH_SUBSTRATE\",\"to\":\"headless\"}" >/dev/null 2>&1 || true
 fi
 
-# The resolve above is node-agnostic, so it is the BASE every node starts from.
-# A per-node quota cutover overrides the loop-local copies below; keeping the
-# base separate is what stops one node's cutover leaking into the next node.
+# The resolve above is node-agnostic, so it is the BASE: the fail-fast
+# substrate check ran against it, and an explicit --route pins the per-node
+# resolve to this harness (never to a cutover destination).
 DISPATCH_PROVIDER_BASE="$DISPATCH_PROVIDER"
 DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
-DISPATCH_COMMAND_BASE="$DISPATCH_COMMAND"
 
 # ---- per-node dispatch ------------------------------------------------------
 n_launched=0; n_parked=0; n_already=0; n_skipped=0
@@ -309,68 +302,11 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # ---- The shared quota route decision (same seam as backlog advance / fno
-  # dispatch). This shell rung used to reach only `fno agents dispatch resolve`, which
-  # answers "which harness is configured", never "does that harness have quota
-  # left" - so /target bg and the advance drain stayed on a walled account
-  # while an idle harness sat there. `--autonomous` folds the route in.
-  # No --harness is passed: an explicit harness IS a pin, and passing the
-  # configured default as if it were one would disable the reroute it gates.
-  # Reset from the base first so a previous node's cutover never leaks forward.
-  DISPATCH_PROVIDER="$DISPATCH_PROVIDER_BASE"
-  DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
-  DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
+  # x-ebd2: stay/cutover/defer and the command are ONE authoritative resolve
+  # below. The separate --autonomous route call this block used to make
+  # resolved quota against a node-agnostic command, so the pair could
+  # disagree; the consolidated tuple answers both from the same node read.
   cutover_args=(); route_account=""; spawn_runtime=()
-  # An explicit --route is a human's model-and-billing choice, and precedence
-  # puts every explicit pin above quota policy. Passing the configured harness
-  # makes the resolver treat this launch as pinned: it may still DEFER, but it
-  # is never rerouted onto another harness, which would discard the route.
-  route_pin_args=()
-  [[ -n "$ROUTE" ]] && route_pin_args=(--harness "$DISPATCH_PROVIDER_BASE")
-  route_json="$(fno agents dispatch resolve --autonomous --node "$id" "${route_pin_args[@]+"${route_pin_args[@]}"}" -J 2>/dev/null)"; route_rc=$?
-  route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
-  # Fail OPEN but never SILENT. A stale `fno` without --autonomous, or any
-  # unreadable verdict, leaves quota routing off for this node - the pre-quota
-  # behaviour, so the node still dispatches rather than wedging the fleet, but
-  # the degrade is announced. Silence here would be indistinguishable from
-  # "quota said proceed", which is how a routing seam quietly stops existing.
-  if [[ "$route_rc" -ne 0 || -z "$route_action" ]]; then
-    echo "note: $id quota routing unavailable (dispatch resolve --autonomous rc=$route_rc); dispatching on the configured harness '$DISPATCH_PROVIDER_BASE'" >&2
-  fi
-  if [[ "$route_action" == "defer" ]]; then
-    # The node stays ready and nothing is claimed; the next run after the reset
-    # dispatches it. Same outcome the Python launchers report as quota-deferred.
-    route_retry="$(printf '%s' "$route_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
-    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$route_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
-    n_parked=$((n_parked + 1))
-    continue
-  fi
-  if [[ "$route_action" == "cutover" ]]; then
-    route_account="$(printf '%s' "$route_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
-    route_harness="$(printf '%s' "$route_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
-    route_substrate="$(printf '%s' "$route_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-    route_command="$(printf '%s' "$route_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
-    # All four or none. Falling back to the BASE harness here would launch on the
-    # very account the selector just ruled out, so an incomplete tuple parks the
-    # node instead - fail closed, leaving it ready and re-dispatchable.
-    if [[ -z "$route_account" || -z "$route_harness" || -z "$route_substrate" || -z "$route_command" ]]; then
-      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
-      n_parked=$((n_parked + 1))
-      continue
-    fi
-    DISPATCH_PROVIDER="$route_harness"
-    DISPATCH_SUBSTRATE="$route_substrate"
-    DISPATCH_COMMAND="$route_command"
-    # The record id travels on argv; spawn resolves its credentials itself.
-    cutover_args=(--dispatch-account "$route_account")
-    # `spawn` auto-routes to the Rust client, which does not know this flag
-    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
-    # before it starts. The overlay resolver is Python, so pin the runtime for a
-    # cutover spawn - the same pin spawn-guard and `agents name` already use for
-    # Python-only surfaces in this script.
-    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
-    echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
-  fi
 
   # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title
   # reads at a glance which node a /target worker is on (e.g.
@@ -653,46 +589,30 @@ for id in "${NODES[@]}"; do
   esac
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # x-8151: ONE resolver call builds the command for every branch, with the
-  # merge posture as an input. This shell no longer re-derives the carrier:
-  # the old prefix-matching inject missed /fno:target (opencode refusals were
-  # silently dropped), and the claude branch built /target by hand. The resolve
-  # runs in the node's project cwd so from-config honors THIS node's
-  # config.auto_merge.grant in a batch spanning repos (codex P2, x-4391).
-  # Command precedence (unchanged): node dispatch_verb / dispatch_brief (US3,
-  # x-f78d) > claude native /target > per-harness builtin (x-567d).
+  # x-8151 + x-ebd2: ONE authoritative resolve per node builds the command for
+  # every branch, merge posture and lifecycle alike. The resolver loads the
+  # node itself and derives the workflow verb from its plan rung and
+  # difficulty, so this shell no longer pre-reads dispatch_verb/dispatch_brief
+  # and carries no local /target or DISPATCH_COMMAND fallback - a fallback
+  # here would bypass the derivation exactly the way the old hand-built claude
+  # /target did. --autonomous rides the quota route (stay/cutover/defer) on
+  # the same tuple. The resolve runs in the node's project cwd so from-config
+  # honors THIS node's config.auto_merge.grant in a batch spanning repos
+  # (codex P2, x-4391).
   node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
   case "$ALLOW_MERGE" in
     1) posture_args=(--merge-posture allow) ;;
     0) posture_args=(--merge-posture no-merge) ;;
     *) posture_args=(--merge-posture from-config) ;;
   esac
-  # select(. != "") before // empty: jq's // treats "" as truthy (repo idiom).
-  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
-  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
-  resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" "${posture_args[@]}" -J)
-  if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
-    # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
-    # `/target` verb resolves to `$fno:target {id}` on codex, `/target {id}` on
-    # claude/agy, a prose brief on gemini/opencode.
-    [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
-    [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
-  elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
-    # claude native /target (Locked Decision 4). --flags rides the template
-    # verbatim; the resolver normalizes, migrates a legacy bare token, and
-    # applies the posture (Locked Decision 6 lives in from-config now: every
-    # config error shape degrades to no-merge).
-    resolve_args+=(--command "/target${FLAGS:+ $FLAGS} {id}")
-  elif [[ -n "$DISPATCH_COMMAND" ]]; then
-    # non-claude per-harness builtin (x-567d): codex `$fno:target`, agy
-    # `/target`, opencode/gemini prose brief. Same posture input.
-    resolve_args+=(--command "$DISPATCH_COMMAND")
-  else
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""
-    n_failed=$((n_failed + 1))
-    continue
-  fi
+  resolve_args=(dispatch resolve --autonomous --node "$id" "${posture_args[@]}" -J)
+  # An explicit --route is a human's model-and-billing choice, and precedence
+  # puts every explicit pin above quota policy. Passing the harness pin ONLY
+  # here makes the resolver treat this launch as pinned: it may still DEFER,
+  # but it is never rerouted onto another harness, which would discard the
+  # route. Unpinned launches stay rerouteable - the cutover answers ride the
+  # same tuple.
+  [[ -n "$ROUTE" ]] && resolve_args+=(--harness "$DISPATCH_PROVIDER_BASE")
   if [[ -n "$node_cwd" && -d "$node_cwd" ]]; then
     resolved_json="$( ( cd "$node_cwd" && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
   else
@@ -721,6 +641,49 @@ for id in "${NODES[@]}"; do
     continue
   fi
   tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
+  # x-ebd2: the same tuple is the harness authority for stay AND cutover. On a
+  # cutover the command is ALREADY rendered for the destination, and
+  # harness/substrate/account ride beside it; on stay they name the configured
+  # (or pinned) harness. Reset from the base resolve is unnecessary - one
+  # tuple, one truth, no leak between nodes.
+  DISPATCH_PROVIDER="$(printf '%s' "$resolved_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
+  DISPATCH_SUBSTRATE="$(printf '%s' "$resolved_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
+  route_action="$(printf '%s' "$resolved_json" | jq -r '.route_action // "stay"')"
+  if [[ "$route_action" == "defer" ]]; then
+    # The node stays ready and re-dispatchable; the reservation is released so
+    # the next run after the window dispatches it.
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    route_retry="$(printf '%s' "$resolved_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
+    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$resolved_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
+    n_parked=$((n_parked + 1))
+    continue
+  fi
+  if [[ "$route_action" == "cutover" ]]; then
+    route_account="$(printf '%s' "$resolved_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
+    if [[ -z "$route_account" || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
+      # An incomplete destination parks the node: launching on the exhausted
+      # harness is the exact wrong-billing launch the selector ruled out.
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
+      n_parked=$((n_parked + 1))
+      continue
+    fi
+    # The record id travels on argv; spawn resolves its credentials itself.
+    cutover_args=(--dispatch-account "$route_account")
+    # `spawn` auto-routes to the Rust client, which does not know this flag
+    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
+    # before it starts. The overlay resolver is Python, so pin the runtime for a
+    # cutover spawn - the same pin spawn-guard and `agents name` already use for
+    # Python-only surfaces in this script.
+    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
+    echo "note: $id cutting over to harness '$DISPATCH_PROVIDER' (account $route_account); $(printf '%s' "$resolved_json" | jq -r '.route_reason // "quota"')" >&2
+  fi
+  if [[ -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"dispatch resolve returned no harness/substrate (route_action=$route_action); node not dispatched\""
+    n_failed=$((n_failed + 1))
+    continue
+  fi
   # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
   # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
   # --node is passed with no --brief, so a plain node cold-starts with context.
@@ -990,11 +953,11 @@ for id in "${NODES[@]}"; do
   if [[ -n "$route_account" ]]; then
     fno doctor event emit -t dispatch_failover -s backlog -d "$(jq -nc \
       --arg node_id "$id" \
-      --arg from "$(printf '%s' "$route_json" | jq -r '.route_source // ""')" \
+      --arg from "$(printf '%s' "$resolved_json" | jq -r '.route_source // ""')" \
       --arg to "$route_account" \
       --arg harness_to "$DISPATCH_PROVIDER" \
-      --arg window "$(printf '%s' "$route_json" | jq -r '.route_window // ""')" \
-      --arg reason "$(printf '%s' "$route_json" | jq -r '.route_reason // ""')" \
+      --arg window "$(printf '%s' "$resolved_json" | jq -r '.route_window // ""')" \
+      --arg reason "$(printf '%s' "$resolved_json" | jq -r '.route_reason // ""')" \
       '{node_id:$node_id,from:$from,to:$to,harness_to:$harness_to,window:$window,reason:$reason}' \
       2>/dev/null)" >/dev/null 2>&1 || true
   fi

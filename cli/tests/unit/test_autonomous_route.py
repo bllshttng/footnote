@@ -367,7 +367,12 @@ class TestAutonomousResolveRung:
         import fno.dispatch as dm
         from typer.testing import CliRunner
 
-        monkeypatch.setattr(dm, "_lookup_node", lambda ref: {"id": node, "priority": "p2"})
+        # A real projection row (x-0961/x-ebd2): planless low is the law's
+        # target intake, so the node-aware resolve derives instead of refusing.
+        monkeypatch.setattr(
+            dm, "_lookup_node",
+            lambda ref: {"id": node, "priority": "p2", "difficulty": "low", "dispatch_verb": ""},
+        )
         monkeypatch.setattr(dm, "_autonomous_route_for", lambda *a, **k: route)
         args = ["resolve", "--autonomous", "--node", node, "-J"]
         if harness:
@@ -401,6 +406,35 @@ class TestAutonomousResolveRung:
         assert out["route_action"] == "defer"
         assert out["route_source"] == "ccm"
         assert out["route_retry_at"] == 9e18
+
+    def test_cutover_preserves_the_derived_verb(self, monkeypatch) -> None:
+        """x-ebd2 parity: quota reroutes the HARNESS, never the workflow phase.
+        A planless medium node resolves /blueprint, and the cutover destination
+        renders that same phase in its own surface."""
+        import fno.dispatch as dm
+        from typer.testing import CliRunner
+
+        monkeypatch.setattr(
+            dm, "_lookup_node",
+            lambda ref: {"id": "ab-1111aaaa", "priority": "p2", "difficulty": "medium", "dispatch_verb": ""},
+        )
+        route = ar.AutonomousRoute(
+            "cutover",
+            "exhausted-cutover",
+            source_record="ccm",
+            record_id="ccr",
+            harness="codex",
+            account_env={"CODEX_HOME": "/acct/ccr"},
+            window="exhausted",
+        )
+        monkeypatch.setattr(dm, "_autonomous_route_for", lambda *a, **k: route)
+        out = json.loads(
+            CliRunner().invoke(
+                dm.dispatch_app, ["resolve", "--autonomous", "--node", "ab-1111aaaa", "-J"]
+            ).stdout
+        )
+        assert out["harness"] == "codex"
+        assert out["command"].startswith("$fno:blueprint ")
 
     def test_unrenderable_destination_falls_back_to_defer_not_the_walled_harness(
         self, monkeypatch
@@ -441,7 +475,10 @@ class TestAutonomousResolveRung:
         import fno.dispatch as dm
         from typer.testing import CliRunner
 
-        monkeypatch.setattr(dm, "_lookup_node", lambda ref: {"id": "ab-1111aaaa"})
+        monkeypatch.setattr(
+            dm, "_lookup_node",
+            lambda ref: {"id": "ab-1111aaaa", "difficulty": "low", "dispatch_verb": ""},
+        )
         monkeypatch.setattr(
             dm,
             "_autonomous_route_for",
@@ -732,7 +769,10 @@ class TestQuotaRotationDeclinedEvent:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             dm, "_lookup_node",
-            lambda node: {"id": node, "priority": "p2", "cwd": str(tmp_path)},
+            lambda node: {
+                "id": node, "priority": "p2", "cwd": str(tmp_path),
+                "difficulty": "low", "dispatch_verb": "",
+            },
         )
         monkeypatch.setattr(
             "fno.agents.autonomous_route.select_autonomous_route",

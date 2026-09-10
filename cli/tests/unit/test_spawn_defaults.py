@@ -388,9 +388,11 @@ def test_crown_profile_injects_on_a_non_verb_seed():
     assert "crown-model" in result
 
 
-def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
-    """AC13-HP: a /target on an unplanned node bills planning (band floored
-    high); the same node WITH a plan_path bills execution (stamped band)."""
+def test_target_verb_ignores_plan_presence_blueprint_bills_planning(monkeypatch):
+    """x-ebd2: the resolved leading verb is the phase authority. A /target
+    never acquires the planning band merely because its node has no plan -
+    that model-only plan-presence inference is gone - while /blueprint still
+    bills planning on its own profile."""
     rows = [
         {"name": "cheap-x", "harness": "codex", "model": "gpt-cheap", "band": "low"},
         {"name": "strong-x", "harness": "codex", "model": "gpt-strong", "band": "high"},
@@ -406,12 +408,17 @@ def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
         "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(node)
     )
     out = _inject(["spawn", "--node", "x-1", "/target x-1"])
-    assert "gpt-strong" in out and "gpt-cheap" not in out
+    assert "gpt-cheap" in out and "gpt-strong" not in out
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(planned)
     )
     out = _inject(["spawn", "--node", "x-1", "/target x-1"])
     assert "gpt-cheap" in out and "gpt-strong" not in out
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(node)
+    )
+    out = _inject(["spawn", "--node", "x-1", "/blueprint x-1"])
+    assert "gpt-strong" in out and "gpt-cheap" not in out
 
 
 def test_ac3_bare_spawn_inherits_provider_and_model():

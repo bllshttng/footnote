@@ -1154,15 +1154,13 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # Plan-presence, not plan quality: an unplanned target bills planning.
+            # x-ebd2: the resolved leading verb is the phase authority.
+            # blueprint/think bill planning; target never acquires frontier
+            # eligibility merely because its low-difficulty node has no plan -
+            # that model-only plan-presence inference is gone (the derived
+            # verb already routed the node to the blueprint profile).
             grid_role: Optional[str] = None
-            if grid_node_entry and verb == "target":
-                grid_role = (
-                    "execution"
-                    if (grid_node_entry.get("plan_path") or "").strip()
-                    else "planning"
-                )
-            elif verb in ("blueprint", "think"):
+            if verb in ("blueprint", "think"):
                 grid_role = "planning"
             protected_name: Optional[str] = None
             try:
