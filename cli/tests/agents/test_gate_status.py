@@ -1,4 +1,4 @@
-"""x-df28: the read-only capacity probe behind `fno agents gate-status`.
+"""The read-only capacity probe behind `fno agents gate-status`.
 
 The stop hook asks this instead of waking the model on work no session can
 dispatch. Behavioral contract: every capped lane at cap refuses; one lane with

@@ -2,7 +2,7 @@
 
 The gate's contracts live in `cli/src/fno/agents/spawn_gate.py` (the sole gate on every `fno agents spawn` path) and its Rust twin `crates/fno-agents/src/spawn_gate.rs`. This doc carries the two long stories that were living in docstrings, so the code keeps its prose short.
 
-## The load ceiling asks two instruments (x-7c0f, measured twice)
+## The load ceiling asks two instruments (measured twice)
 
 `_check_load_ceiling` runs three thresholds. Below `max_load_per_cpu x cpus` the gate admits without probing, so the common path costs no subprocess. Above the trigger the gate asks footprint whose CPU this is. When the fleet holds more than `max_fleet_cpu_share` of capacity, the refusal fires. `hard_max_load_per_cpu x cpus` refuses regardless of attribution.
 
