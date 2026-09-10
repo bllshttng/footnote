@@ -373,6 +373,11 @@ jobs:
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
 
+      - name: Graph store parity guard
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-graph-parity.sh --self-test
+
       # From the installed-tree import crash: parents[N]/scripts joins in
       # cli/src/fno escape the package root and the wheel never ships them.
       - name: Package-root path escapes + self-test

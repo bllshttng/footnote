@@ -768,6 +768,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
+        "export_status" => handle_export_status(state),
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
@@ -1133,6 +1134,21 @@ fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
         "path": state.graph.display().to_string(),
     }))
 }
+
+fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
+    if state.read_source != ReadSource::Sqlite {
+        return Ok(json!({"backend": "json", "stale": false}));
+    }
+    let (current, exported) =
+        crate::graph_sqlite::export_status(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "backend": "sqlite",
+        "stale": exported.as_deref() != Some(current.as_str()),
+        "version": current,
+        "exported_version": exported,
+    }))
+}
+
 fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let version = params
         .get("version")

@@ -235,6 +235,13 @@ pub fn version(graph: &Path) -> Result<String, String> {
     meta(&connection, "version")?.ok_or_else(|| "SQLite graph has no version".into())
 }
 
+pub fn export_status(graph: &Path) -> Result<(String, Option<String>), String> {
+    let connection = open(graph)?;
+    let current =
+        meta(&connection, "version")?.ok_or_else(|| "SQLite graph has no version".to_string())?;
+    Ok((current, meta(&connection, "exported_version")?))
+}
+
 pub fn export_now(graph: &Path) -> Result<String, String> {
     let entries = read_entries(graph)?;
     let version = content_version(&entries);

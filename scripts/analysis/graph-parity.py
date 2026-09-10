@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Temporary JSON-export to SQLite graph parity gate."""
 
 from __future__ import annotations
@@ -5,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +65,11 @@ def _sqlite_rows(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
 
 
 def compare(*, graph: Path | None = None, db: Path | None = None) -> int:
-    from fno import paths
+    if graph is None:
+        from fno import paths
 
-    graph = Path(graph or paths.graph_json())
+        graph = paths.graph_json()
+    graph = Path(graph)
     db = Path(db or graph.with_suffix(".db"))
     try:
         json_rows, malformed, json_order = _json_rows(graph)
@@ -76,12 +80,12 @@ def compare(*, graph: Path | None = None, db: Path | None = None) -> int:
     failures = malformed + sqlite_malformed
     if json_order != sqlite_order:
         failures.append("row order diverged")
-    failures.extend(f"missing from SQLite: {node_id}" for node_id in sorted(json_rows.keys() - sqlite_rows.keys()))
-    failures.extend(f"extra in SQLite: {node_id}" for node_id in sorted(sqlite_rows.keys() - json_rows.keys()))
+    failures.extend(f"missing from SQLite: {key}" for key in sorted(json_rows.keys() - sqlite_rows.keys()))
+    failures.extend(f"extra in SQLite: {key}" for key in sorted(sqlite_rows.keys() - json_rows.keys()))
     failures.extend(
-        f"content diverged: {node_id}"
-        for node_id in sorted(json_rows.keys() & sqlite_rows.keys())
-        if json_rows[node_id] != sqlite_rows[node_id]
+        f"content diverged: {key}"
+        for key in sorted(json_rows.keys() & sqlite_rows.keys())
+        if json_rows[key] != sqlite_rows[key]
     )
     if failures:
         for failure in failures:
@@ -91,12 +95,34 @@ def compare(*, graph: Path | None = None, db: Path | None = None) -> int:
     return 0
 
 
+def self_test() -> int:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        graph, db = root / "graph.json", root / "graph.db"
+        graph.write_text('{"entries":[{"id":"x-test","title":"same"}]}')
+        with sqlite3.connect(db) as connection:
+            connection.execute("CREATE TABLE entries(id TEXT PRIMARY KEY, ordinal INTEGER, row TEXT)")
+            connection.execute("INSERT INTO entries VALUES(?, ?, ?)", ("x-test", 0, '{"id":"x-test","title":"same"}'))
+        if compare(graph=graph, db=db) != 0:
+            return 1
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "UPDATE entries SET row = ?",
+                ('{"id":"x-test","title":"different"}',),
+            )
+        if compare(graph=graph, db=db) != 1:
+            return 1
+    print("graph-parity self-test: PASS (clean and divergence controls fired)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--graph", type=Path)
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
-    return compare(graph=args.graph, db=args.db)
+    return self_test() if args.self_test else compare(graph=args.graph, db=args.db)
 
 
 if __name__ == "__main__":
