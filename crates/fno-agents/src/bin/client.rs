@@ -164,6 +164,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::reentry::run_reentry_plan(&args[1..], &AgentsHome::from_env());
     }
 
+    // `resume-argv` is the INTERNAL machine verb behind the mux resume
+    // gesture (x-eb79): the server shells it for the codex lane instead of
+    // re-deriving the declared form and losing the writable-roots grant.
+    // Same `matches!` treatment as `reentry-plan` - it is not an `fno agents`
+    // verb, so the routable-verb parity guard never sees it.
+    if matches!(verb, "resume-argv") {
+        return fno_agents::client_verbs::run_resume_argv(&args[1..]);
+    }
+
     if matches!(verb, "manifest-for-session") {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }

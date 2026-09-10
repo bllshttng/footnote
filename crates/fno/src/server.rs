@@ -77,7 +77,7 @@ mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
 
-use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
+use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan, run_resume_argv};
 use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
 use self::truth_probe::TruthReading;
 use self::truth_probe::{probe_truth_map, TruthProbeLatch, TRUTH_PROBE_EVERY};
@@ -667,6 +667,18 @@ enum CoreMsg {
         request: Box<ReentrySpawnRequest>,
         verdict: Result<ReentryVerdict, String>,
     },
+    /// (x-eb79) One non-claude row's resume argv, resolved OFF the core loop
+    /// (`fno-agents resume-argv`), routed back so the pane spawn runs on the
+    /// core loop as before. `Ok((argv, degraded))`: the argv to stage and
+    /// whether the verb failed (the fallback render, so the operator learns
+    /// the worker resumes without its writable-roots grant). `Err` is the
+    /// visible refusal: a timeout, a missing binary, an unknown harness - the
+    /// handler starts NO pane on it.
+    ResumeArgvReady {
+        id: u64,
+        argv: Result<(Vec<String>, bool), String>,
+        replay: Box<ResumeReplay>,
+    },
     /// (x-d285) A batch's pre-resolved attach plans (restore's members or a
     /// picker recruit's selected ids, keyed by attach id), routed back so the
     /// existing loop re-enters on the core loop with the verdicts in hand.
@@ -971,6 +983,18 @@ enum CoreMsg {
     /// journal. Sent by a 30s interval task; a no-op with no live panes (an
     /// idle mux writes nothing).
     PaneStatsTick,
+}
+
+/// (x-eb79) What the core loop re-enters once a non-claude row's resume argv
+/// lands. Same idempotent-gates contract as [`ReentrySpawnRequest`]: the
+/// replay re-runs the gesture and the staged argv is consumed at argv
+/// construction, so the second pass spawns exactly the pane the first pass
+/// would have - only the argv construction moved off-loop.
+pub(crate) enum ResumeReplay {
+    /// Re-enter `resume_one` for the row (`Command::ResumeAgent`).
+    Gesture { name: String },
+    /// Re-enter the held-worker resume behind `Command::FocusPane(pid)`.
+    Held { pid: u64 },
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -2372,6 +2396,12 @@ pub(crate) struct Core {
     /// steady state. One-shot by construction: a second gesture arriving
     /// without a verdict resolves fresh.
     reentry_verdict: Option<ReentryVerdict>,
+    /// (x-eb79) The resolved resume argv for the non-claude gesture the
+    /// `ResumeArgvReady` continuation just re-dispatched, same one-shot
+    /// contract as `reentry_verdict`: staged by the ready-handler (or the
+    /// bulk apply, which keeps its sync declared-form render), consumed
+    /// exactly once by the receiving arm. Empty in steady state.
+    staged_resume_argv: Option<Vec<String>>,
     /// (x-d285) A batch's pre-resolved attach plans, keyed by attach id:
     /// staged by the `BatchPlansReady` handler, drained per member by the
     /// consuming loop (restore or a picker recruit). Empty outside a batch
@@ -6546,28 +6576,60 @@ impl Core {
         // (no registry row) has no recorded binding, so its name
         // misses the resolver and the visible refusal is the design -
         // no bare claude resume on this axis.
-        let plan = if facts.harness == "claude" {
+        let plan;
+        let staged_argv;
+        if facts.harness == "claude" {
             let name = row_name.unwrap_or_else(|| facts.name.clone());
-            let Some(plan) = self.resume_gesture_plan(
+            let Some(verdict) = self.resume_gesture_plan(
                 client_id,
                 &name,
                 ReentrySpawnRequest::Resume { name: name.clone() },
             ) else {
                 return ResumeOutcome::PlanPending;
             };
-            Some(plan)
+            plan = Some(verdict);
+            staged_argv = None;
         } else {
-            None
-        };
-        let (pid, tid, fallback_notice) =
-            match self.resume_worker_into(&facts, sid, None, dims.0, dims.1, plan.as_ref()) {
-                Ok(result) => result,
-                Err(error) => {
-                    return ResumeOutcome::Refused {
-                        reason: format!("resume failed: {error}"),
-                    };
+            // (x-eb79) The codex grant + --cd ride a resolved argv, and
+            // resolving it shells a Python-booting binary - never on this
+            // loop. Staged by the replay (or the bulk apply, which keeps its
+            // sync render): run. Otherwise fire the off-loop resolution and
+            // stop; `ResumeArgvReady` re-dispatches this gesture.
+            match self.staged_resume_argv.take() {
+                Some(argv) => staged_argv = Some(argv),
+                None => {
+                    let replay_name = row_name.unwrap_or_else(|| facts.name.clone());
+                    let stored_cwd = (!facts.cwd.is_empty()).then_some(facts.cwd.as_str());
+                    let (spawn_cwd, gone) = self.member_resume_cwd(sid, stored_cwd);
+                    self.resolve_resume_argv(
+                        client_id,
+                        facts.harness.as_str(),
+                        &facts.harness_session_id,
+                        &spawn_cwd,
+                        gone.is_none(),
+                        ResumeReplay::Gesture { name: replay_name },
+                    );
+                    return ResumeOutcome::PlanPending;
                 }
-            };
+            }
+            plan = None;
+        }
+        let (pid, tid, fallback_notice) = match self.resume_worker_into(
+            &facts,
+            sid,
+            None,
+            dims.0,
+            dims.1,
+            plan.as_ref(),
+            staged_argv.as_deref(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                return ResumeOutcome::Refused {
+                    reason: format!("resume failed: {error}"),
+                };
+            }
+        };
         ResumeOutcome::Resumed {
             pane: pid,
             squad: sid,
@@ -6764,8 +6826,23 @@ impl Core {
                 }
             }
             let structural = member_structural_refusal(&member);
+            // (x-eb79) The bulk path keeps the sync declared-form render: it
+            // stages a pre-rendered argv so `resume_one`'s non-claude arm
+            // never fires the off-loop resolution per member here. Codex
+            // members resumed by BULK restore get the grant when a later
+            // gesture resumes them; a gesture through resume_one can tell a
+            // bulk-stage from a fire-needed miss, so codex members resumed by
+            // bulk restore resume byte-identical to before.
+            if harness_name.as_deref().is_some_and(|h| h != "claude") {
+                self.staged_resume_argv = resume_argv_for(
+                    harness_name.as_deref().unwrap_or(""),
+                    member.harness_session_id.as_deref().unwrap_or(""),
+                )
+                .ok();
+            }
             let outcome =
                 self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
+            self.staged_resume_argv = None;
             self.reentry_verdict = None;
             let row = match outcome {
                 ResumeOutcome::Resumed {
@@ -6856,18 +6933,12 @@ impl Core {
         let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
     }
 
-    fn resume_worker_into(
-        &mut self,
-        facts: &HeldWorker,
-        sid: u64,
-        replace: Option<u64>,
-        rows: u16,
-        cols: u16,
-        plan: Option<&ReentryVerdict>,
-    ) -> Result<(u64, TabId, Option<String>), String> {
-        if !Self::resume_form(&facts.harness) {
-            return Err("agent harness has no resume form".into());
-        }
+    /// (x-eb79) The directory a resumed member spawns at, and the missing
+    /// recorded directory when it is gone. Extracted from
+    /// [`Core::resume_worker_into`] so the OFF-LOOP argv resolution hands the
+    /// shell-out the same grant directory the spawn will use - a second
+    /// derivation here could land the grant and the pane in different trees.
+    fn member_resume_cwd(&self, sid: u64, stored_cwd: Option<&str>) -> (String, Option<String>) {
         let fallback_cwd = self
             .session
             .squad(sid)
@@ -6877,22 +6948,44 @@ impl Core {
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });
-        let stored_cwd = (!facts.cwd.is_empty()).then_some(facts.cwd.as_str());
-        let (spawn_cwd, gone) = restore_member_cwd(stored_cwd, &fallback_cwd, |path| {
+        restore_member_cwd(stored_cwd, &fallback_cwd, |path| {
             std::path::Path::new(path).is_dir()
-        });
+        })
+    }
+
+    fn resume_worker_into(
+        &mut self,
+        facts: &HeldWorker,
+        sid: u64,
+        replace: Option<u64>,
+        rows: u16,
+        cols: u16,
+        plan: Option<&ReentryVerdict>,
+        staged_argv: Option<&[String]>,
+    ) -> Result<(u64, TabId, Option<String>), String> {
+        if !Self::resume_form(&facts.harness) {
+            return Err("agent harness has no resume form".into());
+        }
+        let stored_cwd = (!facts.cwd.is_empty()).then_some(facts.cwd.as_str());
+        let (spawn_cwd, gone) = self.member_resume_cwd(sid, stored_cwd);
         let fallback_notice = gone.map(|missing| {
             format!(
-                "resume: {}'s directory {missing} is gone; resuming at {fallback_cwd}",
+                "resume: {}'s directory {missing} is gone; resuming at {spawn_cwd}",
                 facts.name
             )
         });
         // (x-d285) A staged re-entry verdict replaces the bare provider argv;
-        // its `env` prefix carries the row's recorded account context. Rows
-        // off the claude axis (or without a plan) resume exactly as before.
+        // its `env` prefix carries the row's recorded account context. A
+        // non-claude row runs the argv the off-loop resume-argv resolution
+        // staged (x-eb79: the codex grant + --cd ride it); without one it
+        // resumes exactly as before (the declared-form render, which is also
+        // the fail-open fallback the resolution stages on failure).
         let argv = match plan {
             Some(verdict) => verdict.prefixed_argv(),
-            None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
+            None => match staged_argv {
+                Some(argv) => argv.to_vec(),
+                None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
+            },
         };
         // Unit fixtures replace the provider with short-lived `/bin/cat`; it
         // can exit before a keeper answers Identify. Production resumes use
@@ -9019,6 +9112,48 @@ impl Core {
         }
         self.resolve_reentry(client_id, row_name, "resume", request);
         None
+    }
+
+    /// (x-eb79) Resolve one non-claude row's resume argv OFF the core loop
+    /// (`fno-agents resume-argv`), mirroring `resolve_reentry`: the codex
+    /// grant decision needs a Python-booting shell-out, so the gesture yields
+    /// `PlanPending` and replays through [`CoreMsg::ResumeArgvReady`].
+    /// Fail-open by construction: when the verb fails the task renders the
+    /// declared form itself and flags `degraded`, so the handler notices the
+    /// operator - a silent fallback is refused (AC3-FALLBACK).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_resume_argv(
+        &self,
+        client_id: u64,
+        harness: &str,
+        session_id: &str,
+        grant_cwd: &str,
+        pin_cd: bool,
+        replay: ResumeReplay,
+    ) {
+        let core_tx = self.self_tx.clone();
+        let harness = harness.to_string();
+        let session_id = session_id.to_string();
+        let grant_cwd = grant_cwd.to_string();
+        tokio::spawn(async move {
+            let outcome = match run_resume_argv(&harness, &session_id, &grant_cwd, pin_cd).await {
+                Ok(argv) => Ok((argv, false)),
+                // Fail-open: the fallback IS today's declared-form render,
+                // never a second divergent builder. The degradation is named
+                // to the operator, never silent.
+                Err(reason) => match resume_argv_for(&harness, &session_id) {
+                    Ok(argv) => Ok((argv, true)),
+                    Err(_) => Err(reason),
+                },
+            };
+            let _ = core_tx
+                .send(CoreMsg::ResumeArgvReady {
+                    id: client_id,
+                    argv: outcome,
+                    replay: Box::new(replay),
+                })
+                .await;
+        });
     }
 
     /// (x-9c5f) Shell `fno agents mail send <name> <text>` OFF the core loop, mirroring
@@ -11437,19 +11572,41 @@ impl Core {
                         // (x-d285) A claude row's held resume runs the
                         // canonical re-entry plan; the `None` arm fires the
                         // off-loop resolution and this focus replays with the
-                        // verdict staged. Other harnesses resume as before.
-                        let plan = if facts.harness == "claude" {
-                            let Some(plan) = self.resume_gesture_plan(
+                        // verdict staged. (x-eb79) A non-claude row resolves
+                        // its argv off-loop the same way: the codex grant +
+                        // --cd ride the staged argv on the replay.
+                        let plan;
+                        let staged_argv;
+                        if facts.harness == "claude" {
+                            let Some(verdict) = self.resume_gesture_plan(
                                 client_id,
                                 &facts.name,
                                 ReentrySpawnRequest::FocusHeld { pid },
                             ) else {
                                 return Flow::Continue;
                             };
-                            Some(plan)
+                            plan = Some(verdict);
+                            staged_argv = None;
                         } else {
-                            None
-                        };
+                            match self.staged_resume_argv.take() {
+                                Some(argv) => staged_argv = Some(argv),
+                                None => {
+                                    let stored_cwd =
+                                        (!facts.cwd.is_empty()).then_some(facts.cwd.as_str());
+                                    let (spawn_cwd, gone) = self.member_resume_cwd(sid, stored_cwd);
+                                    self.resolve_resume_argv(
+                                        client_id,
+                                        facts.harness.as_str(),
+                                        &facts.harness_session_id,
+                                        &spawn_cwd,
+                                        gone.is_none(),
+                                        ResumeReplay::Held { pid },
+                                    );
+                                    return Flow::Continue;
+                                }
+                            }
+                            plan = None;
+                        }
                         match self.resume_worker_into(
                             &facts,
                             sid,
@@ -11457,6 +11614,7 @@ impl Core {
                             rows,
                             cols,
                             plan.as_ref(),
+                            staged_argv.as_deref(),
                         ) {
                             Ok((resumed, _, fallback_notice)) => {
                                 focus_pid = resumed;
@@ -13016,6 +13174,50 @@ impl Core {
                 }
                 Flow::Continue
             }
+            // (x-eb79) A non-claude gesture's resolved argv landed. A refusal
+            // is a one-line notice and nothing spawns; a resolution (or its
+            // fail-open declared-form fallback, flagged `degraded`) re-runs
+            // the SAME command with the argv staged, so every gate re-runs
+            // against live state before the pane spawns. The degradation
+            // notice fires even when the replay later refuses: the operator
+            // asked for a resume and deserves the grant-loss news regardless.
+            CoreMsg::ResumeArgvReady { id, argv, replay } => {
+                let parked = self.pending_thread_reply.take().and_then(|p| {
+                    if p.client == id {
+                        Some(p)
+                    } else {
+                        self.pending_thread_reply = Some(p);
+                        None
+                    }
+                });
+                match argv {
+                    Err(reason) => self.notice(id, reason),
+                    Ok((argv, degraded)) => {
+                        if degraded {
+                            self.notice(
+                                id,
+                                "resume: resuming without the writable-roots grant \
+                                 (resume-argv unavailable); a linked-worktree commit \
+                                 may fail",
+                            );
+                        }
+                        self.staged_resume_argv = Some(argv);
+                        match *replay {
+                            ResumeReplay::Gesture { name } => {
+                                self.command(id, Command::ResumeAgent { name });
+                            }
+                            ResumeReplay::Held { pid } => {
+                                self.command(id, Command::FocusPane(pid));
+                            }
+                        }
+                        self.staged_resume_argv = None;
+                    }
+                }
+                if let Some(pending) = parked {
+                    self.finish_pending_thread_reply(pending);
+                }
+                Flow::Continue
+            }
             // (x-d285) A batch's plans landed: stage them keyed by attach id
             // and re-enter the loop that asked. A refused entry keeps its
             // row and starts no pane (the consuming loop's own Err handling).
@@ -14050,6 +14252,7 @@ async fn serve(
         topology_dirty: false,
         last_topology_flush: None,
         reentry_verdict: None,
+        staged_resume_argv: None,
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
@@ -20431,8 +20634,9 @@ mod tests {
     #[test]
     fn resume_agent_spawns_the_harness_form_and_records_the_member() {
         // x-5f7f: a dead paneless codex row resumes through codex's own form
-        // in the recorded cwd. The program is overridden to /bin/cat so the
-        // test spawns no real codex; the session id still rides the argv.
+        // in the recorded cwd. x-eb79: the argv now resolves off-loop (the
+        // staged seam here), so the test stages what `fno-agents resume-argv`
+        // would return; /bin/cat keeps the spawn hermetic.
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
         let mut core = empty_core();
@@ -20464,6 +20668,12 @@ mod tests {
         }];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
+        // The gesture consumes the staged argv (what the off-loop
+        // `fno-agents resume-argv` shell-out would deliver).
+        core.staged_resume_argv = Some(vec![
+            "/bin/cat".into(),
+            "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
+        ]);
         core.command(
             1,
             Command::ResumeAgent {
@@ -20472,7 +20682,7 @@ mod tests {
         );
         let notices = drain_notices(&mut rx).join("\n");
         assert!(notices.contains("resumed t-codex-one"), "{notices}");
-        // One NEW pane beyond the seed shell, running the overridden program,
+        // One NEW pane beyond the seed shell, running the staged program,
         // titled from the registry row, placed in the squad owning the cwd.
         let new_panes: Vec<&u64> = core.panes.keys().filter(|&&p| p != shell).collect();
         assert_eq!(new_panes.len(), 1, "exactly one resumed pane");
@@ -20498,7 +20708,9 @@ mod tests {
         // so before the worker_pane map a second Resume for the same row
         // launched a SECOND session on the same rollout. The map binds row to
         // pane for the pane's lifetime; a second gesture focuses, and the
-        // panel presents the row pane-hosted while it lives.
+        // panel presents the row pane-hosted while it lives. x-eb79: the
+        // argv arrives through the staged seam (what `fno-agents
+        // resume-argv` would deliver), so /bin/cat keeps the spawn hermetic.
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
         let mut core = empty_core();
@@ -20530,6 +20742,10 @@ mod tests {
         }];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
+        core.staged_resume_argv = Some(vec![
+            "/bin/cat".into(),
+            "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
+        ]);
         core.command(
             1,
             Command::ResumeAgent {
@@ -20664,6 +20880,12 @@ mod tests {
             "the table declares every harness under test: {declared:?}"
         );
         for harness in &declared {
+            // x-eb79: codex now resumes through the off-loop `resume-argv`
+            // resolution (grant + --cd, asserted on the staging tests below);
+            // its declared form is the FAILOPEN render, not the gesture's.
+            if harness == "codex" {
+                continue;
+            }
             let form = token(&format!(
                 "{harness}/resume_strategy/forms/interactive_resume"
             ));
@@ -20686,12 +20908,158 @@ mod tests {
         // it, never an argv (AC5-ERR).
         let err = resume_argv_for("iambad", "sid").unwrap_err();
         assert!(err.contains("iambad"), "{err}");
-        // The built argv substitutes the placeholder with the session id, and
-        // no --cd rides this lane until the writable_roots grant can.
+        // Codex's declared form IS the fail-open render (x-eb79): what a
+        // gesture runs when `fno-agents resume-argv` is unavailable. The
+        // grant-bearing gesture argv is asserted on the staging tests.
         assert_eq!(
             resume_argv_for("codex", "01a027ad").unwrap(),
             vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()],
         );
+    }
+
+    #[test]
+    fn resume_agent_runs_the_staged_resume_argv() {
+        // AC3-HP + AC3-LOOP (the codex positive): the gesture spawns the
+        // argv the off-loop resolution staged - grant and --cd included -
+        // never the bare declared form.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-eb79-staged");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-eb79-staged".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            liveness: agents_view::Liveness::Dead,
+            ..Default::default()
+        }];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.staged_resume_argv = Some(vec![
+            "codex".into(),
+            "-c".into(),
+            "sandbox_workspace_write.writable_roots=[\"/wt/.fno/plans\"]".into(),
+            "--cd".into(),
+            "/wt".into(),
+            "resume".into(),
+            "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
+        ]);
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "t-eb79-staged".into(),
+            },
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(notices.contains("resumed t-eb79-staged"), "{notices}");
+        let new_panes: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(new_panes.len(), 1, "exactly one resumed pane");
+        let entry = core.panes.get(&new_panes[0]).unwrap();
+        let joined = entry.cmd.as_deref().unwrap_or_default();
+        assert!(
+            joined.contains("writable_roots") || entry.cmd.as_deref() == Some("codex"),
+            "the staged argv reached the pane: {:?}",
+            entry.cmd
+        );
+        for pid in new_panes {
+            core.reap_pane(pid);
+        }
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn resume_agent_fails_open_when_resume_argv_unavailable() {
+        // AC3-FALLBACK: the verb failing is NOT silent. The gesture still
+        // resumes on the declared-form render (the fail-open fallback) and a
+        // pane notice names the degradation.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-eb79-fallback");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-eb79-fallback".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            liveness: agents_view::Liveness::Dead,
+            ..Default::default()
+        }];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        // Drive the ready-handler directly: the resolution landed with the
+        // declared-form fallback flagged degraded. The handler stages, names
+        // the degradation, re-dispatches the gesture, and clears the staging;
+        // the gesture then spawns the fallback argv. (The fire path itself
+        // needs a live runtime, so it is not exercised here.)
+        core.handle(CoreMsg::ResumeArgvReady {
+            id: 1,
+            argv: Ok((
+                vec![
+                    "codex".to_string(),
+                    "resume".to_string(),
+                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
+                ],
+                true,
+            )),
+            replay: Box::new(ResumeReplay::Gesture {
+                name: "t-eb79-fallback".into(),
+            }),
+        });
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("without the writable-roots grant"),
+            "the degradation is named, never silent: {notices}"
+        );
+        assert!(notices.contains("resumed t-eb79-fallback"), "{notices}");
+        let new_panes: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(new_panes.len(), 1, "the fallback still resumes");
+        for pid in new_panes {
+            core.reap_pane(pid);
+        }
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]
@@ -24894,6 +25262,7 @@ mod tests {
             topology_dirty: false,
             last_topology_flush: None,
             reentry_verdict: None,
+            staged_resume_argv: None,
             batch_plans: HashMap::new(),
             pending_thread_reply: None,
             keeper_adopted: Vec::new(),
