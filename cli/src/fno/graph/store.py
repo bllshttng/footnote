@@ -637,6 +637,7 @@ def _commit_snapshot(
                 return client.request("commit_rows", {
                     "base_version": snap["version"],
                     "base_digests": digests,
+                    "base_plan_rungs": _plan_rung_map(base_entries),
                     "changed": changed,
                     "removed": removed,
                     "plan_rungs": plan_rungs,

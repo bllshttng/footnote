@@ -201,6 +201,7 @@ struct StoreState {
     lock_timeout: Duration,
     /// Serializes the read-modify-write cycles across client threads.
     write_gate: Mutex<()>,
+    snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
 }
 
 /// Run the store keeper to completion. Returns only on a startup failure;
@@ -231,6 +232,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         canonical: cfg.canonical,
         lock_timeout: cfg.lock_timeout,
         write_gate: Mutex::new(()),
+        snapshots: Mutex::new(std::collections::VecDeque::new()),
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -617,11 +619,36 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
     let version = file_version(&state.graph);
     let entries = graph_store::read_defaulted(&state.graph, false)?;
+    remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
         "base_digests": canonical_row_digests(&entries),
         "entries": entries,
     }))
+}
+
+fn remember_snapshot(state: &StoreState, version: &str, entries: &[Value]) {
+    let mut snapshots = state
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if snapshots.iter().any(|(stored, _)| stored == version) {
+        return;
+    }
+    snapshots.push_back((version.to_string(), entries.to_vec()));
+    while snapshots.len() > 2 {
+        snapshots.pop_front();
+    }
+}
+
+fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
+    state
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .find(|(stored, _)| stored == version)
+        .map(|(_, entries)| entries.clone())
 }
 
 fn file_version(path: &std::path::Path) -> String {
@@ -679,10 +706,18 @@ fn handle_commit_rows_reply(id: u64, state: &StoreState, params: &Value) -> Valu
 }
 
 fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
+    canonical_row_digests_with_rungs(entries, None)
+}
+
+fn canonical_row_digests_with_rungs(
+    entries: &[Value],
+    plan_rungs: Option<&std::collections::BTreeMap<String, String>>,
+) -> std::collections::BTreeMap<String, String> {
     use sha2::Digest as _;
 
     let mut canonical = entries.to_vec();
     graph_store::ensure_slugs(&mut canonical);
+    graph_store::recompute_statuses_with_plan_rungs(&mut canonical, plan_rungs);
     graph_store::canonicalize_entries(&mut canonical);
     canonical
         .iter()
@@ -699,7 +734,7 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         .get("base_version")
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("commit_rows needs base_version".into()))?;
-    let base_digests: std::collections::BTreeMap<String, String> = params
+    let _base_digests: std::collections::BTreeMap<String, String> = params
         .get("base_digests")
         .and_then(Value::as_object)
         .ok_or_else(|| StoreError::Invalid("commit_rows needs base_digests".into()))?
@@ -755,15 +790,20 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     let current_version = file_version(&state.graph);
     let current = graph_store::read_defaulted(&state.graph, false)?;
     if current_version != base_version {
-        let current_digests = canonical_row_digests(&current);
-        let ids: std::collections::BTreeSet<String> = base_digests
+        let Some(base_entries) = stored_snapshot(state, base_version) else {
+            return Err(CommitRowsError::Conflict(touched.into_iter().collect()));
+        };
+        let base_rungs = plan_rung_map_field(params, "base_plan_rungs");
+        let normalized_base = canonical_row_digests_with_rungs(&base_entries, base_rungs.as_ref());
+        let current_digests = canonical_row_digests_with_rungs(&current, base_rungs.as_ref());
+        let ids: std::collections::BTreeSet<String> = normalized_base
             .keys()
             .chain(current_digests.keys())
             .cloned()
             .collect();
         let conflicts: Vec<String> = ids
             .into_iter()
-            .filter(|id| base_digests.get(id) != current_digests.get(id) && touched.contains(id))
+            .filter(|id| normalized_base.get(id) != current_digests.get(id) && touched.contains(id))
             .collect();
         if !conflicts.is_empty() {
             return Err(CommitRowsError::Conflict(conflicts));
@@ -813,7 +853,14 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
 /// on the Python side, so the map crosses as data. Absent key = the caller
 /// is not re-deriving from plans, and stored statuses stay.
 fn plan_rung_map(params: &Value) -> Option<std::collections::BTreeMap<String, String>> {
-    let obj = params.get("plan_rungs")?.as_object()?;
+    plan_rung_map_field(params, "plan_rungs")
+}
+
+fn plan_rung_map_field(
+    params: &Value,
+    field: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let obj = params.get(field)?.as_object()?;
     Some(
         obj.iter()
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
@@ -1838,6 +1885,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             write_gate: Mutex::new(()),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -1845,6 +1893,7 @@ mod tests {
         json!({
             "base_version": begin["version"],
             "base_digests": begin["base_digests"],
+            "base_plan_rungs": {},
             "changed": [row],
             "removed": [],
             "plan_rungs": {},
@@ -1939,6 +1988,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             write_gate: Mutex::new(()),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         };
         let stale = json!({
             "name": "update_fields",
