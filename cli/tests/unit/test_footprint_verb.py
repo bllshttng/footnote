@@ -36,7 +36,12 @@ def no_worker_roots(monkeypatch):
     monkeypatch.setattr(
         doctor_footprint,
         "_live_shared_serve_root_pids",
-        lambda **_kwargs: (set(), None, {}),
+        lambda **_kwargs: (set(), None),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
     )
 
 
@@ -148,7 +153,6 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
         json.dumps({"pid": 900, "pid_start": 123}), encoding="utf-8"
     )
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
     monkeypatch.setattr(
         "fno.agents.session_procs.bg_socket_pid_map", lambda: {}
@@ -159,11 +163,7 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     )
 
     assert doctor_footprint._live_root_pids() == (set(), None)
-    assert doctor_footprint._live_shared_serve_root_pids() == (
-        {900},
-        None,
-        {"opencode-serve": "live", "codex-app-server": "absent"},
-    )
+    assert doctor_footprint._live_shared_serve_root_pids() == ({900}, None)
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
@@ -171,7 +171,6 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     assert doctor_footprint._live_shared_serve_root_pids() == (
         set(),
         "shared serve root liveness unavailable",
-        {"opencode-serve": "unreadable"},
     )
 
     (tmp_path / "opencode-serve.json").write_text(
@@ -180,7 +179,6 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     assert doctor_footprint._live_shared_serve_root_pids() == (
         set(),
         "shared serve root liveness unavailable",
-        {"opencode-serve": "unreadable"},
     )
 
 
@@ -387,7 +385,6 @@ def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tm
         json.dumps({"pid": 900, "pid_start": 123}), encoding="utf-8"
     )
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
         lambda _pid, _start: False,
@@ -396,7 +393,6 @@ def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tm
     assert doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900}) == (
         set(),
         "shared serve root liveness unavailable",
-        {"opencode-serve": "unreadable"},
     )
 
 
@@ -1639,9 +1635,9 @@ def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
     assert "w1 (node=unknown)" in error.text
 
 
-def test_shared_serve_attributes_live_codex_app_server(monkeypatch, tmp_path) -> None:
-    """x-cb2b Part A: the fno-harness-daemon state file names a live root;
-    that pid joins the attributed roots and the verdict reads live."""
+def test_codex_app_server_serve_attributes_a_live_root(monkeypatch, tmp_path) -> None:
+    """x-cb2b: the fno-harness-daemon state file names a live root; that pid
+    joins the attributed roots and the verdict reads live."""
     from fno import doctor_footprint
 
     codex_home = tmp_path / "codex"
@@ -1655,14 +1651,12 @@ def test_shared_serve_attributes_live_codex_app_server(monkeypatch, tmp_path) ->
         lambda pid, _start: True if pid == 910 else None,
     )
 
-    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
-
-    assert roots == {910}
-    assert error is None
-    assert serves["codex-app-server"] == "live"
+    assert doctor_footprint._codex_app_server_serve(set()) == ({910}, "live")
 
 
-def test_shared_serve_accepts_alternate_token_spellings(monkeypatch, tmp_path) -> None:
+def test_codex_app_server_serve_accepts_alternate_token_spellings(
+    monkeypatch, tmp_path
+) -> None:
     """The Rust reader (codex_inject.rs parse_state) tolerates several token
     spellings; the Python reader answers the same words, so one provider
     spelling variant cannot gap the fleet."""
@@ -1679,14 +1673,12 @@ def test_shared_serve_accepts_alternate_token_spellings(monkeypatch, tmp_path) -
         lambda pid, _start: True if pid == 913 else None,
     )
 
-    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
-
-    assert roots == {913}
-    assert error is None
-    assert serves["codex-app-server"] == "live"
+    assert doctor_footprint._codex_app_server_serve(set()) == ({913}, "live")
 
 
-def test_shared_serve_falls_back_to_the_provider_pid_file(monkeypatch, tmp_path) -> None:
+def test_codex_app_server_serve_falls_back_to_the_provider_pid_file(
+    monkeypatch, tmp_path
+) -> None:
     """No fno state file, but the provider's own app-server.pid names a live
     root: the fallback oracle attributes it, liveness proven without a token."""
     from fno import doctor_footprint
@@ -1702,17 +1694,13 @@ def test_shared_serve_falls_back_to_the_provider_pid_file(monkeypatch, tmp_path)
         lambda pid, _start: True if pid == 912 else None,
     )
 
-    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
-
-    assert roots == {912}
-    assert error is None
-    assert serves["codex-app-server"] == "live"
+    assert doctor_footprint._codex_app_server_serve(set()) == ({912}, "live")
 
 
-def test_shared_serve_survives_malformed_codex_state(monkeypatch, tmp_path) -> None:
-    """x-cb2b Part A: a malformed codex state file with no readable fallback
-    never kills the reading; the serve answers unreadable and the caller
-    degrades its rows to a gap."""
+def test_codex_app_server_serve_survives_a_malformed_state(monkeypatch, tmp_path) -> None:
+    """x-cb2b: a malformed codex state file with no readable fallback never
+    kills the reading; the serve answers unreadable and the caller degrades
+    its rows to a gap."""
     from fno import doctor_footprint
 
     codex_home = tmp_path / "codex"
@@ -1722,11 +1710,7 @@ def test_shared_serve_survives_malformed_codex_state(monkeypatch, tmp_path) -> N
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
-    roots, error, serves = doctor_footprint._live_shared_serve_root_pids()
-
-    assert roots == set()
-    assert error is None
-    assert serves["codex-app-server"] == "unreadable"
+    assert doctor_footprint._codex_app_server_serve(set()) == (set(), "unreadable")
 
 
 def test_pidless_codex_row_rides_a_live_shared_daemon(monkeypatch):
