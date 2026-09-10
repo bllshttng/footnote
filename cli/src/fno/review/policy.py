@@ -279,10 +279,9 @@ def review_assurance(
     from fno.review import provider_resolution as pr
 
     implementer, identity_known = pr.load_implementer_identity(session_id or "")
-    if not identity_known:
-        ambient = _local_runtime_kind()
-        if ambient:
-            implementer, identity_known = ambient, True
+    ambient = _local_runtime_kind()
+    if not identity_known and ambient:
+        implementer, identity_known = ambient, True
 
     # exhausted_provider_kinds returns None when the headroom read FAILED. For
     # this gate an unreadable headroom fails CLOSED: we cannot trust a
@@ -292,7 +291,7 @@ def review_assurance(
     headroom_unknown = exhausted is None
     exhausted = exhausted or set()
 
-    effective_kinds: set[str] = {_local_runtime_kind() or implementer}
+    effective_kinds: set[str] = {ambient or implementer}
     if _cross_model_enabled():
         for kind in pr.available_provider_kinds():
             kind = str(kind).strip().lower()

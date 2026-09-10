@@ -328,6 +328,9 @@ def test_read_state_parses_frontmatter_session_id(tmp_path) -> None:
     state.write_text("---\nsession_id: abc\n---\nbody\n", encoding="utf-8")
     assert review_mod._read_state(state) == {"session_id": "abc"}
     assert review_mod._read_state(tmp_path / "absent.md") == {}
+
+
+def test_review_assurance_blocks_on_unknown_identity() -> None:
     """F3: session id present but no ledger row -> family unestablished."""
     with patch("fno.review.provider_resolution.load_implementer_identity", return_value=("claude", False)), patch(
         "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
