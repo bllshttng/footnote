@@ -906,6 +906,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_row_reaped",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
+    "graph_write_gate",
+    "graph_export_failed",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every
