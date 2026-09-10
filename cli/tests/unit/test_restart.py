@@ -281,13 +281,15 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
+    # x-84b2: the revived worker is ro-t-session-<short> (the orphan row name
+    # is not a canonical dispatch name, so the identity is the typed session).
     assert [
-        "/cargo/bin/fno", "agents", "spawn", "--name", "worker1",
+        "/cargo/bin/fno", "agents", "spawn", "--name", "ro-t-session-uuid-1",
         "--harness", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
     ] in calls
     assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revived"] == ["worker1"]
+    assert payload["agents_revived"] == ["ro-t-session-uuid-1"]
 
 
 def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:

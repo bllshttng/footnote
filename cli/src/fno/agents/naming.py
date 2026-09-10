@@ -215,6 +215,23 @@ class DispatchName:
     tail: str
 
 
+def legacy_verb_code(name: Optional[str]) -> Optional[str]:
+    """The verb code for a pre-cutover convention name, else ``None``.
+
+    The legacy-read window (x-84b2): ``target-*`` rows read as ``t`` and
+    ``think-*`` as ``th`` so recovery/restart can stamp a resumed worker's
+    name while old rows are still in the fleet. Anything else is not a legacy
+    dispatch name and returns ``None``.
+    """
+    if not name:
+        return None
+    if name.startswith("target-"):
+        return "t"
+    if name.startswith("think-"):
+        return "th"
+    return None
+
+
 def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
     """Parse a canonical ``[<source>-]<verb>-<identity>`` name, else ``None``.
 

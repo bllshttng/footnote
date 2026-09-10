@@ -156,13 +156,42 @@ def _revive_orphans(
                 err=True,
             )
             continue
+        # x-84b2: the revived worker gets the ro-<verb>-<node-or-session>-<short>
+        # name - source ro says a restart revive minted it, the predecessor's
+        # parsed verb and node (legacy target-*/think-* still resolve) ride
+        # along, and a genuinely nodeless row uses the typed session identity.
+        # The old name stays addressable as an alias of the new row.
+        from fno.agents.naming import (
+            AgentNameError,
+            dispatch_agent_name,
+            legacy_verb_code,
+            parse_dispatch_agent_name,
+        )
+
+        parsed = parse_dispatch_agent_name(name)
+        verb = parsed.verb if parsed else (legacy_verb_code(name) or "t")
+        short = str(session)[:8]
+        if parsed and parsed.node:
+            identity, slug = parsed.node, short
+        else:
+            identity, slug = f"session-{short}", None
+        try:
+            new_name = dispatch_agent_name("ro", verb, identity, slug=slug)
+        except AgentNameError as exc:
+            result["agents_revive_failed"].append(name)
+            say(
+                f"fno agents restart: worker '{name}' revive name unrepresentable "
+                f"({exc}); resume it manually: fno agents resume {name}",
+                err=True,
+            )
+            continue
         # Pin the provider explicitly: a bare spawn inherits
         # config.agents.defaults.provider, and a non-claude default makes the
         # spawn seam inject --provider <that>, which the --resume guard then
         # rejects - every revive would fail in such an environment. --substrate
         # bg is what --resume implies; naming it is belt-and-suspenders.
         cmd = [
-            fno, "agents", "spawn", "--name", name,
+            fno, "agents", "spawn", "--name", new_name,
             "--harness", "claude", "--substrate", "bg", "--resume", str(session),
         ]
         if row.get("cwd"):
@@ -172,8 +201,17 @@ def _revive_orphans(
         except (OSError, subprocess.SubprocessError):
             rc = 1
         if rc == 0:
-            result["agents_revived"].append(name)
-            say(f"fno agents restart: revived worker '{name}' onto session {session}.")
+            try:
+                from fno.agents.registry import append_row_alias
+
+                append_row_alias(new_name, name)
+            except (OSError, ValueError):
+                pass
+            result["agents_revived"].append(new_name)
+            say(
+                f"fno agents restart: revived worker '{new_name}' (was '{name}') "
+                f"onto session {session}."
+            )
         else:
             result["agents_revive_failed"].append(name)
             say(

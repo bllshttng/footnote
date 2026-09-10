@@ -271,16 +271,18 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
 
     ``--substrate headless`` is explicit and load-bearing: a one-shot pass wants
     no pane and no placement prompt, and `-p` is only ever reachable through the
-    headless verb.
+    headless verb. The worker name is the x-84b2 ``gr-th-backlog-<day>``: the
+    groom source, the think verb, and the typed non-node ``backlog`` identity.
     """
     from fno import _subprocess_util
+    from fno.agents.naming import dispatch_agent_name
 
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",
         "--harness", "claude", "--substrate", "headless",
         "--model", model, "--cwd", cwd,
         "--timeout", str(_WORKER_TIMEOUT_S),
-        "--name", f"groom-{day}", brief,
+        "--name", dispatch_agent_name("gr", "th", "backlog", slug=day), brief,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_SPAWN_TIMEOUT_S)
     if proc.returncode != 0:

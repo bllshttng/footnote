@@ -1335,10 +1335,12 @@ def test_worker_agent_name_reason_scoped():
     The spawned `fno agents spawn` name must be reason-scoped or the second
     lifecycle trigger for a node collides on name and is wrongly skipped.
     """
-    assert st._worker_agent_name("x-1", "slug") == "think-x-1-slug"  # default birth
-    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
-    assert st._worker_agent_name("x-1", "slug", st.REASON_WORK_START) == "think-x-1-work-start-slug"
-    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO) == "think-x-1-retro-slug"
+    # x-84b2: the spawn_think source stamped only by this path, the think
+    # verb as a code; the reason stays the reason-scoped qualifier.
+    assert st._worker_agent_name("x-1", "slug") == "th-th-x-1-slug"  # default birth
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-x-1-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_WORK_START) == "th-th-x-1-work-start-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO) == "th-th-x-1-retro-slug"
     names = {st._worker_agent_name("x-1", "slug", r)
              for r in (st.REASON_BIRTH, st.REASON_WORK_START, st.REASON_RETRO)}
     assert len(names) == 3  # no collision across a node's lifecycle
@@ -1350,13 +1352,13 @@ def test_worker_agent_name_capped_at_64_keeps_node_id():
     Per-component slugging caps each part at 30, but a long slug + a long
     invocation suffix on a lifecycle reason can overflow the assembled name and
     crash `fno agents spawn` with "name must be 1-64 chars". The cap trims the
-    tail while keeping the `think-<node-id>` lead.
+    tail while keeping the `th-th-<node-id>` lead.
     """
     long_slug = "a-very-long-descriptive-node-slug-that-keeps-going-and-going"
     suffix = "sessaaaa"
     name = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, suffix)
     assert len(name) <= 64, f"name overflowed: {len(name)} chars: {name!r}"
-    assert name.startswith("think-x-2c27-work-start"), f"node id/reason dropped: {name!r}"
+    assert name.startswith("th-th-x-2c27-work-start"), f"node id/reason dropped: {name!r}"
     assert not name.endswith("-"), f"trailing hyphen not trimmed: {name!r}"
     # codex P2: the per-session suffix is the uniqueness discriminator - capping
     # must trim the slug, never the suffix, or two repeat dispatches collide.
@@ -1501,7 +1503,7 @@ def test_worker_name_unique_per_conversation():
     assert a != b
     assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
     # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
-    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "think-x-1-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-x-1-slug"
 
 
 # ---------------------------------------------------------------------------
@@ -1511,11 +1513,13 @@ def test_worker_name_unique_per_conversation():
 
 def test_provenance_name_is_byte_identical_to_the_canonical_owner():
     """AC3: same semantic components -> same name, whichever caller asks."""
-    from fno.agents.naming import agent_name
+    from fno.agents.naming import dispatch_agent_name
 
-    assert st._worker_agent_name("x-1", "slug") == agent_name("think", "x-1", slug="slug")
-    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO, "sessaaaa") == agent_name(
-        "think", "x-1", qualifier=st.REASON_RETRO, slug="slug", discriminator="sessaaaa"
+    assert st._worker_agent_name("x-1", "slug") == dispatch_agent_name(
+        "th", "th", "x-1", slug="slug"
+    )
+    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO, "sessaaaa") == dispatch_agent_name(
+        "th", "th", "x-1", qualifier=st.REASON_RETRO, slug="slug", discriminator="sessaaaa"
     )
 
 

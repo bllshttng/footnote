@@ -56,7 +56,7 @@ from typing import Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import agent_name
+from fno.agents.naming import dispatch_agent_name
 from fno.harness_identity import env_marks_unattended, resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
 from fno.user import display_name
@@ -711,9 +711,10 @@ def _think_output_path(
 def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
     """Provenance-carrying bg worker name, scoped by trigger reason.
 
-    Birth keeps ``think-<node-id>-<slug>`` byte-for-byte (A1). A LIFECYCLE
-    trigger gets ``think-<node-id>-<reason>-<slug>`` so a node born + later
-    worked + retro'd dispatches a DISTINCT worker per moment - the dedup token
+    x-84b2 shape: ``th-th-<node-id>[-<reason>]-<slug>`` - the spawn_think
+    source stamped only by this path, the think verb as a code. A LIFECYCLE
+    trigger keeps its ``<reason>`` segment so a node born + later worked +
+    retro'd dispatches a DISTINCT worker per moment - the dedup token
     is reason-scoped, and ``fno agents spawn`` rejects a duplicate NAME, so the
     name must be reason-scoped too or the second lifecycle trigger collides and
     is wrongly skipped (codex P2).
@@ -727,8 +728,9 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
     out of provenance-trigger code: an over-budget required identity now raises
     instead of shaving the suffix onto a colliding name.
     """
-    return agent_name(
-        "think",
+    return dispatch_agent_name(
+        "th",
+        "th",
         node_id,
         qualifier=None if reason == REASON_BIRTH else reason,
         slug=node_slug,

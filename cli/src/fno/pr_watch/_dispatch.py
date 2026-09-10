@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fno import _subprocess_util
+from fno.agents.naming import dispatch_agent_name
 from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
 
 log = logging.getLogger(__name__)
@@ -291,6 +292,7 @@ def fire_skill(
     pr_number: int,
     repo_dir: Path,
     *,
+    node_id: Optional[str] = None,
     model: str = _DEFAULT_MODEL,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     env_seam: str = _ENV_SEAM,
@@ -303,6 +305,11 @@ def fire_skill(
     (``PR_WATCH_FIRE_CMD`` env, or *env_seam*) replaces the complete spawn command
     with an arbitrary command string for unit tests; when set, the command is
     built as ``["<seam>"]`` and the runner receives it like any other call.
+
+    ``node_id`` (x-84b2) names the worker ``pw-r-<node>-pr-<n>``; a PR whose
+    candidate binds no graph node REFUSES the autonomous spawn rather than
+    substituting the PR number as a fake node (the tick's retry/park machinery
+    owns the refusal).
 
     This is the review (``check``) fire only. The post-merge ritual no longer
     fires here: pr-watch runs ``fno do pr ritual <n> --autonomous`` directly, and
@@ -319,6 +326,12 @@ def fire_skill(
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``. Every other outcome
     is a failure.
     """
+    if not node_id:
+        log.warning(
+            "pr-watch: PR #%d binds no graph node; refusing the %s fire (x-84b2)",
+            pr_number, verb,
+        )
+        return DispatchResult(ok=False, rc=-1, is_error=False, raw="")
     worker_timeout = (
         timeout_s if timeout_s is not None else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
     )
@@ -341,7 +354,7 @@ def fire_skill(
             "--cwd",
             str(repo_dir),
             "--name",
-            f"pr-check-{pr_number}",
+            dispatch_agent_name("pw", "r", node_id, qualifier=f"pr-{pr_number}"),
             "--output-format",
             "json",
         ]
@@ -1043,7 +1056,7 @@ def _run_tick(
                             pm.detail or pm.short_id or "",
                         )
                 else:
-                    result = fire_skill_fn("check", pr, cand.repo_dir)
+                    result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
 
                 if dispatch_ok:

@@ -39,6 +39,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,6 +47,7 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
+from fno.agents.naming import dispatch_agent_name
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
@@ -838,7 +840,10 @@ class Ritual:
         ``agents spawn`` takes ONE positional - the MESSAGE - and the agent name
         rides ``--name``; a second positional is refused ("takes one positional;
         the agent name moved to --name"). So the prompt is the sole positional
-        and ``judgment-pr-<n>`` is passed via ``--name``. (Before the axis
+        and ``pm-r-<node>-pr-<n>`` is passed via ``--name`` (x-84b2; the old
+        ``judgment-pr-<n>`` carried neither source nor node). A merged PR with
+        no recovered node binding refuses the spawn rather than substituting
+        the PR number as a fake node. (Before the axis
         redesign the grammar was ``[name] [message]`` and the two were swapped
         positionals; a stale two-positional call fails closed here, which is
         exactly how the redesign's refusal caught this leg.) The headless worker
@@ -846,6 +851,17 @@ class Ritual:
         so it gets spawn's own ``--timeout`` and the outer bound matches it
         rather than killing the worker early.
         """
+        node_ids = [str(node) for node in self.ctx.node_ids if str(node)]
+        if not node_ids:
+            # The PR merged but binds no graph node: spawning a judgment under
+            # a fabricated identity would orphan its own provenance.
+            print(
+                f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
+                "no pm-r worker spawned (x-84b2)",
+                file=sys.stderr,
+            )
+            return False
+        name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
@@ -862,7 +878,7 @@ class Ritual:
             argv += ["--harness", "claude", "--model", model]
         # Behind `--` (fno's own click parser honors it, verified both
         # directions): a leading-flag seed must be the prompt positional.
-        argv += ["--name", f"judgment-pr-{self.ctx.pr}", "--", prompt]
+        argv += ["--name", name, "--", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fno import _subprocess_util
-from fno.agents.naming import AgentNameError, agent_name
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.provenance.spawn_think import (
     _bump_daily_count,
     _daily_cap,
@@ -187,7 +187,7 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     (never ``-p``). Returns True on a spawn receipt (a short_id), False otherwise.
     """
     try:
-        name = agent_name("keepgo", node_id)
+        name = dispatch_agent_name("kg", "t", node_id, slug="follow-up")
     except AgentNameError as exc:
         # warning, not debug: the caller only prints "dispatch failed", so at
         # default level the operator cannot tell a permanent unrepresentable name

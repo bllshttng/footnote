@@ -416,7 +416,8 @@ def test_judgment_autonomous_empty_skips(tmp_path, capsys):
 def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md",
+              node_ids=["x-7test"])
     r.leg_judgment()
     out = capsys.readouterr().out
     assert "step=judgment status=ok" in out
@@ -434,7 +435,8 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
     # grammar this leg depends on.
     assert argv[-1].startswith("Post-merge judgment")   # the prompt = message
     i = argv.index("--name")
-    assert argv[i + 1] == "judgment-pr-7" and len(argv[i + 1]) <= 64
+    # x-84b2: pm-r-<node>-pr-<n> - the post-merge source and the bound node.
+    assert argv[i + 1] == "pm-r-x-7test-pr-7" and len(argv[i + 1]) <= 64
     # codex P2: the worker gets its own --timeout, not a 60s outer kill.
     assert "--timeout" in argv
     # Guard against silent grammar drift: the constructed argv must SURVIVE the
@@ -444,7 +446,22 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
 
     spawn_argv = argv[argv.index("spawn"):]  # ["spawn", ...]
     normalized = normalize_spawn_args(spawn_argv)  # raises SystemExit(2) if invalid
-    assert normalized[normalized.index("--name") + 1] == "judgment-pr-7"
+    assert normalized[normalized.index("--name") + 1] == "pm-r-x-7test-pr-7"
+
+
+def test_judgment_pr_without_node_binding_refuses(tmp_path, capsys, monkeypatch):
+    """x-84b2: a merged PR that binds no graph node spawns no pm-r worker -
+    substituting the PR number as a fake node would orphan the provenance."""
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
+    runner = FakeRunner(diff_files=14, additions=300, deletions=20)
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r.leg_judgment()
+    captured = capsys.readouterr()
+    assert "step=judgment status=failed" in captured.out
+    assert "binds no node" in captured.err
+    assert not any(
+        len(c) > 1 and c[1] == "agents" and "spawn" in c for c in runner.calls
+    )
 
 
 def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch):
@@ -456,7 +473,8 @@ def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch)
     """
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md",
+              node_ids=["x-7test"])
     r.leg_judgment()
     argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
     assert argv[argv.index("--model") + 1] == PostMergeBlock().model
@@ -479,7 +497,7 @@ def test_judgment_spawn_omits_model_when_unset(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
     r = _bare(tmp_path, runner, autonomous=True,
-              parking_lot="internal/x/parking-lot.md", model="")
+              parking_lot="internal/x/parking-lot.md", model="", node_ids=["x-7test"])
     r.leg_judgment()
     argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
     assert "--model" not in argv
@@ -536,7 +554,7 @@ def test_judgment_autonomous_spawns_without_parking_lot_above_bar(
     # availability).
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, pr=7)  # NO parking_lot
+    r = _bare(tmp_path, runner, autonomous=True, pr=7, node_ids=["x-7test"])  # NO parking_lot
     r.leg_judgment()
     out = capsys.readouterr().out
     assert "step=judgment status=ok" in out

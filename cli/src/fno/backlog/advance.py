@@ -2565,7 +2565,7 @@ def _transcript_recently_active(session_id: str) -> bool:
 
 
 def _live_joiner_names(node_id: str) -> list[str]:
-    """Live roster names ``j-<node>-*``, probed - not the stored field.
+    """Live roster joiner names (``jn-t-<node>-*``, legacy ``j-<node>-*``), probed - not the stored field.
 
     A second join into the same node rewrites the join brief (dropping the
     first join's band table) and then dies on the already-taken lead name -
@@ -2584,11 +2584,13 @@ def _live_joiner_names(node_id: str) -> list[str]:
         reg = json.loads(Path(agents_registry_path()).read_text())
     except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
         return []
-    prefix = f"j-{node_id}-"
+    legacy_prefix = f"j-{node_id}-"
+    canonical_prefix = f"jn-t-{node_id}-"
     candidates = [
         (str(row.get("name")), str(row.get("harness_session_id") or ""))
         for row in reg.get("agents", [])
-        if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
+        if str(row.get("name", "")).startswith((legacy_prefix, canonical_prefix))
+        and row.get("status") == "live"
     ]
     if not candidates:
         return []
@@ -2626,13 +2628,13 @@ def _sandbox_brief_section(
         if pol is not None and pol.verdict == "enforced":
             any_policy = True
             lines.append(
-                f"- j-{node_id}-{k} (band {band}) may write: "
+                f"- jn-t-{node_id}-{k} (band {band}) may write: "
                 f"{', '.join(pol.allow_write or ())}. A write outside it is "
                 f"refused at the Edit/Write layer and by the OS sandbox."
             )
         else:
             lines.append(
-                f"- j-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
+                f"- jn-t-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
                 f"narrowed ({verdict}); the sandbox layer is off for it."
             )
     return "\n".join(lines) if any_policy else ""
@@ -2810,7 +2812,7 @@ def _join_node(
         worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
-    lead = f"j-{node_id}-1"
+    lead = f"jn-t-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
@@ -2818,11 +2820,18 @@ def _join_node(
     # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
+        # x-84b2: joiner names are minted once through the canonical bridge -
+        # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
+        # is distinguishable from an autonomous dispatch.
+        joiner_names = {
+            k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
+            for k in range(1, len(worker_bands) + 1)
+        }
         brief_dir.mkdir(parents=True, exist_ok=True)
         band_table = ""
         if bands:
             rows = "\n".join(
-                f"| j-{node_id}-{k} | {band} |"
+                f"| {joiner_names[k]} | {band} |"
                 for k, band in enumerate(worker_bands, start=1)
             )
             band_table = (
@@ -2885,7 +2894,7 @@ def _join_node(
             pol = policies.get(band)
             if pol is None or pol.verdict != "enforced":
                 continue
-            name = f"j-{node_id}-{k}"
+            name = joiner_names[k]
             policy_dir.mkdir(parents=True, exist_ok=True)
             (policy_dir / f"{name}.json").write_text(
                 json.dumps(
@@ -2904,9 +2913,10 @@ def _join_node(
     spawned: list[str] = []
     lanes: dict[str, dict] = {}
     for k, band in enumerate(worker_bands, start=1):
-        name = f"j-{node_id}-{k}"
+        name = joiner_names[k]
         brief = (
-            f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
+            f"lead joiner of {node_id}: you are the mail hub for the {node_id} "
+            f"joiners (jn-t-{node_id}-*)"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (
