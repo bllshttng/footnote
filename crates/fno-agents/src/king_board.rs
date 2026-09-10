@@ -44,6 +44,8 @@ mod prs;
 mod queues;
 mod scope;
 
+pub(crate) use queues::not_read_status;
+
 use crate::graph_store;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -93,6 +95,8 @@ pub(crate) const SRC_DISTRESS: &str =
 pub(crate) struct SourceRead {
     pub(crate) payload: Option<Value>,
     pub(crate) error: Option<String>,
+    /// True when the read died at its budget slice, not at a source failure.
+    pub(crate) over_budget: bool,
 }
 
 impl SourceRead {
@@ -100,12 +104,30 @@ impl SourceRead {
         SourceRead {
             payload: Some(payload),
             error: None,
+            over_budget: false,
         }
     }
     pub(crate) fn err(msg: impl Into<String>) -> Self {
         SourceRead {
             payload: None,
             error: Some(msg.into()),
+            over_budget: false,
+        }
+    }
+    pub(crate) fn over_budget(msg: impl Into<String>) -> Self {
+        SourceRead {
+            payload: None,
+            error: Some(msg.into()),
+            over_budget: true,
+        }
+    }
+    /// Re-wrap a failed read under a new message, keeping its verdict: a
+    /// composition site must not flatten a budget kill into a plain failure.
+    pub(crate) fn rewrap(&self, msg: impl Into<String>) -> Self {
+        SourceRead {
+            payload: None,
+            error: Some(msg.into()),
+            over_budget: self.over_budget,
         }
     }
     pub(crate) fn is_ok(&self) -> bool {
@@ -871,6 +893,28 @@ mod tests {
             .unwrap()
             .to_lowercase()
             .contains("blueprint"));
+    }
+
+    #[test]
+    fn a_budget_kill_and_a_failed_exit_tally_apart_but_both_hold_exit_code_1() {
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        // entries: None reads as an unreadable queue of its own; an empty
+        // list keeps the fixture's failure count at exactly the two legs.
+        inputs.entries = Some(Vec::new());
+        inputs.undispatched = SourceRead::over_budget(
+            "fno backlog undispatched --json: killed at its 28.5s slice of the board budget; the source did not fail",
+        );
+        inputs.prs = SourceRead::err("exit 1: gh pr list failed");
+        let board = build_board(&inputs);
+        assert_eq!(board["over_budget"], 1);
+        assert_eq!(board["unreadable"], 1);
+        assert_eq!(board["exit_code"], 1);
+        let queues = board["queues"].as_array().unwrap();
+        let undispatched = queues.iter().find(|q| q["name"] == "undispatched").unwrap();
+        assert_eq!(undispatched["status"], "over_budget");
+        let prs = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
+        assert_eq!(prs["status"], "unreadable");
+        assert_eq!(prs["count"], Value::Null);
     }
 
     #[test]

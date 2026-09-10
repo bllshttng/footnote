@@ -266,6 +266,14 @@ pub(crate) struct Queue {
     pub(crate) verb: &'static str,
 }
 
+/// The not-read statuses, decided once. A budget kill is `over_budget`;
+/// every other failed read is `unreadable`. Both mean the queue answered
+/// nothing, so every not-read consumer (null count, tally, exit code,
+/// termination rendering) reads this predicate instead of re-deciding.
+pub(crate) fn not_read_status(status: &str) -> bool {
+    status == "unreadable" || status == "over_budget"
+}
+
 pub(crate) fn queue(
     name: &'static str,
     source: String,
@@ -280,7 +288,11 @@ pub(crate) fn queue(
         return Queue {
             name,
             source,
-            status: "unreadable",
+            status: if read.over_budget {
+                "over_budget"
+            } else {
+                "unreadable"
+            },
             error: read.error.clone().unwrap_or_default(),
             count: -1,
             rows: Vec::new(),
@@ -308,7 +320,7 @@ pub(crate) fn queue_json(q: &Queue) -> Value {
         "source": q.source,
         "status": q.status,
         "error": q.error,
-        "count": if q.status == "unreadable" { Value::Null } else { json!(q.count) },
+        "count": if not_read_status(q.status) { Value::Null } else { json!(q.count) },
         "rows": q.rows,
         "actionable": q.actionable,
         "note": q.note,
@@ -825,15 +837,20 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &if inputs.undispatched.is_ok() && inputs.claims.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
-                    SourceRead {
-                        error: inputs.undispatched.error.clone(),
-                        ..Default::default()
-                    }
+                let combined = inputs
+                    .undispatched
                     .error
+                    .clone()
                     .or_else(|| inputs.claims.error.clone())
-                    .unwrap_or_default(),
-                )
+                    .unwrap_or_default();
+                // The composed read keeps the louder verdict: a budget kill
+                // must not degrade into "unreadable" because a second source
+                // was wrapped around it.
+                if inputs.undispatched.over_budget || inputs.claims.over_budget {
+                    SourceRead::over_budget(combined)
+                } else {
+                    SourceRead::err(combined)
+                }
             },
             undispatched_rows,
             true,
@@ -1019,9 +1036,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     let mut actionable: i64 = 0;
     let mut unreadable: i64 = 0;
+    let mut over_budget: i64 = 0;
     for q in &queues {
-        if q.status == "unreadable" {
-            unreadable += 1;
+        if not_read_status(q.status) {
+            if q.status == "over_budget" {
+                over_budget += 1;
+            } else {
+                unreadable += 1;
+            }
             // A blind ACTIONABLE queue is work: the king may not exit while it
             // cannot see a queue it could have shrunk. A blind report-only
             // queue is loud (the exit code) and still uncounted.
@@ -1037,15 +1059,60 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     json!({
         "actionable": actionable,
         "unreadable": unreadable,
+        "over_budget": over_budget,
         "queues": queues_json,
         "warnings": warnings,
-        "exit_code": if unreadable > 0 { 1 } else { 0 },
+        "exit_code": if unreadable + over_budget > 0 { 1 } else { 0 },
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_kill_reads_over_budget_not_unreadable() {
+        let read = SourceRead::over_budget(
+            "fno backlog undispatched --json: killed at its 28.5s slice of the board budget; the source did not fail",
+        );
+        let q = queue(
+            "undispatched",
+            "src".to_string(),
+            &read,
+            Vec::new(),
+            true,
+            String::new(),
+            "/fno:target",
+            None,
+        );
+        assert_eq!(q.status, "over_budget");
+        let body = queue_json(&q);
+        assert_eq!(body["count"], Value::Null);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("slice of the board budget"));
+    }
+
+    #[test]
+    fn a_failed_exit_still_reads_unreadable() {
+        let read = SourceRead::err("exit 1: boom");
+        let q = queue(
+            "claims",
+            "src".to_string(),
+            &read,
+            Vec::new(),
+            true,
+            String::new(),
+            "",
+            None,
+        );
+        assert_eq!(q.status, "unreadable");
+        let body = queue_json(&q);
+        assert_eq!(body["count"], Value::Null);
+        assert!(body["error"].as_str().unwrap().contains("exit 1"));
+    }
+
     #[test]
     fn lane_parser_carries_node_and_parked_suffixes() {
         let dir = tempfile::tempdir().unwrap();

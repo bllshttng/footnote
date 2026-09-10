@@ -11924,7 +11924,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 .unwrap_or(i64::MAX)
         };
         if undelivered == 0 {
-            let message = if board.unreadable > 0 {
+            let message = if board.unreadable + board.over_budget > 0 {
                 "board clean on every readable queue; exiting NoWork"
             } else {
                 "board clean; exiting NoWork"

@@ -1120,7 +1120,8 @@ fn external_read_timeout_king_board_blocks_named() {
         .as_str()
         .unwrap_or("");
     assert!(
-        undispatched_err.contains("timed out after"),
-        "the killed source is named in the payload: {undispatched_err}"
+        undispatched_err.contains("killed at its")
+            && undispatched_err.contains("slice of the board budget"),
+        "the killed source is named in the payload as a budget kill: {undispatched_err}"
     );
 }
