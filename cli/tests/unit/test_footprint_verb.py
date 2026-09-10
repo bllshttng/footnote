@@ -182,6 +182,166 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     )
 
 
+<<<<<<< HEAD
+=======
+# --- codex daemon-thread attribution route (x-494b) ----------------------------
+# A codex thread row carries pid: None deliberately (one shared app-server; a
+# stamped shared pid broke liveness and gc). Its verified serving identity
+# comes from the provider-owned daemon record plus liveness, so a fleet of
+# thread rows reads gap-free instead of refusing every capped spawn.
+
+
+def _codex_thread_row(name: str = "cx-thread", session_id: str = "c0dex1a2-b3c4-d5e6-f7a8-9012bcdefabc"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        provider="openai",
+        short_id="",
+        harness_session_id=session_id,
+        substrate="thread",
+        name=name,
+        node=None,
+        exited_at=None,
+        mux=None,
+    )
+
+
+def _pin_codex_daemon_record(monkeypatch, tmp_path, *, pid=None, start=123456) -> None:
+    record = tmp_path / "app-server-daemon"
+    record.mkdir(parents=True, exist_ok=True)
+    body = {} if pid is None else {"pid": pid, "processStartToken": start}
+    (record / "fno-harness-daemon.json").write_text(json.dumps(body), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+
+def test_pidless_route_accepts_codex_thread_rows_via_harness_daemon() -> None:
+    from fno import doctor_footprint
+
+    assert doctor_footprint._pidless_route(_codex_thread_row()) == "harness-daemon"
+    # The property, never the harness name: no full session handle, no route.
+    assert doctor_footprint._pidless_route(_codex_thread_row(session_id="")) is None
+    # A claude row keeps its bg-socket route; an unknown harness stays unrouted.
+    from types import SimpleNamespace
+
+    claude_row = SimpleNamespace(
+        status="live", pid=None, harness="claude", short_id="",
+        harness_session_id="11111111-2222-3333-4444-55555555abcd",
+    )
+    assert doctor_footprint._pidless_route(claude_row) == "bg-socket"
+
+
+def test_live_root_pids_attributes_codex_thread_rows_via_daemon_record(
+    monkeypatch, tmp_path
+) -> None:
+    from fno import doctor_footprint
+
+    _pin_codex_daemon_record(monkeypatch, tmp_path, pid=905)
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_codex_thread_row()]
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 905 else None,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({905}, None)
+
+
+def test_live_root_pids_reads_a_thread_heavy_fleet_gap_free(
+    monkeypatch, tmp_path
+) -> None:
+    """The ordering proof: a fleet of thread rows must NOT read as an
+    attribution gap, which is the refusal that made the thread default
+    unshippable (x-494b)."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    keeper = SimpleNamespace(
+        status="live", pid=907, pid_start_time=123456, harness="pi",
+        short_id="", harness_session_id=None, substrate="thread",
+        name="pi-thread", node=None, exited_at=None, mux=None,
+    )
+    claude_bg = SimpleNamespace(
+        status="live", pid=None, pid_start_time=None, harness="claude",
+        short_id="11111111", harness_session_id=None, substrate="thread",
+        name="claude-bg", node=None, exited_at=None, mux=None,
+    )
+    rows = [_codex_thread_row("cx-1"), _codex_thread_row("cx-2"), keeper, claude_bg]
+    _pin_codex_daemon_record(monkeypatch, tmp_path, pid=905)
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {"11111111": 908},
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid in (905, 907, 908),
+    )
+
+    roots, gap = doctor_footprint._live_root_pids()
+
+    assert gap is None
+    assert roots == {905, 907, 908}
+
+
+def test_live_root_pids_names_a_gap_when_the_daemon_record_is_unreadable(
+    monkeypatch, tmp_path
+) -> None:
+    from fno import doctor_footprint
+
+    record = tmp_path / "app-server-daemon"
+    record.mkdir(parents=True, exist_ok=True)
+    (record / "fno-harness-daemon.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_codex_thread_row()]
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map", lambda **_kwargs: {}
+    )
+
+    roots, gap = doctor_footprint._live_root_pids()
+
+    assert roots == set()
+    assert gap is not None
+    assert "cx-thread" in str(gap.text)
+    assert "codex daemon record unreadable" in str(gap.text)
+
+
+def test_live_root_pids_names_a_gap_when_the_serving_daemon_is_dead(
+    monkeypatch, tmp_path
+) -> None:
+    from fno import doctor_footprint
+
+    _pin_codex_daemon_record(monkeypatch, tmp_path, pid=906)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_codex_thread_row()]
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+
+    roots, gap = doctor_footprint._live_root_pids()
+
+    assert roots == set()
+    assert gap is not None
+    assert "cx-thread" in str(gap.text)
+    assert "codex daemon serving identity is not alive" in str(gap.text)
+
+
+>>>>>>> 9291710cb (refactor(spawn): read the mirror daemon record; slim the portal module)
 def test_live_root_pids_refuses_registry_pid_without_start_token(monkeypatch) -> None:
     from fno import doctor_footprint
     from types import SimpleNamespace

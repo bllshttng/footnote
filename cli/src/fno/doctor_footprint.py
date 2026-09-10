@@ -323,6 +323,46 @@ def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
     return timestamp.timestamp() + resolution > snapshot_at
 
 
+<<<<<<< HEAD
+=======
+def _codex_serving_root(
+    *, deadline: float | None = None
+) -> tuple[int | None, int | None, str | None]:
+    """The verified (pid, start) of the shared codex app-server, or a named reason.
+
+    Read-only like the opencode shared-serve reader: fno's own daemon record (``CODEX_HOME/app-server-daemon/fno-harness-daemon.json``, whose numeric ``processStartToken`` the fno writer stamps beside the provider's own pid) plus a liveness check. This NEVER boots the daemon; an unreadable or dead identity is a named reason the caller fails closed on.
+    """
+    del deadline  # one file read + one pid signal; kept for signature parity
+    try:
+        codex_home = os.environ.get("CODEX_HOME") or str(
+            Path(os.environ.get("HOME", "~")) / ".codex"
+        )
+        value = json.loads(
+            (
+                Path(codex_home).expanduser()
+                / "app-server-daemon"
+                / "fno-harness-daemon.json"
+            ).read_text(encoding="utf-8")
+        )
+        pid = value.get("pid")
+        start = value.get("processStartToken")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError("missing pid")
+        if not isinstance(start, int) or isinstance(start, bool) or start <= 0:
+            raise ValueError("missing process start token")
+    except FileNotFoundError:
+        return None, None, "codex daemon record absent"
+    except Exception as exc:  # noqa: BLE001 - any unreadable shape is a named reason
+        return None, None, f"codex daemon record unreadable ({exc})"
+    live = _root_pid_is_live(pid, start)
+    if live is None:
+        return None, None, "codex daemon serving identity liveness unavailable"
+    if live is False:
+        return None, None, "codex daemon serving identity is not alive"
+    return pid, start, None
+
+
+>>>>>>> 9291710cb (refactor(spawn): read the mirror daemon record; slim the portal module)
 def _live_root_pids(
     *,
     deadline: float | None = None,

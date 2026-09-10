@@ -1504,8 +1504,7 @@ def cmd_spawn(
 
     # The substrate axis (x-2c27): headless is the ergonomic shortcut and wins
     # over an explicit --substrate (x-c772); an empty value resolves through
-    # the spawn posture module (the built-in default: thread where the harness
-    # seats one, else pane, with portal 0 requested inside a mux).
+    # spawn_portal (the built-in default: thread where seated, else pane).
     if headless:
         substrate = "headless"
     if not substrate:
@@ -2541,10 +2540,8 @@ def cmd_spawn(
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
     if portal is not None and substrate == "bg" and spawn_succeeded:
-        # Post-receipt portal placement: the worker receipt is the truth and is
-        # already out on this lane's stdout path order, so a placement failure
-        # prints a named line and never recolors the spawn - a retrying caller
-        # must not create a duplicate worker.
+        # Post-receipt placement: the receipt is the truth, so a placement
+        # failure never recolors the spawn verdict.
         from fno.agents.spawn_portal import place_thread_portal
 
         place_thread_portal(result.name, portal)

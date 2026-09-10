@@ -116,28 +116,27 @@ def validate_monitor_or_exit(
 def place_thread_portal(name: str, portal: int) -> None:
     """Open a portal on a spawned thread (the two-call seam's second call).
 
-    Best-effort by contract: the worker receipt is already the truth, so any
+    Best-effort by contract: the worker receipt is already the truth, so a
     failure is a named stderr line pointing at the manual reach, never a
     failed spawn - a retrying caller must not create a duplicate worker.
     """
+    detail = ""
     try:
+        fno_bin = os.environ.get("FNO_BIN") or "fno"
         proc = subprocess.run(
-            ["fno", "mux", "thread", name, "--portal", str(portal)],
+            [fno_bin, "mux", "thread", name, "--portal", str(portal)],
             capture_output=True,
             text=True,
             timeout=30,
         )
+        if proc.returncode == 0:
+            return
+        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detail = lines[-1] if lines else f"exit {proc.returncode}"
     except (OSError, subprocess.SubprocessError) as exc:
-        print(
-            f"portal placement failed ({exc}); the worker is live: reach it "
-            f"with `fno mux thread {name} --portal {portal}`",
-            file=sys.stderr,
-        )
-        return
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        print(
-            f"portal placement failed: {detail[-1] if detail else proc.returncode}; "
-            f"the worker is live: reach it with `fno mux thread {name} --portal {portal}`",
-            file=sys.stderr,
-        )
+        detail = str(exc)
+    print(
+        f"portal placement failed: {detail}; the worker is live: reach it "
+        f"with `fno mux thread {name} --portal {portal}`",
+        file=sys.stderr,
+    )
