@@ -796,8 +796,8 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
     ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
     worktree, never the pane default that would STALL a fire-and-forget dispatch),
-    ``headless`` for codex/others. The workflow verb is DERIVED, not read
-    (x-ebd2, law d-834b6ff1): ``harness_map.resolve_effective_verb`` runs one
+    ``headless`` for codex/others. The workflow verb is DERIVED, not read:
+    ``harness_map.resolve_effective_verb`` runs one
     conditional over the node's plan rung and difficulty. At INTAKE (plan rung
     ``none``) difficulty decides - ``low`` dispatches straight to ``/target``
     with no plan, ``medium``/``high`` blueprint on a frontier lane first and a
@@ -812,7 +812,7 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     a planless node without a valid difficulty REFUSE. ``verb_source`` keeps
     the RAW declaration state (declared / none-declared) beside the resolved
     verb, and a node dict missing the ``dispatch_verb`` key at all is a lossy
-    projection (x-0961): the spawn refuses before anything is spent. The stage
+    selection projection: the spawn refuses before anything is spent. The stage
     table reads the DERIVED verb, so ``agents.profiles.blueprint`` reaches
     medium/high planless nodes and ``agents.profiles.target`` no longer
     acquires planning eligibility from plan absence (the ``_grid_lane_for``

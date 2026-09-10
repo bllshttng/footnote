@@ -172,18 +172,14 @@ def cmd_resolve(
     def _resolve(target_harness: Optional[str]) -> dict:
         from fno.graph.ladder import plan_rung as _node_plan_rung
 
-        # x-ebd2 LD2/LD5: the node's STORED verb rides as audit input - an
-        # out-of-family declaration (/think) keeps declared precedence through
-        # the abstain path; a family value reconciles through the table.
-        stored_verb = (
-            str((rec or {}).get("dispatch_verb") or "").strip() or None
-        ) if rec else None
         return resolve_dispatch(
             harness=target_harness,
             substrate=substrate,
             node_id=node,
             command=command,
-            verb=verb or stored_verb,
+            # The stored verb rides as audit input: out-of-family keeps
+            # declared precedence; a family value reconciles through the table.
+            verb=verb or _stored_verb(rec),
             # x-ebd2: node lifecycle context; the derived verb is the phase
             # authority and the stage table reads its profile row.
             difficulty=(rec or {}).get("difficulty") if node else None,
@@ -392,6 +388,11 @@ def _resolve_provider_id(node_cwd: Optional[str] = None) -> Optional[str]:
         return None
 
 
+def _stored_verb(rec: Optional[dict]) -> Optional[str]:
+    """The node's stored dispatch_verb as resolver audit input (x-ebd2)."""
+    return str((rec or {}).get("dispatch_verb") or "").strip() or None
+
+
 def _cutover_command(
     harness: Optional[str], node_id: str, rec: Optional[dict] = None
 ) -> str:
@@ -408,9 +409,7 @@ def _cutover_command(
         return resolve_dispatch(
             harness=harness or "",
             node_id=node_id,
-            verb=(
-                str((rec or {}).get("dispatch_verb") or "").strip() or None
-            ) if rec else None,
+            verb=_stored_verb(rec),
             merge_posture="no-merge",
             difficulty=(rec or {}).get("difficulty"),
             plan_rung=_node_plan_rung(rec).value if rec else None,

@@ -1176,16 +1176,13 @@ def resolve_effective_verb(
     difficulty: Optional[str] = None,
     plan_rung: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
-    """The target/blueprint lifecycle conditional (x-ebd2, d-834b6ff1); full
-    table: docs/architecture/backlog-graph-verb-contracts.md. Intake (rung
-    "none"): difficulty decides. Re-dispatch: the plan rung decides. The
-    stored ``verb`` reconciles through the table; out-of-family abstains to
-    declared precedence.
-
-    Returns ``(canonical_verb, decision)``; ``None`` = abstain (no node
-    context, or out-of-family verb). Raises :class:`DispatchResolveError` on
-    a refusal rung, or planless without low/medium/high difficulty.
-    ``plan_rung`` is a ``graph.ladder.Rung`` value string."""
+    """The target/blueprint lifecycle conditional; full table:
+    docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
+    difficulty decides. Re-dispatch: the plan rung decides. The stored
+    ``verb`` reconciles through the table; out-of-family abstains to declared
+    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
+    Raises :class:`DispatchResolveError` on a refusal rung, or planless
+    without low/medium/high difficulty. ``plan_rung`` is a Rung value."""
     raw_verb = (verb or "").strip()
     if raw_verb.startswith("/fno:"):
         raw_verb = "/" + raw_verb[len("/fno:"):]
@@ -1352,9 +1349,8 @@ def resolve_dispatch(
     # 3. command template. Precedence: explicit --command > lifecycle > node
     # verb (allowlist-checked; a graph field is a trust boundary) > config
     # template > per-harness builtin. A derived /target renders through the
-    # SAME builtin rungs, byte-identical to the pre-x-ebd2 shape (suppress the
-    # raw verb and fall through); a derived /blueprint renders its own verb:
-    # the operator's target template is a target-phase contract.
+    # SAME builtin rungs (suppress the raw verb and fall through); a derived
+    # /blueprint renders its own verb: the target template is target-phase.
     derived_blueprint = lifecycle_verb == "/blueprint"
     if lifecycle_verb == "/target":
         verb = None

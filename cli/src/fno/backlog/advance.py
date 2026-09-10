@@ -1165,11 +1165,10 @@ def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
 
 
 def _node_effective_verb(node: dict) -> Optional[str]:
-    """The x-ebd2 effective workflow verb for a node dict, or None when the
-    lifecycle table abstains. One wrapper so every advance door - the spawn's
-    command/name/receipt and the lane placement's grid consult alike - derives
-    ONE answer per node. Raises DispatchResolveError on an unanswerable node;
-    the caller's spawn-failure path owns it."""
+    """The effective workflow verb for a node dict, or None when the
+    lifecycle table abstains. One wrapper so every advance door derives ONE
+    answer per node. Raises DispatchResolveError on an unanswerable node; the
+    caller's spawn-failure path owns it."""
     from fno.agents import harness_map
     from fno.graph.ladder import plan_rung as _node_plan_rung
 
@@ -1358,13 +1357,12 @@ def _spawn_worker(
     # x-0961/x-ebd2: classify the RAW declaration from the DICT alone (a
     # caller whose verb param diverges surfaces as verb=builtin beside
     # verb_source=declared). A dict without the key is a lossy projection:
-    # REFUSE before any worker, claim, or model slot is spent. A None node
-    # names no projection at all and keeps its warning + builtin path.
+    # REFUSE before anything is spent. A None node keeps its warning + path.
     if isinstance(node, dict) and "dispatch_verb" not in node:
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
-            "carries no dispatch_verb key. The selection projection feeding "
-            "this dispatcher is lossy (x-0961); fix the projection, not the node."
+            "carries no dispatch_verb key; the projection feeding this "
+            "dispatcher is lossy (x-0961); fix the projection, not the node."
         )
     if isinstance(node, dict):
         verb_source = (
@@ -1378,8 +1376,8 @@ def _spawn_worker(
             "evidence (x-0961).",
             file=sys.stderr,
         )
-    # x-ebd2: the effective workflow verb. Reconcile bypasses: its explicit
-    # command already spells the de-stub pass.
+    # x-ebd2: the effective workflow verb. Reconcile bypasses (its explicit
+    # command spells the de-stub pass).
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
@@ -1451,8 +1449,8 @@ def _spawn_worker(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    # The receipt names the RESOLVED verb (x-ebd2); verb_source keeps the RAW
-    # state. Canonicalized so receipt and command agree on the spelling.
+    # The receipt names the RESOLVED verb (x-ebd2); verb_source keeps the
+    # RAW state, canonicalized so receipt and command agree on the spelling.
     receipt_verb = effective_verb or node_verb or "builtin"
     if receipt_verb.startswith("/fno:"):
         receipt_verb = "/" + receipt_verb[len("/fno:"):]
@@ -1473,7 +1471,6 @@ def _spawn_worker(
             )
     else:
         # x-ebd2: the node's lifecycle context rides so the resolver derives
-        # the same effective verb this caller did.
         if isinstance(node, dict):
             from fno.graph.ladder import plan_rung as _node_plan_rung
 
@@ -1796,8 +1793,8 @@ def _grid_lane_for(
     One seam: tests monkeypatch this name, and a caller reaching past it
     bypasses every patch. A decline surfaces the chain's terminal verbatim,
     never refusing (Locked 10). Route and account ride beside harness/model
-    as one row fact. ``verb`` is the effective workflow verb (x-ebd2): its
-    profile row prices the slot; None keeps the target profile. Contract:
+    as one row fact. ``verb`` is the effective workflow verb: its profile row
+    prices the slot; None keeps the target profile. Contract:
     docs/architecture/backlog-graph-verb-contracts.md"""
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None, None, None
