@@ -183,14 +183,16 @@ impl Core {
         }
     }
 
-
     /// Bind one stored worker member to its re-adopted pane, once. The join
     /// is the member's own identity read back out of the pane's argv: the
     /// registered worker name (FNO_AGENT_SELF) or the resumed session id.
     /// Returns the pane and registers the `worker_pane` mapping restore's
     /// reconcile-first resume relies on, so a later resume FOCUSES the
     /// adopted pane instead of spawning a second writer.
-    pub(super) fn take_adopted_for_member(&mut self, m: &crate::squad_store::StoredMember) -> Option<u64> {
+    pub(super) fn take_adopted_for_member(
+        &mut self,
+        m: &crate::squad_store::StoredMember,
+    ) -> Option<u64> {
         let worker = m.worker.as_deref();
         let session_id = m.harness_session_id.as_deref();
         let hit = self.keeper_adopted.iter_mut().find(|a| {
@@ -206,7 +208,6 @@ impl Core {
         a.placed = true;
         Some(a.pane)
     }
-
 
     /// Place any adopted pane restore's member walk did not bind (its stored
     /// member is gone, or the store held no squads at all). A live pane must

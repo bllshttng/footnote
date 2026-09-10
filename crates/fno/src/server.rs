@@ -65,6 +65,7 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 mod agent_rows_join;
+mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_identity;
 mod pane_reseat;
@@ -73,7 +74,6 @@ mod retire_session;
 mod row_set;
 mod shutdown_capture;
 mod squad_persistence;
-mod keeper_adopt;
 mod squad_sync;
 mod truth_probe;
 
@@ -1116,7 +1116,6 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
 fn refused_worker_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_REFUSED_WORKER=")
 }
-
 
 /// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
@@ -16616,7 +16615,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn watch_only_bg_row_surfaces_while_foreign_pane_is_skipped() {
         // An `fno agents spawn --substrate bg` worker writes a paneless
@@ -26149,7 +26147,6 @@ mod tests {
             .expect("keeper spawns");
         KeeperProcess(child)
     }
-
 
     #[test]
     fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
