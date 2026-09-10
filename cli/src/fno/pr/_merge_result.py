@@ -48,7 +48,7 @@ def _run_script(top: str, base_rev: str, head_oid: str, cwd: str) -> tuple[str, 
         return ("unknown", f"merge-result probe did not run: {exc}")
     out = (proc.stdout or "").strip()
     if proc.returncode == 0:
-        return ("ok", out or "merge result is statically green")
+        return ("ok", out.replace("merge-result: ok - ", "", 1) or out)
     if proc.returncode == 3:
         return ("red", out.replace("merge-result: red - ", "", 1) or out)
     detail = ((proc.stderr or "") + out).strip() or f"exit {proc.returncode}"
