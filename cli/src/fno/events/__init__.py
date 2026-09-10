@@ -33,7 +33,7 @@ import re as _re
 import secrets as _secrets
 import sys as _sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import yaml as _yaml
 
@@ -159,12 +159,22 @@ if TYPE_CHECKING:
     # These names are populated dynamically after import by
     # _ensure_schema_loaded(). Keep them visible to static analysis without
     # creating module attributes that would defeat __getattr__.
-    SCHEMA = EVENT_TYPES = ENVELOPE_REQUIRED = MAX_DATA_BYTES = None
-    DATA_SIZE_ENCODING = ALLOWED_SOURCES = ALLOWED_SOURCE_PATTERNS = None
-    ALLOWED_GATES = RETENTION_DEFAULT = RETENTION_MINIMUM_TTL_HOURS = None
-    PROTOCOL_FAMILY_TYPES = PROTOCOL_FAMILY_VERSION = None
-    PROTOCOL_ENVELOPE_ALLOWED = PROTOCOL_ENVELOPE_REQUIRED = None
-    PROTOCOL_OUTCOME_ENUM = PROTOCOL_OUTCOME_ON = None
+    SCHEMA = cast(dict[str, Any] | None, None)
+    EVENT_TYPES = cast(dict[str, dict[str, Any]] | None, None)
+    ENVELOPE_REQUIRED = cast(list[str], None)
+    MAX_DATA_BYTES = cast(int, None)
+    DATA_SIZE_ENCODING = cast(str, None)
+    ALLOWED_SOURCES = cast(set[str], None)
+    ALLOWED_SOURCE_PATTERNS = cast(list[Any], None)
+    ALLOWED_GATES = cast(set[str], None)
+    RETENTION_DEFAULT = cast(str, None)
+    RETENTION_MINIMUM_TTL_HOURS = cast(int, None)
+    PROTOCOL_FAMILY_TYPES = cast(set[str], None)
+    PROTOCOL_FAMILY_VERSION = cast(int, None)
+    PROTOCOL_ENVELOPE_ALLOWED = cast(set[str], None)
+    PROTOCOL_ENVELOPE_REQUIRED = cast(list[str], None)
+    PROTOCOL_OUTCOME_ENUM = cast(set[str], None)
+    PROTOCOL_OUTCOME_ON = cast(set[str], None)
 
 _schema_loaded = False
 _SCHEMA_PUBLIC_NAMES = frozenset(
