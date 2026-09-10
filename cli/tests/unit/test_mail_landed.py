@@ -174,3 +174,19 @@ def test_ac8_abandoned_message_drops_off_the_scan_entirely(tmp_path, monkeypatch
     outstanding = _sent_unclaimed("alice", ttl_seconds=0)
 
     assert outstanding == []
+
+
+def test_is_deliverable_refuses_a_landed_ack(tmp_path, monkeypatch):
+    """A landed row is a receipt about another message, not inbox content, so
+    the deliverability test must refuse it (x-22ce). The send row is the
+    positive control, asserted in the same test: 151 of the 2378 live send rows
+    carry no `delivery` field, and a predicate that returned False for
+    everything would pass without it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.bus.log import Envelope, is_deliverable, record_landed
+
+    send = Envelope.new(from_="worker", to="king", kind="send", body="status")
+    ack = record_landed(msg_id=send.id, sender="worker", recipient="king")
+
+    assert is_deliverable(ack) is False
+    assert is_deliverable(send) is True

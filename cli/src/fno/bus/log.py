@@ -443,8 +443,25 @@ def append(env: Envelope) -> None:
             os.close(fd)
 
 
+#: The tombstone kind. A withdrawal cannot delete a line (the log is
+#: append-only) and must not advance the RECIPIENT's cursor, which is a
+#: last-seen position rather than a per-message flag - moving it would swallow
+#: every other unread message addressed to them. So a withdrawal is one more
+#: appended envelope naming the message it retracts, and readers skip the pair.
+WITHDRAW_KIND = "withdraw"
+
+#: Durable proof one id reached its recipient's transcript. Never deliverable.
+LANDED_KIND = "landed"
+
+#: Rows that are ledger traffic about other messages, never inbox content.
+CONTROL_KINDS = frozenset({WITHDRAW_KIND, LANDED_KIND})
+
+
 def is_deliverable(env: Envelope) -> bool:
     """Whether a bus envelope is pending recipient delivery.
+
+    A control row (a withdrawal tombstone, a landed receipt) is bookkeeping
+    about another message and is never inbox content, whatever its `to` says.
 
     Missing delivery metadata is the legacy durable shape. A hosted row records
     a delivery that already succeeded and exists only for sender/operator audit.
@@ -452,6 +469,8 @@ def is_deliverable(env: Envelope) -> bool:
     is audit-only too -- draining it would hand the recipient a second copy of
     text already sitting at its prompt.
     """
+    if getattr(env, "kind", None) in CONTROL_KINDS:
+        return False
     return getattr(env, "delivery", None) not in (HOSTED_DELIVERY, TYPED_DELIVERY)
 
 
@@ -588,14 +607,6 @@ def iter_messages(*, warn: bool = True) -> Iterator[Envelope]:
             continue
 
 
-#: The tombstone kind. A withdrawal cannot delete a line (the log is
-#: append-only) and must not advance the RECIPIENT's cursor, which is a
-#: last-seen position rather than a per-message flag - moving it would swallow
-#: every other unread message addressed to them. So a withdrawal is one more
-#: appended envelope naming the message it retracts, and readers skip the pair.
-WITHDRAW_KIND = "withdraw"
-
-
 def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
     """Ids retracted by a tombstone, plus the tombstone ids themselves.
 
@@ -624,10 +635,6 @@ def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
             continue
         out.add(target.id)
     return out
-
-
-#: Durable proof one id reached its recipient's transcript. Never deliverable.
-LANDED_KIND = "landed"
 
 
 def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
