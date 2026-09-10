@@ -55,6 +55,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "node-origin",
     "node-route",
     "notify-watch",
     "orphan-reap",
@@ -232,7 +233,9 @@ async fn run(args: Vec<String>) -> i32 {
     // `node-origin` is the HIDDEN transport verb over the request-origin
     // decision (fno_agents::node_origin): Python birth assembly posts birth
     // records and stamps the receipt. Same `matches!` treatment as `claim`
-    // so the routable-verb parity guard does not see it.
+    // so the routable-verb parity guard does not see it; the verb IS
+    // registered in ALL_CLIENT_ACTIONS because the verb-surface ratchet's
+    // binary probe reads the unknown-verb refusal.
     if matches!(verb, "node-origin") {
         return fno_agents::node_origin::run_node_origin(&args[1..]);
     }
