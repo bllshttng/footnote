@@ -295,7 +295,7 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin, and every node born before this field existed reads unknown.
 
-The local board carries the four buckets as a filter (`All origins` select), a dashed pill on rows with a known origin, and an origin plus evidence line in each row's detail panel. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
+On the local board the four buckets appear as an `All origins` filter, a dashed pill on rows with a known origin, and an origin plus evidence line in each row's detail panel. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
 
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
