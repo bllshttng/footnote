@@ -244,7 +244,7 @@ class Entry(BaseModel):
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
 
-    # Request origin (x-1005): birth-time, never rewritten later.
+    # Request origin: birth-time, never rewritten later.
     request_origin: Optional[str] = None
     origin_evidence: Optional[str] = None
 

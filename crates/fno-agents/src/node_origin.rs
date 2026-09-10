@@ -1,4 +1,4 @@
-//! Request-origin normalization for node birth (x-1005).
+//! Request-origin normalization for node birth.
 //!
 //! One owner for the decision "who requested this work", derived from the
 //! birth provenance a node already carries plus the minimal evidence field

@@ -609,7 +609,7 @@ _DASHBOARD_JS = """\
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
   var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false, origin:'' };
-  // Request-origin bucket names (x-1005). Unknown rows carry no pill; the
+  // Request-origin bucket names. Unknown rows carry no pill; the
   // detail panel still names the origin so absence reads as unknown, never
   // as missing data.
   var ORIGIN_LABELS = { operator_request:'your request', agent_discovery:'agent discovery', automated_followup:'automated', unknown:'unknown' };

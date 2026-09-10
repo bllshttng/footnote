@@ -637,7 +637,7 @@ def _replace_item_line(text: str, fu_id: str, new_line: str) -> str:
 
 
 def _item_source_ref(text: str, fu_id: str) -> Optional[str]:
-    """The item's ``source:`` sub-line value (x-1005 birth evidence); None if absent."""
+    """The item's ``source:`` sub-line value as birth evidence; None if absent."""
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         m = _ITEM_RE.match(line)

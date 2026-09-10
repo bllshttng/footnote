@@ -145,7 +145,7 @@ SOURCE_KINDS = frozenset(
 )
 SOURCE_KIND_DEFAULT = "organic"
 
-# Request-origin buckets (x-1005); the decision lives in node_origin.rs.
+# Request-origin buckets; the decision lives in node_origin.rs.
 REQUEST_ORIGINS = frozenset({"operator_request", "agent_discovery", "automated_followup", "unknown"})
 REQUEST_ORIGIN_DEFAULT = "unknown"
 
