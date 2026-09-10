@@ -10385,12 +10385,18 @@ mod tests {
         assert!(error.message.contains("still live"), "{}", error.message);
         // Positive markers (x-d19e): the refusal names the safe verb and the
         // cost of forcing past it; the override lives in --help, never here.
+        // For a row with a mux ref the safe verb is the pane kill (ruling
+        // d-658e6834): stop cannot serve a pane worker.
         assert!(
-            error.message.contains("fno agents stop maybe-pane-worker"),
+            error.message.contains("fno mux pane kill main:76"),
             "{}",
             error.message
         );
-        assert!(error.message.contains("resume handle"), "{}", error.message);
+        assert!(
+            error.message.contains("stop cannot serve it"),
+            "{}",
+            error.message
+        );
         assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
@@ -10432,11 +10438,15 @@ mod tests {
         assert!(error.message.contains("still live"), "{}", error.message);
         // Positive markers (x-d19e): same contract as the probe-unknown arm.
         assert!(
-            error.message.contains("fno agents stop live-pane-worker"),
+            error.message.contains("fno mux pane kill main:76"),
             "{}",
             error.message
         );
-        assert!(error.message.contains("resume handle"), "{}", error.message);
+        assert!(
+            error.message.contains("stop cannot serve it"),
+            "{}",
+            error.message
+        );
         assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
