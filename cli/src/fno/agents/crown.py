@@ -1,6 +1,7 @@
 """The crown vocabulary: what a scope is, what rung it implies, and what a
 grantor may hand down. ``registry`` owns the three row fields; this module owns
-their meaning and touches no file.
+their meaning. Its one file write is the crown journal: the events a grant,
+a vacate, or a spawn-time handoff leaves in ``~/.fno/events.jsonl``.
 
 THE LADDER IS THREE RUNGS, EACH A FACT ABOUT THE SCOPE:
 
@@ -610,6 +611,38 @@ def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
 
 class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
+
+
+def emit_crown_vacated(
+    *,
+    scope: Optional[str],
+    level: Optional[int],
+    holder: Optional[str],
+    holder_session: Optional[str],
+    grantor: Optional[str],
+    cause: str,
+    successor: Optional[str] = None,
+) -> None:
+    """Journal one crown leaving its holder.
+
+    The court can only answer "where did this crown go" from the record, never
+    from testimony: an abdication and a crown lost to a bug are indistinguishable
+    from outside until one of these lines lands. Callers emit AFTER the registry
+    write commits, so the row stays the authority and a refused vacate stays
+    silent.
+    """
+    from fno.agents import events
+
+    events.emit(
+        "agent_crown_vacated",
+        scope=scope,
+        level=level,
+        holder=holder,
+        holder_session=holder_session,
+        grantor=grantor,
+        cause=cause,
+        successor=successor,
+    )
 
 
 def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:

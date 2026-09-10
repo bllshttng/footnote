@@ -229,6 +229,7 @@ def done_cmd(
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         calling_agent_row,
+        emit_crown_vacated,
     )
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import update_registry
@@ -295,11 +296,12 @@ def done_cmd(
     # moved to a successor mid-call is refused here instead of disarming the
     # successor's manifest below (same order as the succession path).
     vacated = holder_name is None
+    vacated_row = None
     if holder_name is not None:
         attended_named = holder_name == ""
 
         def _vacate(rows: list) -> list:
-            nonlocal vacated
+            nonlocal vacated, vacated_row
             for index, row in enumerate(rows):
                 if attended_named:
                     # Attended + named scope: vacate whatever live row holds
@@ -308,6 +310,7 @@ def done_cmd(
                         row.crown_scope == scope
                         and row.status not in _TERMINAL_ROW_STATUSES
                     ):
+                        vacated_row = row
                         rows[index] = _replace(
                             row,
                             crown_level=None,
@@ -316,6 +319,7 @@ def done_cmd(
                         )
                         vacated = True
                 elif row.name == holder_name and row.crown_scope == scope:
+                    vacated_row = row
                     rows[index] = _replace(
                         row, crown_level=None, crown_scope=None, crown_grantor=None
                     )
@@ -337,6 +341,19 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(1)
+        if vacated_row is not None:
+            # The row write is the authority: a vacated row gets its event even
+            # if the manifest removal below then exits 1. Emitted before it, and
+            # never on the refusal above, so the journal only ever records a
+            # vacate that committed.
+            emit_crown_vacated(
+                scope=scope,
+                level=vacated_row.crown_level,
+                holder=vacated_row.name,
+                holder_session=vacated_row.harness_session_id,
+                grantor=vacated_row.crown_grantor,
+                cause="expired" if attended_named else "abdicated",
+            )
 
     # The session-id snapshot guards the successor race under the manifest
     # lock (ownership was proven by the locked vacate above). False means the
@@ -352,6 +369,17 @@ def done_cmd(
             err=True,
         )
         raise typer.Exit(1)
+    if not vacated:
+        # No live holder held the row: the manifest clear itself is the whole
+        # vacate, so the event names the manifest's session, not a row.
+        emit_crown_vacated(
+            scope=scope,
+            level=None,
+            holder=None,
+            holder_session=expired_manifest_session,
+            grantor=None,
+            cause="orphan_manifest",
+        )
     typer.echo(f"king: crown expired: {scope}")
     typer.echo(
         "row crown: vacated; manifest: cleared"

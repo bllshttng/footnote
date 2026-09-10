@@ -409,7 +409,7 @@ The joiner half of this contract is the joiner posture in [/execute waves](../ex
 
 Before you abdicate, record every ruling that changes what a worker does. One `fno backlog note <node> <text>` call per ruling; for a rule the operator asked for, `fno inbox law set <subject> <decision> --rationale "<why>"`. `fno backlog decide` refuses every agent session, crowned included, so it is not a channel a king can open. Your context is the only place these rulings live, and it is about to end.
 
-Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
+Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. It also writes one `agent_crown_vacated` event to `~/.fno/events.jsonl`; a reader that finds a crown missing should look there before reading the absence as a loss. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
 
 No king outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.

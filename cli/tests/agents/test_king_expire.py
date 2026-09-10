@@ -8,6 +8,7 @@ file - so a scope that moved to an heir mid-call is never disarmed.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -81,6 +82,21 @@ def _done(*args: str):
     from fno.king.cli import agents_king_app
 
     return CliRunner().invoke(agents_king_app, ["done", *args])
+
+
+def _vacates() -> list:
+    """Every parsed line of the tmp journal. The real events.emit writes the
+    real file; a monkeypatched list would re-prove only the call."""
+    from fno import paths
+
+    journal = paths.state_dir() / "events.jsonl"
+    if not journal.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def test_done_expires_the_manifest_and_arms_a_successor_without_force(court) -> None:
@@ -213,3 +229,87 @@ def test_an_agent_with_no_crown_has_nothing_to_expire(court) -> None:
 
     assert result.exit_code == 2
     assert "no crown" in result.output
+
+
+def test_done_writes_one_vacate_event_naming_scope_and_holder(court) -> None:
+    """The abdication lands in the journal, not just the registry: one event
+    naming the scope, the holder and its session, from the record alone."""
+    _seat("sitting-king", CALLER_SESSION)
+    _manifest(court)
+
+    result = _done()
+
+    assert result.exit_code == 0, result.output
+    vacates = [e for e in _vacates() if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    event = vacates[0]
+    assert event["scope"] == SCOPE
+    assert event["holder"] == "sitting-king"
+    assert event["holder_session"] == CALLER_SESSION
+    assert event["cause"] == "abdicated"
+    assert (event["level"], event["grantor"]) == (2, "human")
+
+
+def test_a_refused_done_leaves_the_journal_silent(court, monkeypatch) -> None:
+    """A successful abdication first proves the reader finds the event; the
+    refused expiry that follows (the crown moved before the write) must gain
+    no second one."""
+    _seat("sitting-king", CALLER_SESSION)
+    _manifest(court)
+    assert _done().exit_code == 0
+    found = [e for e in _vacates() if e["kind"] == "agent_crown_vacated"]
+    assert len(found) == 1, "the reader must find the first abdication"
+
+    update_registry(
+        lambda rows: [
+            (
+                replace(row, crown_level=2, crown_scope=SCOPE, crown_grantor="human")
+                if row.name == "sitting-king"
+                else row
+            )
+            for row in rows
+        ]
+    )
+    from fno.agents import registry as registry_mod
+
+    real_update = registry_mod.update_registry
+
+    def _move_then_update(fn):
+        real_update(
+            lambda rows: [
+                (
+                    replace(
+                        row, crown_scope=None, crown_level=None, crown_grantor=None
+                    )
+                    if row.name == "sitting-king"
+                    else row
+                )
+                for row in rows
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _move_then_update)
+
+    result = _done()
+
+    assert result.exit_code == 1, result.output
+    found = [e for e in _vacates() if e["kind"] == "agent_crown_vacated"]
+    assert len(found) == 1, "a refused vacate must write nothing"
+
+
+def test_an_orphaned_scope_writes_the_manifest_clear_event(court, monkeypatch) -> None:
+    """No live holder: the manifest clear is the whole vacate, so the event
+    names the manifest's session, not a row."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _manifest(court, scope="orphaned-scope", session="long-gone")
+
+    result = _done("--scope", "orphaned-scope")
+
+    assert result.exit_code == 0, result.output
+    vacates = [e for e in _vacates() if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    event = vacates[0]
+    assert (event["cause"], event["scope"]) == ("orphan_manifest", "orphaned-scope")
+    assert event["holder"] is None
+    assert event["holder_session"] == "long-gone"
