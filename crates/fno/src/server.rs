@@ -8224,7 +8224,6 @@ impl Core {
             // slot; the legacy lane gives each its own tab.
             let mut member_panes: Vec<(String, u64, Option<String>)> = Vec::new();
             let mut detached_adoptions: Vec<(u64, crate::squad_store::StoredMember)> = Vec::new();
-            let mut pane_aliases: HashMap<String, Option<u64>> = HashMap::new();
             // (x-c4d4) The zero-live-member fallback shell tab, if we create one;
             // a deferred template restore removes it once real template tabs land.
             let mut fallback_tid: Option<TabId> = None;
@@ -8444,16 +8443,6 @@ impl Core {
                             Ok(pid) => {
                                 let binding = worker_binding_key(m)
                                     .unwrap_or_else(|| worker_name.to_string());
-                                if binding != worker_name {
-                                    match pane_aliases.entry(worker_name.to_string()) {
-                                        std::collections::hash_map::Entry::Vacant(entry) => {
-                                            entry.insert(Some(pid));
-                                        }
-                                        std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                            entry.insert(None);
-                                        }
-                                    }
-                                }
                                 member_panes.push((binding, pid, m.tab_name.clone()));
                             }
                             Err(error) => {
@@ -8612,9 +8601,31 @@ impl Core {
                     .iter()
                     .map(|(id, pid, _)| (id.clone(), *pid))
                     .collect();
+                // A capture taken before the registry row published names the
+                // bare worker, while the member now binds by session. Alias the
+                // bare name to the member's pane, or to nothing when two members
+                // share that name.
+                let mut pane_aliases: HashMap<&str, Option<u64>> = HashMap::new();
+                for m in &members {
+                    let (Some(worker), Some(binding)) =
+                        (m.worker.as_deref(), worker_binding_key(m))
+                    else {
+                        continue;
+                    };
+                    if binding == worker {
+                        continue;
+                    }
+                    let Some(pane) = pane_by_id.get(&binding).copied() else {
+                        continue;
+                    };
+                    pane_aliases
+                        .entry(worker)
+                        .and_modify(|seen| *seen = None)
+                        .or_insert(Some(pane));
+                }
                 for (alias, pane) in pane_aliases {
                     if let Some(pane) = pane {
-                        pane_by_id.entry(alias).or_insert(pane);
+                        pane_by_id.entry(alias.to_string()).or_insert(pane);
                     }
                 }
                 // (x-9052) The home lane's fresh attach shell already IS an

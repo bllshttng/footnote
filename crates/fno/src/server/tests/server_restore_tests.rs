@@ -393,6 +393,104 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
 }
 
 #[test]
+fn restore_seats_an_adopted_worker_whose_slot_was_captured_under_its_bare_name() {
+    // The capture ran before the registry row published, so the slot names
+    // the bare worker; at restore the member binds by session. The adopted
+    // keeper pane must still land in its captured tab, while a slot whose
+    // worker has no member at all keeps the shell substitute and the notice.
+    let s = StoreScratch::new("restore-bare-seat");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-live-one".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("live-session".into()),
+            pane_id: None,
+        }],
+    )
+    .unwrap();
+    let one_slot_tab = |name: &str, binding: &str| crate::squad_store::StoredTabTree {
+        tab_name: Some(name.into()),
+        tree: crate::proto::LayoutTreeSpec::Slot("s0".into()),
+        slots: vec![crate::proto::LayoutSlot::new(
+            "s0".into(),
+            LayoutBinding::Fno(binding.into()),
+        )],
+        focus: None,
+    };
+    crate::squad_store::set_tab_trees(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[],
+        &[
+            one_slot_tab("work", "t-live-one"),
+            one_slot_tab("ghost", "worker:codex:ghost-session"),
+        ],
+        None,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let adopted = core.spawn_pane(24, 80, &origin_str).unwrap();
+    core.keeper_adopted.push(AdoptedKeeper {
+        pane: adopted,
+        child_pid: None,
+        argv: vec![
+            "env".into(),
+            "FNO_AGENT_SELF=t-live-one".into(),
+            "codex".into(),
+        ],
+        cwd: origin_str.clone(),
+        placed: false,
+    });
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-live-one"]);
+    let _done = DoneSessionsGuard;
+    set_done_sessions(HashSet::new());
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    assert!(
+        core.keeper_adopted[0].placed,
+        "the member walk bound the adopted pane"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    let (sid, ti) = core.session.find_pane(adopted).unwrap();
+    let tab = &core.session.squad(sid).unwrap().tabs[ti];
+    assert_eq!(
+        (tab.name.as_deref(), tree::leaves(&tab.root)),
+        (Some("work"), vec![adopted]),
+        "the adopted worker is seated in its captured tab, not appended: {notices}"
+    );
+    assert_eq!(
+        core.panes.len(),
+        2,
+        "the adopted pane plus one ghost shell, no substitute for the seated worker"
+    );
+    assert!(
+        notices.contains("1 worker(s) did not come back (tab ghost): worker:codex:ghost-session"),
+        "the absent worker is shell-substituted and named: {notices}"
+    );
+    assert!(
+        !notices.contains("(tab work)"),
+        "the seated worker is not reported missing: {notices}"
+    );
+}
+
+#[test]
 fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
     // x-2990: a member whose attach-id NO row names is dead weight; one
     // whose EXITED row still names it is the resumable dim card and stays.
