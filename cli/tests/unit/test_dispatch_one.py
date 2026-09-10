@@ -47,6 +47,11 @@ class _FakeGate:
 
 def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    # A real selection projection row (x-0961/x-ebd2): planless low is the
+    # law's straight-to-target intake, so the node-aware command resolve
+    # derives instead of refusing. Caller-supplied values still win.
+    if next_node is not None:
+        next_node = {"difficulty": "low", "dispatch_verb": "", **next_node}
     monkeypatch.setattr(dispatch, "_next_node", lambda project: next_node)
     monkeypatch.setattr(dispatch, "_worker_agent_name", lambda nid, slug: f"target-{nid}")
     monkeypatch.setattr(dispatch, "resolve_provenance", lambda nid, slug: {})
@@ -465,7 +470,11 @@ def test_resolve_auto_brief_from_node_details(monkeypatch):
 
     monkeypatch.setattr(
         dispatch, "_lookup_node",
-        lambda ref: {"id": "x-9", "title": "Retry", "details": "exponential backoff " * 5},
+        lambda ref: {
+            "id": "x-9", "title": "Retry",
+            "details": "exponential backoff " * 5,
+            "difficulty": "low", "dispatch_verb": "",
+        },
     )
     r = _resolve_cli("--node", "x-9", "-J")
     assert r.exit_code == 0
@@ -476,12 +485,19 @@ def test_resolve_auto_brief_from_node_details(monkeypatch):
 
 def test_resolve_explicit_brief_still_wins_over_auto(monkeypatch):
     """An explicit --brief is rung 1: it rides verbatim and the node is never
-    consulted for a synthesized brief."""
+    consulted for a SYNTHESIZED brief. The node still loads (x-ebd2: the
+    lifecycle verb derives from it either way) - only the brief chain skips."""
     import json
 
     monkeypatch.setattr(
         dispatch, "_lookup_node",
-        lambda ref: (_ for _ in ()).throw(AssertionError("must not look up node")),
+        lambda ref: {"id": "x-9", "difficulty": "low", "dispatch_verb": ""},
+    )
+    import fno.provenance.autobrief as autobrief
+
+    monkeypatch.setattr(
+        autobrief, "resolve_dispatch_brief",
+        lambda n: (_ for _ in ()).throw(AssertionError("must not synthesize a brief")),
     )
     r = _resolve_cli("--node", "x-9", "--brief", "hand set", "-J")
     assert r.exit_code == 0

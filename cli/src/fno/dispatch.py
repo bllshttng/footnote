@@ -151,10 +151,11 @@ def cmd_resolve(
     # dispatcher (dispatch-node.sh) included - carries the same context, not only
     # advance.py's daemon paths. An explicit --brief still wins (it IS rung 1).
     brief_source = "explicit" if brief else "none"
-    # An explicit --brief is rung 1 and the node is never consulted for it, so
-    # the lookup stays demand-driven: only a brief that must be synthesized, or
-    # the autonomous route (which reads the node's priority and cwd), pays it.
-    rec = _lookup_node(node) if node and (brief is None or autonomous) else None
+    # x-ebd2: the node ALWAYS loads under --node, explicit brief or not - the
+    # lifecycle verb derives from the node's plan rung and difficulty, which an
+    # explicit brief does not carry. The brief chain itself stays demand-driven
+    # (an explicit --brief is rung 1 and is never overridden).
+    rec = _lookup_node(node) if node else None
     if brief is None and rec:
         from fno.provenance.autobrief import resolve_dispatch_brief
 
@@ -169,12 +170,22 @@ def cmd_resolve(
         harness = route.harness
 
     def _resolve(target_harness: Optional[str]) -> dict:
+        from fno.graph.ladder import plan_rung as _node_plan_rung
+
         return resolve_dispatch(
             harness=target_harness,
             substrate=substrate,
             node_id=node,
             command=command,
             verb=verb,
+            # x-ebd2: node lifecycle context - the derived verb is the phase
+            # authority, and the stage table reads its profile row.
+            difficulty=(rec or {}).get("difficulty") if node else None,
+            plan_rung=(
+                _node_plan_rung(rec).value
+                if node and isinstance(rec, dict)
+                else None
+            ),
             brief=brief,
             merge_posture=merge_posture,
             trigger=trigger,
@@ -379,8 +390,11 @@ def _resolve_provider_id(node_cwd: Optional[str] = None) -> Optional[str]:
         return None
 
 
-def _cutover_command(harness: Optional[str], node_id: str) -> str:
-    """The destination harness's own target command, or "" if unresolvable.
+def _cutover_command(
+    harness: Optional[str], node_id: str, rec: Optional[dict] = None
+) -> str:
+    """The destination harness's own node-aware dispatch command, or "" if
+    unresolvable.
 
     This verb hosts a pane in THIS mux session, so the substrate is not the
     destination's default; only the COMMAND needs the per-harness render
@@ -388,17 +402,24 @@ def _cutover_command(harness: Optional[str], node_id: str) -> str:
     caller's signal to stage nothing - a half-resolved destination must not
     spawn.
 
-    This verb always spawns the no-merge `/target` command, on the normal path
-    and on the cutover path alike, so `config.auto_merge.grant` is deliberately
-    not consulted here. Going through the full resolver would read it and could
-    hand a rerouted worker merge authority that the non-cutover launch never
-    gets: quota exhaustion must not change who may merge."""
+    The workflow verb derives from the node's plan rung and difficulty
+    (x-ebd2), so a planless medium node stages a blueprint pane here exactly as
+    every other door would. This verb always spawns no-merge, on the normal
+    path and on the cutover path alike, so `config.auto_merge.grant` is
+    deliberately overridden: quota exhaustion must not change who may merge."""
     try:
-        from fno.agents.harness_map import dispatch_command
+        from fno.agents.harness_map import resolve_dispatch
+        from fno.graph.ladder import plan_rung as _node_plan_rung
 
-        return dispatch_command(harness or "", allow_merge=False).replace(
-            "{id}", node_id
-        )
+        return resolve_dispatch(
+            harness=harness or "",
+            node_id=node_id,
+            merge_posture="no-merge",
+            difficulty=(rec or {}).get("difficulty"),
+            plan_rung=(
+                _node_plan_rung(rec).value if isinstance(rec, dict) else None
+            ),
+        )["command"]
     except Exception:  # noqa: BLE001 - an unresolvable harness never spawns
         return ""
 
@@ -597,7 +618,7 @@ def _dispatch_one(
             # Render the destination's own command HERE, before any claim or
             # reservation is taken: an unresolvable harness must fall back to the
             # defer floor rather than reach the spawn with a claude command.
-            cutover_command = _cutover_command(route.harness, node_id)
+            cutover_command = _cutover_command(route.harness, node_id, rec)
             if cutover_command:
                 cutover = route
             elif not route.defer_fallback:
@@ -765,7 +786,7 @@ def _dispatch_one(
             # the flag form (and any per-harness surface) comes from ONE template
             # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
             # drifts when the token changes shape (x-9d11).
-            message = _cutover_command(spawn_harness, node_id)
+            message = _cutover_command(spawn_harness, node_id, rec)
             if cutover is not None:
                 spawn_harness = cutover.harness or "claude"
                 message = cutover_command
