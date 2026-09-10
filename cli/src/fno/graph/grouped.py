@@ -42,9 +42,7 @@ GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "source_harness",
             "source_cwd",
             "source_node_id",
-            "source_plan_path",
-            "request_origin",
-            "origin_evidence",
+            "source_plan_path", "request_origin", "origin_evidence",
         ),
     ),
     (

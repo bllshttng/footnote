@@ -878,7 +878,6 @@ _DASHBOARD_JS = """\
         // Click order matters: the pill's handler stops propagation, which also
         // keeps the .rid copy-id handler beneath it from firing, so one click
         // copies the command and nothing else.
-        var originPill = LOCAL && n.ro && n.ro !== 'unknown' ? '<span class="pill origin">' + esc(ORIGIN_LABELS[n.ro] || n.ro) + '</span>' : '';
         main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + originPill + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
