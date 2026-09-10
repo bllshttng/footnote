@@ -197,9 +197,11 @@ while IFS= read -r -d '' row; do
                 # happened. The shrink number is the measured net growth, so
                 # the next author gets the exact size of the owed payback.
                 net=$((added - deleted))
-                echo "check-file-budget: main advanced $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) and grew $path by +$added/-$deleted" >> "$findings"
-                echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head." >> "$findings"
-                echo "  The next change touching this file must shrink it by at least $net lines." >> "$findings"
+                {
+                    echo "check-file-budget: main advanced $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) and grew $path by +$added/-$deleted"
+                    echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head."
+                    echo "  The next change touching this file must shrink it by at least $net lines."
+                } >> "$findings"
             else
                 echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
             fi

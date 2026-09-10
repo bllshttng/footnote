@@ -87,6 +87,11 @@ fresh; mkdir -p cli; git mv scripts/big.sh cli/big.sh; commit
 check 'a moved over-budget file is measured against its old path' 0 \
   'ok cli/big.sh 40 lines, change +0/-0 (net 0); no grow' FILE_BUDGET_LINES=20
 
+fresh; lines 5 grow >> scripts/big.sh; commit
+check 'the push alarm names the owed shrink' 1 \
+  'The next change touching this file must shrink it by at least 5 lines.' \
+  FILE_BUDGET_LINES=20 FILE_BUDGET_BASE_SHA="$(git rev-parse main)"
+
 fresh; git rm -q scripts/big.sh; commit
 check 'a deleted over-budget file passes' 0 'check-file-budget: ok (no over-budget file grew' FILE_BUDGET_LINES=20
 
