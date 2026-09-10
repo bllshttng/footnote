@@ -3181,14 +3181,9 @@ def _warn_lock_mirror_without_claim(node_id: str) -> None:
     write time so a caller never mistakes the stamp for a held lock.
     """
     try:
-        from fno.claims.core import claim_path
-        from fno.claims.io import claims_root_for, dedup_claims_roots
+        from fno.claims.io import node_has_live_claim
 
-        key = f"node:{node_id}"
-        roots = [claims_root_for(key), None]
-        has_claim = any(
-            claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots)
-        )
+        has_claim = node_has_live_claim(f"node:{node_id}")
     except Exception:  # noqa: BLE001 - the probe must not fail a write that landed
         return
     if not has_claim:

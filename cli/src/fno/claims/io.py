@@ -230,6 +230,15 @@ def claim_path(key: str, root: Path | None = None) -> Path:
     return claims_dir(root) / f"{encode_key(key)}.lock"
 
 
+def node_has_live_claim(key: str, roots: "list[Path | None] | None" = None) -> bool:
+    """Does a claim lockfile for ``key`` exist in any swept root? Shared by
+    the reap mirror-clear and the update write-time warning so both answer
+    the same question the same way."""
+    if roots is None:
+        roots = [claims_root_for(key), None]
+    return any(claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots))
+
+
 def expired_archive_path(key: str, ts_ms: int, root: Path | None = None) -> Path:
     """Return the archive path for a recovered stale claim."""
     return claims_dir(root) / EXPIRED_SUBDIR / f"{encode_key(key)}.{ts_ms}.lock"
