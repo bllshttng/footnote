@@ -237,6 +237,13 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
     reason = item.subkind or ""
     if reason.lower() not in _PM_STUCK_REASONS and _PM_ONEOFF_RE.search(reason):
         return DISPOSITION_ARCHIVE, None
+    # A success terminal (DonePRGreen and every other Done*) is the receipt of a
+    # healthy session, not open work: consume it. The postmortem file stays on
+    # disk as the monthly review's input; the wedge regex below cannot be
+    # trusted on these gists (the pasted assistant prose matches it constantly),
+    # so a Done* reason never reaches it.
+    if reason.lower().startswith("done"):
+        return DISPOSITION_ARCHIVE, None
 
     wedge = bool(_PM_WEDGE_RE.search(item.text or ""))
     # A genuine wedge always surfaces, even if its text happens to also match
