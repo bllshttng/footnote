@@ -85,7 +85,7 @@ registry_fixture "$CROWNED"
 manifest_fixture court
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno agents spawn --node" \
+   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno agents spawn '/fno:target <id>' --node <id> --substrate thread" \
    && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno backlog advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
   pass "AC1: crowned court Edit denied, reason names spawn + advance"
@@ -194,7 +194,7 @@ OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/quoted plan.md\"")")"; RC=$
 
 # Delegation with a thrown-away stderr is the guard's own remedy; /dev writes
 # no source.
-OUT="$(run_guard "$(bash_payload "fno agents spawn --node x-9 --substrate bg 2>/dev/null")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "fno agents spawn '/fno:target x-9' --node x-9 --substrate thread 2>/dev/null")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: spawn with 2>/dev/null allowed" \
   || fail "Bash floor: spawn devnull rc=$RC out=$OUT"
 
