@@ -1779,6 +1779,18 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
+    # First-bind the graph pointer (x-f8b1 change 2): the reverse leg of the
+    # x-39c0 backfill above. Both target-side writes - this init and
+    # `fno do state set --field plan_path` - write the session manifest only,
+    # so a plan handed straight to `init --plan-path` (x-7649) never told the
+    # graph and the node stayed dispatchable-planless. Sits AFTER every
+    # refusal so a refused init binds nothing, and OUTSIDE any claim gate:
+    # whether a plan is bound is a fact about the node, never about who holds
+    # the claim (x-7649's init was claim-refused and a bind placed behind the
+    # shell hook's _NODE_OWNED guard would have missed it).
+    if plan_path and isinstance(_dispatch_node, dict):
+        _bind_node_plan_path(_dispatch_node, plan_path)
+
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash
@@ -1849,6 +1861,63 @@ def init(
         _maybe_check_resume_receipt()
         _record_denominator_choice(plan_path, deliverables, _dispatch_node)
     raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def _bind_node_plan_path(node: dict, plan_path: str) -> None:
+    """First-bind the graph node's ``plan_path`` at init (x-f8b1 change 2).
+
+    ``plan_path`` reaches the graph through exactly one first-binding writer
+    (blueprint's ``mutate_doc.py``), so a plan handed straight to this verb
+    never told the graph. Shells out to ``fno backlog update`` for the same
+    reason ``fno.research.deliverable._bind_plan_path`` does: ``backlog
+    update`` is the one choke point every write to ``plan_path`` goes through,
+    and duplicating its locking/validation here would be a second
+    implementation to diverge from.
+
+    Never overwrites a non-empty stored value (a group child shares one plan
+    with its siblings); a stored pointer naming a different plan says so and
+    init continues. Non-fatal by posture, matching the shell hook's graph lock
+    stamp: a lock-contended graph must not abort init.
+    """
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        return
+    stored = node.get("plan_path")
+    stored_str = stored.strip() if isinstance(stored, str) else ""
+    if stored_str:
+        try:
+            same = (
+                Path(stored_str).expanduser().resolve()
+                == Path(plan_path).expanduser().resolve()
+            )
+        except OSError:
+            same = stored_str == plan_path
+        if same:
+            return
+        typer.echo(
+            f"fno do target init: graph node {node_id} is already bound to "
+            f"{stored_str}; leaving it untouched",
+            err=True,
+        )
+        return
+    try:
+        result = subprocess.run(
+            ["fno", "backlog", "update", node_id, "--plan-path", plan_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        typer.echo(f"WARNING: could not bind {plan_path} to {node_id}: {exc}", err=True)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:200]
+        typer.echo(
+            f"WARNING: could not bind {plan_path} to {node_id}: {detail}",
+            err=True,
+        )
+        return
+    typer.echo(f"fno do target init: bound graph node {node_id} to {plan_path}", err=True)
 
 
 def _record_denominator_choice(
