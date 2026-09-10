@@ -3206,6 +3206,12 @@ event_types:
         message:
           type: string
           description: "Human-readable termination message."
+        cancel_author:
+          type: string
+          description: "Author read from the cancel sentinel payload; absent when the sentinel was empty."
+        cancel_reason:
+          type: string
+          description: "Reason read from the cancel sentinel payload; absent when the sentinel carried none."
         driver:
           type: string
           enum: [target, king]
@@ -3803,6 +3809,12 @@ event_types:
         cancel_age_seconds:
           type: integer
           description: "Age of the sentinel in seconds when the walk refused to start or continue."
+        cancel_author:
+          type: string
+          description: "Author read from the sentinel payload; absent when the sentinel was empty."
+        cancel_reason:
+          type: string
+          description: "Reason read from the sentinel payload; absent when the sentinel carried none."
     consumers: [operator, megawalk]
 
   - name: cancel_signal_set

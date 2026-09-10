@@ -120,7 +120,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding, and either no open finding or the configured rounds spent), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
 - *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
-- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `touch .fno/.target-cancelled`; king: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
+- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `/fno:cancel-target` (attributed). King: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
 
 ### State files & forbidden surfaces

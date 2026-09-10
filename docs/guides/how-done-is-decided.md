@@ -78,10 +78,10 @@ A run refuses to stop until done is proven, by design.
 To stop one on purpose:
 
 ```bash
-touch .fno/.target-cancelled
+printf 'author: operator\nreason: stopping the run\n' > .fno/.target-cancelled
 ```
 
-This is the supported off switch.
+This is the supported off switch. The author and reason are echoed in the run's Interrupted line. A bare `touch` also works and reads as unattributed.
 Do not edit `.fno/target-state.md`.
 It is an immutable manifest.
 
