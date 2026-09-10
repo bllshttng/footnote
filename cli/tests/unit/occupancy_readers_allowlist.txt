@@ -1,0 +1,45 @@
+# Registered node-claim occupancy readers (x-74aa). One entry per site:
+# <relpath>:<exact source line>. A new reader fails
+# scripts/ci/check-node-occupancy-readers.sh until registered here with the
+# control that covers it. The four-way control is
+# cli/tests/unit/test_occupancy_four_way_control.py; "core routing" is
+# test_claims_core.py::TestStatus::test_rootless_node_key_routes_to_global_root
+# (the fix that makes the default read the global root for node: keys).
+
+# --- the three sites the plan corrects; each has its own regression ---
+cli/src/fno/backlog/note_notify.py:status = claim_status(f"node:{node_id}")
+# control: core routing + four-way control (rootless read reaches the global root)
+cli/src/fno/pr/_merge_grant.py:status = claim_status(f"node:{node_id}")
+# control: test_pr_merge_grant.py::test_held_when_claim_really_live_at_global_root
+cli/src/fno/pr_watch/cli.py:info = claim_status(f"node:{node_id}")
+# control: test_pr_watch_config_coupling.py::test_is_node_live_sees_global_claim
+cli/src/fno/provenance/runtime_attempts.py:return claim_status(f"node:{node_id}")
+# control: test_runtime_attempts.py::test_default_claim_state_routes_to_global_root
+
+# --- already-routed sites; their explicit root stays true under the fix ---
+cli/src/fno/agents/cli.py:node_key = f"node:{node_id}"
+# control: core routing (root=claims_root_for at the call below)
+cli/src/fno/agents/truth_status.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/agents/unfinished_work.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/agents/watchdog.py:key = f"node:{node}"
+# control: core routing
+cli/src/fno/annotate/core.py:key = f"node:{node}"
+# control: core routing
+cli/src/fno/backlog/advance.py:claim_key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/backlog/requeue.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/decide/cli.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/graph/cli.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/mail/job_address.py:key = f"node:{node_id}"
+# control: core routing
+cli/src/fno/resume/cli.py:return claim_status(f"node:{node}", root=claims_root)
+# control: core routing (root=None arg now routes by key)
+
+# --- the control site itself: the shape every other site should have had ---
+cli/src/fno/target_cli.py:key = f"node:{node_id}"
+# control: test_occupancy_four_way_control.py::test_the_control_classifier_keeps_its_answers

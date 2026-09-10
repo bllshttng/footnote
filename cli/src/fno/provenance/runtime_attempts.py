@@ -200,7 +200,7 @@ def _branch_from_manifest(raw: Optional[dict[str, Any]]) -> Optional[str]:
 
 
 def _default_claim_state(node_id: str) -> dict[str, Any]:
-    """Read the live ``node:<id>`` claim state (global root). Never raises."""
+    """Read the live ``node:<id>`` claim state; the key routes to the global root. Never raises."""
     try:
         from fno.claims import claim_status
 

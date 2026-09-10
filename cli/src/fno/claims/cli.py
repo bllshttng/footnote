@@ -919,6 +919,24 @@ def _roster_verdict_line(info: dict) -> str:
     return scanned
 
 
+def _expiry_clause(info: dict) -> str:
+    """One stderr line when a live holder's TTL lapsed (x-74aa): the word live
+    alone cannot tell a fresh lease from one that lapsed an hour ago. Empty
+    for every non-live state - "holder live by" would lie about stale."""
+    if info.get("expired") is not True or info.get("state") != "live":
+        return ""
+    from .types import now_ms
+
+    expires_at = info.get("expires_at")
+    if isinstance(expires_at, (int, float)):
+        mins = max(0, int((now_ms() - expires_at) / 60_000))
+        age = f"{mins}m ago"
+    else:
+        age = "unknown age"
+    basis = info.get("basis") or "live"
+    return f"live (ttl expired {age}; holder live by {basis})"
+
+
 @cli.command()
 def status(
     key: str = typer.Argument(...),
@@ -990,6 +1008,9 @@ def status(
         if info.get("session_basis"):
             line += f"; session witness: {info['session_basis']}"
         typer.echo(line, err=True)
+    clause = _expiry_clause(info)
+    if clause:  # stderr: stdout stays parseable JSON on every path
+        typer.echo(clause, err=True)
 
 
 def _merge_claims_across_roots(
