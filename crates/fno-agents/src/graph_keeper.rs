@@ -582,7 +582,7 @@ fn cached_entries_gated(
         // No identity, no trust: a stat failure invalidates and the read
         // answers fresh, exactly as an unreadable stat read today.
         *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
-        let version = file_version(&state.graph);
+        let version = graph_store::file_content_version(&state.graph);
         let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
         return Ok((Arc::new(entries), version));
     };
@@ -599,7 +599,7 @@ fn cached_entries_gated(
     // Digest first, parse second: with the gate held, a keeper-side write
     // cannot interleave, and a FOREIGN one (gc_sweep on the file) moves the
     // post-parse identity, which the fill check below refuses.
-    let version = file_version(&state.graph);
+    let version = graph_store::file_content_version(&state.graph);
     state.file_opens.fetch_add(1, Ordering::SeqCst);
     let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
     let entries = Arc::new(entries);
