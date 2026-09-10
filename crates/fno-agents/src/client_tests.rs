@@ -2419,3 +2419,45 @@ fn spawn_seam_marker_rejects_an_unknown_verdict() {
     .expect_err("bogus verdict refuses");
     assert!(err.contains("--defaults-applied"), "{err}");
 }
+
+#[test]
+fn place_thread_portal_after_spawn_routes_through_fno_bin() {
+    // The placement crossing resolves FNO_BIN like every other crossing:
+    // a stubbed binary receives the exact `mux thread` argv, so tests and
+    // non-PATH installs never depend on a PATH `fno` (scrape.rs:867 pattern).
+    let dir = std::env::temp_dir().join(format!("fno-c4d5-{}", std::process::id()));
+    // A crashed prior run on a reused pid would leave a stale argv log the
+    // stub appends onto; clear the dir so the assert only reads this run.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = dir.join("fno-stub.sh");
+    let argv_path = dir.join("argv.txt");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\n",
+            argv_path.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("FNO_BIN", &stub);
+
+    let params: Value = serde_json::from_str(r#"{"portal": 1, "squad": "sq"}"#).unwrap();
+    let result = place_thread_portal_after_spawn(&params, "worker-a");
+
+    assert!(result.is_ok(), "placement failed: {result:?}");
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+
+    std::env::remove_var("FNO_BIN");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        argv,
+        "mux\nthread\nworker-a\n--portal\n1\n--workspace\nsq\n"
+    );
+}
