@@ -963,39 +963,6 @@ from fno.agents.spawn_lineage import (  # noqa: E402
 )
 
 
-def _place_thread_portal(name: str, portal: int) -> None:
-    """Open a portal on a spawned thread (the two-call seam's second call).
-
-    Runs the same `fno mux thread <name> --portal N` the docs name, so the
-    binary-selection and geometry rules stay owned by that verb. Best-effort
-    by contract: the worker receipt is already the truth, so any failure is a
-    named stderr line naming the manual reach, never a failed spawn.
-    """
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["fno", "mux", "thread", name, "--portal", str(portal)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(
-            f"portal placement failed ({exc}); the worker is live: reach it "
-            f"with `fno mux thread {name} --portal {portal}`",
-            file=sys.stderr,
-        )
-        return
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        print(
-            f"portal placement failed: {detail[-1] if detail else proc.returncode}; "
-            f"the worker is live: reach it with `fno mux thread {name} --portal {portal}`",
-            file=sys.stderr,
-        )
-
-
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -1535,45 +1502,27 @@ def cmd_spawn(
     # receipts stay byte-parity-locked with the Rust client, so they don't
     # carry it.
 
-    # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
-    # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
-    # spawns out of the binary route), `bg`/`headless` keep their existing
-    # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
-    # headless still maps onto the `once` lever.
-    # --headless is the ergonomic shortcut for --substrate headless (x-c772). It
-    # wins over an explicit --substrate so `--headless` always resolves to the
-    # one-shot lane. (The -H short moved to --harness in x-6de8.)
+    # The substrate axis (x-2c27): headless is the ergonomic shortcut and wins
+    # over an explicit --substrate (x-c772); an empty value resolves through
+    # the spawn posture module (the built-in default: thread where the harness
+    # seats one, else pane, with portal 0 requested inside a mux).
     if headless:
         substrate = "headless"
     if not substrate:
-        # Empty = unset. The seam at the front door injects the same answer as
-        # an explicit token; this body re-derives it only when a spawn reaches
-        # Python dispatch without one. A pane-only capability (the fence,
-        # placement, a monitor) implies pane; otherwise the harness decides:
-        # thread where it seats one, else the closable pane.
-        from fno.agents.harness_map import thread_seatable
+        from fno.agents.spawn_portal import resolve_body_substrate
 
-        pane_implied = bool(
-            passthrough
-            or split
-            or at
-            or tab
-            or bounded_placement
-            or squad
-            or monitor is not None
+        substrate, default_portal = resolve_body_substrate(
+            harness,
+            passthrough=bool(passthrough),
+            split=split,
+            at=at,
+            tab=tab,
+            bounded_placement=bounded_placement,
+            squad=squad,
+            monitor=monitor,
         )
-        substrate = (
-            "pane"
-            if pane_implied or not thread_seatable(harness)
-            else "thread"
-        )
-        if substrate == "thread" and portal is None:
-            # The default view: a spawn from inside a mux that took the
-            # built-in thread default opens portal 0 on its worker. Outside a
-            # mux there is no session to host a portal; the thread still starts
-            # paneless and the receipt names the reach command.
-            if os.environ.get("FNO_PANE"):
-                portal = 0
+        if portal is None:
+            portal = default_portal
     # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
     # --substrate headless; the spawn gate counts it as headless) but Python leaves
     # it on the pane default. That only bites the routed lane, where the substrate
@@ -1582,22 +1531,9 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    if substrate not in ("pane", "thread", "bg", "headless"):
-        print(
-            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if substrate == "bg":
-        print(
-            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
-            "the alias will be removed after one release",
-            file=sys.stderr,
-        )
-    # Keep the lower-level spawn branches stable while the public substrate
-    # vocabulary migrates to `thread`.
-    if substrate == "thread":
-        substrate = "bg"
+    from fno.agents.spawn_portal import resolve_substrate_or_exit, validate_portal_or_exit
+
+    substrate = resolve_substrate_or_exit(substrate)
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
     # composed-argv refusals live. The seam refuses the explicit-flag spelling
     # for the Rust-routed lane; this is the same refusal for the Python lane,
@@ -1608,22 +1544,7 @@ def cmd_spawn(
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    if portal is not None:
-        if not 0 <= portal <= 255:
-            print(
-                f"--portal takes an index 0-255 (got {portal})",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if substrate != "bg":
-            # A portal is the pane a thread hosts. A pane hosts its own view
-            # (nothing to place); a one-shot exits before it can be viewed.
-            print(
-                "--portal applies only to the thread substrate; a pane hosts "
-                "its own view and a one-shot exits before it can be viewed",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
+    validate_portal_or_exit(portal, substrate)
 
     if monitor is not None and monitor != "happy":
         print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
@@ -2634,11 +2555,13 @@ def cmd_spawn(
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
     if portal is not None and substrate == "bg" and spawn_succeeded:
-        # Post-receipt portal placement (x-9b60's two-call seam): the worker
-        # receipt is the truth and is already out on this lane's stdout path
-        # order, so a placement failure prints a named line and never recolors
-        # the spawn - a retrying caller must not create a duplicate worker.
-        _place_thread_portal(result.name, portal)
+        # Post-receipt portal placement: the worker receipt is the truth and is
+        # already out on this lane's stdout path order, so a placement failure
+        # prints a named line and never recolors the spawn - a retrying caller
+        # must not create a duplicate worker.
+        from fno.agents.spawn_portal import place_thread_portal
+
+        place_thread_portal(result.name, portal)
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.
