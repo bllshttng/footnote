@@ -2408,10 +2408,12 @@ fn run_reap(rest: &[String]) -> i32 {
     // (x-91eb) The mux sideline sweep: the registry pass above reaps rows,
     // but ghost panes are the surface an operator SEES. The sweep body stays
     // the one prune verb (reused, not reimplemented); `--no-mux` skips it.
+    // The manual verb keeps `--include-used-shells`: closing a human's spent
+    // shells is an attended choice, never the daemon's default.
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        run_mux_sweep(dry_run)
+        fno_agents::gc::mux_tab_sweep(dry_run, true)
     };
     print!(
         "{}",
@@ -2424,45 +2426,6 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     );
     0
-}
-
-/// (x-91eb) Shell out to the existing prune verb - one sweep body, reused,
-/// not reimplemented. Fail-closed: a spawn failure, a non-zero exit, or an
-/// unparsable receipt is `Unread`, never a measured zero (AC3-EDGE).
-fn run_mux_sweep(dry_run: bool) -> fno_agents::reap_render::MuxSweep {
-    let mut cmd = std::process::Command::new(fno_agents::scrape::fno_bin());
-    cmd.args([
-        "mux",
-        "workspace",
-        "prune",
-        "--tabs-only",
-        "--include-used-shells",
-        "--json",
-    ]);
-    if dry_run {
-        cmd.arg("--dry-run");
-    }
-    match cmd.output() {
-        Ok(out) => {
-            let code = out.status.code();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match (code, fno_agents::reap_render::parse_prune_receipt(&stdout)) {
-                (Some(0), Some(receipt)) => fno_agents::reap_render::MuxSweep::Ran { receipt },
-                (code, _) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
-                    fno_agents::reap_render::MuxSweep::Unread {
-                        exit_code: code,
-                        stderr_first,
-                    }
-                }
-            }
-        }
-        Err(e) => fno_agents::reap_render::MuxSweep::Unread {
-            exit_code: None,
-            stderr_first: e.to_string(),
-        },
-    }
 }
 
 /// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
