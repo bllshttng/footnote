@@ -1083,7 +1083,10 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
         ReadSource::Json => cached_snapshot(state)?,
         ReadSource::Sqlite => {
             let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-            (state_version(state)?, Arc::new(read_state(state, false, true)?))
+            (
+                state_version(state)?,
+                Arc::new(read_state(state, false, true)?),
+            )
         }
     };
     remember_snapshot(state, &version, &entries);
