@@ -8,7 +8,7 @@ A review written by the model family that wrote the code shares the implementer'
 |---|---|---|
 | `/fno:review peer` | one cross-model second opinion on a diff, with `--attest` or `--post` | needs a second provider in `config.accounts` |
 | `config.review.peers` | required local cross-model reviewers gating the ship gate (see the symmetric guard below) | the peers list itself |
-| `config.review.cross_model.enabled` | counts available other-provider kinds as review-assurance diversity when the review lane computes its assurance reading | opt-in, default off |
+| `config.review.cross_model.enabled` | counts available other-provider kinds as review-assurance diversity when the review lane computes its assurance reading; the local runtime that read starts from is the session's ambient harness, never a fixed claude, so with the switch off the effective set is that one kind | opt-in, default off |
 
 The retired panel's per-agent routing key `config.review.agent_routes` refuses with the replacement named: the review-posture ladder (`config.review.posture`) replaced per-agent review routing. The panel-era routing keys `config.review.agent_harnesses` / `config.review.agent_providers` no longer drive anything; the peer gate below is the cross-model enforcement surface. A configured `sigma` name refuses everywhere and names the owned lane. The specialist agents that once made up the panel remain individually invocable as agents.
 

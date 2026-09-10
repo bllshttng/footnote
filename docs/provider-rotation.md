@@ -1693,6 +1693,8 @@ separate post-hoc layer).
 | size `M` | `diverse_preferred` |
 | size `S` / unknown | `portable` |
 
+The effective kinds start from the session's ambient harness (`resolve_harness_identity`), and an implementer with no ledger row yet is that same harness. A codex session with cross-model off reads `[codex]` and can never satisfy high assurance on its own. That is the honest reading under law d-d4b4293e. Review runs in the session that did the work. The only way to hand that session a different family was a spawned review session.
+
 `assess_assurance(policy, ...)` turns the *effective reviewer kinds* (what the
 panel will genuinely dispatch to) into a verdict with a single load-bearing
 asymmetry:
