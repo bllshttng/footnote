@@ -1616,6 +1616,36 @@ def _acquire_worker_slot(
         _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
 
 
+def gate_settings() -> tuple:
+    """The gate's knobs, shared by :func:`run_gate` and :func:`probe_capacity`
+    so the two cannot disagree about a cap. Machine THRESHOLDS read through
+    getattr (a missing one has a safe default); a missing CAP or the limits
+    table is a real attribute read (falling back would silently uncap a
+    provider). The fail-safe fallback carries the built-in budget table.
+    """
+
+    try:
+        from fno.config import load_settings
+
+        agents_cfg = load_settings().agents
+        cap = int(agents_cfg.max_live)
+        floor_gb = float(agents_cfg.min_free_gb)
+        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
+        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
+        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
+        limits = dict(agents_cfg.provider_limits)
+    except Exception:
+        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
+        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
+        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
+
+        limits = {
+            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
+        }
+    return cap, floor_gb, max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu, limits
+
+
+
 def run_gate(
     name: str,
     substrate: str,
@@ -1641,34 +1671,6 @@ def run_gate(
             _substrate=substrate,
             _admission_token=_PROVIDER_ADMISSION_TOKEN,
         )
-def gate_settings() -> tuple:
-    """The gate's knobs, shared by :func:`run_gate` and :func:`probe_capacity`
-    so the two cannot disagree about a cap. Machine THRESHOLDS read through
-    getattr (a missing one has a safe default); a missing CAP or the limits
-    table is a real attribute read (falling back would silently uncap a
-    provider). The fail-safe fallback carries the built-in budget table.
-    """
-    try:
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        cap = int(agents_cfg.max_live)
-        floor_gb = float(agents_cfg.min_free_gb)
-        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
-        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
-        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
-        limits = dict(agents_cfg.provider_limits)
-    except Exception:
-        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
-        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
-        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
-
-        limits = {
-            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
-        }
-    return cap, floor_gb, max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu, limits
-
-
     (
         cap,
         floor_gb,

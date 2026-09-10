@@ -167,7 +167,7 @@ pub(crate) fn probe_dispatch_capacity(fno_bin: &str, cwd: &Path) -> Result<GateP
     parse_gate_probe(&payload).ok_or_else(|| "spawn gate status payload unparseable".to_string())
 }
 
-/// The saturation decision for one board fire (x-df28): a fire where the top
+/// The saturation decision for one board fire: a fire where the top
 /// actionable row is undispatched and the gate refuses means every candidate
 /// dispatch would be refused, so the stop is legitimate. `probe: None` (not
 /// asked, or asked and failed) and an accepted probe both return `None` - a
@@ -216,7 +216,7 @@ pub(crate) fn saturation_verdict(
 }
 
 /// What the capacity gate decided for this fire, rendered and ready for the
-/// caller's two verdicts (x-df28). Composition of the probe read, the pure
+/// caller's two verdicts. Composition of the probe read, the pure
 /// saturation verdict, and the two messages the king block carries.
 pub(crate) enum CapacityGate {
     /// Every actionable row is undispatched and the gate refuses: the stop is
