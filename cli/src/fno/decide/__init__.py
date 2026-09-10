@@ -421,12 +421,10 @@ def record_decision(
     origin = enforce_origin_floor(origin)
     provenance = _resolve_decider(decided_by, authority_source, origin=origin)
 
-    # The evidence gate lives HERE, not in the command bodies, for the same
-    # reason validate_durable_law does: the library is importable, and a check
-    # only the CLI enforces is a check anything using the library walks
-    # around. The exemption keys on the RESOLVED authority: an attended
-    # operator terminal is exempt, and a waiver verb whose authority is
-    # hardcoded operator inherits the exemption by construction.
+    # Evidence gate, here not in the command bodies: the library is
+    # importable, and a check only the CLI enforces is a check anything
+    # using the library walks around. Exempt when the RESOLVED authority is
+    # operator (an attended terminal; a waiver verb inherits this).
     read_rows = None
     if provenance.authority_source != "operator":
         from fno.decide.evidence import check_ruling_evidence

@@ -1,12 +1,9 @@
 """The read that produced a ruling's code fact, carried on the ruling.
 
-Three rulings in one afternoon named a code fact that was false, and each was
-caught downstream by a worker re-measuring - a review round the two-round cap
-could not afford. The shape: a measured claim and an assumed one are written
-identically. So a ruling body asserting a code fact must carry `--read`: the
-command that produced it. The verb RUNS the command at record time and stores
-the exit code and output head on the row. A string nobody ran is prose; a row
-with an exit code is evidence.
+A measured claim and an assumed one are written identically, so a ruling body
+asserting a code fact must carry `--read`: the command that produced it, RUN
+at record time, exit code and output head stored on the row. Full contract:
+docs/architecture/decision-record.md.
 """
 
 from __future__ import annotations
@@ -18,24 +15,24 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-# The claim vocabulary, listed in ONE place so a reviewer can audit it in one
-# read. A false positive on ordinary prose is the failure that gets this gate
-# disabled, so it fires on two shapes and nothing else: a `path:line` citation
+# The claim vocabulary, ONE constant so a reviewer audits it in one read. A
+# false positive on ordinary prose is the failure that gets this gate
+# disabled: it fires on two shapes and nothing else - a `path:line` citation
 # over a source extension, and a count bound to a fixed noun list (or its
-# negative - "zero callers" is a code fact too, and the expensive kind).
-SOURCE_EXTS = (
-    "py", "rs", "ts", "tsx", "js", "jsx", "sh", "go", "rb", "java",
-    "c", "h", "cpp", "md", "toml", "yaml", "yml", "json",
-)
+# negative; "zero callers" is a code fact, and the expensive kind).
+SOURCE_EXTS = ("py", "rs", "ts", "tsx", "js", "sh", "md", "toml", "yaml", "json")
 _NOUNS = r"(?:lines?|call sites?|callers?|consumers?|usages?|occurrences?|matches|files?)"
-_CITATION_RE = re.compile(
-    r"\b[\w./\\-]+\.(?:" + "|".join(SOURCE_EXTS) + r"):\d+(?:-\d+)?"
-)
+_CITATION_RE = re.compile(r"\b[\w./\\-]+\.(?:" + "|".join(SOURCE_EXTS) + r"):\d+(?:-\d+)?")
 _COUNTED_RE = re.compile(r"\b\+?\d+\s+" + _NOUNS)
 _NEGATIVE_RE = re.compile(r"\b(?:no|zero)\s+" + _NOUNS)
 MAX_READS = 5
-OUT_HEAD_LINES = 5
-OUT_HEAD_CHARS = 400
+OUT_HEAD_LINES, OUT_HEAD_CHARS = 5, 400
+
+READ_HELP = (
+    "The command that produced a code fact in this ruling. It is RUN at "
+    "record time and its output stored on the row. Repeatable; pair a zero "
+    "with a control: a second read aimed at something known to be present."
+)
 
 
 class UnmeasuredClaimError(ValueError):
@@ -46,15 +43,11 @@ class UnresolvableCitationError(ValueError):
     """A citation the repo contradicts."""
 
 
-def _unique(matches: "list[str]") -> "list[str]":
-    seen: "set[str]" = set()
-    return [m for m in matches if not (m in seen or seen.add(m))]
-
-
 def find_code_claims(text: str) -> "list[str]":
     """Claim spans in a ruling body, empty when it asserts none."""
-    return _unique(_CITATION_RE.findall(text) + _NEGATIVE_RE.findall(text)
-                   + _COUNTED_RE.findall(text))
+    matches = _CITATION_RE.findall(text) + _NEGATIVE_RE.findall(text) + _COUNTED_RE.findall(text)
+    seen: "set[str]" = set()
+    return [m for m in matches if not (m in seen or seen.add(m))]
 
 
 def _tracked_files(root: Path) -> "list[str]":
@@ -80,7 +73,9 @@ def check_citations(text: str, *, root: Path | None = None) -> "list[str]":
     root = root or resolve_repo_root()
     tracked = _tracked_files(root)
     failures: "list[str]" = []
-    for cite in _unique(_CITATION_RE.findall(text)):
+    for cite in find_code_claims(text):
+        if not _CITATION_RE.fullmatch(cite):
+            continue
         path_text, _, line_text = cite.rpartition(":")
         line = int(line_text.partition("-")[0])
         exact = [p for p in tracked if p.replace("\\", "/") == path_text]
@@ -139,33 +134,24 @@ def run_reads(
 ) -> "list[dict]":
     """Run each read, bounded, and return one evidence row per command.
 
-    Refusals, both earned: a read that cannot run stores no row (a ruling
-    whose own read does not run is not evidence), and an all-zero result set
-    refuses under the standing pitfall - assert a positive marker, never an
-    absence - so a zero must arrive beside a control aimed at something known
-    to be present. A non-zero exit WITH output is a measurement, not a
-    failure: `grep -c` exiting 1 on a real zero is the read working.
+    A read that cannot run stores no row. An all-zero answer set refuses
+    under the standing pitfall - assert a positive marker, never an absence.
+    A non-zero exit WITH output is a measurement: `grep -c` exiting 1 on a
+    real zero is the read working.
     """
     from fno.paths import resolve_repo_root
 
     root = root or resolve_repo_root()
     if len(commands) > MAX_READS:
-        raise UnmeasuredClaimError(
-            f"cap is {MAX_READS} reads per ruling, got {len(commands)}"
-        )
+        raise UnmeasuredClaimError(f"cap is {MAX_READS} reads per ruling, got {len(commands)}")
     rows: "list[dict]" = []
     for cmd in commands:
         try:
             done = run(cmd, cwd=root, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnmeasuredClaimError(
-                f"read '{cmd}' timed out after {timeout}s and stored no row. "
-                "A ruling whose own read does not run is not evidence."
-            ) from exc
-        except OSError as exc:
-            raise UnmeasuredClaimError(
-                f"read '{cmd}' could not run: {exc}. A ruling whose own read "
-                "does not run is not evidence."
+                f"read '{cmd}' did not run ({type(exc).__name__}) and stored "
+                "no row. A ruling whose own read does not run is not evidence."
             ) from exc
         head = "\n".join((done.stdout or "").splitlines()[:OUT_HEAD_LINES])
         rows.append({
@@ -193,10 +179,6 @@ def unmeasured_note_warning(claims: "list[str]") -> str:
     )
 
 
-def _body(decision: str, rationale: str | None) -> str:
-    return f"{decision}\n{rationale or ''}"
-
-
 def check_ruling_evidence(
     decision: str,
     rationale: str | None,
@@ -204,13 +186,13 @@ def check_ruling_evidence(
     *,
     root: Path | None = None,
 ) -> "list[dict] | None":
-    """Gate for the ruling lane; returns the rows to store, or None.
+    """Ruling-lane gate: the rows to store, or None when the body has no claim.
 
     Order matters: a citation the repo contradicts is refused whatever is
-    attached to it, then a claim with no read is refused. No claim, no
-    change from today's behavior.
+    attached to it, then a claim with no read. No claim, no change from
+    today's behavior.
     """
-    text = _body(decision, rationale)
+    text = f"{decision}\n{rationale or ''}"
     failures = check_citations(text, root=root)
     if failures:
         raise UnresolvableCitationError(
@@ -234,20 +216,15 @@ def check_ruling_evidence(
 def note_evidence(
     text: str, reads: "list[str] | None", *, root: Path | None = None
 ) -> "tuple[list[dict] | None, list[str] | None]":
-    """Gate for the note lane: (rows, claims), each None.
+    """Note-lane gate: (rows, claims), each None when not applicable.
 
-    Split disposition on purpose: a contradicted citation RAISES (a note
-    naming a file:line the repo contradicts is a demonstrably false fact),
-    while a claim with no read only reports - the note verb advises, never
-    refuses a body.
+    A contradicted citation RAISES (a note is a fact on the node even when
+    --quiet); a claim with no read only reports - the note verb advises,
+    never refuses a body.
     """
     failures = check_citations(text, root=root)
     if failures:
-        raise UnresolvableCitationError(
-            "; ".join(failures)
-            + ". Fix or drop the citation; a note is a fact on the node even "
-            "when --quiet."
-        )
+        raise UnresolvableCitationError("; ".join(failures))
     claims = find_code_claims(text)
     if not claims:
         return None, None
@@ -282,6 +259,7 @@ def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
 
 __all__ = [
     "MAX_READS",
+    "READ_HELP",
     "UnmeasuredClaimError",
     "UnresolvableCitationError",
     "check_citations",

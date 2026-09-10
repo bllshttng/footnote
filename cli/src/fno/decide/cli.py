@@ -18,6 +18,9 @@ from typing import List, Optional
 
 import typer
 
+from fno.decide.evidence import READ_HELP
+from fno.decide.graduation import REFERENCE_HELP as grad_reference_help
+
 shim_app = typer.Typer(
     help=(
         "One-release root registration for `decide` (x-6233). Unreachable "
@@ -157,24 +160,9 @@ def legacy_record(
         help="enforced, guidance, or should-be-enforced-but-i-did-not.",
     ),
     graduation_ref: Optional[str] = typer.Option(
-        None,
-        "--graduation-ref",
-        help=(
-            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
-            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
-            "Follow-up: node:<id>."
-        ),
+        None, "--graduation-ref", help=grad_reference_help
     ),
-    read: List[str] = typer.Option(
-        [],
-        "--read",
-        help=(
-            "The command that produced a code fact in this ruling. It is RUN "
-            "at record time and its output stored on the row. Repeatable; "
-            "pair a zero with a control: a second read aimed at something "
-            "known to be present."
-        ),
-    ),
+    read: List[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Warn once, then delegate the old spelling to the backlog leaf."""
     typer.echo(_DEPRECATION_NOTICE, err=True)
@@ -395,24 +383,9 @@ def backlog_decide(
         help="enforced, guidance, or should-be-enforced-but-i-did-not.",
     ),
     graduation_ref: Optional[str] = typer.Option(
-        None,
-        "--graduation-ref",
-        help=(
-            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
-            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
-            "Follow-up: node:<id>."
-        ),
+        None, "--graduation-ref", help=grad_reference_help
     ),
-    read: List[str] = typer.Option(
-        [],
-        "--read",
-        help=(
-            "The command that produced a code fact in this ruling. It is RUN "
-            "at record time and its output stored on the row. Repeatable; "
-            "pair a zero with a control: a second read aimed at something "
-            "known to be present."
-        ),
-    ),
+    read: List[str] = typer.Option([], "--read", help=READ_HELP),
     origin: Optional[str] = typer.Option(
         None,
         "--origin",

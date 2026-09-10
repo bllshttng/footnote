@@ -37,6 +37,8 @@ import re
 
 import typer
 
+from fno.decide.evidence import READ_HELP
+
 DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 COORDINATION_MARKERS = (
     "this pr",
@@ -107,16 +109,7 @@ def record_command(
     supersedes: str | None = typer.Option(None, "--supersedes"),
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
-    read: list[str] = typer.Option(
-        [],
-        "--read",
-        help=(
-            "The command that produced a code fact in this ruling. It is RUN "
-            "at record time and its output stored on the row. Repeatable; "
-            "pair a zero with a control: a second read aimed at something "
-            "known to be present."
-        ),
-    ),
+    read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (

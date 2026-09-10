@@ -25,6 +25,7 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
+from fno.decide.evidence import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     _build_backlog_node,
@@ -968,6 +969,18 @@ def _validate_priority_or_exit(priority: str, *, blocks_everything: bool = False
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2)
+
+
+def _require_node_id(task_id: str) -> None:
+    """The shared node-id gate: one refusal text for every verb that takes one."""
+    from fno.graph._constants import has_node_id_prefix
+
+    if has_node_id_prefix(task_id):
+        return
+    typer.echo(
+        f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+    )
+    raise typer.Exit(code=1)
 
 
 def _create_node_impl(
@@ -2937,16 +2950,7 @@ def cmd_note(
         False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
-    read: list[str] = typer.Option(
-        [],
-        "--read",
-        help=(
-            "The command that produced a code fact in this note. It is RUN "
-            "at record time and its output stored on the note. Repeatable; "
-            "pair a zero with a control: a second read aimed at something "
-            "known to be present."
-        ),
-    ),
+    read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
@@ -3383,11 +3387,7 @@ def cmd_update(
 
     refuse_retired_model_tier(_model_tier_tombstone)
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     if priority is not None and priority not in PRIORITY_ORDER:
         typer.echo(
@@ -6813,7 +6813,6 @@ def cmd_cost(
     import click
 
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
 
     session = merge_deprecated_alias(
@@ -6824,11 +6823,7 @@ def cmd_cost(
     if session is None:
         raise click.UsageError("Missing option '--session-id'.")
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     try:
         amount_f = float(amount)
@@ -6867,15 +6862,10 @@ def cmd_remove(
     """Delete a node from the graph permanently. This verb exists and works.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     entries = read_graph(_graph_path())
     dependents = _find_dependents(entries, task_id)
@@ -7050,18 +7040,13 @@ def cmd_defer(
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
     """Expand one-or-many id args; refuse an empty set and non-node ids
     (the shared prologue of every batch-mutating verb)."""
-    from fno.graph._constants import has_node_id_prefix
 
     ids = _expand_id_args(task_ids)
     if not ids:
         typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
     for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+        _require_node_id(tid)
     return ids
 
 
@@ -8744,12 +8729,7 @@ def cmd_done(
         _done_via_seam(task_id, skip_stamp=skip_stamp, force=force, reason=reason)
         return
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Usage guard: --force requires --reason
     if force and not reason:
@@ -9101,7 +9081,6 @@ def cmd_reopen(
     """Clear a node's completion, returning it to its underlying state.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9110,12 +9089,7 @@ def cmd_reopen(
         resolve_merge_evidence,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Validate at the CLI boundary the way cmd_defer validates its own reason, so
     # a direct call cannot land a reasonless reopen that the event then records
@@ -11892,15 +11866,10 @@ def cmd_reprioritize(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
 ) -> None:
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
@@ -12422,7 +12391,6 @@ def cmd_unarchive(
     """Move one node from graph-archive.json back into the working graph.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph._intake import _find_node
     from fno.graph.store import (
         GraphCorruptError,
@@ -12433,12 +12401,7 @@ def cmd_unarchive(
         read_graph,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     if _find_node(read_graph(_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
