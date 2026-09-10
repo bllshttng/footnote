@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import dispatch_agent_name, slug_component, verb_code_for
+from fno.agents.naming import dispatch_agent_name, verb_code_for
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env

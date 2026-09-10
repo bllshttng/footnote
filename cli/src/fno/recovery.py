@@ -1032,8 +1032,8 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
                 # x-84b2 canonical shape: the reason opens the parsed tail.
                 from fno.agents.naming import parse_dispatch_agent_name
 
-                parsed = parse_dispatch_agent_name(name_str)
-                tail = parsed.tail if parsed and parsed.node == node_id else ""
+                dname = parse_dispatch_agent_name(name_str)
+                tail = dname.tail if dname and dname.node == node_id else ""
             if any(tail == r or tail.startswith(f"{r}-")
                    for r in _NON_BIRTH_THINK_REASONS):
                 return None

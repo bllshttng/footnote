@@ -52,7 +52,7 @@ def dispatch_provenance() -> list[tuple[str, str, str]]:
     ``cli/src/fno/agents/naming-codes.yaml``."""
     from fno.agents.naming import provenance_rows
 
-    return [tuple(row) for row in provenance_rows()]
+    return list(provenance_rows())
 
 
 _PROVENANCE_BY_SPAWNER = {row[0]: row for row in dispatch_provenance()}
