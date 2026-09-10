@@ -155,6 +155,17 @@ def test_command_not_found_refuses_instead_of_storing_a_row(tmp_path: Path):
         run_reads(["nosuchcmd -x"], root=tmp_path, run=not_found)
 
 
+def test_blank_leading_output_is_a_measurement_not_a_zero(tmp_path: Path):
+    """The zero rule reads full stdout, never the truncated head."""
+
+    def blank_lead(cmd, *, cwd, timeout):
+        return subprocess.CompletedProcess(cmd, 0, "\n\n\n\n\n\nreal content", "")
+
+    rows = run_reads(["odd"], root=tmp_path, run=blank_lead)
+    assert rows[0]["out_head"] == "\n\n\n\n"  # the head holds only blanks
+    # and the zero rule did not fire: the rows came back
+
+
 def test_cap_on_read_count(tmp_path: Path):
     with pytest.raises(UnmeasuredClaimError, match="cap is 5"):
         run_reads(["echo 1"] * 6, root=tmp_path)

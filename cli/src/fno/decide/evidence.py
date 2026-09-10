@@ -125,9 +125,13 @@ def _head_sha(root: Path) -> str:
         return ""
 
 
-def _zeroish(row: dict) -> bool:
-    out = str(row["out_head"]).strip()
-    return out == "" or out == "0" or (row["exit"] == 1 and out == "")
+def _zeroish(stdout: str, exit_code: int) -> bool:
+    """The zero shapes: empty output, a bare `0`, or grep's silent no-match.
+
+    Reads the FULL stdout, never the truncated head: a read whose first five
+    lines are blank but whose content follows is a measurement, not a zero.
+    """
+    return stdout == "" or stdout == "0" or (exit_code == 1 and stdout == "")
 
 
 def run_reads(
@@ -150,6 +154,7 @@ def run_reads(
     if len(commands) > MAX_READS:
         raise UnmeasuredClaimError(f"cap is {MAX_READS} reads per ruling, got {len(commands)}")
     rows: "list[dict]" = []
+    zero_flags: "list[bool]" = []
     for cmd in commands:
         try:
             done = run(cmd, cwd=root, timeout=timeout)
@@ -166,7 +171,9 @@ def run_reads(
                 "stored no row. A ruling whose own read does not run is not "
                 "evidence."
             )
-        head = "\n".join((done.stdout or "").splitlines()[:OUT_HEAD_LINES])
+        stdout = done.stdout or ""
+        zero_flags.append(_zeroish(stdout.strip(), done.returncode))
+        head = "\n".join(stdout.splitlines()[:OUT_HEAD_LINES])
         rows.append({
             "cmd": cmd,
             "exit": done.returncode,
@@ -174,7 +181,7 @@ def run_reads(
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "head_sha": _head_sha(root),
         })
-    if rows and all(_zeroish(row) for row in rows):
+    if rows and all(zero_flags):
         raise UnmeasuredClaimError(
             f"read '{rows[0]['cmd']}' produced a zero. A zero needs a control: "
             "a second --read of the same shape aimed at something known to be "
