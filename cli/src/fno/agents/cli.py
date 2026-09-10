@@ -1525,7 +1525,13 @@ def cmd_spawn(
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
+    from fno.agents.harness_map import lost_verb_refusal
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
+
+    lost_verb = lost_verb_refusal(message)
+    if lost_verb:
+        print(f"fno agents spawn: {lost_verb}", file=sys.stderr)
+        raise typer.Exit(code=2)
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
     seedless = seedless_thread_refusal(

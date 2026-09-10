@@ -287,6 +287,8 @@ This table shows how autonomous dispatch renders a footnote `/verb` for each har
 | codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
 | gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
 
+Single-quote a `$fno:verb` payload on a command line. Inside double quotes the shell expands `$fno` to nothing before fno runs. bash leaves `:target`. zsh also drops the first letter and leaves `arget`. The worker reads either one as prose. `fno agents spawn` refuses both shapes and names the fix.
+
 Retask is a read-and-verified transaction over a live mux pane. It clears before switching. It waits for a changed harness session id. It renames the fno registry label. It verifies model and effort before submitting the no-merge target. Claude uses the declarative `direct` strategy. Codex uses `menu_walk` with live cursor reads. Gemini, agy, and opencode expose an unsupported strategy and retask refuses with `unsupported_switch_strategy` (spawn a fresh worker instead); only an axis mismatch returns `spawn_required`.
 
 Only two spawn payloads render through this table: an **explicit `/verb` passthrough**, and a **resolved node-id build** (a node id -> `/target <id>`, the one surviving implicit `/target`, config-driven not shape-inferred). Any other free text is NOT wrapped - `spawn "<free text>"` sends it **verbatim as the session seed**, no `/target`, no per-harness render. To build free text, write `spawn /target <text>` or pass a node id. (The retired `ask`/`discuss` verbs are subsumed: a one-shot Q&A is the `headless` substrate; a conversational session is the default seed.)
