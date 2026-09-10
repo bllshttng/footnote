@@ -122,16 +122,16 @@ fi
 
 ### 2b. Dispatch the pr-create role worker (the router stays in main context)
 
-Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the Task/Agent tool. The heavy PR-description generation runs in a cheap, fresh context on the `pr-create` role's model; the router never does it inline - that is the whole cost property (the no-subagent-primitive fallback below is the one exception):
+Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the Task/Agent tool. The heavy PR-description generation runs in a cheap, fresh context on the `pr-create` role's model. The router never does it inline - that is the whole cost property (the no-subagent-primitive fallback below is the one exception):
 
 > State to the user: `dispatching the pr-create worker (pr-creator)`.
 
 Dispatch with the Task/Agent tool:
 
-- subagent type: **pr-creator** (the bundled agent at `skills/pr/agents/pr-creator.md`). Declare the `pr-create` role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override) so the model is resolved through `config.model_routing.roles.pr-create`; unconfigured, it runs on the invoking harness's primary model. No tier or model literal is hardcoded. On a runtime that resolves subagents by name, use that name. On a runtime with no subagent primitive (codex without `spawn_agent`, gemini), load `references/create.md` and run it inline in this context. A session is not a subagent; never `fno agents spawn` for a PR.
+- subagent type: **pr-creator** (the bundled agent at `skills/pr/agents/pr-creator.md`). Declare the `pr-create` role at the spawn boundary so the model resolves through `config.model_routing.roles.pr-create`. Do that with `fno agents spawn --role pr-create`, or by omitting any `model:` override. Unconfigured, the role runs on the invoking harness's primary model. No tier or model literal is hardcoded. On a runtime that resolves subagents by name, use that name. On a runtime with no subagent primitive (codex without `spawn_agent`, gemini), load `references/create.md` and run it inline in this context. A session is not a subagent. Never `fno agents spawn` for a PR.
 - Pass ONLY the gathered context the worker needs - the current branch, the base branch, a one-line summary of the change, and the no-merge / auto-merge posture. Do NOT pass the full session transcript: the worker's context is small and a fork would blow it.
 
-`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `skills/pr/agents/pr-creator.md` is the same flow rewritten as the pr-create role subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
+`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill). `skills/pr/agents/pr-creator.md` is the same flow rewritten as the pr-create role subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
 
 ### 2c. Parse the worker's RESULT line (no false success)
 
