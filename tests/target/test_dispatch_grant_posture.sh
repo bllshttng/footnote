@@ -52,7 +52,7 @@ case "${1:-} ${2:-}" in
           ;;
         *) command="$command --no-merge" ;;
       esac
-      printf '{"harness":"claude","command":"%s"}\n' "$command"
+      printf '{"harness":"claude","substrate":"bg","route_action":"stay","command":"%s"}\n' "$command"
     fi
     ;;
   "dispatch family")
