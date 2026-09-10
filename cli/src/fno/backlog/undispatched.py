@@ -149,6 +149,11 @@ def classify_planned_unclaimed(
     from fno.graph._intake import make_selection_sort_key
 
     live = frozenset(n for n, state in claimed.items() if state == "live")
+    # The keys-only snapshot carries state null, so `live` is empty on the
+    # real path: the observer no longer floats an epic whose only progress
+    # signal is a live claim on a sibling. Presence-only by contract; the
+    # in-progress signal survives via node status/session_id/completed_at.
+    # Test callers may still pass state-carrying rows.
     # The key sorts full entries; a row is a projection that already dropped
     # rank and created_at, so sort through `by_id` rather than through the row.
     order = make_selection_sort_key(entries, live_claimed=live)
