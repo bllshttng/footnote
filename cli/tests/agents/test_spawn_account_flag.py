@@ -66,7 +66,7 @@ def test_account_overlay_threads_to_pane_and_receipt(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--here"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--here", "--substrate", "pane"]
     )
     assert result.exit_code == 0, result.output
     assert received["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
@@ -100,7 +100,7 @@ def test_dispatch_account_threads_to_pane_and_receipt(monkeypatch, runner):
         agents_app,
         [
             "spawn", "--name", "w1", "hi", "--harness", "claude",
-            "--dispatch-account", "makers", "--here",
+            "--dispatch-account", "makers", "--here", "--substrate", "pane",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -143,7 +143,7 @@ def test_proven_credential_carrier_overrides_record_derivation(monkeypatch, runn
         agents_app,
         [
             "spawn", "--name", "w1", "hi", "--harness", "claude",
-            "--dispatch-account", "makers", "--here",
+            "--dispatch-account", "makers", "--here", "--substrate", "pane",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -178,7 +178,7 @@ def test_proven_credential_carrier_refuses_when_unreadable(monkeypatch, runner):
         agents_app,
         [
             "spawn", "--name", "w1", "hi", "--harness", "claude",
-            "--dispatch-account", "makers", "--here",
+            "--dispatch-account", "makers", "--here", "--substrate", "pane",
         ],
     )
     assert result.exit_code == 2
@@ -402,7 +402,7 @@ def test_account_only_receipt_has_no_credential_fields(monkeypatch, runner):
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--here"]
+        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--here", "--substrate", "pane"]
     )
     assert result.exit_code == 0, result.output
     receipt = json.loads(

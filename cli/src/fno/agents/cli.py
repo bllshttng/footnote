@@ -1494,6 +1494,11 @@ def cmd_spawn(
     defaulted = False
     if headless:
         substrate = "headless"
+    if not substrate and once:
+        # `--once` is the pre-substrate spelling of headless: it always means
+        # a one-shot, so it answers before the built-in default can seat a
+        # persistent thread.
+        substrate = "headless"
     if not substrate:
         # Empty = unset. A pane-only capability (the fence, placement, a
         # monitor) implies the pane; otherwise the harness decides: thread
