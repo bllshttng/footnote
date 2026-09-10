@@ -101,6 +101,7 @@ agents status	T1	agents status	5
 agents stop	T1	agents stop	22
 agents subscribe	T1	agents subscribe	2
 agents sweep	T1	agents sweep	1
+agents test-run	T1	agents test-run	3
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
 agents truth	T1	agents truth	16

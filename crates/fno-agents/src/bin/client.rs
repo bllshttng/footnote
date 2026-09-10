@@ -61,6 +61,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "test-run",
     "promote",
     "reap",
     "roster-reap",
@@ -281,6 +282,16 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
+    }
+
+    // `test-run`: the native process-group owner behind `fno doctor test`
+    // (see test_run.rs doc). Direct dispatch, no daemon RPC - a test run must
+    // not depend on a live daemon to clean up after itself. Same `matches!`
+    // treatment as `probe-run`/`state` so it stays out of CLIENT_VERB_USAGE /
+    // RUST_CLIENT_VERBS and the routable-verb parity guard: this is not an
+    // `fno agents` verb, `cli/src/fno/test_runner.py` is its only caller.
+    if verb == "test-run" {
+        return fno_agents::test_run::run_test_run(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc

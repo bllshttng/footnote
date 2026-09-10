@@ -449,6 +449,61 @@ def _lanes_threads() -> tuple[Optional[int], str]:
     return _LANES_READING
 
 
+def _last_flag_value(
+    args: Sequence[str], long_flag: str, short_flag: str = "", limit: Optional[int] = None
+) -> Optional[tuple[int, str, int]]:
+    """Last parseable `long_flag N` / `long_flag=N` / `short_flagN` in
+    ``args[:limit]``. Returns ``(index, form, value)`` - ``form`` is ``"sep"``
+    (value is the next token), ``"eq"`` (`--flag=N`), or ``"short"`` (`-jN`).
+    An unparseable match at a given index is skipped, not recorded, so a
+    malformed value never masks a real one seen elsewhere.
+    """
+    n = len(args) if limit is None else limit
+    found = None
+    for i in range(n):
+        a = args[i]
+        if a == long_flag and i + 1 < n:
+            try:
+                found = (i, "sep", int(args[i + 1]))
+                continue
+            except ValueError:
+                pass
+        if a.startswith(long_flag + "="):
+            try:
+                found = (i, "eq", int(a[len(long_flag) + 1 :]))
+                continue
+            except ValueError:
+                pass
+        if short_flag and a == short_flag and i + 1 < n:
+            try:
+                found = (i, "sep", int(args[i + 1]))
+                continue
+            except ValueError:
+                pass
+        if short_flag and a.startswith(short_flag) and a != short_flag and a[len(short_flag) :].isdigit():
+            found = (i, "short", int(a[len(short_flag) :]))
+    return found
+
+
+def _clamp_flag(
+    args: list[str], hit: tuple[int, str, int], long_flag: str, short_flag: str, ceiling: int
+) -> tuple[int, int]:
+    """Clamp a found flag's value to ``ceiling``, rewriting it in place.
+
+    Returns ``(requested, effective)``.
+    """
+    index, form, value = hit
+    effective = min(value, ceiling)
+    if effective != value:
+        if form == "sep":
+            args[index + 1] = str(effective)
+        elif form == "eq":
+            args[index] = f"{long_flag}={effective}"
+        else:
+            args[index] = f"{short_flag}{effective}"
+    return value, effective
+
+
 def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     """Run the Rust suites: nextest when installed, else `cargo test -q`.
 
@@ -456,41 +511,69 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     every `crates/*/Cargo.toml` (the two-test-trees lesson: a green subset is
     not proof).
 
-    The test-thread count comes from the `fno doctor lanes` reading, not core
-    count: the keeper tests exec a real pty-holding worker each, so a dozen
-    threads is a dozen live processes. The reading (and what it did) prints so
-    a slow run explains itself.
+    The test-thread count comes from the `fno doctor lanes` reading, capped at
+    the machine's own CPU count: a lane is a worker-lane headroom count, not a
+    thread count, so an idle box's 64-lane reading must never become 64 test
+    threads on a 12-core machine. A bare `--` (libtest args follow) or an
+    unrelated `--jobs`/`-j` build-parallelism flag no longer suppresses the
+    cap - only an explicit `--test-threads` does, and even that is clamped to
+    the CPU ceiling rather than trusted past it. `--jobs`/`-j` (cargo's own
+    build parallelism, unrelated to test concurrency) is bounded to the same
+    ceiling independently. The reading (and what it did) prints so a slow run
+    explains itself.
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     cargo_args = list(args)
     nextest = bool(shutil.which("cargo-nextest"))
     threads, lanes_note = _lanes_threads()
-    override = any(
-        a == "--" or a == "--jobs" or a.startswith(("-j", "--test-threads"))
-        for a in cargo_args
-    )
+    ceiling = max(1, os.cpu_count() or 1)
+    timeout = test_timeout_seconds()
+
+    sep_index = cargo_args.index("--") if "--" in cargo_args else None
+    notes: list[str] = []
+
+    build_hit = _last_flag_value(cargo_args, "--jobs", "-j", limit=sep_index)
+    if build_hit is not None:
+        requested, effective = _clamp_flag(cargo_args, build_hit, "--jobs", "-j", ceiling)
+        if effective != requested:
+            notes.append(f"build jobs {requested} capped at {effective}")
+
+    thread_hit = _last_flag_value(cargo_args, "--test-threads")
+
     if nextest:
         base = ["cargo", "nextest", "run"]
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
-    timeout = test_timeout_seconds()
-    if threads is None:
-        sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
-        )
-    elif override:
-        sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied; timeout {timeout}s\n"
-        )
-    else:
-        if nextest:
-            base = [*base, "--test-threads", str(threads)]
+
+    if thread_hit is not None:
+        requested, effective = _clamp_flag(cargo_args, thread_hit, "--test-threads", "", ceiling)
+        if effective != requested:
+            notes.append(f"explicit --test-threads {requested} capped at {effective}")
         else:
-            cap_tail = ["--", "--test-threads", str(threads)]
-        sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}; timeout {timeout}s\n"
-        )
+            notes.append(f"explicit --test-threads {requested} kept")
+    elif threads is None:
+        notes.append("runner default parallelism")
+    else:
+        effective = max(1, min(threads, ceiling))
+        cap_note = f"test threads capped at {effective}"
+        if effective != threads:
+            cap_note += f" (requested {threads}, ceiling {ceiling})"
+        notes.append(cap_note)
+        if nextest:
+            base = [*base, "--test-threads", str(effective)]
+        elif sep_index is not None:
+            insert_at = sep_index + 1
+            cargo_args = [
+                *cargo_args[:insert_at],
+                "--test-threads",
+                str(effective),
+                *cargo_args[insert_at:],
+            ]
+        else:
+            cap_tail = ["--", "--test-threads", str(effective)]
+
+    sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; {'; '.join(notes)}; timeout {timeout}s\n")
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]

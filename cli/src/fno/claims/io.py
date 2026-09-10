@@ -143,6 +143,10 @@ _GLOBAL_ID_PREFIXES = frozenset(
         "config-optout",
         "flight",
         "gate",
+        # `test:suite`, the fno-agents test-run admission claim (Rust-only
+        # caller): keeps parity with crates/fno-agents/src/claims.rs so the
+        # same key never routes to two different roots.
+        "test",
     }
 )
 
