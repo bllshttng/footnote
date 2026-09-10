@@ -158,5 +158,9 @@ pub(crate) fn served_liveness_basis(word: Option<&str>, measured_at: Option<&str
     let stamp = measured_at
         .and_then(crate::state::rfc3339_like_to_secs)
         .map(|s| s as u64);
-    crate::served_liveness::served_liveness_basis(word, stamp, crate::daemon::now_epoch_secs() as u64)
+    crate::served_liveness::served_liveness_basis(
+        word,
+        stamp,
+        crate::daemon::now_epoch_secs() as u64,
+    )
 }
