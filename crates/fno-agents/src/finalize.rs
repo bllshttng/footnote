@@ -167,11 +167,17 @@ struct ManifestFields {
     /// auto-merge at a green terminal. `None` = the key was absent.
     auto_merge_approved: Option<bool>,
     /// Which input set the posture (x-9d11): config | flag-no-merge |
-    /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
+    /// env-target-auto-merge | default-off. `None` = a pre-provenance manifest;
     /// surfaced as `unknown`, never guessed. No longer advisory (x-01b9):
     /// `env-target-auto-merge` on an approved run satisfies the standing
     /// config arm on its own, exactly as init folded it and the docs promise.
     auto_merge_source: Option<String>,
+    /// The run's node claim, written to the manifest body by init when it
+    /// claimed `node:<id>` (init:1670). The cancel settle releases it with
+    /// `--stamp-do`, closing the do row the session's acquire opened.
+    target_claim_key: Option<String>,
+    /// Who holds the claim above: the `--holder` the release must match.
+    target_claim_holder: Option<String>,
 }
 
 /// Does this line close the double-quoted scalar `init-target-state.sh` opened?
@@ -295,6 +301,13 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             // itself - prose inside the `input` scalar must not be able to
             // claim an origin either. Advisory, so no separate trust gate.
             "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
+            // The run's node claim (x-9d3b): init writes both keys into the
+            // manifest BODY, and this parser scans the body for exactly that
+            // reason. Plain `set`, never trust-gated: a cancelled run must
+            // release the claim the manifest NAMES, and prose cannot mint a
+            // claim the run does not hold (the release verifies the holder).
+            "target_claim_key" => set(&mut m.target_claim_key, v),
+            "target_claim_holder" => set(&mut m.target_claim_holder, v),
             _ => {}
         }
     }
@@ -877,6 +890,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // Same shape and same fatality as the stamp above: log-only, deliberately
     // not returned into `failed` (a guard skip must never wedge the loop).
     stamp_node_do(&cwd, &m, &reason);
+
+    // ── cancel settle: release the claim a cancelled run still holds (x-9d3b)
+    // Interrupted is deliberately absent from the stop hook's terminal release
+    // case (a hand-maintained mirror of this enum; growing it by one more
+    // entry is what the plan refused), so the settle belongs beside the
+    // classification. Same non-fatal shape as the stamp above.
+    if predicates.cancelled {
+        cancel_settle_claims(&cwd, &m);
+    }
 
     // ── arm auto-merge at the green gate, not at PR creation (x-1951) ──────
     // Last, so the plan stamp and both node<->PR stamps have already landed
@@ -2346,6 +2368,56 @@ fn do_stamp_args(
     args
 }
 
+/// Argument vector for the cancel settle's claim release, split out so the
+/// tests can assert `--stamp-do` without a subprocess.
+fn cancel_release_args(key: &str, holder: &str) -> Vec<String> {
+    vec![
+        "agents".to_string(),
+        "claim".to_string(),
+        "release".to_string(),
+        key.to_string(),
+        "--holder".to_string(),
+        holder.to_string(),
+        "--stamp-do".to_string(),
+    ]
+}
+
+/// The cancel settle (x-9d3b). An `Interrupted` terminal never reaches the
+/// stop hook's terminal release case (a hand-maintained mirror of the Rust
+/// enum; the string `Interrupted` appears in that file zero times by design),
+/// so before this the claim stayed held and the do row stayed open, pinning
+/// the node at `in_progress` forever. The release does both halves: `release`
+/// frees the claim, `--stamp-do` fills `ended_at` on the row the session's
+/// acquire opened (fill-only: `append_session_record` never overwrites a set
+/// timestamp, so a retried finalize is a no-op on the row).
+///
+/// Non-fatal, like every finalize side effect: one named stderr line per
+/// skip or failure, the exit code untouched. A manifest naming no claim key
+/// prints one line and stops - the sweep (x-8739) is the path for a row no
+/// claim opened.
+fn cancel_settle_claims(cwd: &Path, m: &ManifestFields) {
+    let (Some(key), Some(holder)) = (
+        m.target_claim_key.as_deref(),
+        m.target_claim_holder.as_deref(),
+    ) else {
+        eprintln!("finalize: cancel settle skipped: manifest names no target_claim_key");
+        return;
+    };
+    if !key.starts_with("node:") {
+        eprintln!("finalize: cancel settle skipped for key {key} (not a node claim)");
+        return;
+    }
+    let ok = Command::new("fno")
+        .args(cancel_release_args(key, holder))
+        .current_dir(cwd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("finalize: cancel claim release failed for {key} (non-fatal)");
+    }
+}
+
 /// True when `initial_head..HEAD` holds a non-merge commit on HEAD's own
 /// first-parent chain authored at or after `floor` (epoch seconds).
 ///
@@ -3255,6 +3327,43 @@ mod tests {
             "2026-09-06T18:30:00Z",
         );
         assert!(!args.contains(&"--guard-plan".to_string()));
+    }
+
+    // ── x-9d3b: the cancel terminal settles its own claim ───────────────────
+
+    #[test]
+    fn cancel_release_args_carries_stamp_do() {
+        let args = cancel_release_args("node:x-9d3b", "holder-s1");
+        assert_eq!(
+            args,
+            vec![
+                "agents".to_string(),
+                "claim".to_string(),
+                "release".to_string(),
+                "node:x-9d3b".to_string(),
+                "--holder".to_string(),
+                "holder-s1".to_string(),
+                "--stamp-do".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_manifest_fields_reads_claim_keys_from_body() {
+        // Both keys live in the manifest BODY (init:1670), below the closing
+        // `---`, so a frontmatter-only parse would miss them.
+        let m = parse_manifest_fields(
+            "---\nsession_id: s1\n---\n# Target Session State\ngraph_node_id: x-9d3b\ntarget_claim_key: \"node:x-9d3b\"\ntarget_claim_holder: \"holder-s1\"\n",
+        );
+        assert_eq!(m.target_claim_key.as_deref(), Some("node:x-9d3b"));
+        assert_eq!(m.target_claim_holder.as_deref(), Some("holder-s1"));
+    }
+
+    #[test]
+    fn parse_manifest_fields_leaves_claim_keys_absent_when_unwritten() {
+        let m = parse_manifest_fields("---\nsession_id: s1\n---\ngraph_node_id: x-1\n");
+        assert!(m.target_claim_key.is_none());
+        assert!(m.target_claim_holder.is_none());
     }
 
     // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
