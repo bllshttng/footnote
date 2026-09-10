@@ -199,6 +199,15 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
 /// the row. A PR bound to the epic keeps it reading none - undriven_pr owns
 /// that shape, and a PR needs a driver of its own. In-scope leaves stay
 /// claim-driven: a dead worker under a crown is still a dead handoff.
+///
+/// The stalled arm asks for PROGRESS, never for a lease. A holder is stalled
+/// exactly when its probe carries no positive transcript evidence; lease
+/// presence or absence decides nothing. A fresh `spawn-handover` lease is not
+/// health - a deadlocked worker was measured holding an unexpired one - so a
+/// lease must never suppress the row, and (structurally: the claim scan strips
+/// `expires_at`) it cannot. This ruling is pinned by the three
+/// `*_asks_for_progress_*` tests below; x-caf7 is the failure the obvious
+/// lease-keyed fix would have silenced.
 pub(crate) fn node_driver<'a>(
     node: &Value,
     claim_by_node: &'a HashMap<String, Value>,
@@ -401,5 +410,69 @@ mod tests {
         assert!(
             text.contains(r#"_ACTIVE_STATES = frozenset({"working", "watching", "your-move"})"#)
         );
+    }
+
+    // --- x-9958: stalled asks for progress, never for a lease ---------------
+    //
+    // The plan for x-9958 requires three tests: advancing evidence clears the
+    // row, no evidence keeps it, and an UNEXPIRED spawn-handover lease under a
+    // silent holder must never suppress it (the x-caf7 deadlocked worker held
+    // a fresh lease; keying on the lease would have gone silent about exactly
+    // that row). Each asserts the literal state word: a positive marker.
+
+    fn handover_claim(node_id: &str) -> serde_json::Value {
+        let mut claim = json!({
+            "key": format!("node:{node_id}"),
+            "state": "live",
+            "holder": format!("spawn-handover:t-{node_id}-worker"),
+        });
+        // The lease field the claim scan strips before this layer; carried
+        // here to prove the classification reads nothing from it.
+        claim["expires_at"] = json!("9999-12-31T23:59:59Z");
+        claim
+    }
+
+    #[test]
+    fn an_advancing_holder_is_never_stalled_whatever_the_lease_says() {
+        // Test A: a live handover claim whose holder's row shows
+        // transcript-turn progress and a recent age. The claim names no agent
+        // row of its own - the probe is the row's answer - and the node must
+        // read active, not stalled.
+        let node = json!({"id": "x-adv", "priority": "p1"});
+        let mut claims = HashMap::new();
+        claims.insert("x-adv".to_string(), handover_claim("x-adv"));
+        let mut activity = HashMap::new();
+        activity.insert("t-x-adv-worker".to_string(), probe("working", 30.0));
+        assert_eq!(node_driver(&node, &claims, &activity, None).0, "active");
+    }
+
+    #[test]
+    fn a_holder_without_progress_evidence_reads_stalled() {
+        // Test B: no agent row, no progress evidence. The queued-spawn window
+        // has nothing to probe yet, and the rule stays honest about that:
+        // stalled is the answer until transcript evidence exists.
+        let node = json!({"id": "x-quiet", "priority": "p1"});
+        let mut claims = HashMap::new();
+        claims.insert("x-quiet".to_string(), handover_claim("x-quiet"));
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        assert_eq!(node_driver(&node, &claims, &activity, None).0, "stalled");
+    }
+
+    #[test]
+    fn an_unexpired_handover_lease_never_suppresses_a_stalled_row() {
+        // Test C, the regression guard: a fresh lease beside NO progress
+        // evidence still reads stalled. The lease is not evidence of health;
+        // this is the shape the lease-keyed fix would have silenced.
+        let node = json!({"id": "x-wedge", "priority": "p1"});
+        let mut claims = HashMap::new();
+        claims.insert("x-wedge".to_string(), handover_claim("x-wedge"));
+        let mut activity = HashMap::new();
+        // A row exists and answers, but shows nothing recent: the deadlock
+        // shape, not the missing-row shape.
+        activity.insert(
+            "t-x-wedge-worker".to_string(),
+            probe("working", STALLED_AFTER_S + 1.0),
+        );
+        assert_eq!(node_driver(&node, &claims, &activity, None).0, "stalled");
     }
 }
