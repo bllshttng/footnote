@@ -46,15 +46,17 @@ fn external_backend_selected() -> bool {
 }
 
 /// Match one requested token against `id` first, then `slug`, case-insensitive
-/// (mirrors `fuzzy.resolve_node`'s exact-match tiers for these two shapes).
-fn find_entry<'a>(entries: &'a [Value], token: &str) -> Option<&'a Value> {
+/// (mirrors `fuzzy.resolve_node`'s exact-match tiers for these to shapes).
+/// The keeper's `read_ids` verb reuses this one matcher: two matchers for one
+/// resolution contract is the dual-implementation shape.
+pub(crate) fn find_entry<'a>(entries: &'a [Value], token: &str) -> Option<&'a Value> {
     entries
         .iter()
         .find(|e| field_eq(e, "id", token))
         .or_else(|| entries.iter().find(|e| field_eq(e, "slug", token)))
 }
 
-fn field_eq(entry: &Value, field: &str, token: &str) -> bool {
+pub(crate) fn field_eq(entry: &Value, field: &str, token: &str) -> bool {
     entry
         .get(field)
         .and_then(Value::as_str)

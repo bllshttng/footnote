@@ -541,6 +541,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let result = match method {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
+        "read_ids" => handle_read_ids(state, &params),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "op" => handle_op(state, &params),
@@ -708,6 +709,39 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // that needed them is over (graph_store_parity.rs is characterization).
     let entries = cached_entries(state, keep_malformed, strict)?;
     Ok(json!({ "entries": entries }))
+}
+
+/// The by-id read: exact id-then-slug rows from the cache, in argument order,
+/// with the readiness overlay applied server-side (the overlay derives
+/// `blocked` from the blockers' rows, so it needs the whole list even when
+/// the reply carries one). Unmatched tokens are reported, never guessed;
+/// the client falls back to the full read on any miss it cannot use.
+fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    let tokens: Vec<String> = match params.get("ids").and_then(Value::as_array) {
+        Some(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        None => return Err(StoreError::Invalid("read_ids needs ids".into())),
+    };
+    if tokens.is_empty() {
+        return Err(StoreError::Invalid(
+            "read_ids needs a non-empty ids list".into(),
+        ));
+    }
+    let entries = cached_entries(state, false, false)?;
+    let mut overlaid = (*entries).clone();
+    graph_store::apply_readiness_overlay(&mut overlaid);
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut missing = Vec::new();
+    for token in &tokens {
+        match crate::graph_get::find_entry(&overlaid, token) {
+            Some(entry) => out.push(entry.clone()),
+            None => missing.push(token.clone()),
+        }
+    }
+    Ok(json!({"entries": out, "missing": missing}))
 }
 
 /// Pure transforms over client-shipped rows: the migration seam and the
@@ -2356,6 +2390,56 @@ mod tests {
             "strict must diagnose without writing"
         );
         assert!(state.cache.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn read_ids_returns_overlaid_rows_in_order_and_reports_missing() {
+        // AC9-HP / AC10-EDGE / AC11-EDGE: one row for one id (the reply body
+        // is a row, not the graph), the readiness overlay applied server-side,
+        // argument order preserved, unmatched tokens reported not guessed,
+        // and a mixed-case slug resolving like the batch matcher's field_eq.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let body = serde_json::to_string(&json!({
+            "entries": [
+                {"id": "x-hit", "slug": "first-node", "title": "hit",
+                 "status": "ready", "blocked_by": ["x-gate"]},
+                {"id": "x-gate", "slug": "second-node", "title": "gate",
+                 "status": "in_progress"},
+                {"id": "x-late", "slug": "third-node", "title": "late",
+                 "status": "ready"},
+            ]
+        }))
+        .unwrap();
+        std::fs::write(&graph, body).unwrap();
+        let state = read_state(&graph);
+        let reply = handle_read_ids(
+            &state,
+            &json!({"ids": ["x-late", "second-node", "X-HIT", "x-nope"]}),
+        )
+        .unwrap();
+        let entries = reply["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "three matched tokens, one row each");
+        assert_eq!(entries[0]["id"], json!("x-late"));
+        assert_eq!(entries[1]["id"], json!("x-gate"));
+        assert_eq!(entries[2]["id"], json!("x-hit"));
+        // The overlay: x-hit is blocked by x-gate's non-terminal status.
+        assert_eq!(entries[2]["status"], json!("blocked"));
+        assert!(entries[2]["blocked_reason"].is_string());
+        let missing: Vec<String> = reply["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(missing, vec!["x-nope".to_string()]);
+        // The cache leg: a second call parses nothing new.
+        let _ = handle_read_ids(&state, &json!({"ids": ["x-hit"]})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "read_ids must ride the cache"
+        );
     }
 
     #[test]

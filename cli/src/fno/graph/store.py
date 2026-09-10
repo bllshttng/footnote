@@ -510,6 +510,14 @@ class _Keeper:
         del path
         return self.request("read_file", {})
 
+    def read_ids(self, ids: "list[str]") -> dict:
+        """Exact id/slug rows through the keeper's by-id read: the reply
+        carries the matched rows (readiness overlay applied server-side, the
+        blockers' list is server-side knowledge) plus the unmatched tokens.
+        The single-graph keeper, so no path; a stale keeper that predates
+        the verb raises through ``request`` and every caller falls back."""
+        return self.request("read_ids", {"ids": list(ids)})
+
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     """A keeper connection for `path`, spawning the keeper when absent.
@@ -953,6 +961,21 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     return _client_for(path).read(path, strict=True)["entries"]
 
 
+def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
+    """Exact rows by id/slug through the keeper's by-id read, or None.
+
+    The single-node fast path's seam: the keeper reply (``entries`` plus
+    ``missing``) on an answer, and None whenever the fast path cannot
+    answer -- no keeper, a stale keeper that predates ``read_ids``, an
+    unreadable graph -- so the caller falls back to the full read and
+    resolution never changes shape.
+    """
+    try:
+        return _client_for(Path(path)).read_ids(tokens)
+    except Exception:  # noqa: BLE001 - the fast path is an optimization; the full read owns correctness
+        return None
+
+
 def read_archive_entries() -> list[dict]:
     """The archived nodes, best-effort: an absent archive is []. Callers that
     may test many ids read once and pass the list to
@@ -1256,6 +1279,16 @@ def _resolve_node_id(
     """
     from fno.graph._intake import _find_node
 
+    if entries_out is None:
+        # The by-id fast path: one exact row instead of a whole-graph begin.
+        # The tier guard keeps resolution identical to _find_node's exact
+        # tiers (exact id, exact slug); anything else falls through to the
+        # snapshot so title-fuzzy and id-prefix never change.
+        fast = read_nodes_by_ids(client_keeper_path, [node_id])
+        if fast and fast["entries"] and not fast["missing"]:
+            row = fast["entries"][0]
+            if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
+                return row.get("id")
     snap = _client_for(client_keeper_path).request("begin", {})
     if entries_out is not None:
         entries_out.extend(snap["entries"])

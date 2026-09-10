@@ -1037,3 +1037,111 @@ def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
         for proc in (doomed, kept):
             proc.kill()
             proc.wait(timeout=15)
+
+
+# -- the by-id read (x-1601 wave 3) --
+
+
+def test_read_nodes_by_ids_returns_exact_rows(tmp_path):
+    """AC9-HP client half: one id, one row back, nothing unmatched."""
+    from fno.graph.store import read_nodes_by_ids
+
+    path = _make_graph(
+        tmp_path,
+        [
+            {"id": "ab-1", "slug": "first-one", "title": "One"},
+            {"id": "ab-2", "slug": "second-one", "title": "Two"},
+        ],
+    )
+    result = read_nodes_by_ids(path, ["second-one", "ab-1", "zz-none"])
+    assert result is not None
+    assert [e["id"] for e in result["entries"]] == ["ab-2", "ab-1"]
+    assert result["missing"] == ["zz-none"]
+
+
+def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_path, monkeypatch):
+    """AC10-EDGE: a stale keeper (installed worker behind the source) answers
+    `unknown store method`; the fast path degrades to None and the caller
+    falls back, so an old binary never breaks a current client."""
+    from fno.graph import store as store_mod
+
+    def stale_request(self, method, params):
+        raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
+    assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
+
+
+def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
+    """Change 4's resolve site: exact id and exact slug through one row,
+    no whole-graph begin."""
+    from fno.graph import store as store_mod
+
+    path = _make_graph(
+        tmp_path,
+        [
+            {"id": "ab-1", "slug": "first-one", "title": "One"},
+            {"id": "ab-2", "slug": "second-one", "title": "Two"},
+        ],
+    )
+    assert store_mod._resolve_node_id(path, "second-one") == "ab-2"
+    assert store_mod._resolve_node_id(path, "ab-1") == "ab-1"
+
+
+def test_resolve_node_id_falls_back_to_the_begin_snapshot(tmp_path, monkeypatch):
+    """AC10-EDGE at the resolve site: any fast-path absence keeps riding the
+    begin snapshot, so the snapshot resolver's own tiers are unchanged."""
+    from fno.graph import store as store_mod
+
+    path = _make_graph(
+        tmp_path,
+        [{"id": "ab-12345678", "slug": "first-one", "title": "One"}],
+    )
+
+    def no_fast(path, tokens):
+        return None
+
+    monkeypatch.setattr(store_mod, "read_nodes_by_ids", no_fast)
+    # The exact id resolves through the snapshot when the fast path is out.
+    assert store_mod._resolve_node_id(path, "ab-12345678") == "ab-12345678"
+    # ...and a genuinely absent node still resolves to None.
+    assert store_mod._resolve_node_id(path, "zz-none") is None
+
+
+def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkeypatch, capsys):
+    """The get fast path: the row renders through the same renderer, the miss
+    falls back by returning the token unchanged."""
+    import typer
+
+    from fno.graph import get_batch
+
+    row = {"id": "ab-1", "slug": "first-one", "title": "One", "status": "idea"}
+    payload = {"entries": [dict(row)], "missing": []}
+
+    def fake_fast(path, tokens):
+        return dict(payload)
+
+    # get_batch imports the helper from store at call time; patch it there.
+    from fno.graph import store as store_mod
+
+    monkeypatch.setattr(store_mod, "read_nodes_by_ids", fake_fast)
+    monkeypatch.setattr(get_batch, "_graph_path", lambda: tmp_path / "graph.json")
+    # Exact id: served, rendered, never returns.
+    with pytest.raises(typer.Exit) as exc:
+        get_batch.resolve_or_dispatch(["ab-1"], field=None, grouped=False, strict=False)
+    assert exc.value.exit_code == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "ab-1"
+
+    # A case-different id must NOT serve: resolve_node tier 1 is exact, so
+    # a fast path hit here would widen resolution.
+    payload["entries"] = [dict(row)]
+    payload["missing"] = []
+    returned = get_batch.resolve_or_dispatch(["AB-1"], field=None, grouped=False, strict=False)
+    assert returned == "AB-1"
+
+    # Miss: the token falls through to the caller's full path.
+    payload["entries"] = []
+    payload["missing"] = ["zz-none"]
+    returned = get_batch.resolve_or_dispatch(["zz-none"], field=None, grouped=False, strict=False)
+    assert returned == "zz-none"
