@@ -6,9 +6,9 @@
 //! not only on timeout or interruption. The defect this closes:
 //! `wait_or_kill_group` in `cli/src/fno/test_runner.py` only killed the
 //! group on `TimeoutExpired` or an exception, so cargo's own clean exit left
-//! an orphaned `deps/` test binary running in the same group (x-b275: one
-//! such binary held 225 of the machine's 228 zombies for 3h32m after cargo
-//! itself had already exited).
+//! an orphaned `deps/` test binary running in the same group (one such binary
+//! held 225 of the machine's 228 zombies for 3h32m after cargo itself had
+//! already exited).
 //!
 //! `killpg` targets every process sharing the group's pgid regardless of
 //! parent/child lineage, which is why this reaches a grandchild the leader
@@ -35,9 +35,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// `Popen` wrapper no longer isolates this process into its own group (that
 /// job moved to the child's `setsid()`), so a terminal Ctrl-C reaches this
 /// owner directly - without a handler, the default disposition would kill it
-/// before its own cleanup ever ran, exactly the "supervisor SIGKILL" gap
-/// AC2-EDGE names. The handler does the one thing async-signal-safe code may
-/// do: store an integer.
+/// before its own cleanup ever ran. The handler does the one thing
+/// async-signal-safe code may do: store an integer.
 static RECEIVED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 extern "C" fn record_signal(sig: libc::c_int) {
@@ -154,8 +153,8 @@ pub fn owner_alive(pid: u32, birth: u64) -> bool {
 }
 
 /// Block until the claim is ours or `deadline` passes. A contender spawns
-/// ZERO workers while waiting (AC4-HP): the loop returns before any `Command`
-/// is built.
+/// ZERO workers while waiting: the loop returns before any `Command` is
+/// built.
 fn acquire_suite_claim(
     run_id: &str,
     holder: &str,
@@ -260,7 +259,8 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<i32, Unfinished>
 /// SIGTERM the whole group, give it [`TERM_GRACE`] to leave, then SIGKILL.
 /// Returns whether the group is confirmed EMPTY afterward - `killpg(pgid, 0)`
 /// answers that for every member by pgid, not only processes this owner
-/// itself `wait()`s for, which is exactly the grandchild x-b275 needs.
+/// itself `wait()`s for, which is exactly what a grandchild leaked by a
+/// leader's own clean exit needs.
 fn cleanup_group(pgid: i32) -> bool {
     // SAFETY: pgid is this run's own child pid, and that child called
     // setsid() before exec, so pgid == its own pid: the signal never reaches
@@ -302,9 +302,9 @@ pub fn run_test_run(args: &[String]) -> i32 {
         .or_else(crate::claims::global_claims_root);
 
     // A nested invocation inherits the outer admission rather than
-    // re-acquiring (AC4-EDGE): it never touches the outer claim and never
-    // multiplies the outer concurrency budget, because it never becomes a
-    // NEW claim holder at all.
+    // re-acquiring: it never touches the outer claim and never multiplies
+    // the outer concurrency budget, because it never becomes a NEW claim
+    // holder at all.
     let nested = nested_owner();
     let mut claimed = false;
     if nested.is_none() {
@@ -389,8 +389,8 @@ pub fn run_test_run(args: &[String]) -> i32 {
         }
     };
     if !cleaned {
-        // Cleanup failure is nonzero even after test success (AC2-ERR): a
-        // green suite that leaked its group must not read as done.
+        // Cleanup failure is nonzero even after test success: a green suite
+        // that leaked its group must not read as done.
         return if exit_code == 0 { 1 } else { exit_code };
     }
     exit_code

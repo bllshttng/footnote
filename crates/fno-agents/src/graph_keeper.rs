@@ -252,9 +252,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
     // bound to that test run's lifetime, not the longer-lived idle bound
     // above: a wedged test that never sends Shutdown must not leak this
-    // store past its own run (x-79bc's mechanism, one keeper family over).
-    // Resolved once - the env does not change mid-run - and polled at most
-    // every 250ms, cheap enough to share the accept loop's own tick.
+    // store past its own run (the same mechanism the pane keeper uses, one
+    // keeper family over). Resolved once - the env does not change mid-run -
+    // and polled at most every 250ms, cheap enough to share the accept
+    // loop's own tick.
     let test_owner = crate::test_run::owner_from_env();
     let mut last_owner_check = std::time::Instant::now();
     listener

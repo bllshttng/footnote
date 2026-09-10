@@ -9,7 +9,7 @@ zombies. Every ``fno doctor test`` suite runs through this module.
 ``test:suite`` claim and ALWAYS attempts a group-kill after the run, not only
 on timeout - the Python ``wait_or_kill_group`` below only killed the group on
 ``TimeoutExpired``/an exception, which is exactly how a clean cargo exit left
-an orphaned ``deps/`` test binary running for 3h32m (x-b275). ``kill_group``/
+an orphaned ``deps/`` test binary running for 3h32m. ``kill_group``/
 ``wait_or_kill_group`` stay as the degraded fallback for a checkout with no
 ``fno-agents`` binary installed, and as the policy census's ``_run_bounded``
 (a different, per-probe kill bound, never suite-admission-gated) still uses.
@@ -87,8 +87,9 @@ def run_suite_bounded(cmd: Sequence[str], env: Mapping[str, str], timeout: int, 
     """Run cmd through the native ``fno-agents test-run`` owner, which admits
     under the shared ``test:suite`` claim and ALWAYS group-kills after the
     run (success, failure, or timeout) - not only on timeout, the gap that
-    let x-b275 leak. Degrades to the pre-native Python group-kill (timeout
-    only) when the binary is unavailable, rather than failing the suite."""
+    let a clean-exit leader orphan a group-mate. Degrades to the pre-native
+    Python group-kill (timeout only) when the binary is unavailable, rather
+    than failing the suite."""
     native = _native_owner_binary()
     if native is None:
         proc = subprocess.Popen(cmd, env=env, start_new_session=True, **kw)

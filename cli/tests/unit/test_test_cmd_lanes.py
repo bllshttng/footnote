@@ -287,6 +287,21 @@ def test_build_jobs_flag_does_not_suppress_thread_cap(tmp_path, monkeypatch, cap
     assert "capped at 12" in capsys.readouterr().out
 
 
+def test_space_separated_build_jobs_flag_is_clamped(tmp_path, monkeypatch, capsys):
+    """`-j 32` (space-separated) must clamp the same as `-j32` (glued)."""
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
+    assert test_cmd._run_rust(["-j", "32"]) == 0
+    assert cmds[0][cmds[0].index("-j") + 1] == "12"
+    assert "build jobs 32 capped at 12" in capsys.readouterr().out
+
+
 def test_excessive_build_jobs_flag_is_clamped(tmp_path, monkeypatch, capsys):
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)

@@ -214,6 +214,12 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no daemon RPC); this entry keeps the client.rs<->router
         # parity test in sync.
         "probe-run",
+        # Native test-run process-group owner (x-d10f): admits under the
+        # `test:suite` claim, spawns the suite leader in its own session, and
+        # always cleans up the group. Internal dispatch only, matched the same
+        # way as `probe-run`; this entry keeps the client.rs<->router parity
+        # test in sync.
+        "test-run",
         # Registry-label rename: `agent.rename` over the daemon RPC, the same
         # transport as rm/stop. The old label rides home as a persisted alias.
         "rename",
@@ -483,6 +489,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno do phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 only when every row is PASS - exit 0 with no output reads SKIP, not pass. Rows carry verdict (PASS FAIL BLOCKED SKIP), an optional ` # claim` comment from the declaration, and bounded captured output. Shelled by the close verbs for close_probes and by prove-it for runtime evidence.",
+    "test-run": "Native test-suite process-group owner: --timeout SECS [--claims-root PATH] -- ARGV...; admits under the machine-wide test:suite claim, spawns ARGV as the leader of a fresh session, and always kills the group after. Invoked directly by cli/src/fno/test_runner.py's run_suite_bounded, not `fno agents` routing.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",

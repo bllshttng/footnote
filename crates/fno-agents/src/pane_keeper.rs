@@ -469,10 +469,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // A test-owned pane (spawned under `fno-agents test-run`, argv carries
     // FNO_TEST_OWNER_PID/BIRTH) never survives its test run: without a
     // Drop on the pty type, a wedged/killed test that never sends Kill
-    // leaks this whole pane (x-79bc - 5 confirmed orphans, one traced to
+    // leaks this whole pane (five confirmed orphans were traced to
     // `run_pane_with_worker` at crates/fno/src/server.rs:20282). A
-    // production pane (no such env, Locked Decision 4) is unaffected - this
-    // thread never spawns for one.
+    // production pane (no such env) is unaffected - this thread never
+    // spawns for one.
     if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
         std::thread::Builder::new()
             .name("fno-keeper-test-owner".into())

@@ -474,6 +474,12 @@ def _last_flag_value(
                 continue
             except ValueError:
                 pass
+        if short_flag and a == short_flag and i + 1 < n:
+            try:
+                found = (i, "sep", int(args[i + 1]))
+                continue
+            except ValueError:
+                pass
         if short_flag and a.startswith(short_flag) and a != short_flag and a[len(short_flag) :].isdigit():
             found = (i, "short", int(a[len(short_flag) :]))
     return found
