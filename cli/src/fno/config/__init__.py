@@ -271,7 +271,7 @@ class MaintainBlock(BaseModel):
 
     @field_validator("staleness_days", "max_failed_attempts", "abandoned_do_row_hours")
     @classmethod
-    def _positive_counts(cls, v: int, info) -> int:
+    def _positive_counts(cls, v: int, info: ValidationInfo) -> int:
         """A threshold below 1 cannot bound anything."""
         if v < 1:
             raise ValueError(f"config.backlog.maintain.{info.field_name} must be >= 1")
