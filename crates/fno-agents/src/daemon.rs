@@ -6762,7 +6762,8 @@ async fn handle_rm_with(
     }
     let pane_outcome;
     let mut pane_stop_detail: Option<String> = None;
-    if entry.substrate.as_deref() == Some("pane") {
+    let pane_arm_ran = entry.substrate.as_deref() == Some("pane");
+    if pane_arm_ran {
         // x-1b90: a pane row's ONE live ref is the pane process, and a
         // successful or absent pane kill is not a death - the stored pane id
         // is not an address for a process a keeper re-adopt. rm proves the
@@ -6793,7 +6794,7 @@ async fn handle_rm_with(
                 CascadeOutcome::AlreadyAbsent(_) => "harness row already absent; ".into(),
                 _ => String::new(),
             };
-            if pane_stop_detail.is_some() {
+            if pane_arm_ran {
                 // The pane arm's reason IS the stop measurement; there may be
                 // no mux ref at all to name.
                 return Response::err(

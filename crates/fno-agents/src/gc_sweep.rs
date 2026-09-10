@@ -30,6 +30,9 @@ use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
 use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason, TreeAction};
+use crate::graph_store::{self, WorkState};
+use crate::node_route;
+use crate::paths::AgentsHome;
 
 /// (x-1b90 change 3) How long a row has sat unresolved: now minus
 /// `last_message_at`, else `created_at`; a stamp that cannot parse names no
@@ -43,9 +46,6 @@ fn unresolved_hold_secs(e: &state::RegistryEntry, now: i64) -> i64 {
         .or_else(|| state::rfc3339_like_to_secs(&e.created_at));
     parsed.map_or(0, |at| (now - at as i64).max(0))
 }
-use crate::graph_store::{self, WorkState};
-use crate::node_route;
-use crate::paths::AgentsHome;
 use crate::receipt::{
     build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
 };
