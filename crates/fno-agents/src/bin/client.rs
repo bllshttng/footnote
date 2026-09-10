@@ -229,6 +229,14 @@ async fn run(args: Vec<String>) -> i32 {
     // rung of the badge lattice currently badges the agent. Same `matches!`
     // treatment as `claim` so it stays out of CLIENT_VERB_USAGE /
     // RUST_CLIENT_VERBS and the parity guard.
+    // `node-origin` is the HIDDEN transport verb over the request-origin
+    // decision (fno_agents::node_origin): Python birth assembly posts birth
+    // records and stamps the receipt. Same `matches!` treatment as `claim`
+    // so the routable-verb parity guard does not see it.
+    if matches!(verb, "node-origin") {
+        return fno_agents::node_origin::run_node_origin(&args[1..]);
+    }
+
     if matches!(verb, "detect") {
         return fno_agents::scrape::run_detect(&args[1..]);
     }

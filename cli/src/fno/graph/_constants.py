@@ -145,6 +145,15 @@ SOURCE_KINDS = frozenset(
 )
 SOURCE_KIND_DEFAULT = "organic"
 
+# Request-origin vocabulary (x-1005): the four board buckets. The DECISION is
+# owned by crates/fno-agents/src/node_origin.rs and reached through the
+# `fno-agents node-origin resolve` transport; this set only names the values
+# Python may stamp and test, and what fail-open reads (the default).
+REQUEST_ORIGINS = frozenset(
+    {"operator_request", "agent_discovery", "automated_followup", "unknown"}
+)
+REQUEST_ORIGIN_DEFAULT = "unknown"
+
 
 def validate_source_kind(value: str) -> str:
     """Return ``value`` when it is in the vocabulary; raise ``ValueError`` else.

@@ -11,6 +11,7 @@ capture.py and retro/land.py keep resolving.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +19,12 @@ from typing import Optional
 
 import typer
 
-from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
+from fno.graph._constants import (
+    REQUEST_ORIGIN_DEFAULT,
+    REQUEST_ORIGINS,
+    SOURCE_KIND_DEFAULT,
+    validate_source_kind,
+)
 
 def _scan_md_field(text: str, key: str) -> Optional[str]:
     """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
@@ -122,6 +128,52 @@ def _session_provenance(
     }
 
 
+def resolve_birth_origins(records: list[dict]) -> list[dict]:
+    """Transport caller over the native origin decision (x-1005).
+
+    Posts birth records to `fno-agents node-origin resolve` and returns one
+    ``{"origin", "evidence"}`` receipt per record, index-aligned. Fail-open to
+    ``unknown``: a missing binary, a spawn failure, a malformed receipt, or a
+    length mismatch must never invent an origin - unknown stays unknown, and
+    the caller stamps that. One subprocess per birth, never per read.
+    """
+    fail_open = [{"origin": REQUEST_ORIGIN_DEFAULT, "evidence": None}] * len(records)
+    try:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            return fail_open
+        import subprocess
+
+        proc = subprocess.run(
+            [str(binary), "node-origin", "resolve", "--payload", "-"],
+            input=json.dumps(records),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            return fail_open
+        results = (json.loads(proc.stdout) or {}).get("results")
+        if not isinstance(results, list) or len(results) != len(records):
+            return fail_open
+        receipts: list[dict] = []
+        for result in results:
+            origin = result.get("origin") if isinstance(result, dict) else None
+            receipts.append(
+                {
+                    "origin": origin
+                    if origin in REQUEST_ORIGINS
+                    else REQUEST_ORIGIN_DEFAULT,
+                    "evidence": result.get("evidence") if isinstance(result, dict) else None,
+                }
+            )
+        return receipts
+    except Exception:  # noqa: BLE001 - fail open; birth never invents origin
+        return fail_open
+
+
 def _build_backlog_node(
     *,
     title: str,
@@ -146,6 +198,8 @@ def _build_backlog_node(
     known_ids: Optional[set] = None,
     out: Optional[dict] = None,
     source_kind: str = SOURCE_KIND_DEFAULT,
+    origin_channel: str = "new",
+    origin_evidence: Optional[str] = None,
     source: Optional[str] = None,
     source_project: Optional[str] = None,
     source_inbox_msg: Optional[str] = None,
@@ -174,6 +228,19 @@ def _build_backlog_node(
     # written, so a new writer cannot mint an out-of-vocabulary value even if
     # it skips its own CLI-level check.
     validate_source_kind(source_kind)
+
+    # Request origin (x-1005): the native decision, stamped once at birth and
+    # never rewritten by later updates. Fail-open stamps unknown; a recorder
+    # harness or an organic default never establishes origin.
+    origin_receipt = resolve_birth_origins(
+        [
+            {
+                "source_kind": source_kind,
+                "birth_channel": origin_channel,
+                "origin_evidence": origin_evidence,
+            }
+        ]
+    )[0]
 
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
@@ -226,6 +293,8 @@ def _build_backlog_node(
         "source_cwd": prov["source_cwd"],
         "source_node_id": prov["source_node_id"],
         "source_plan_path": prov["source_plan_path"],
+        "request_origin": origin_receipt["origin"],
+        "origin_evidence": origin_receipt["evidence"],
     }
 
 
@@ -267,6 +336,15 @@ def cmd_new(
     ),
     source_inbox_msg: Optional[str] = typer.Option(
         None, "--source-inbox-msg", help="Source inbox message ID"
+    ),
+    origin_evidence: Optional[str] = typer.Option(
+        None,
+        "--origin-evidence",
+        help=(
+            "Producing-event reference (mail id, event id, fu-id, path). With "
+            "--source-kind from_observation/from_supervisor this is what makes "
+            "the node an agent discovery; without it the origin stays unknown."
+        ),
     ),
 ) -> None:
     """Create a new graph entry without a plan file.
@@ -361,6 +439,8 @@ def cmd_new(
             difficulty=difficulty,
             domain=domain,
             source_kind=source_kind,
+            origin_channel="new",
+            origin_evidence=origin_evidence,
             source="fno-new",
             source_project=source_project,
             source_inbox_msg=source_inbox_msg,

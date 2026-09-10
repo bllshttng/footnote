@@ -106,6 +106,7 @@ pub mod graph_keeper;
 pub mod graph_sqlite;
 pub mod graph_store;
 pub mod harness_capabilities;
+pub mod node_origin;
 pub mod harness_daemon;
 pub mod heal;
 mod identity;
