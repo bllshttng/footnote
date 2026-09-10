@@ -1260,6 +1260,63 @@ def test_a_tail_without_timestamps_falls_back_and_names_mtime(tmp_path):
     assert result["last_event_at"] == "2023-11-14T22:13:20Z"
 
 
+def test_an_unrenderable_tail_stamp_falls_to_the_fallback_as_one_pair(tmp_path, monkeypatch):
+    """A tail epoch that cannot render as a stamp never becomes the epoch:
+    the age and the stamp degrade together to the labelled fallback, the same
+    paired discipline _transcript_age_s applies to its own reads."""
+    import os
+
+    from fno.agents import session_truth
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-54cf-0000-0000-000000000009"
+    path = _write_claude_transcript(tmp_path, cwd, sid, ["turn"])
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    real = session_truth._record_stamp_epoch
+
+    def huge(_ts):
+        return 1.0e12  # beyond datetime's range: renders as neither stamp nor age
+
+    monkeypatch.setattr(session_truth, "_record_stamp_epoch", huge)
+    # Keep the parser honest for the control: the real parser could never
+    # produce this value (its ISO input caps at year 9999), which is why the
+    # guard is exercised through the seam.
+    assert real("2026-09-09T20:00:00Z") is not None
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
+    )
+
+    assert result["last_activity_age_s"] == 100
+    assert result["last_activity_basis"] == "mtime"
+    assert result["last_event_at"] == "2023-11-14T22:13:20Z"
+
+
+def test_newest_entry_epoch_reads_the_whole_file_when_asked(tmp_path):
+    """tail_bytes=None is the adopt stamp's shape: the window can never be
+    narrower than the tail truth's own read covers, or one transcript ages by
+    two instruments."""
+    from datetime import datetime, timezone
+
+    from fno.agents.session_truth import newest_entry_epoch
+
+    path = tmp_path / "t.jsonl"
+    stamp = "2026-01-01T01:00:00Z"
+    filler = json.dumps({"type": "progress"})  # untimestamped, dates nothing
+    count = 300 * 1024 // (len(filler) + 1) + 10
+    lines = [json.dumps({"type": "assistant", "timestamp": stamp, "message": {}})]
+    lines.extend([filler] * count)
+    path.write_text("\n".join(lines) + "\n")
+    assert path.stat().st_size > 256 * 1024
+    # The bounded window sees only untimestamped records -> None.
+    assert newest_entry_epoch(path) is None
+    expected = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc).timestamp()
+    assert newest_entry_epoch(path, tail_bytes=None) == expected
+
+
 def test_opencode_age_names_the_db_basis(tmp_path, monkeypatch):
     """opencode keeps the MAX(time_updated) reading and its own basis name."""
     from fno.agents import session_truth

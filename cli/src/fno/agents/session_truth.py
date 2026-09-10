@@ -209,7 +209,7 @@ def _record_stamp_epoch(ts: str) -> Optional[float]:
 _ENTRY_TAIL_BYTES = 256 * 1024
 
 
-def newest_entry_epoch(path: Path) -> Optional[float]:
+def newest_entry_epoch(path: Path, tail_bytes: Optional[int] = _ENTRY_TAIL_BYTES) -> Optional[float]:
     """Newest top-level ``timestamp`` in a jsonl transcript, in epoch SECONDS.
 
     The transcript-age primitive the file stat must not be: trailing records
@@ -218,18 +218,21 @@ def newest_entry_epoch(path: Path) -> Optional[float]:
     negative, median +20 minutes, maximum +240 hours over 311 claude
     transcripts (x-54cf). Reads the same bounded tail
     ``watchdog.tail_entries`` reads and takes the newest parseable stamp.
-    None when the file is unreadable or carries no timestamped entry at all;
-    the caller then falls back (and names the fallback via
-    ``last_activity_basis``)."""
+    ``tail_bytes=None`` reads the WHOLE file: the adopt stamp passes it so its
+    window can never be narrower than the tail truth's own read covers, which
+    would split one transcript across two instruments. None when the file is
+    unreadable or carries no timestamped entry at all; the caller then falls
+    back (and names the fallback via ``last_activity_basis``)."""
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
-            fh.seek(max(0, size - _ENTRY_TAIL_BYTES))
+            if tail_bytes is not None:
+                fh.seek(max(0, size - tail_bytes))
             chunk = fh.read()
         lines = chunk.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return None
-    if size > _ENTRY_TAIL_BYTES and lines:
+    if tail_bytes is not None and size > tail_bytes and lines:
         lines = lines[1:]  # a mid-file seek lands inside a line; drop it
     newest: Optional[float] = None
     for line in lines:
@@ -409,10 +412,19 @@ def resolve_session_truth(
             if not rec.timestamp:
                 continue
             stamp_epoch = _record_stamp_epoch(rec.timestamp)
-            if stamp_epoch is not None:
-                epoch = stamp_epoch
-                basis = "last-entry"
-                break
+            if stamp_epoch is None:
+                continue
+            # The same representability guard _transcript_age_s applies: an
+            # epoch datetime cannot render degrades the WHOLE pair, so a stamp
+            # that cannot produce both an age and a stamp never becomes the
+            # epoch - the reading falls to the labelled fallback as one piece.
+            try:
+                datetime.fromtimestamp(stamp_epoch, tz=timezone.utc)
+            except (ValueError, OverflowError, OSError):
+                continue
+            epoch = stamp_epoch
+            basis = "last-entry"
+            break
     if epoch is None:
         epoch, age, basis = _transcript_age_s(
             agent,

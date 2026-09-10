@@ -470,7 +470,7 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
             return None
         if resolved.kind != "jsonl":
             return None
-        epoch = newest_entry_epoch(Path(resolved.transcript_path))
+        epoch = newest_entry_epoch(Path(resolved.transcript_path), tail_bytes=None)
         if epoch is None:
             epoch = Path(resolved.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 - a stamp is a nicety; adoption still lands
