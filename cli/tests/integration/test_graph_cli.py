@@ -1765,6 +1765,51 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     assert "ownership_defect" not in row
 
 
+def test_update_locked_by_warns_when_no_claim_backs_the_mirror(tmp_graph, monkeypatch):
+    """A mirror stamped with no claim lockfile is hygiene bait. The caller
+    must be told at write time, never left to discover the clear."""
+    from fno.claims.core import claim_path
+
+    node_id = json.loads(_invoke("backlog", "add", "Unbacked mirror").output)["id"]
+    claims = tmp_graph.parent / "claims"
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: claims)
+
+    unbacked = _invoke("backlog", "update", node_id, "--locked-by", "probe-worker")
+    assert unbacked.exit_code == 0, unbacked.output
+    assert f"fno agents claim acquire node:{node_id}" in unbacked.stderr
+    row = _read_graph(tmp_graph)[0]
+    assert row["locked_by"] == "probe-worker"
+
+    lock = claim_path(f"node:{node_id}", root=claims)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("schema_version: 1\n")
+    backed = _invoke("backlog", "update", node_id, "--locked-by", "probe-worker")
+    assert backed.exit_code == 0, backed.output
+    assert "claim acquire" not in backed.stderr
+
+
+def test_update_locked_by_readback_failure_refuses_the_updated_receipt(
+    tmp_graph, monkeypatch
+):
+    """Updated answers 'was the command accepted', never 'is the value
+    there'. A stored row that lost the write must exit non-zero."""
+    node_id = json.loads(_invoke("backlog", "add", "Lost write").output)["id"]
+    real_load = json.loads(tmp_graph.read_text())
+
+    def stale_load(_path):
+        real_load["entries"][0]["locked_by"] = None
+        return real_load["entries"]
+
+    monkeypatch.setattr("fno.graph.load.load_graph", stale_load)
+
+    refused = runner.invoke(
+        app, ["backlog", "update", node_id, "--locked-by", "ghost-worker"]
+    )
+    assert refused.exit_code == 1
+    assert "did not persist" in refused.stderr
+    assert "ghost-worker" in refused.stderr
+
+
 def test_remove_pr_drops_entry_by_number(tmp_graph):
     """--remove-pr N drops the entry with that number from additional_prs."""
     r = _invoke("backlog", "add", "Multi")

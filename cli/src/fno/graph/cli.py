@@ -3175,6 +3175,31 @@ def cmd_demand(
 
 
 
+def _warn_lock_mirror_without_claim(node_id: str) -> None:
+    """A locked_by stamped with no backing claim lockfile is mirror-only
+    state: claim hygiene clears it on the next reap of that node. Say so at
+    write time so a caller never mistakes the stamp for a held lock.
+    """
+    try:
+        from fno.claims.core import claim_path
+        from fno.claims.io import claims_root_for, dedup_claims_roots
+
+        key = f"node:{node_id}"
+        roots = [claims_root_for(key), None]
+        has_claim = any(
+            claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots)
+        )
+    except Exception:  # noqa: BLE001 - the probe must not fail a write that landed
+        return
+    if not has_claim:
+        typer.echo(
+            f"warning: no live claim lockfile backs node:{node_id}; claim "
+            "hygiene (fno agents claim reap) clears locked_by without one. "
+            f"To hold the node: fno agents claim acquire node:{node_id}",
+            err=True,
+        )
+
+
 @cli.command("update")
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
@@ -4019,6 +4044,22 @@ def cmd_update(
     from fno.graph.load import load_graph
 
     stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    if locked_by is not None:
+        # The Updated receipt answers "was the command accepted", never "is
+        # the value there". Only the reread can answer the second.
+        expected_owner = None if locked_by == "null" else locked_by
+        stored_owner = stored_node.get("locked_by")
+        if stored_owner != expected_owner:
+            typer.echo(
+                f"error: {stored_node.get('id', task_id)} read back "
+                f"locked_by={stored_owner!r}, not {expected_owner!r}: "
+                "the write did not persist. A concurrent claim transition may "
+                "have cleared it; re-check before trusting.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if expected_owner is not None:
+            _warn_lock_mirror_without_claim(stored_node.get("id", task_id))
     if add_pr is not None and stored_node.get("status") == "ready":
         typer.echo(
             f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
