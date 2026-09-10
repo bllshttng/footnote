@@ -695,6 +695,7 @@ _DASHBOARD_JS = """\
   document.getElementById('sizeSel').addEventListener('change', function (e) { state.size = e.target.value; render(); });
   var originSel = document.getElementById('originSel');
   if (originSel) originSel.addEventListener('change', function (e) { state.origin = e.target.value; render(); });
+  function originBadge(n) { return LOCAL && n.ro && n.ro !== 'unknown' ? '<span class="pill origin">' + esc(ORIGIN_LABELS[n.ro] || n.ro) + '</span>' : ''; }
   var fromEl = document.getElementById('fromDate'); var stamps = NODES.map(function (n) { return n.u || n.c || ''; }).filter(Boolean).sort();
   if (stamps.length) { fromEl.min = stamps[0]; fromEl.max = stamps[stamps.length - 1]; }
   fromEl.addEventListener('change', function () { state.from = fromEl.value || '';
@@ -1120,7 +1121,6 @@ def _dashboard_rows(
                         for bid in entry.get("blocked_by") or []
                         if isinstance(bid, str)
                     ],
-                    # Request origin (x-1005); local-only, evidence can be private.
                     "ro": str(entry.get("request_origin") or "unknown"), "oe": str(entry.get("origin_evidence") or ""),
                 }
             )
@@ -1366,8 +1366,7 @@ def _dashboard_html(
             '<select id="originSel" aria-label="Filter by request origin"><option value="">All origins</option>'
             '<option value="operator_request">Your requests</option><option value="agent_discovery">Agent discoveries</option>'
             '<option value="automated_followup">Automated follow-ups</option><option value="unknown">Unknown</option></select>'
-            if local
-            else ""
+            if local else ""
         )
         + '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
