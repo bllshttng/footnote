@@ -1023,7 +1023,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     (tmp_path / ".git").mkdir()
     node = {
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
-        "priority": "p1", "cwd": str(tmp_path),
+        "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
     capacity = {"claude": "exhausted", "codex": "exhausted"}
 
