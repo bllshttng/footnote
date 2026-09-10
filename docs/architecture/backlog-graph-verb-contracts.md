@@ -570,7 +570,7 @@ Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
 Verify predecessor cause surfaces against one merged PR's file set.
 
     Returns positive receipts for predecessors that remain pending. Surfaces
-    govern the EVIDENCE stamp only (x-e8f3): a predecessor's status went
+    govern the EVIDENCE stamp only: a predecessor's status went
     terminal from the superseded_by edge alone, so a receipt here never
     changes whether the row reads as live work - it records which declared
     paths a merged PR did or did not touch.
@@ -589,7 +589,7 @@ Successor id -> successor node, for pending predecessors already owed proof.
     hand-run ``fno backlog done``, or a supersede recorded against a node that
     had already shipped - never passes through that path. Its predecessors keep
     an unverified record, but the superseded_by edge already terminals their
-    status (x-e8f3), so the row never reads as live work while the evidence
+    status, so the row never reads as live work while the evidence
     stays open.
 
     This finds those rows so the sweep can settle them against the evidence the
