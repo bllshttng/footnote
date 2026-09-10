@@ -200,13 +200,13 @@ def read_planned_unclaimed(
 
 
 def read_claim_snapshot() -> list[dict]:
-    from fno.claims.core import list_claims
-    from fno.claims.io import global_claims_root
+    from fno.claims.io import global_claims_root, list_claim_keys
 
     try:
-        return list_claims(
-            prefix="node:", include_stale=True, root=global_claims_root()
-        )
+        return [
+            {"key": key, "state": None}
+            for key in list_claim_keys("node:", global_claims_root())
+        ]
     except Exception as exc:  # noqa: BLE001 - identify the failed source
         raise ObserverReadError(f"claims unreadable: {exc}") from exc
 
