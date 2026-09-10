@@ -14,7 +14,7 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
-    // The host session is the first positional; --session stays the override
+    // The host session is the first positional; --server stays the override
     // spelling every verb shares.
     let mut parsed = rest.iter();
     let host_session = match parsed

@@ -1645,6 +1645,7 @@ fn base_command(
     // A pane host IS a terminal. It has no business inheriting a caller's
     // decision to suppress color in that caller's own output.
     cmd.env_remove("NO_COLOR");
+    cmd.env("FNO_SERVER", session);
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
     // Unique per pane-host spawn: descendants (incl. a nested claude) inherit
@@ -2417,7 +2418,9 @@ mod tests {
         // would collapse to `epoch--epochend`, which the assertion rejects.
         shell
             .0
-            .write_input(b"echo mark-$FNO_SESSION-$FNO_PANE-end epoch-$FNO_PANE_EPOCH-epochend\r")
+            .write_input(
+                b"echo mark-$FNO_SERVER-$FNO_SESSION-$FNO_PANE-end epoch-$FNO_PANE_EPOCH-epochend\r",
+            )
             .unwrap();
         let mut seen = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2426,7 +2429,7 @@ mod tests {
                 Ok(Some((_, chunk))) => {
                     seen.extend_from_slice(&chunk);
                     let text = String::from_utf8_lossy(&seen);
-                    if text.contains("mark-envtest-31-end") && text.contains("-epochend") {
+                    if text.contains("mark-envtest-envtest-31-end") && text.contains("-epochend") {
                         assert!(
                             !text.contains("epoch--epochend"),
                             "FNO_PANE_EPOCH must be non-empty: {text:?}"

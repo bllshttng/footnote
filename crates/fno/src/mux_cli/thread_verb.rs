@@ -142,14 +142,13 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         eprintln!("fno mux thread: takes exactly one name");
         return EXIT_USAGE;
     }
-    // A paneless row owns no session routing: the operator's ambient session
-    // (FNO_SESSION / the default) is the server whose portal this drives.
+    // A paneless row owns no session routing: the operator's ambient server
+    // (the flag, FNO_SERVER / FNO_SESSION, or the default) is the one whose
+    // portal this drives. Flag and env stay separate so resolve_session can
+    // tell an env-decided server from a flag-decided one (x-f209).
     let session = resolve_session(
-        session_flag
-            .as_deref()
-            .or(env_session)
-            .filter(|s| !s.is_empty()),
-        None,
+        session_flag.as_deref().filter(|s| !s.is_empty()),
+        env_session,
     );
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,

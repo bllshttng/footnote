@@ -49,14 +49,60 @@ use crate::tree::Dir;
 /// a hang. Generous next to a socket round-trip, tight next to a human.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The mux server axis, ruled 2026-09-10 (x-f209): a server is one socket and
+/// its workspaces; a session is one harness transcript. `FNO_SESSION` and
+/// `--session` stay as deprecated aliases that work and warn, because live
+/// worker payloads and long-running servers still send the old spellings.
+pub const SERVER_ENV: &str = "FNO_SERVER";
+pub const LEGACY_SERVER_ENV: &str = "FNO_SESSION";
+
+/// The value [`env_server`] took from `FNO_SESSION`, when it did, so
+/// [`resolve_session`] can tell an env-decided server from a flag-decided one.
+static LEGACY_ENV_VALUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static LEGACY_ENV_NOTED: std::sync::Once = std::sync::Once::new();
+
+/// One stderr line when a parser consumed the retired `--session` spelling.
+pub fn note_server_flag(tok: &str) {
+    if tok == "--session" {
+        eprintln!("warning: --session is deprecated; use --server instead. The alias will be removed in a future release.");
+    }
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// `FNO_SERVER`, else `FNO_SESSION`, else None. Silent: the note fires in
+/// [`resolve_session`], and only when the legacy value decided the server.
+pub fn env_server() -> Option<String> {
+    nonempty_env(SERVER_ENV).or_else(|| {
+        nonempty_env(LEGACY_SERVER_ENV).map(|v| {
+            let _ = LEGACY_ENV_VALUE.set(v.clone());
+            v
+        })
+    })
+}
+
 /// Resolve the target session: explicit flag/arg > `FNO_SESSION` (set in
-/// every pane the server spawns) > the default. Pure, so precedence is
-/// unit-testable (Locked 7).
+/// every pane the server spawns) > the default. Pure in its return value, so
+/// precedence is unit-testable (Locked 7).
 pub fn resolve_session(explicit: Option<&str>, env: Option<&str>) -> String {
-    explicit
+    let resolved = explicit
         .map(str::to_string)
         .or_else(|| env.filter(|s| !s.is_empty()).map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_SESSION.to_string())
+        .unwrap_or_else(|| DEFAULT_SESSION.to_string());
+    // The FNO_SESSION note only when the legacy var is the value that decided
+    // the server: an explicit flag or a set FNO_SERVER never prints it.
+    if explicit.is_none() {
+        if let (Some(legacy), Some(env)) = (LEGACY_ENV_VALUE.get(), env) {
+            if env == legacy {
+                LEGACY_ENV_NOTED.call_once(|| {
+                    eprintln!("warning: FNO_SESSION is deprecated; use FNO_SERVER instead. The alias will be removed in a future release.");
+                });
+            }
+        }
+    }
+    resolved
 }
 
 /// What one socket probe learned.
@@ -1783,11 +1829,12 @@ fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
                     }
                 });
             }
-            Some("--session") => {
+            Some(flag @ ("--server" | "--session")) => {
+                note_server_flag(flag);
                 session = Some(match it.next().and_then(|v| v.to_str()) {
                     Some(v) => v.to_string(),
                     None => {
-                        eprintln!("fno mux workspace restore: --session needs a value");
+                        eprintln!("fno mux workspace restore: {flag} needs a value");
                         return EXIT_USAGE;
                     }
                 });
@@ -2836,7 +2883,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 }
                 "--json" => json = true,
                 "--claim" => claim = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
                 // (x-5f7f) The registry name of the worker this pane hosts.
                 // Validated here with the same rule the store's load gate
@@ -2983,7 +3033,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
             "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             // (x-d865) split/break/ls flags.
             "--direction" | "-d" => {
                 direction = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
@@ -3403,7 +3456,10 @@ fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<Str
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
             "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             other => rest.push(other.to_string()),
         }
         i += 1;
@@ -3464,7 +3520,10 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         let res = (|| -> Result<(), String> {
             match tok {
                 "--json" => json = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
                 "--tab" => {
@@ -3651,9 +3710,11 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         };
         let res = (|| -> Result<(), String> {
             match tok {
-                "get" | "--json" | "--session" => {
-                    if tok == "--session" {
-                        let _ = flag_value(flags, &mut i, "--session")?;
+                "get" | "--json" | "--server" | "--session" => {
+                    // A re-parse of flags the common prefix already consumed:
+                    // the note fired there, so this skip stays silent.
+                    if tok == "--server" || tok == "--session" {
+                        let _ = flag_value(flags, &mut i, tok)?;
                     }
                 }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
@@ -5800,7 +5861,10 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
         match tok {
             "--json" => json = true,
             "--force" => force = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--to" => to = Some(parse_u64(&flag_value(args, &mut i, "--to")?, "--to")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
@@ -6531,7 +6595,10 @@ fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String
             .to_str()
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
             "--node" => node = Some(flag_value(args, &mut i, "--node")?),
@@ -6775,6 +6842,91 @@ mod tests {
         assert_eq!(resolve_session(None, None), DEFAULT_SESSION);
         // An empty env var reads as unset, not as a session named "".
         assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
+    }
+
+    #[test]
+    fn server_axis_resolve_session_accepts_both_spellings() {
+        // x-f209: `--server` and `--session` name the same axis; the resolver
+        // itself is spelling-blind (it takes resolved values).
+        assert_eq!(resolve_session(Some("work"), None), "work");
+        assert_eq!(resolve_session(None, Some("work")), "work");
+    }
+
+    #[test]
+    fn server_axis_pane_run_parser_accepts_server_alias_pair() {
+        // AC1/AC3: --server x and --session x parse to the same value, on the
+        // run parser and on a non-run pane verb.
+        let run_server = pane_args(&["run", "--server", "s1", "--", "echo", "hi"])
+            .expect("--server parses on run");
+        let run_alias = pane_args(&["run", "--session", "s1", "--", "echo", "hi"])
+            .expect("--session still parses on run");
+        assert_eq!(run_server.session, run_alias.session);
+        assert_eq!(run_server.session.as_deref(), Some("s1"));
+
+        let kill_server = pane_args(&["kill", "--server", "s2", "main:7"]).expect("must parse");
+        let kill_alias = pane_args(&["kill", "--session", "s2", "main:7"]).expect("must parse");
+        assert_eq!(kill_server.session, kill_alias.session);
+        assert_eq!(kill_server.session.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn server_axis_take_common_flags_accepts_server_alias_pair() {
+        // rows/where/view/thread/reseat/retire-session share this prefix.
+        let args: Vec<OsString> = ["--server", "s3", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let (server, json, rest) = take_common_flags(&args).expect("--server parses");
+        assert_eq!(server.as_deref(), Some("s3"));
+        assert!(json);
+        assert!(rest.is_empty());
+        let args: Vec<OsString> = ["--session", "s3", "--json"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let (server, json, rest) = take_common_flags(&args).expect("--session still parses");
+        assert_eq!(server.as_deref(), Some("s3"));
+        assert!(json);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn server_axis_block_parsers_accept_server_alias_pair() {
+        // AC1: block pipe and block annotate.
+        let pipe_server =
+            parse_block_args(&os(&["pipe", "--from", "4", "--to", "2", "--server", "s4"]))
+                .expect("must parse");
+        let pipe_alias = parse_block_args(&os(&[
+            "pipe",
+            "--from",
+            "4",
+            "--to",
+            "2",
+            "--session",
+            "s4",
+        ]))
+        .expect("must parse");
+        assert_eq!(pipe_server.session, pipe_alias.session);
+        assert_eq!(pipe_server.session.as_deref(), Some("s4"));
+
+        let ann_server = parse_block_annotate(&os(&[
+            "annotate", "--from", "3", "--server", "s5", "--node", "n1", "-m", "hi",
+        ]))
+        .expect("must parse");
+        let ann_alias = parse_block_annotate(&os(&[
+            "annotate",
+            "--from",
+            "3",
+            "--session",
+            "s5",
+            "--node",
+            "n1",
+            "-m",
+            "hi",
+        ]))
+        .expect("must parse");
+        assert_eq!(ann_server.session, ann_alias.session);
+        assert_eq!(ann_server.session.as_deref(), Some("s5"));
     }
 
     fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
