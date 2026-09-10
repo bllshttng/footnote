@@ -2,9 +2,9 @@
 
 A codex worker in the ``workspace-write`` sandbox can launch, report ready,
 and then wait forever on a tool the sandbox blocks: ``gh`` with no network, or
-a git ref write with no writable git dir. ``codex sandbox`` runs a command
-under the same seatbelt policy and ``config.toml`` a worker gets, so each tool
-is checked from inside it against a marker only that tool's success produces.
+a git ref lock with no writable git dir. ``codex sandbox`` runs a command under
+the same seatbelt policy and ``config.toml`` a worker gets, so each tool is
+checked from inside it against a marker only that tool's success produces.
 
 Two controls keep a refusal honest. A sandboxed echo must return its nonce, or
 the probe never ran. A tool that fails inside the sandbox is run again outside
@@ -18,7 +18,7 @@ import secrets
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Optional
 
 EXIT_SANDBOX_UNREACHABLE = 82
 
@@ -34,9 +34,13 @@ class SandboxProbe:
 
 
 def _first_line(text: str) -> str:
-    # gh states the cause first and a status-page pointer after it.
+    # gh states its cause at the start of the first line; git's lock error states
+    # it at the end, after a long path. A long line keeps both ends.
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    return lines[0][:160] if lines else ""
+    if not lines:
+        return ""
+    line = lines[0]
+    return line if len(line) <= 160 else f"{line[:60]}...{line[-97:]}"
 
 
 def _why(proc: "subprocess.CompletedProcess[str]") -> str:
@@ -48,7 +52,7 @@ def probe_codex_sandbox(
     *,
     run: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
 ) -> SandboxProbe:
-    """Check that ``gh`` and a git ref write work inside the worker's sandbox."""
+    """Check that ``gh`` and a git ref lock work inside the worker's sandbox."""
     from fno.agents.harnesses.codex import git_writable_config_args
 
     # The same roots override the resume lane grants, so the probe runs under
@@ -58,10 +62,13 @@ def probe_codex_sandbox(
         *git_writable_config_args(cwd), "--",
     ]
 
-    def call(argv: list[str], *, sandboxed: bool = True) -> "subprocess.CompletedProcess[str]":
+    def call(
+        argv: list[str], *, sandboxed: bool = True, stdin: Optional[str] = None
+    ) -> "subprocess.CompletedProcess[str]":
         return run(
             [*sandbox, *argv] if sandboxed else argv,
             cwd=str(cwd),
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=_TIMEOUT_SECS,
@@ -78,50 +85,39 @@ def probe_codex_sandbox(
     blocked: list[tuple[str, str]] = []
     unjudged: list[str] = []
 
-    gh_argv = ["gh", "api", "rate_limit", "--jq", ".resources.core.limit"]
+    def judge(tool: str, argv: list[str], answered, stdin: Optional[str] = None) -> None:
+        try:
+            inside = call(argv, stdin=stdin)
+            if answered(inside):
+                return
+            outside = call(argv, sandboxed=False, stdin=stdin)
+            if answered(outside):
+                blocked.append((tool, _why(inside)))
+            else:
+                unjudged.append(f"{tool} fails outside the sandbox too ({_why(outside)})")
+        except _ERRORS as exc:
+            unjudged.append(f"{tool}: {type(exc).__name__}: {exc}"[:160])
 
     def gh_answers(proc: "subprocess.CompletedProcess[str]") -> bool:
         limit = proc.stdout.strip()
         return proc.returncode == 0 and limit.isdigit() and int(limit) > 0
 
-    try:
-        inside = call(gh_argv)
-        if not gh_answers(inside):
-            outside = call(gh_argv, sandboxed=False)
-            if gh_answers(outside):
-                blocked.append(("gh", _why(inside)))
-            else:
-                unjudged.append(f"gh fails outside the sandbox too ({_why(outside)})")
-    except _ERRORS as exc:
-        unjudged.append(f"gh: {type(exc).__name__}: {exc}"[:160])
+    judge("gh", ["gh", "api", "rate_limit", "--jq", ".resources.core.limit"], gh_answers)
 
     try:
         head = call(["git", "rev-parse", "HEAD"], sandboxed=False)
     except _ERRORS:
         head = None
     if head is not None and head.returncode == 0:
-        ref = f"refs/fno-probe/{nonce}"
-        sha = head.stdout.strip()
-
-        def ref_landed() -> bool:
-            back = call(["git", "rev-parse", "--verify", "-q", ref], sandboxed=False)
-            return back.stdout.strip() == sha
-
-        try:
-            write = call(["git", "update-ref", ref, "HEAD"])
-            if not ref_landed():
-                outside = call(["git", "update-ref", ref, "HEAD"], sandboxed=False)
-                if ref_landed():
-                    blocked.append(("git", _why(write)))
-                else:
-                    unjudged.append(f"git ref write fails outside the sandbox too ({_why(outside)})")
-        except _ERRORS as exc:
-            unjudged.append(f"git: {type(exc).__name__}: {exc}"[:160])
-        finally:
-            try:
-                call(["git", "update-ref", "-d", ref], sandboxed=False)
-            except _ERRORS:
-                pass
+        # A transaction that takes the ref lock a commit takes, then aborts:
+        # no ref is ever created, and an interrupted write reads EOF and aborts.
+        txn = f"start\ncreate refs/fno-probe/{nonce} {head.stdout.strip()}\nprepare\nabort\n"
+        judge(
+            "git",
+            ["git", "update-ref", "--stdin"],
+            lambda proc: "prepare: ok" in proc.stdout.splitlines(),
+            stdin=txn,
+        )
 
     if blocked:
         return SandboxProbe("blocked", blocked, "; ".join(unjudged))
