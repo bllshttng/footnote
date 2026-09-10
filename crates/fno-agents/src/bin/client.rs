@@ -75,6 +75,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "report",
     "review-coverage",
     "review-summary",
+    "census",
     "restart",
     "resume",
     "review-start",
@@ -547,6 +548,15 @@ async fn run(args: Vec<String>) -> i32 {
     // `--force` (x-3498) is the break-glass variant: SIGKILL the lockfile's
     // holder BEFORE any probe, because a wedged holder is exactly what the
     // probe cannot see.
+    // `census` (x-f188): one JSON row per long-lived process, the build-
+    // staleness read that doctor/restart/update render. Composes the daemon
+    // status (in-process), a ps walk of keepers, and `fno mux ls --json`.
+    if verb == "census" {
+        let rows = fno_agents::census::census().await;
+        println!("{}", serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        return 0;
+    }
+
     if verb == "restart" {
         let force = match &args[1..] {
             [] => false,

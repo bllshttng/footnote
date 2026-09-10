@@ -61,6 +61,7 @@ pub mod claims;
 pub mod claude_adopt;
 pub mod claude_ask;
 pub mod claude_attach;
+pub mod census;
 pub mod claude_drive;
 pub mod claude_roster;
 pub mod claude_sessions;

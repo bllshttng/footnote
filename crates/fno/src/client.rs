@@ -16883,6 +16883,10 @@ mod tests;
 mod court_block_tests;
 
 #[cfg(test)]
+#[path = "client_tests/update_modal_tests.rs"]
+mod update_modal_tests;
+
+#[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]
 mod feed_view_tests;
 

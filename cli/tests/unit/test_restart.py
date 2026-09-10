@@ -8,6 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno import restart
+from fno import update as fno_update
 from fno.cli import app
 
 runner = CliRunner()
@@ -441,46 +442,19 @@ def _quiet_keeper_leg(monkeypatch) -> None:
 def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> None:
     """AC6-HP: a stale store keeper moves to a new pid, no mux server is
     killed, and the last stdout line starts with the ok verdict."""
-    from fno.agents import keeper_lane as _kl
     from fno.graph import store as _store
-    from pathlib import Path as _Path
 
     _fake_daemon_binary(monkeypatch)
     calls: list = []
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
-
-    class _Lane:
-        observations = [
-            types.SimpleNamespace(
-                pid=11,
-                lane="store",
-                sock=_Path("/tmp/k.store.sock"),
-                session="s",
-                cwd=None,
-                age_s=1.0,
-                child_pids=(),
-                sock_state="listener",
-                claimed_by=None,
-                registry_ok=True,
-            ),
-            types.SimpleNamespace(
-                pid=12,
-                lane="pane",
-                sock=_Path("/tmp/p.sock"),
-                session="p",
-                cwd=None,
-                age_s=1.0,
-                child_pids=(),
-                sock_state="listener",
-                claimed_by=None,
-                registry_ok=True,
-            ),
-        ]
-
-    monkeypatch.setattr(_kl, "discover", lambda **k: _Lane())
     monkeypatch.setattr(
-        _kl, "sock_identify", lambda sock: ("listener", {"drift": "drifted"})
+        fno_update,
+        "running_components",
+        lambda: [
+            {"component": "store-keeper", "verdict": "stale", "sock": "/tmp/k.store.sock"},
+            {"component": "pane-keeper", "verdict": "stale", "sock": "/tmp/p.sock"},
+        ],
     )
     monkeypatch.setattr(
         _store,
@@ -529,33 +503,17 @@ def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
 def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
     """AC6-EDGE: a keeper that answers Shutdown busy is spared, named, and
     the verb exits 1 - a spared keeper is NOT healed."""
-    from fno.agents import keeper_lane as _kl
     from fno.graph import store as _store
-    from pathlib import Path as _Path
 
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls := []))
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
-
-    class _Lane:
-        observations = [
-            types.SimpleNamespace(
-                pid=11,
-                lane="store",
-                sock=_Path("/tmp/k.store.sock"),
-                session="s",
-                cwd=None,
-                age_s=1.0,
-                child_pids=(),
-                sock_state="listener",
-                claimed_by=None,
-                registry_ok=True,
-            )
-        ]
-
-    monkeypatch.setattr(_kl, "discover", lambda **k: _Lane())
     monkeypatch.setattr(
-        _kl, "sock_identify", lambda sock: ("listener", {"drift": "drifted"})
+        fno_update,
+        "running_components",
+        lambda: [
+            {"component": "store-keeper", "verdict": "stale", "sock": "/tmp/k.store.sock"},
+        ],
     )
     monkeypatch.setattr(
         _store,
