@@ -13,6 +13,7 @@ import typer.main
 from typer.models import TyperInfo
 
 from fno.autonomy_cli import (
+    DISPATCH_PROVENANCE,
     SpawnerStatus,
     autonomy_app,
     collect_status,
@@ -221,3 +222,61 @@ def test_status_command_always_exits_0_even_on_resolver_error(
     monkeypatch.setattr(autonomy_cli, "collect_status", _boom)
     result = runner.invoke(_cli(), ["status", "--project-root", str(tmp_path)])
     assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# x-84b2: dispatch provenance codes
+# ---------------------------------------------------------------------------
+
+
+def test_status_rows_carry_source_and_verb_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
+    _write_settings(tmp_path, "schema_version: 1\n")
+
+    rows = collect_status(tmp_path)
+    by_name = {r.name: r for r in rows}
+    assert by_name["dispatch_lanes (parallel fill)"].source == "ab"
+    assert by_name["epic converge (mission drain)"].source == "ab"
+    assert by_name["advance (node-walk)"].source == "ac"
+    assert by_name["reconcile_dispatch (G4 de-stub)"].verb == "t"
+    # The master switch is not a dispatch path: no provenance codes.
+    assert by_name["autonomy (master switch)"].source is None
+
+
+def test_format_table_renders_source_verb_columns() -> None:
+    rows = [
+        SpawnerStatus("a", "trigger-a", "config.a.enabled", True, "config", "ab", "t"),
+        SpawnerStatus("b", "trigger-b", "(none)", None, "ungated"),
+    ]
+    table = format_table(rows)
+    assert "SOURCE" in table and "VERB" in table
+    assert "ab" in table and "ungated" in table
+
+
+def test_provenance_inventory_is_complete() -> None:
+    assert len(DISPATCH_PROVENANCE) == 18
+    sites = [row.site for row in DISPATCH_PROVENANCE]
+    assert len(set(sites)) == len(sites)
+    sources = {row.source for row in DISPATCH_PROVENANCE}
+    assert {"sob", "ac"} <= sources, "sob and ac must be distinct rows"
+    assert sum(1 for row in DISPATCH_PROVENANCE if row.source == "ab") == 2
+
+
+def test_provenance_audit_prints_marker_and_exits_zero(tmp_path: Path) -> None:
+    result = runner.invoke(_cli(), ["provenance"])
+    assert result.exit_code == 0
+    assert "dispatch provenance: 18/18 coded" in result.stdout
+
+
+def test_provenance_audit_fails_on_a_broken_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fno.autonomy_cli as autonomy_cli
+
+    broken = autonomy_cli.DISPATCH_PROVENANCE[:-1]  # 17 rows: short one path
+    monkeypatch.setattr(autonomy_cli, "DISPATCH_PROVENANCE", broken)
+    result = runner.invoke(_cli(), ["provenance"])
+    assert result.exit_code == 1
+    assert "dispatch provenance: 18/18 coded" not in result.stdout

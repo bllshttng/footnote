@@ -2647,12 +2647,18 @@ NAME_REFUSED_EXIT = 3
 
 @agents_app.command("name", hidden=True)
 def cmd_name(
-    prefix: str = typer.Argument(..., help="Operation prefix (target|spawn|handoff|...)."),
+    prefix: str = typer.Argument("", help="Legacy operation prefix (target|think|...); omit with --verb."),
     node_id: str = typer.Argument(..., help="Full backlog node id; never abbreviated."),
     slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
     qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
     discriminator: str = typer.Option(
         "", "--discriminator", help="Per-invocation uniqueness token; never shaved."
+    ),
+    source: str = typer.Option(
+        "", "--source", help="Dispatch source code (x-84b2); omit for an attended launch."
+    ),
+    verb: str = typer.Option(
+        "", "--verb", help="Dispatch verb code (t|bp|r|th|f); the x-84b2 form."
     ),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
@@ -2662,21 +2668,49 @@ def cmd_name(
     from a `cut -c1-64`, which shaves the uniqueness discriminator and collapses
     two dispatches onto one dedup token.
 
-    Exit 3 (NOT 2) is the naming refusal. Exit 2 is Click's usage error, which
-    an `fno` too old to know this verb also returns for "no such command" - a
-    caller treating 2 as a refusal would read every ordinary node as
-    unrepresentable and refuse the whole fleet on a stale install.
+    Two forms. The x-84b2 dispatch form passes `--verb` (and optionally
+    `--source`); the name is `[<source>-]<verb>-<node>`. The legacy form passes
+    a positional prefix and no `--verb`; behavior is unchanged.
+
+    Exit 3 (NOT 2) is the naming refusal, including an unknown --source or
+    --verb. Exit 2 is Click's usage error, which an `fno` too old to know this
+    verb also returns for "no such command" - a caller treating 2 as a refusal
+    would read every ordinary node as unrepresentable and refuse the whole
+    fleet on a stale install.
     """
     from fno.agents.naming import AgentNameError, agent_name as _agent_name
+    from fno.agents.naming import dispatch_agent_name
 
     try:
-        name = _agent_name(
-            prefix,
-            node_id,
-            slug=slug or None,
-            qualifier=qualifier or None,
-            discriminator=discriminator or None,
-        )
+        if verb or source:
+            if prefix:
+                typer.echo(
+                    "error: pass the legacy prefix form or --source/--verb, not both",
+                    err=True,
+                )
+                raise typer.Exit(2)
+            if not verb:
+                typer.echo("error: --source requires --verb", err=True)
+                raise typer.Exit(2)
+            name = dispatch_agent_name(
+                source or None,
+                verb,
+                node_id,
+                slug=slug or None,
+                qualifier=qualifier or None,
+                discriminator=discriminator or None,
+            )
+        else:
+            if not prefix:
+                typer.echo("error: a prefix or --verb is required", err=True)
+                raise typer.Exit(2)
+            name = _agent_name(
+                prefix,
+                node_id,
+                slug=slug or None,
+                qualifier=qualifier or None,
+                discriminator=discriminator or None,
+            )
     except AgentNameError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(NAME_REFUSED_EXIT)

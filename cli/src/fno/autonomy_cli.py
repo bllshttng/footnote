@@ -18,7 +18,8 @@ Exit code is always 0 - this is introspection, never a gate (AC9-ERR).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +41,52 @@ class SpawnerStatus:
     gate_key: str
     armed: Optional[bool]  # None = ungated (no gate exists yet)
     rank: str  # "env" | "config" | "default" | "autonomy" | "ungated"
+    source: Optional[str] = None  # x-84b2 dispatch source code; None = n/a
+    verb: Optional[str] = None  # dispatch verb code, or "resolved" at runtime
+
+
+@dataclass(frozen=True)
+class ProvenanceRow:
+    """One entry of the x-84b2 dispatch-provenance inventory.
+
+    Every path that can mint a worker name carries exactly one source code
+    and one verb code. ``verb == "resolved"`` marks the advance family, whose
+    verb comes from the harness-map receipt at dispatch time (t/bp/r/th/f).
+    """
+
+    site: str
+    source: str
+    verb: str
+
+
+#: The 18 dispatch paths (x-84b2): the 13 autonomous spawners of the status
+#: table plus spawn-on-blueprint and the four extra paths from the operator
+#: input brief (outage handoff, target self-handoff, foreign wave, backlog
+#: join). ``site`` is the status-table spawner name when one exists, else a
+#: stable label - the CI provenance audit (check-autonomy-registry.sh) fails
+#: when this inventory is short a path or a code.
+DISPATCH_PROVENANCE: tuple[ProvenanceRow, ...] = (
+    ProvenanceRow("dispatch_lanes (parallel fill)", "ab", "resolved"),
+    ProvenanceRow("epic converge (mission drain)", "ab", "resolved"),
+    ProvenanceRow("advance (node-walk)", "ac", "resolved"),
+    ProvenanceRow("spawn on blueprint", "sob", "resolved"),
+    ProvenanceRow("reconcile_dispatch (G4 de-stub)", "rd", "t"),
+    ProvenanceRow("spawn_think (context /think)", "th", "th"),
+    ProvenanceRow("post-merge ritual", "pm", "r"),
+    ProvenanceRow("pr_watch (headless PR poll)", "pw", "r"),
+    ProvenanceRow("recovery sweep (crash respawn)", "rec", "resolved"),
+    ProvenanceRow("keep_going (autonomous follow-up)", "kg", "t"),
+    ProvenanceRow("groom (_spawn_groom_worker)", "gr", "th"),
+    ProvenanceRow("restart (_revive_orphans)", "ro", "resolved"),
+    ProvenanceRow("evals runner", "ev", "th"),
+    ProvenanceRow("king loop", "kl", "th"),
+    ProvenanceRow("outage handoff", "oh", "t"),
+    ProvenanceRow("target self-handoff", "sh", "t"),
+    ProvenanceRow("execute foreign wave", "ex", "t"),
+    ProvenanceRow("backlog join", "jn", "t"),
+)
+
+_PROVENANCE_BY_SPAWNER = {row.site: row for row in DISPATCH_PROVENANCE}
 
 
 def _settings_for(project_root: Optional[Path]):
@@ -308,19 +355,38 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _evals_status(project_root),
         _king_loop_status(project_root),
     ]
-    return rows
+    # x-84b2: stamp each row with its dispatch provenance codes.
+    return [
+        replace(
+            r,
+            source=(
+                _PROVENANCE_BY_SPAWNER[r.name].source if r.name in _PROVENANCE_BY_SPAWNER else None
+            ),
+            verb=(
+                _PROVENANCE_BY_SPAWNER[r.name].verb if r.name in _PROVENANCE_BY_SPAWNER else None
+            ),
+        )
+        for r in rows
+    ]
 
 
 def format_table(rows: list[SpawnerStatus]) -> str:
-    headers = ("SPAWNER", "TRIGGER", "GATE KEY", "ARMED", "RANK")
+    headers = ("SPAWNER", "TRIGGER", "GATE KEY", "ARMED", "RANK", "SOURCE", "VERB")
 
     def _armed_cell(v: Optional[bool]) -> str:
         if v is None:
             return "ungated"
         return "true" if v else "false"
 
+    def _code_cell(v: Optional[str]) -> str:
+        return v if v else "-"
+
     table_rows = [
-        (r.name, r.trigger, r.gate_key, _armed_cell(r.armed), r.rank) for r in rows
+        (
+            r.name, r.trigger, r.gate_key, _armed_cell(r.armed), r.rank,
+            _code_cell(r.source), _code_cell(r.verb),
+        )
+        for r in rows
     ]
     widths = [
         max(len(headers[i]), *(len(row[i]) for row in table_rows)) if table_rows else len(headers[i])
@@ -354,3 +420,46 @@ def status_command(
     except Exception as exc:  # noqa: BLE001 - AC9-ERR: introspection must not raise
         typer.echo(f"fno agents autonomy status: degraded read ({exc})", err=True)
     raise typer.Exit(code=0)
+
+
+def audit_dispatch_provenance() -> None:
+    """Positive completeness marker for the x-84b2 vocabulary (AC5-GUARD).
+
+    Prints one row per registered dispatch path, then the terminal marker the
+    CI provenance audit (check-autonomy-registry.sh) greps for. Exits 1 when
+    the inventory is short 18 paths, a code is unknown, or the sob/ac split
+    and the two active-backlog rows lost their distinction - an empty grep is
+    never the evidence; the marker line is.
+    """
+    from fno.agents.naming import DISPATCH_SOURCES, DISPATCH_VERBS
+
+    problems: list[str] = []
+    if len(DISPATCH_PROVENANCE) != 18:
+        problems.append(f"expected 18 coded paths, found {len(DISPATCH_PROVENANCE)}")
+    for row in DISPATCH_PROVENANCE:
+        if row.source not in DISPATCH_SOURCES:
+            problems.append(f"{row.site}: unknown source {row.source!r}")
+        if row.verb not in DISPATCH_VERBS and row.verb != "resolved":
+            problems.append(f"{row.site}: unknown verb {row.verb!r}")
+    sites = [row.site for row in DISPATCH_PROVENANCE]
+    if len(set(sites)) != len(sites):
+        problems.append("duplicate site labels in the inventory")
+    sources = {row.source for row in DISPATCH_PROVENANCE}
+    if {"sob", "ac"} - sources:
+        problems.append("sob and ac must be distinct inventory rows")
+    if sum(1 for row in DISPATCH_PROVENANCE if row.source == "ab") != 2:
+        problems.append("both active-backlog rows must carry ab")
+    for row in DISPATCH_PROVENANCE:
+        typer.echo(f"{row.site}\t{row.source}\t{row.verb}")
+    if problems:
+        for problem in problems:
+            typer.echo(f"error: {problem}", err=True)
+        sys.exit(1)
+    typer.echo("dispatch provenance: 18/18 coded")
+
+
+@autonomy_app.command("provenance", hidden=True)
+def provenance_command() -> None:
+    """Print every dispatch path with its source and verb codes, then the
+    completeness marker. Exit 1 when the inventory is incomplete."""
+    audit_dispatch_provenance()
