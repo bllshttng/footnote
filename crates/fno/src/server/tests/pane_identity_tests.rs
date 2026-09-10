@@ -82,3 +82,48 @@ fn a_spawned_name_pane_is_orphaned_only_when_the_name_is_dead() {
         "a shell pane with no spawned name never reaches the tier"
     );
 }
+
+#[test]
+fn member_pane_reads_the_recorded_pane_id_first_and_falls_through_when_it_is_gone() {
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let recorded = core.spawn_pane(24, 80, "/a").unwrap();
+    let joined = core.spawn_pane(24, 80, "/a").unwrap();
+    core.worker_session_pane
+        .insert(("codex".into(), "session-one".into()), joined);
+    let member = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some("t-worker".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("session-one".into()),
+        pane_id: Some(recorded),
+    };
+    assert_eq!(
+        core.member_pane(&member),
+        Some(recorded),
+        "a recorded live pane id wins over the derived join"
+    );
+    let gone = crate::squad_store::StoredMember {
+        pane_id: Some(joined + 100),
+        ..member.clone()
+    };
+    assert_eq!(
+        core.member_pane(&gone),
+        Some(joined),
+        "a dead recorded id falls through to the member's own session join"
+    );
+    let stranger = crate::squad_store::StoredMember {
+        harness_session_id: Some("session-two".into()),
+        ..gone.clone()
+    };
+    assert_eq!(
+        core.member_pane(&stranger),
+        None,
+        "a dead recorded id never lands on another worker's pane"
+    );
+}

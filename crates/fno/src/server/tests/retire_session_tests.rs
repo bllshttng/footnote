@@ -23,6 +23,7 @@ fn retirement_cannot_launder_a_newer_topology_generation() {
         worker: Some("retiring".into()),
         harness: Some("codex".into()),
         harness_session_id: Some("session-retiring".into()),
+        pane_id: None,
     };
     core.squad_members.insert(1, vec![member.clone()]);
     core.persist_stored("sq", "", &["/a".into()], &[member]);
@@ -65,6 +66,7 @@ fn retire_session_tombstones_the_identity_and_closes_only_its_panes() {
             worker: Some("t-r-one".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("sess-retire-one".into()),
+            pane_id: None,
         },
         crate::squad_store::StoredMember {
             attach_id: String::new(),
@@ -76,6 +78,7 @@ fn retire_session_tombstones_the_identity_and_closes_only_its_panes() {
             worker: Some("t-r-two".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("sess-retire-two".into()),
+            pane_id: None,
         },
     ];
     crate::squad_store::upsert(

@@ -76,6 +76,48 @@ impl Core {
         evidence
     }
 
+    /// The fail-closed send gate: `Some(refusal)` when the pane must not
+    /// be typed into. An unreconciled pane (adopted at a fresh id
+    /// because its birth id was taken) refuses outright; an unaddressed
+    /// send to a labelled pane whose session id resolves to nothing
+    /// refuses too. A pane with no label is an operator shell and is
+    /// untouched.
+    pub(super) fn pane_send_identity_gate(
+        &self,
+        pane: u64,
+        label: Option<&str>,
+        unreconciled: bool,
+        expected_identity: Option<&str>,
+        agents: Result<&[RegistryAgent], &'static str>,
+    ) -> Option<ServerMsg> {
+        // Fail closed: a pane whose identity did not reconcile is never typed
+        // into blind - the number may name a different occupant than its label
+        // claims. A mis-delivered send is worse than a refused one. A pane with
+        // no label at all is an operator shell and is untouched.
+        if unreconciled {
+            let host = label.unwrap_or("<no label>");
+            return Some(ServerMsg::Err {
+                code: err_code::TARGET_IDENTITY_MISMATCH,
+                msg: format!(
+                    "pane {pane} carries label {host}; its birth pane id could not be reused, so it was adopted at a fresh id and its identity never reconciled; re-address by session id through `fno mux where`"
+                ),
+            });
+        }
+        if expected_identity.is_none() {
+            if let (Some(host), Ok(rows)) = (label, agents) {
+                if self.fno_id_for_pane_with_agents(pane, rows).is_none() {
+                    return Some(ServerMsg::Err {
+                        code: err_code::TARGET_IDENTITY_MISMATCH,
+                        msg: format!(
+                            "pane {pane} carries label {host} but no session id resolves for it; re-address by session id through `fno mux where`"
+                        ),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn dead_sweep_count(&self) -> usize {
         let mut evidence = self.member_evidence();
         for entry in self.panes.values() {

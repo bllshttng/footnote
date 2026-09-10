@@ -1936,6 +1936,7 @@ fn the_restore_notice_names_both_held_kinds() {
             worker: Some("t-live-one".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("live-session".into()),
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -2132,6 +2133,7 @@ fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();

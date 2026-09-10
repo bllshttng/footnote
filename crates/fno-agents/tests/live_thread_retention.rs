@@ -18,6 +18,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         worker: Some(worker.into()),
         harness: Some(harness.into()),
         harness_session_id: Some(session_id.into()),
+        pane_id: None,
     };
     let registry = RegistryAgent {
         name: worker.into(),

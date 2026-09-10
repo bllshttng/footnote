@@ -46,6 +46,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                     worker: Some("t-codex-one".into()),
                     harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-one".into()),
+                    pane_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -57,6 +58,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                     worker: Some("t-codex-two".into()),
                     harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-two".into()),
+                    pane_id: None,
                 },
             ],
         )
@@ -147,6 +149,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
                 worker: Some("t-codex-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("codex-session-one".into()),
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -158,6 +161,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
                 worker: Some("t-codex-two".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("codex-session-two".into()),
+                pane_id: None,
             },
         ],
     )
@@ -289,6 +293,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
                 worker: Some("t-done-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("done-session".into()),
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -300,6 +305,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
                 worker: Some("t-live-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("live-session".into()),
+                pane_id: None,
             },
         ],
     )
@@ -387,6 +393,104 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
 }
 
 #[test]
+fn restore_seats_an_adopted_worker_whose_slot_was_captured_under_its_bare_name() {
+    // The capture ran before the registry row published, so the slot names
+    // the bare worker; at restore the member binds by session. The adopted
+    // keeper pane must still land in its captured tab, while a slot whose
+    // worker has no member at all keeps the shell substitute and the notice.
+    let s = StoreScratch::new("restore-bare-seat");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    crate::squad_store::upsert(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-live-one".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("live-session".into()),
+            pane_id: None,
+        }],
+    )
+    .unwrap();
+    let one_slot_tab = |name: &str, binding: &str| crate::squad_store::StoredTabTree {
+        tab_name: Some(name.into()),
+        tree: crate::proto::LayoutTreeSpec::Slot("s0".into()),
+        slots: vec![crate::proto::LayoutSlot::new(
+            "s0".into(),
+            LayoutBinding::Fno(binding.into()),
+        )],
+        focus: None,
+    };
+    crate::squad_store::set_tab_trees(
+        "",
+        &crate::squad_store::origin_key(&[origin_str.clone()]),
+        &[],
+        &[
+            one_slot_tab("work", "t-live-one"),
+            one_slot_tab("ghost", "worker:codex:ghost-session"),
+        ],
+        None,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let adopted = core.spawn_pane(24, 80, &origin_str).unwrap();
+    core.keeper_adopted.push(AdoptedKeeper {
+        pane: adopted,
+        child_pid: None,
+        argv: vec![
+            "env".into(),
+            "FNO_AGENT_SELF=t-live-one".into(),
+            "codex".into(),
+        ],
+        cwd: origin_str.clone(),
+        placed: false,
+    });
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-live-one"]);
+    let _done = DoneSessionsGuard;
+    set_done_sessions(HashSet::new());
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    assert!(
+        core.keeper_adopted[0].placed,
+        "the member walk bound the adopted pane"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    let (sid, ti) = core.session.find_pane(adopted).unwrap();
+    let tab = &core.session.squad(sid).unwrap().tabs[ti];
+    assert_eq!(
+        (tab.name.as_deref(), tree::leaves(&tab.root)),
+        (Some("work"), vec![adopted]),
+        "the adopted worker is seated in its captured tab, not appended: {notices}"
+    );
+    assert_eq!(
+        core.panes.len(),
+        2,
+        "the adopted pane plus one ghost shell, no substitute for the seated worker"
+    );
+    assert!(
+        notices.contains("1 worker(s) did not come back (tab ghost): worker:codex:ghost-session"),
+        "the absent worker is shell-substituted and named: {notices}"
+    );
+    assert!(
+        !notices.contains("(tab work)"),
+        "the seated worker is not reported missing: {notices}"
+    );
+}
+
+#[test]
 fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
     // x-2990: a member whose attach-id NO row names is dead weight; one
     // whose EXITED row still names it is the resumable dim card and stays.
@@ -409,6 +513,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: "c0ffee00".into(),
@@ -420,6 +525,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -482,6 +588,7 @@ fn restore_lifts_a_tombstone_against_a_live_registry_row() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -534,6 +641,7 @@ fn restore_keeps_a_tombstone_against_an_exited_row() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -572,6 +680,7 @@ fn restore_refusal_names_the_never_bound_marker() {
         worker: Some("residue".into()),
         harness: None,
         harness_session_id: None,
+        pane_id: None,
     };
     let markers = HashMap::from([(
         String::from("residue"),
@@ -614,6 +723,7 @@ fn restore_legacy_member_uses_unique_receipt_harness() {
         worker: Some("worker".into()),
         harness: None,
         harness_session_id: Some("full-session".into()),
+        pane_id: None,
     };
     let receipts = HashMap::from([(
         (String::from("codex"), String::from("full-session")),
@@ -657,6 +767,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
                 worker: Some("t-codex-live".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -668,6 +779,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
                 worker: Some("t-codex-reaped".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -739,6 +851,7 @@ fn restore_retires_a_gone_worker_before_the_hold_branch_and_skips_its_tab() {
             worker: Some("t-corpse".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("corpse-session".into()),
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -818,6 +931,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
                 worker: Some("t-codex-one".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -829,6 +943,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
                 worker: Some("t-codex-two".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -1127,6 +1242,7 @@ fn stored_worker(
         worker: Some(name.into()),
         harness: Some(harness.into()),
         harness_session_id: Some(sid.into()),
+        pane_id: None,
     }
 }
 
@@ -1287,6 +1403,7 @@ fn workspace_restore_resumes_members_and_a_rerun_focuses() {
                 worker: None,
                 harness: Some("claude".into()),
                 harness_session_id: None,
+                pane_id: None,
             },
             {
                 let mut dead = stored_worker("gone-row", "codex", "sid-gone", "/x");
