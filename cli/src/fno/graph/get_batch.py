@@ -32,14 +32,16 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
 def _echo_entry(e: dict, field: object, grouped: bool) -> None:
     """Render the exact hit exactly as the caller's exact branch does: the
     one renderer, re-used, so the fast path's bytes are the slow path's."""
-    if field == "_status":
-        field = "status"
     from fno.graph.cli import _echo_node_entry
     from fno.graph._intake import project_root_from_settings
 
+    # The caller's annotation is loose; the renderer wants str | None.
+    field_name: "str | None" = field if isinstance(field, str) else None
+    if field_name == "_status":
+        field_name = "status"
     root = project_root_from_settings(e["project"]) if e.get("project") else None
     e["_resolved_cwd"] = root or e.get("cwd")
-    _echo_node_entry(e, field, grouped)
+    _echo_node_entry(e, field_name, grouped)
 
 
 def _graph_path():
