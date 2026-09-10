@@ -2127,7 +2127,7 @@ def abandoned_leg(entries, claimed, graph_path, apply):
     except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
         return [], f"abandoned-do-row leg skipped: {exc}"
 
-    reaped, truncated = {}, 0
+    reaped, reaped_rows, truncated = {}, 0, 0
     if apply:
         gone = [r for r in rows if r.verdict == "gone"]
         truncated = max(0, len(gone) - AUTO_DEFER_BLAST_CAP)
@@ -2141,10 +2141,11 @@ def abandoned_leg(entries, claimed, graph_path, apply):
                 )
                 reaped[cand.node] = {"row_removed": bool(rep.get("row_removed")),
                                      "status_after": rep.get("status_after")}
+                reaped_rows += 1
             except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                 reaped[cand.node] = {"error": str(exc)}
 
-    lines = [f"abandoned-do-rows reaped {len(reaped)} of {len(rows)} candidate(s)"
+    lines = [f"abandoned-do-rows reaped {reaped_rows} of {len(rows)} candidate(s)"
              if apply else f"abandoned-do-row candidates {len(rows)}"]
     for r in rows:
         tag = f"{r.harness} {str(r.session_id)[:8]}"
