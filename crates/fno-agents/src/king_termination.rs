@@ -135,6 +135,18 @@ pub(crate) fn parse_gate_probe(payload: &Value) -> Option<GateProbe> {
     })
 }
 
+impl GateProbe {
+    /// The one-line constraint statement this verdict carries, for a stop-hook
+    /// message: the probe's own sentence, else its reason token, else a bare
+    /// statement that dispatch capacity is gone.
+    pub(crate) fn constraint(&self) -> String {
+        self.message
+            .clone()
+            .or_else(|| self.reason.clone())
+            .unwrap_or_else(|| "dispatch capacity exhausted".to_string())
+    }
+}
+
 /// Ask the gate the dispatch would ask. Any failure here is `Err`: the caller
 /// must fall back to today's block, never read a broken probe as saturation.
 pub(crate) fn probe_dispatch_capacity(fno_bin: &str, cwd: &Path) -> Result<GateProbe, String> {
@@ -201,6 +213,85 @@ pub(crate) fn saturation_verdict(
         blocked,
     })
     .or(Some(SaturationOutcome::Saturated { blocked }))
+}
+
+/// What the capacity gate decided for this fire, rendered and ready for the
+/// caller's two verdicts (x-df28). Composition of the probe read, the pure
+/// saturation verdict, and the two messages the king block carries.
+pub(crate) enum CapacityGate {
+    /// Every actionable row is undispatched and the gate refuses: the stop is
+    /// legitimate, so the caller terminates NoWork with this message.
+    Saturated {
+        message: String,
+        blocked: i64,
+        fires: u64,
+    },
+    /// Keep the block, pointed at a non-dispatch row, with the honest split.
+    Split {
+        message: String,
+        actionable: i64,
+        fires: u64,
+        journal: Value,
+    },
+}
+
+pub(crate) fn capacity_gate(
+    board: &KingBoard,
+    fno_bin: &str,
+    cwd: &Path,
+    session_id: &str,
+    dry: u64,
+    emit: &dyn Fn(&str, Value),
+) -> Option<CapacityGate> {
+    let probe = match board.top_row.as_deref() {
+        Some(top) if top.starts_with("undispatched:") => {
+            match probe_dispatch_capacity(fno_bin, cwd) {
+                Ok(p) => Some(p),
+                // A failed probe keeps today's block, never reads as saturation.
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+    let verdict = saturation_verdict(board, probe.as_ref())?;
+    let constraint = probe
+        .as_ref()
+        .map(|p| p.constraint())
+        .unwrap_or_else(|| "dispatch capacity exhausted".to_string());
+    match verdict {
+        SaturationOutcome::Saturated { blocked } => {
+            let message = format!(
+                "fleet saturated: {constraint}; \
+                 {blocked} actionable rows all blocked on dispatch capacity"
+            );
+            Some(CapacityGate::Saturated {
+                message,
+                blocked,
+                fires: dry + 1,
+            })
+        }
+        SaturationOutcome::BlockedWithNext { next, blocked } => {
+            let message = format!(
+                "{} actionable now; next: {next}; \
+                 {blocked} blocked on dispatch capacity ({constraint})",
+                board.actionable - blocked
+            );
+            let journal = serde_json::json!({
+                "session_id": session_id,
+                "actionable": board.actionable,
+                "actionable_now": board.actionable - blocked,
+                "blocked_on_capacity": blocked,
+                "actionable_ids": board.actionable_ids,
+                "cleared": false,
+            });
+            Some(CapacityGate::Split {
+                message,
+                actionable: board.actionable,
+                fires: dry + 1,
+                journal,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
