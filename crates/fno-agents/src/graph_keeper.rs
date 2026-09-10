@@ -652,6 +652,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
     Ok(outcome_json(&outcome))
 }
 
+#[derive(Debug)]
 enum CommitRowsError {
     Store(StoreError),
     Conflict(Vec<String>),
@@ -1829,6 +1830,68 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn row_commit_state(graph: PathBuf) -> StoreState {
+        StoreState {
+            graph,
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            write_gate: Mutex::new(()),
+        }
+    }
+
+    fn row_commit_params(begin: &Value, row: Value) -> Value {
+        json!({
+            "base_version": begin["version"],
+            "base_digests": begin["base_digests"],
+            "changed": [row],
+            "removed": [],
+            "plan_rungs": {},
+        })
+    }
+
+    #[test]
+    fn commit_rows_disjoint_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-left","title":"left"},{"id":"x-right","title":"right"}]}"#,
+        )
+        .unwrap();
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let mut left = begin["entries"][0].clone();
+        left["title"] = json!("left changed");
+        let mut right = begin["entries"][1].clone();
+        right["title"] = json!("right changed");
+
+        handle_commit_rows(&state, &row_commit_params(&begin, left)).unwrap();
+        handle_commit_rows(&state, &row_commit_params(&begin, right)).unwrap();
+
+        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        assert_eq!(rows[0]["title"], json!("left changed"));
+        assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn commit_rows_same_row_conflicts_and_names_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[{"id":"x-left","title":"left"}]}"#).unwrap();
+        let state = row_commit_state(graph);
+        let begin = handle_begin(&state).unwrap();
+        let mut first = begin["entries"][0].clone();
+        first["title"] = json!("first");
+        let mut second = begin["entries"][0].clone();
+        second["title"] = json!("second");
+
+        handle_commit_rows(&state, &row_commit_params(&begin, first)).unwrap();
+        match handle_commit_rows(&state, &row_commit_params(&begin, second)) {
+            Err(CommitRowsError::Conflict(ids)) => assert_eq!(ids, vec!["x-left"]),
+            _ => panic!("same-row commit must conflict"),
+        }
+    }
 
     #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
