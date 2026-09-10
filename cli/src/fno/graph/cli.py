@@ -63,7 +63,6 @@ cli.add_typer(_triage_cli, name="triage")
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
 # `fno agents mail` (cross-project messaging).
-#
 # `inbox` was a SECOND registration of this same app, so all nine of its
 # subcommands were duplicates and the surface paid for them twice. It is gone;
 # `fno.tombstones` keeps the name reachable as a signpost.
@@ -747,13 +746,6 @@ def cmd_epic_status(
 
 
 cli.add_typer(_epic_cli, name="epic", hidden=True)
-
-
-# -- shared node construction --
-
-_NodeFields = dict
-
-
 
 
 def _stamp_ship_on_pr_link(node_id: str) -> None:
@@ -3944,7 +3936,6 @@ def cmd_update(
             # inside <owner>", a false completion note on work that never
             # shipped. It also keeps `parent` and `contained_in` from
             # disagreeing, which is what produced that false note.
-            #
             # Deliberately keyed on moving away from THE OWNER, not on any
             # re-parent: a contained node moved between two nodes that both sit
             # under its delivery unit is still contained.
@@ -4191,7 +4182,6 @@ def _starvation_receipts(
             # down a rung), so a node already ON the rung would fall through to
             # `selection_guards`, get None (it is gated on a persisted `ready`),
             # and be dropped by the `continue` - reporting nothing at all.
-            #
             # `idea` is the COMMON case for a linked decompose scaffold, since
             # recomputation persists that rung directly; without this arm a
             # backlog of nothing but undesigned children prints a bare `null`
@@ -4594,12 +4584,10 @@ def cmd_next(
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
                 # and routing alone gave only the first.
-                #
                 # ROUTE the root, or the lock lands in the cwd-default tree
                 # while every reader of a `node:` key resolves the global root
                 # through `claims_root_for`, so the node still reads `free`.
                 # `_read_node_claim` names the same trap from the other side.
-                #
                 # TTL, or the lock is visible and still not honored. Selection
                 # runs in a process that exits as soon as it prints the node,
                 # so a pid-liveness claim is dead on arrival: it reads `stale`,
@@ -6906,14 +6894,12 @@ def cmd_remove(
 
 
 # -- defer / undefer --
-#
 # ``defer`` records a first-class pause on a backlog node via dedicated
 # ``deferred_at`` + ``deferred_reason`` fields. The cascade derives
 # ``status: deferred`` from those fields so the node disappears from the
 # default ``ready`` / ``next`` candidate sets and from triage proposals,
 # but resurfaces with ``--include-deferred``. Reversal is via ``undefer``
 # (idempotent: clearing already-clear state warns but exits 0).
-#
 # Predates the ``completed_at: "deferred:<ts>"`` workaround; ``recompute_statuses``
 # auto-migrates the prefix to the new schema, so callers should never see
 # the old shape after one mutation.
@@ -7024,7 +7010,6 @@ def cmd_defer(
 
 
 # -- queue / unqueue / queued --
-#
 # ``queue`` is the user-facing triage marker for "I'm pulling this off
 # the backlog and intend to work on it next" (e.g. "tomorrow I'm going
 # to queue x, y, z"). Orthogonal to ``status``: a queued node still has
@@ -7032,7 +7017,6 @@ def cmd_defer(
 # kanban renderer reads ``queued_at`` separately and promotes the card
 # into the Now column (between ``claimed`` and the priority-driven
 # promotion rule).
-#
 # Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
 
@@ -8910,68 +8894,7 @@ def _canonical_post_close(
 # -- reconcile (close merged-PR drift) --
 
 
-def _run_advance_epic(
-    epic: str,
-    *,
-    stop: bool,
-    max_dispatch: Optional[int],
-    json_out: bool,
-    verbose: bool,
-    model: Optional[str],
-    provider: Optional[str],
-    continuation: bool = False,
-) -> None:
-    """Run the epic advance and render its receipt ( K1).
-
-    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
-    merge-advance path (a dispatch decision is never an error), an operator naming
-    a bad node to --epic wants a clear failure. Everything else exits 0.
-
-    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
-    inactive mission).
-    """
-    from fno.backlog.advance import advance_epic
-
-    try:
-        result = advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
-    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
-        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
-        raise typer.Exit(code=0)
-
-    if json_out:
-        typer.echo(json.dumps(result.receipt(), indent=2))
-    else:
-        if result.error:
-            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
-        elif result.deactivated:
-            reason = "complete" if result.all_done else "stopped"
-            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
-        else:
-            n = len(result.dispatched)
-            skips = [r for r in result.child_results if r.decision == "skipped"]
-            fails = [r for r in result.child_results if r.decision == "failed"]
-            typer.echo(
-                f"epic {result.epic_id}: dispatched {n}"
-                + (f", skipped {len(skips)}" if skips else "")
-                + (f", failed {len(fails)}" if fails else "")
-            )
-
-    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
-    # loud receipt, not a verb error.
-    if result.error in ("no-such-node", "not-a-container"):
-        raise typer.Exit(code=1)
-
-
 # -- reopen --
-#
 # The inverse of `done`, and a deliberate inversion of its gate: `done` refuses
 # when no referenced PR is merged, `reopen` refuses when one IS. Both gates ask
 # the same question of the same evidence and disagree only about which answer
@@ -9140,7 +9063,6 @@ def cmd_reopen(
         return
 
     # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
-    #
     # Through `resolve_merge_evidence`, the SAME resolver `cmd_done` uses, and
     # over ALL refs rather than the primary. That is what makes this the same
     # gate inverted rather than a similar-looking one: a node can close on a
@@ -9415,22 +9337,44 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    from contextlib import nullcontext
+
+    from fno.backlog.advance import run_advance_epic
+    from fno.backlog.single_flight import advance_flight_scope
+
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        _run_advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
+        # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
+        # both spellings of an epic are one scope. --stop is a control action
+        # and never queues behind its own drain.
+        canonical_epic = epic
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _epic_node = _find_node(read_graph(_graph_path()), epic)
+            if _epic_node and _epic_node.get("id"):
+                canonical_epic = _epic_node["id"]
+        except Exception:  # noqa: BLE001 - an unreadable graph keys on the raw arg
+            pass
+        scope_cm = nullcontext(True) if stop else advance_flight_scope(canonical_epic, json_out=json_out)
+        with scope_cm as ok:
+            if not ok:
+                return
+            run_advance_epic(
+                epic,
+                stop=stop,
+                max_dispatch=max_dispatch,
+                json_out=json_out,
+                verbose=verbose,
+                model=model,
+                provider=provider,
+                continuation=continuation,
+            )
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
@@ -9454,40 +9398,46 @@ def cmd_advance(
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
 
-    try:
-        result = _advance(
-            closed_node_id=closed,
-            project=project,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
-        # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
-        # Only meaningful with --closed (an edge source); the project-scoped
-        # next selection above never reaches a foreign dependent. Shares the
-        # dispatch:<id> dedup with reconcile's call so a node seen by both the
-        # reconcile sweep and this explicit verb dispatches at most once.
-        if closed:
-            _advance_deps(
+    # One in flight for the board advance (x-ef2c): the merge event, a groom
+    # leg and a manual run all fire this verb, and nothing used to stop two
+    # of them from running at once.
+    with advance_flight_scope(None, json_out=json_out) as ok:
+        if not ok:
+            return
+        try:
+            result = _advance(
                 closed_node_id=closed,
-                closed_project=closed_project,
+                project=project,
                 verbose=verbose,
                 model=model,
                 provider=provider,
             )
-            # G4: route the closed node's contract dependents to a reconcile pass
-            # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
-            # advance paths so a node seen by all three dispatches at most once.
-            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
+            # Only meaningful with --closed (an edge source); the project-scoped
+            # next selection above never reaches a foreign dependent. Shares the
+            # dispatch:<id> dedup with reconcile's call so a node seen by both the
+            # reconcile sweep and this explicit verb dispatches at most once.
+            if closed:
+                _advance_deps(
+                    closed_node_id=closed,
+                    closed_project=closed_project,
+                    verbose=verbose,
+                    model=model,
+                    provider=provider,
+                )
+                # G4: route the closed node's contract dependents to a reconcile pass
+                # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
+                # advance paths so a node seen by all three dispatches at most once.
+                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
-    except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
-        # advance() is designed non-fatal (every path emits + returns), but the
-        # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
-        # decision is not an error to whoever invoked the verb. Report on stderr
-        # and exit 0.
-        typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
-        return
+                dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
+        except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
+            # advance() is designed non-fatal (every path emits + returns), but the
+            # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
+            # decision is not an error to whoever invoked the verb. Report on stderr
+            # and exit 0.
+            typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
+            return
     if json_out:
         typer.echo(
             json.dumps(
@@ -9628,6 +9578,31 @@ def cmd_reconcile(
     to it (no archiving). This fires on every throttled auto-reconcile,
     including the SessionStart hook - not just a manual invocation.
     """
+    from fno.backlog.single_flight import reconcile_gate
+
+    # The mutual-exclusion refusal, the dry-run bypass, and the one-in-flight
+    # gate (x-ef2c) all live in single_flight.reconcile_gate.
+    reconcile_gate(
+        dry_run=dry_run,
+        node=node,
+        json_out=json_out,
+        pr_number=pr_number,
+        once=lambda: _reconcile_once(
+            dry_run=dry_run, node=node, json_out=json_out,
+            pr_number=pr_number, repo=repo,
+        ),
+    )
+
+
+def _reconcile_once(
+    dry_run: bool,
+    node: Optional[str],
+    json_out: bool,
+    pr_number: Optional[int],
+    repo: Optional[str],
+) -> None:
+    """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
+    _refuse_tracker_owned_on_external_backend("reconcile")
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9643,22 +9618,6 @@ def cmd_reconcile(
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
-
-    # --node + --pr-number together is refused rather than silently
-    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
-    # PR's trailer claims, unconditional on --node, but the scan/close scope
-    # would then collapse to the single --node id - leaving newly-bound
-    # sibling claims stamped with a live PR ref but never closed until some
-    # later, unrelated sweep happens to revisit them (round-6/7 review,
-    # flagged twice with no caller ever exercising this combination). Loud
-    # refusal beats a latent gap a future caller could silently trip.
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
@@ -9821,7 +9780,6 @@ def cmd_reconcile(
             # fno do pr merge, the bare sweep) only ever reach this with an
             # already-merged PR; this guards a direct manual
             # `--pr-number` invocation against the same premature bind.
-            #
             # Only worth refusing (and reporting) when the body actually
             # names a trailer: a state-read blip on a PR with NO trailer
             # at all has nothing to bind either way, and the node this
@@ -12442,7 +12400,6 @@ def cmd_unarchive(
         raise typer.Exit(code=1)
 
     # TWO locked passes, and the split is the whole safety argument.
-    #
     # `archive` writes the archive inside its mutator because archive-FIRST is
     # safe for it: a crash leaves a duplicate. Inverting the verb inverts the
     # safe order, and the mutator cannot express it - `locked_mutate_graph`
@@ -12451,7 +12408,6 @@ def cmd_unarchive(
     # and a crash between them loses the node from both files. That is the one
     # outcome neither verb may produce, and doing it there quietly guaranteed
     # the ordering the comment claimed to prevent.
-    #
     # So: pass 1 adds the row to the working graph and persists it. Pass 2 takes
     # the lock again, re-reads the archive fresh (never a list read before the
     # first write, which a concurrent `archive --apply` could have grown), and
@@ -13588,7 +13544,6 @@ def _exec_liveness(state: str) -> str:
 
 
 # -- task 4.2: the external-backend verb classification -----------------------
-#
 # Every registered backlog verb is classified exactly ONCE, here, against the
 # LIVE registry (never a frozen count): tracker-owned verbs wrap their
 # registered callback with the shared external refusal BEFORE any graph

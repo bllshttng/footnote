@@ -49,7 +49,6 @@ _PR_RE = re.compile(r"^[1-9][0-9]*$")
 # gh merge call and its post-merge followups (typically seconds), so the wait
 # is short and bounded - a peer still holding it past the window is reported
 # as "held" (exit 2) for the caller to retry, never an indefinite block.
-#
 # Scope: the lock + freshness hold cover the IMMEDIATE merge path. There is no
 # queued lane anymore (x-9d11 dropped --auto): require_checks_pass is enforced
 # by reading the checks under the lock and merging only on green, so every
@@ -1036,6 +1035,16 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
                 f"{closure_refused}",
                 file=sys.stderr,
             )
+        if obj.get("held"):
+            # The one-in-flight gate: a sweep was already running, so this one
+            # stood down without scanning. Named, never silent - the merged
+            # nodes stay open until a later sweep revisits them.
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} held "
+                f"(a sweep is already in flight, requests={obj.get('requests')}); "
+                "a later sweep closes the merged nodes",
+                file=sys.stderr,
+            )
         # `closed` = what the scan closed this run; `closure_bound`/`claims`
         # = the trailer's bindings. The url match backfills a PR whose nodes
         # the trailer never named.
@@ -1810,7 +1819,6 @@ def run_merge(
     # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
     # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
     # by posture plus the CI-green / external-review / stub-manifest guards.
-    #
     # The manifest's `auto_merge_approved` is init's fold of the documented
     # chain (hooks/helpers/init-target-state.sh, references/auto-merge.md). A
     # `false` is a per-run REFUSAL (--no-merge, the `/target bg` injected
@@ -1823,7 +1831,6 @@ def run_merge(
     # promise and that a config-first order made unreachable: consulting
     # `enabled` before the manifest let the config leaf refuse a run init had
     # granted (x-01b9: two workers read this seam the same night).
-    #
     # `enabled` is still re-read LIVE, so a manifest whose `true` merely
     # mirrored config (source: config) does not outlive an operator flipping
     # the switch off mid-flight (x-2270: the manifest is a snapshot; the live
@@ -1832,7 +1839,6 @@ def run_merge(
     # not start refusing. TARGET_AUTO_MERGE is never read HERE - a grant is
     # folded at spawn where it is attributable, never exported on a merge
     # command line by the very worker that wants the merge.
-    #
     # Every refusal names the sanctioned override in its own text (x-3855): a
     # refusal that closes a door without pointing at the key is the one that
     # had two workers improvising config mutations inside sixty seconds.

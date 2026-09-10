@@ -382,7 +382,6 @@ def selection_guards(
         # that dispatch used to supply, and would age into `stale-quarantine` -
         # reporting the wrong reason and letting `maintain --apply` auto-defer
         # a perfectly healthy design doc off the board.
-        #
         # Keys on the RUNG, not on `is_design_stage`, because the persisted
         # `ready` above it can be stale: a plan doc is external mutable state
         # that `/blueprint` (or a hand edit) rewrites without touching the graph,
@@ -391,7 +390,6 @@ def selection_guards(
         # `ready` row, and a DESIGN-only probe waves it straight through to
         # dispatch. Re-probing live is the whole reason this guard exists; it has
         # to ask about every undesigned rung, not just one of them.
-        #
         # One `plan_rung` call, shared with the policy set, so the reason stays
         # rung-specific without a second filesystem read per candidate.
         if entry.get("status") == "ready":
@@ -778,7 +776,6 @@ def select_lane_fill(
                     # Unevaluated (no comparable file surface): dispatch anyway
                     # (fail-open) but say so LOUDLY - a silent pass would read
                     # as "gate clean" when it never ran.
-                    #
                     # Normally only when something is actually in flight: with
                     # nothing to collide against, an unknown surface risks
                     # nothing, and every plan-less node (which is every
@@ -876,30 +873,6 @@ _SAME_DOMAIN_ANNOTATION = "+same-domain:"
 # Same reasoning for the file-overlap token: the producer builds it and
 # select_lane_fill matches it to decide how loudly to log the skip.
 _HIGH_COLLISION_PREFIX = "high-collision:"
-
-
-def lane_fill_filter_name(reason: Optional[str]) -> str:
-    """Map one classifier reason token to its canonical lane-fill filter name.
-
-    The canonical names the ``--explain --epic`` SELECTION section reports.
-    Living HERE, beside the tokens, keeps the explainer's vocabulary from
-    drifting from the selector's: both derive from the classifier's stable
-    tokens, never from a second hand-written list. An unmapped token maps to
-    itself (its head up to the first colon), so a future token shows up in
-    the report under its own name instead of vanishing into a bucket that
-    no longer matches.
-    """
-    if not reason:
-        return ""
-    if reason == "peer-lane":
-        return "live-lane"
-    if reason.startswith(_HIGH_COLLISION_PREFIX):
-        return "in-flight-collision"
-    if _SAME_DOMAIN_ANNOTATION in reason:
-        return "live-lane-domain"
-    if reason.startswith(_UNEVALUATED_PREFIX):
-        return "unevaluated"
-    return reason.split(":", 1)[0]
 
 
 def _classify_lane_candidate(
@@ -1052,7 +1025,6 @@ def schedule_shadow(
     # Slots already held by live lanes count AGAINST the cap, so a cap-two report
     # with one lane already live can start only ONE more node. Counting from zero
     # would overstate the frontier during fill-vacant-lanes runs.
-    #
     # Count EVERY live lane, not just the ones at an index below the cap. It is
     # tempting to count only what acquire_lane_slot(cap) would contend for, since
     # that predicts the acquire call exactly - but effective_cap is a ceiling on
@@ -1680,13 +1652,11 @@ def _spawn_worker(
 # ---------------------------------------------------------------------------
 # Lane dispatch (parallel mode, epic x-42d5 group 3): spawn + per-lane isolation
 # ---------------------------------------------------------------------------
-#
 # G1 shipped the atomic lane-slot cap (claims/lanes.py); G2 the lane-fill
 # selector (select_lane_fill above) + the `fno backlog lane-fill` preview CLI.
 # G3 is the SPAWN layer: it takes G2's selection (which already holds a
 # dispatch-time lane slot per node, LD#8) and launches each pick as an ISOLATED
 # background lane - one worktree off origin/main, one branch, one PR stream.
-#
 # The isolation is the whole point (why x-cbce is a hard dep). Every worktree
 # shares the canonical config.toml (symlinked by setup-worktree.sh). G3 seeds
 # each lane a `.fno/config.local.toml` (x-cbce's per-worktree override, allowlist
@@ -1695,7 +1665,6 @@ def _spawn_worker(
 # `advance(project=<lane-id>)` finds no same-project `next`, so the top-level
 # parallel dispatcher stays the single lane authority instead of each lane
 # fanning out past `max_lanes`.
-#
 # The parking lot is NOT lane-isolated (x-071c): the post-merge ritual resolves
 # `parking_lot_path` against the canonical root unconditionally and writes there.
 # It is a serial one-shot durable step whose write vehicles are already safe on
@@ -1703,7 +1672,6 @@ def _spawn_worker(
 # per-PR single-flight under the reconcile mutex with O_APPEND), so a per-lane
 # redirect bought nothing and orphaned the prose into an untracked file that
 # archive-worktree.sh deletes.
-#
 # NOT here (deferred to G4): merge serialization (LD#9 - lanes must rebase +
 # merge one at a time), full failure isolation via _redispatch (x-370f), and the
 # grid status rollup. G3 releases a lane slot on spawn failure so the node stays
@@ -2085,7 +2053,6 @@ def dispatch_lanes(
         # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
-        #
         # Reserve-to-outcome span (x-41f7), mirroring _converge_one: every exit
         # that is not a dispatch returns the boot-window reservation, so a raise
         # between acquire and the dispatched receipt cannot strand the bridge.
@@ -2195,7 +2162,6 @@ def dispatch_lanes(
 # ---------------------------------------------------------------------------
 # Join (epic x-956c, x-8d1d): spawn execute-waves joiners into a HELD worktree
 # ---------------------------------------------------------------------------
-#
 # dispatch_lanes is one worker per node and a second `/target <id>` refuses
 # (target init takes the node claim). Join is the complement: N
 # `/fno:execute waves <plan>` workers run INSIDE the holder's worktree as
@@ -2317,7 +2283,6 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
 
     # Derived within-wave edges (the orchestrator's partition_edges): group
     # order serializes, unevaluated tasks wait out the evaluated ones.
-    #
     # Runs for EVERY wave, mirroring `apply_partition_edges`. Both used to skip
     # non-parallel waves, so two tasks in one `sequential` wave editing the
     # same file read as simultaneously ready and the label named `sequential`
@@ -2754,7 +2719,6 @@ def _join_node(
     # their cardinality was never a capacity. Measured over the 45 joinable
     # banded plans since bands existed, 14 were capped below width - 1, losing
     # 34 of 197 joiner slots in a fortnight.
-    #
     # The width rule still caps, and it is the real one: the node holder is one
     # of the width workers, so joiners stay under it.
     # One switch covers BOTH enforcement layers (the OS allowlist and the
@@ -2775,7 +2739,6 @@ def _join_node(
         # byte-identical, mutually unrestricted policies - the isolation the
         # partition exists to provide, silently gone. So the band cardinality
         # legitimately caps the lane count HERE, and only here.
-        #
         # With enforcement off (the default) it does not, and that is the
         # whole point of the fix: `len(bands)` used to sit in this min
         # unconditionally, so a single-band plan of width 6 got one joiner and
@@ -2948,7 +2911,6 @@ def _join_node(
             # was ended mid-flight, and that reversal is gated on pane-keeper
             # durability being confirmed end to end: a keeper must survive
             # `fno mux kill-server` and re-adopt the SAME pid.
-            #
             # Not confirmed as of 2026-09-02. `fno mux pane keeper list` shows
             # only the operator's own main pane, no joiner survivor to read
             # durability off, and the one machine that could run the kill-server
@@ -3569,12 +3531,10 @@ def advance(
 # ---------------------------------------------------------------------------
 # advance_dependents() - cross-project successor dispatch (G1 / AC5-FR)
 # ---------------------------------------------------------------------------
-#
 # advance() above dispatches the project-scoped `next` ready node (same-project
 # auto-continue). It deliberately CANNOT reach a dependent in another project:
 # `fno backlog next --project <closed.project>` filters foreign nodes out. So a
 # merge of A (project etl) never dispatches B (project web, blocked_by A).
-#
 # advance_dependents() closes that gap by following `blocked_by` EDGES instead of
 # a project-scoped selection: for each now-unblocked DIRECT dependent in a
 # DIFFERENT project, it spawns `/target --no-merge <dep> --cwd <dep project root>`.
@@ -4039,7 +3999,6 @@ def advance_dependents(
 # ---------------------------------------------------------------------------
 # Epic advance / converge (x-9608 K1): fan out an epic's ready leaf children
 # ---------------------------------------------------------------------------
-#
 # The mission's manual entry point (and, later, K2's per-tick drain reuse the
 # same _converge_one core). A "mission" is an epic node plus its transitive
 # children (the parent EDGE is the mission key; mission_id is untouched -
@@ -4436,3 +4395,63 @@ def _converge_skip_unmapped(
         "skipped", EVENT_SKIPPED, reason="unmapped-project",
         node_id=child["id"], detail=detail,
     )
+
+
+def run_advance_epic(
+    epic: str,
+    *,
+    stop: bool,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+    continuation: bool = False,
+) -> None:
+    """Run the epic advance and render its receipt.
+
+    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
+    merge-advance path (a dispatch decision is never an error), an operator naming
+    a bad node to --epic wants a clear failure. Everything else exits 0.
+
+    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
+    inactive mission).
+    """
+    import typer
+
+    try:
+        result = advance_epic(
+            epic,
+            stop=stop,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+            continuation=continuation,
+        )
+    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
+        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
+        raise typer.Exit(code=0)
+
+    if json_out:
+        typer.echo(json.dumps(result.receipt(), indent=2))
+    else:
+        if result.error:
+            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
+        elif result.deactivated:
+            reason = "complete" if result.all_done else "stopped"
+            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+        else:
+            n = len(result.dispatched)
+            skips = [r for r in result.child_results if r.decision == "skipped"]
+            fails = [r for r in result.child_results if r.decision == "failed"]
+            typer.echo(
+                f"epic {result.epic_id}: dispatched {n}"
+                + (f", skipped {len(skips)}" if skips else "")
+                + (f", failed {len(fails)}" if fails else "")
+            )
+
+    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
+    # loud receipt, not a verb error.
+    if result.error in ("no-such-node", "not-a-container"):
+        raise typer.Exit(code=1)
