@@ -1183,7 +1183,9 @@ class _ScriptedClient:
 
 def _run_tx(client, monkeypatch, record):
     monkeypatch.setattr(store_mod, "_client_for", lambda _path: client)
-    monkeypatch.setattr(store_mod, "_sleep", record)
+    # Patch time.sleep on the store module (the loop's call path), the same
+    # seam the sibling tx-backoff tests record through.
+    monkeypatch.setattr(store_mod.time, "sleep", record)
     return store_mod.locked_mutate_graph(client.path, lambda e: e)
 
 

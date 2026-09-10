@@ -76,11 +76,6 @@ def _tx_backoff_secs(attempt: int) -> float:
     bound = min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt)
     return random.uniform(0.0, bound)
 
-
-# The seam the tx loop sleeps through: module-level so tests inject a
-# recorder and assert the DRAWN values, never wall-clock timing.
-_sleep = time.sleep
-
 # Bounded lock deadline handed to the keeper (its own default is 10s when
 # the spawn omits the flag).
 _LOCK_TIMEOUT_SECS = 10
@@ -1270,7 +1265,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 ) from None
             # Full jitter between attempts: the colliding writers all woke at
             # the same instant, so a fixed delay would only line them up again.
-            _sleep(_tx_backoff_secs(attempt))
+            time.sleep(_tx_backoff_secs(attempt))
             continue
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")
