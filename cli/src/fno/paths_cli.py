@@ -134,6 +134,16 @@ def handoff(
         "--slug",
         help="Human-readable slug; overrides the session-derived short id in the filename.",
     ),
+    scope: Optional[str] = typer.Option(
+        None,
+        "--scope",
+        help=(
+            "Crown scope: name the doc after the crown, not a session. Prints "
+            "the newest existing handoff for that scope when one exists, so a "
+            "successor session resolves its predecessor's doc; today's name "
+            "when none does. Mutually exclusive with --session-id/--slug."
+        ),
+    ),
     name_only: bool = typer.Option(
         False, "--name-only", help="Print just the rendered filename, no directory."
     ),
@@ -142,11 +152,13 @@ def handoff(
 
     Backed by ``paths.handoffs_dir()``. The filename key is the session's mail
     handle (``canonical_handle``, the last-8 of the session id) unless --slug
-    overrides. The PreCompact canon-doc hook and any session writing a handoff
-    doc shell this instead of composing a path, so the configured location is
-    the one door.
+    or --scope overrides. The PreCompact canon-doc hook and any session writing
+    a handoff doc shell this instead of composing a path, so the configured
+    location is the one door. A crowned session passes --scope: a crown
+    outlives its sessions, so its rolling doc keys on the scope.
     """
     import datetime as _dt
+    import re
 
     from fno._flag_aliases import merge_deprecated_alias
     from fno.harness_identity import canonical_handle
@@ -155,8 +167,28 @@ def handoff(
     session_id = merge_deprecated_alias(
         session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
     )
+    if scope:
+        if session_id or slug:
+            raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")
+        key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
+        if key == "crown-":
+            raise typer.BadParameter("a crown scope is required (--scope)")
+        directory = handoffs_dir()
+
+        def _mtime(path: Path) -> float:
+            # A concurrent refresh can unlink between glob and stat; a vanished
+            # candidate sorts oldest and the writer recreates the file anyway.
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
+        filename = existing[-1].name if existing else f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
+        typer.echo(filename if name_only else str(directory / filename))
+        return
     if not session_id:
-        raise typer.BadParameter("a session id is required (--session-id)")
+        raise typer.BadParameter("a session id is required (--session-id), or a crown scope (--scope)")
     key = slug or canonical_handle(session_id)
     filename = f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
     typer.echo(filename if name_only else str(handoffs_dir() / filename))

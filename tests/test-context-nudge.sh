@@ -208,6 +208,7 @@ assert_eq     "AC5: exits 0 (block decision in JSON, not exit 2)" "$RC" "0"
 assert_contains "AC5: decision block" "$OUT" '"decision":"block"'
 assert_contains "AC5: reason carries measured 50%" "$OUT" '50% used'
 assert_contains "AC5: reason names the crowned scope" "$OUT" "$SCOPE"
+assert_contains "AC5: canon ask names the scope-keyed rolling doc" "$OUT" "crown-${SCOPE}.md"
 events_has king_context_nudge && ok "AC5: king_context_nudge event emitted" || bad "AC5: no king_context_nudge event"
 
 # A crown survives a compact, so this percentage asks a king to COMPACT and keep
