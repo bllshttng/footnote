@@ -1,6 +1,7 @@
 """Mux-pane spawn back half (4a-G2): host an agent's PTY as a mux pane.
 
-``fno agents spawn --substrate pane`` (the default substrate) lands here: the
+``fno agents spawn --substrate pane`` (the substrate for harnesses with no
+thread lane, and the closable fallback) lands here: the
 front half - name validation, provider selection, per-agent flock, collision
 check, role routing, billing guard - is the same machinery the daemon/bg paths
 use; only the HOSTING call differs. Instead of the fno-agents daemon spawning

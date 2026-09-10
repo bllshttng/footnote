@@ -115,8 +115,20 @@ def test_non_spawn_verb_untouched():
     assert _inject(["ask", "w", "hi"], provider="codex") == ["ask", "w", "hi"]
 
 
-def test_all_unset_is_noop():
-    assert _inject(["spawn", "--name", "w", "hi"]) == ["spawn", "--name", "w", "hi"]
+def test_all_unset_injects_the_builtin_substrate_default():
+    # Nothing configured anything: the built-in default still applies, injected
+    # so no downstream runtime re-derives a second one (thread where the
+    # harness seats one; claude is the test-harness default).
+    assert _inject(["spawn", "--name", "w", "hi"]) == [
+        "spawn", "--substrate", "thread", "--name", "w", "hi",
+    ]
+
+
+def test_all_unset_unknown_harness_falls_back_to_pane():
+    # A harness with no thread lane keeps the closable pane.
+    out = _inject(["spawn", "--name", "w", "hi", "-H", "gemini"])
+    assert "--substrate" in out
+    assert out[out.index("--substrate") + 1] == "pane"
 
 
 def _declare_inventory(monkeypatch, rows, objective="cheapest-that-clears", prefer=""):
@@ -654,7 +666,10 @@ def test_residual_ambient_codex_leaves_claude_model_to_harness():
     # codex spawn (it 400s after the round-trip). home=claude != target=codex.
     err = io.StringIO()
     out = _inject(["spawn", "w"], err=err, env={"CODEX_THREAD_ID": "x"}, model="opus")
-    assert out[:2] == ["spawn", "--name"] and out[3:] == ["w"]  # no --model
+    # The ambient-codex default also seats a thread; the claude model still
+    # never rides onto the codex spawn.
+    assert out[:3] == ["spawn", "--substrate", "thread"]
+    assert out[3] == "--name"  # the minted name; "w" stays the message
     assert "--model" not in out and "opus" not in out
     msg = err.getvalue()
     # the leave reason names the model, the scope (claude), and the target (codex)
@@ -913,6 +928,8 @@ def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
     )
     assert out == [
         "spawn",
+        "--substrate",
+        "thread",
         "--permission-mode",
         "bypassPermissions",
         "--name",
@@ -974,13 +991,15 @@ def test_message_via_flag_keys_profile():
     assert out[out.index("--model") + 1] == "fable"
 
 
-def test_ac9_ui_no_config_field_prints_no_applied_line():
-    # A prose-seeded spawn with zero injected fields prints no `applied` line
-    # (a verb-seeded spawn always resolves the built-in permission rung,
-    # x-7198 - see test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line).
+def test_ac9_ui_no_config_field_prints_the_builtin_default_line():
+    # A prose-seeded spawn with zero config fields still prints its ONE applied
+    # line: the built-in substrate default is a routing decision, so it is
+    # never silent. (A verb-seeded spawn additionally resolves the built-in
+    # permission rung, x-7198 - see
+    # test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line.)
     err = io.StringIO()
     _inject(["spawn", "--name", "w", "start the thing"], err=err, profiles={"other": {"model": "x"}})
-    assert "applied" not in err.getvalue()
+    assert "applied substrate=thread (builtin.default)" in err.getvalue()
 
 
 def test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line():
@@ -989,7 +1008,7 @@ def test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line():
     # though no other field was injected.
     err = io.StringIO()
     _inject(["spawn", "--name", "w", "/target x"], err=err, profiles={"other": {"model": "x"}})
-    assert "applied permission_mode=bypassPermissions" in err.getvalue()
+    assert "permission_mode=bypassPermissions (builtin.autonomous.permission_mode)" in err.getvalue()
 
 
 def test_apply_permission_builtin_false_suppresses_the_rung():
@@ -1045,12 +1064,26 @@ def test_permission_mode_ok_on_nonclaude_pane():
     assert out[out.index("--permission-mode") + 1] == "yolo"
 
 
-def test_permission_mode_injected_on_bare_nonclaude_spawn_pane_default():
-    # No explicit substrate: `fno agents spawn` defaults to PANE (not the
-    # autonomous headless default), which maps codex permission modes - so the
-    # configured value must be injected, not skipped as incompatible.
+def test_bare_nonclaude_spawn_resolves_thread_permission_degrades_open():
+    # No explicit substrate on a thread-seatable harness: the built-in default
+    # seats a THREAD, where codex hardcodes its own bypass - so the configured
+    # pane-mapped permission mode is skipped with a named line, never silently
+    # applied nor made to fail the spawn.
+    err = io.StringIO()
     out = _inject(
         ["spawn", "-H", "codex", "--name", "w", "/target x"],
+        profiles={"target": {"permission_mode": "yolo"}}, err=err,
+    )
+    assert out[out.index("--substrate") + 1] == "thread"
+    assert "--permission-mode" not in out
+    assert "permission-mode skipped" in err.getvalue()
+
+
+def test_permission_mode_injected_on_explicit_pane_nonclaude_spawn():
+    # Explicit pane keeps the pane-mapped permission surface: the configured
+    # value is injected, not skipped as incompatible.
+    out = _inject(
+        ["spawn", "-H", "codex", "--substrate", "pane", "--name", "w", "/target x"],
         profiles={"target": {"permission_mode": "yolo"}},
     )
     assert out[out.index("--permission-mode") + 1] == "yolo"

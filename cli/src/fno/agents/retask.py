@@ -246,6 +246,7 @@ def resolve_target_coordinate(
         env=env,
         stderr=io.StringIO(),
         apply_permission_builtin=False,
+        apply_builtin_default=False,
     )
     harness = _flag_value(resolved, "--harness", "-H")
     if not harness:

@@ -2141,7 +2141,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
     res = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude",
+        ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
          "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
     )
     assert res.exit_code == 0, res.output
@@ -2188,7 +2188,7 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     runner = CliRunner()
     result = runner.invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "codex", "/fno:target x-81ad"],
+        ["spawn", "--name", "peer", "--harness", "codex", "--substrate", "pane", "/fno:target x-81ad"],
     )
     assert result.exit_code == 1
     assert "required codex session binding" in result.output
@@ -2246,7 +2246,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
 
     result = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "codex", "hello"],
+        ["spawn", "--name", "peer", "--harness", "codex", "--substrate", "pane", "hello"],
     )
 
     assert result.exit_code == 0, result.output
@@ -2626,7 +2626,7 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     assert captured["tab"] is None
 
 
-def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
+def test_cmd_spawn_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -2651,7 +2651,7 @@ def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> Non
 
     result = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "ordinary", "--harness", "claude", "do work"],
+        ["spawn", "--name", "ordinary", "--harness", "claude", "--substrate", "pane", "do work"],
     )
 
     assert result.exit_code == 0, result.output

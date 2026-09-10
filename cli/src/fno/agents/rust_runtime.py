@@ -670,7 +670,10 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     ``fno mux pane run`` spawn (front-half reuse + registry mux ref), so a
     pane spawn must never route to the Rust client's daemon RPC (the daemon
     PTY host retires at G4; a silent fallback there is exactly what AC1-ERR
-    forbids). ``pane`` is the default, so an absent ``--substrate`` counts.
+    forbids). The spawn seam injects an explicit ``--substrate`` for every
+    spawn that names none (the built-in default: thread where the harness
+    seats one, else pane), so an absent token here only means the seam could
+    not run (a failed config load) and pane stays the degrade-open fallback.
     The scan stops at ``--argv`` like the other raw-args scans so a payload
     token can never masquerade as our flag, and at a bare ``--`` fence for the
     same reason (x-1caa: fenced tokens are provider passthrough - a fenced
@@ -706,10 +709,11 @@ def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
     cursor-agent, grok, agy) live only in the Python dispatch. Without this
     carve-out an installed binary answers a working lane with "fno has not
     built this harness's keeper lane spawn arm yet". The substrate scan
-    mirrors :func:`_is_pane_substrate_spawn` (absent = pane; the headless
-    spellings opt out; the scans stop at ``--argv`` and a bare ``--``), and
-    a headless spawn of these harnesses is NOT carved out: its honest
-    refusal is the stance check the Python seam runs.
+    mirrors :func:`_is_pane_substrate_spawn` (the seam injects the token for
+    a spawn naming none; absent stays the degrade-open pane fallback; the
+    headless spellings opt out; the scans stop at ``--argv`` and a bare
+    ``--``), and a headless spawn of these harnesses is NOT carved out: its
+    honest refusal is the stance check the Python seam runs.
     """
     if verb != "spawn":
         return False

@@ -122,8 +122,9 @@ _EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
 PASSTHROUGH_PANE_ONLY = (
     "passthrough after -- is pane-only; the "
     "bg/headless argv builders carry none of the pane's provider "
-    "refusals, so the tokens cannot be forwarded. Use --substrate pane "
-    "(the default) or drop them."
+    "refusals, so the tokens cannot be forwarded. A passthrough fence "
+    "implies the pane substrate unless you name another one; on a thread "
+    "spawn, drop the tokens or pass --substrate pane explicitly."
 )
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -264,6 +265,70 @@ def _refuse_off_pane_passthrough(toks: Sequence[str], err: IO[str]) -> None:
     if len(toks) - fence - 1 > 1 or _positional_indices(toks[:fence]):
         print(f"fno agents spawn: {PASSTHROUGH_PANE_ONLY}", file=err)
         raise SystemExit(2)
+
+
+#: Flags whose ONLY meaning is pane geometry or a pane-only lane. Presence
+#: implies the pane substrate: an operator asking for a tab, a split, a squad,
+#: an anchor, or a monitor is asking for the closable view even when they did
+#: not name a substrate. A `--` passthrough fence counts too - the tokens are
+#: forwarded only by the pane argv builders (the x-1caa refusal says so).
+_PANE_CAPABILITY_FLAGS = frozenset(
+    {"--workspace", "--squad", "-s", "--split", "-x", "--at", "--tab", "--monitor"}
+)
+
+
+def _pane_capability_present(toks: Sequence[str]) -> bool:
+    """Whether the argv carries a pane-only capability, up to the ``--argv``
+    payload boundary. A bare ``--`` fence is itself the capability."""
+    it = iter(toks)
+    for t in it:
+        if t == "--argv":
+            return False
+        if t == "--":
+            return True
+        key, _eq, _val = t.partition("=")
+        if key in _PANE_CAPABILITY_FLAGS:
+            return True
+        if t in _SPAWN_VALUE_FLAGS and "=" not in t:
+            next(it, None)
+    return False
+
+
+def resolve_default_substrate(
+    toks: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> str:
+    """The substrate a spawn with NO explicit or configured substrate gets.
+
+    Rule: thread where the resolved harness seats one (the same
+    journey-proven predicate ``harness_map.thread_seatable`` answers, the
+    same rule autonomous dispatch already runs), else the pane. A pane-only
+    capability on the argv (placement flags, a monitor, a ``--`` fence)
+    implies the pane: those capabilities exist only on that substrate, so
+    requesting one is requesting the pane.
+
+    One helper, every front door: the seam injects its answer so Python
+    dispatch, the diverted routes, and the Rust client all read an EXPLICIT
+    ``--substrate`` token and no runtime re-derives a second default.
+    """
+    if _pane_capability_present(toks):
+        return "pane"
+    harness = (_flag_value(toks, "--harness", "-H") or "").strip()
+    if not harness:
+        try:
+            from fno.dispatch_flags import resolve_dispatch_harness
+
+            harness = (resolve_dispatch_harness(None, env=env)[0] or "").strip()
+        except Exception:
+            harness = ""
+    if harness:
+        try:
+            from fno.agents.harness_map import thread_seatable
+
+            if thread_seatable(harness):
+                return "thread"
+        except Exception:
+            pass
+    return "pane"
 
 
 def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
@@ -981,6 +1046,7 @@ def inject_spawn_defaults(
     args: Sequence[str],
     *,
     settings: object = None,
+    apply_builtin_default: bool = True,
     env: Optional[Mapping[str, str]] = None,
     stderr: Optional[IO[str]] = None,
     apply_permission_builtin: bool = True,
@@ -995,7 +1061,10 @@ def inject_spawn_defaults(
     an incompatible resolved provider (warn, skip); an explicit flag stays
     fail-closed downstream. ``apply_permission_builtin`` (default True) gates
     the ``SPAWN_PERMISSION_BUILTIN`` rung (x-7198); off for a probe that
-    never launches (see ``retask.py``).
+    never launches (see ``retask.py``). ``apply_builtin_default`` (default
+    True) gates the built-in substrate default the same way: a probe that
+    diffs a LIVE worker's coordinate must not read the built-in as a requested
+    axis, or every pane worker reads as a substrate mismatch.
     """
     out = list(args)
     if not out or out[0] != "spawn":

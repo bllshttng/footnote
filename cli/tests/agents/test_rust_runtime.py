@@ -1124,10 +1124,11 @@ def test_output_format_spawn_not_routed_to_installed_rust(monkeypatch, tmp_path)
     assert called == []
 
 
-def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) -> None:
-    """4a-G2 routing: a plain spawn (default = pane substrate) is Python-owned
-    (the mux back half) and must NOT route to the binary; a --substrate bg
-    spawn still auto-routes."""
+def test_plain_spawn_resolves_thread_and_auto_routes(monkeypatch, tmp_path) -> None:
+    """A plain spawn (no --substrate) resolves the built-in default: thread on
+    a thread-seatable harness, injected as an explicit token, and that spawn
+    auto-routes to the binary's thread lanes. An explicit pane spawn stays
+    Python-owned (the mux back half); a --substrate bg spawn still routes."""
     from fno.cli import app
 
     binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
@@ -1141,9 +1142,20 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
 
-    # Plain spawn: stays Python (the pane back half). It will fail inside the
+    # Plain spawn: thread default injected, binary lane taken.
+    result = CliRunner().invoke(app, ["agents", "spawn", "--name", "worker", "--harness", "claude"])
+    assert result.exit_code == 99
+    assert captured == [
+        ["spawn", "--substrate", "thread", "--name", "worker", "--harness", "claude"]
+    ]
+
+    # Explicit pane: stays Python (the pane back half). It will fail inside the
     # Python dispatch (no mux in this test env), but must never exec the binary.
-    CliRunner().invoke(app, ["agents", "spawn", "--name", "worker", "--harness", "claude"])
+    captured.clear()
+    CliRunner().invoke(
+        app,
+        ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "pane"],
+    )
     assert captured == [], "a pane-substrate spawn must not route to the binary"
 
     # bg substrate: still the binary's lane. The seam marker rides straight
