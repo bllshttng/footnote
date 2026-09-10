@@ -7913,13 +7913,12 @@ def _project_plans_from_graph(
     if not ids:
         return
     try:
-        # Vault mirror projection is default-backend machinery (same class as
-        # plan sync): guarded metadata read, degrades to a no-op under an
-        # external selection rather than painting stale local rows.
+        # Vault mirror projection degrades under an external selection.
+        from fno.graph.store import apply_readiness_overlay_via_store
         from fno.plan._project import project_graph_nodes
         from fno.tracker.metadata import read_entries
 
-        entries = read_entries("plan.project")
+        entries = apply_readiness_overlay_via_store(read_entries("plan.project"))
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
