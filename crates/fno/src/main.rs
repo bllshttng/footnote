@@ -45,8 +45,9 @@ fn mux_tombstone(verb: &str) -> Option<&'static str> {
 }
 
 /// What this invocation is, decided purely from args + TTY-ness. Session
-/// resolution (flag > env > default) happens in `main`, not here, so the
-/// decision table stays pure.
+/// resolution (flag > env > default) happens in `main`, not here; the one
+/// side effect is the `--session` deprecation note, which names a flag and
+/// stays silent on every `--server` shape.
 #[derive(Debug, PartialEq, Eq)]
 enum Role {
     /// Attach (spawning the server if absent). `Some(name)` when an explicit

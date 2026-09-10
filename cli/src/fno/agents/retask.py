@@ -185,8 +185,6 @@ def resolve_thread_viewport(
             "carries no thread reference, so there is no thread to open. "
             "A retry cannot fix it."
         )
-    if not session:
-        raise RetaskTransportError("thread_view_unavailable")
     fno_bin = os.environ.get("FNO_BIN") or "fno"
 
     def invoke(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:

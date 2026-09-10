@@ -2826,9 +2826,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 "--json" => json = true,
                 "--claim" => claim = true,
                 "--server" | "--session" => {
-                note_server_flag(tok);
-                session = Some(flag_value(args, &mut i, tok)?)
-            }
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
                 // (x-5f7f) The registry name of the worker this pane hosts.
                 // Validated here with the same rule the store's load gate
