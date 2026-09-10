@@ -63,3 +63,25 @@ def test_ac8_edge_worked_refuses_when_authority_unavailable(monkeypatch):
 
     assert result.exit_code == 1
     assert "roster timeout" in result.output
+
+
+def test_closed_session_phases_do_not_render(monkeypatch):
+    """phases names the work shapes live RIGHT NOW: a closed blueprint row
+    beside a live do row must not read as active staffing."""
+    entry = _entry()
+    entry["sessions"][0]["ended_at"] = "2026-09-08T01:00:00Z"
+    entry["sessions"].append(
+        {
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "session-2",
+            "started_at": "2026-09-09T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **_kw: {"ac1-node": ["do-worker"]})
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
+
+    result = runner.invoke(cli, ["worked", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)[0]["phases"] == ["do"]

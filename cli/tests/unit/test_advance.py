@@ -318,6 +318,42 @@ def test_worked_authority_failure_refuses_dispatch(monkeypatch):
     assert observation.block_reason == "worked-authority-unavailable"
 
 
+def test_dead_dispatch_limit_outranks_worked_error(monkeypatch):
+    """A durable refusal must not be masked by an authority error that merely
+    co-occurred: the caller can act on auto-deferred, and the remedy text that
+    names it is what spawn-guard renders."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        adv,
+        "_refuse_repeated_dead_dispatch",
+        lambda *_a, **_kw: "auto-deferred",
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.action == "auto-deferred"
+    assert observation.refusal_reason == "auto-deferred"
+    assert observation.blocks_dispatch is True
+
+
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_advance_preserves_family2_refusal_reason(iso, monkeypatch, reason):
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)

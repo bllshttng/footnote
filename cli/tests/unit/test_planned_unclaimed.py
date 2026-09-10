@@ -100,3 +100,35 @@ def test_scope_filters_project_mission_roadmap_and_parent():
     )
 
     assert [row["id"] for row in receipt["rows"]] == ["x-in"]
+
+
+def test_worked_node_with_no_claim_stays_out(monkeypatch):
+    """A worker past its claim TTL still owns the node: the observer must not
+    offer it just because the claims list answered nobody home."""
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda *a, **kw: {"x-worked": ["do-worker"]},
+    )
+
+    from fno.backlog.undispatched import read_planned_unclaimed_from_entries
+
+    receipt = read_planned_unclaimed_from_entries([_node("x-in"), _node("x-worked")])
+
+    assert [row["id"] for row in receipt["rows"]] == ["x-in"]
+
+
+def test_worked_authority_failure_refuses_the_observer(monkeypatch):
+    """Unknown liveness must not read as an offerable node; the receipt
+    refuses with the reason and the board queue renders unreadable."""
+    def _raise(*a, **kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    from fno.backlog.undispatched import (
+        ObserverReadError,
+        read_planned_unclaimed_from_entries,
+    )
+
+    with pytest.raises(ObserverReadError, match="worked overlay"):
+        read_planned_unclaimed_from_entries([_node("x-in")])

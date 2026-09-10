@@ -10,7 +10,7 @@ def cmd_worked(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
 ) -> None:
     """Show nodes with positively identified live workers."""
-    from fno.graph.statuses import live_worked_node_ids
+    from fno.graph.statuses import is_open_phase_row, live_worked_node_ids
     from fno.graph.store import read_graph_strict
     from fno.paths import graph_json
 
@@ -28,7 +28,11 @@ def cmd_worked(
         phases = []
         for session in entry.get("sessions") or []:
             phase = session.get("phase") if isinstance(session, dict) else None
-            if isinstance(phase, str) and phase not in phases:
+            if (
+                isinstance(phase, str)
+                and phase not in phases
+                and is_open_phase_row(session, phase)
+            ):
                 phases.append(phase)
         rows.append(
             {

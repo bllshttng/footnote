@@ -219,10 +219,27 @@ def read_planned_unclaimed_from_entries(
     roadmap_id: str | None = None,
     parent: str | None = None,
 ) -> dict:
+    from fno.graph.statuses import live_worked_node_ids
+
+    try:
+        claims = read_claim_snapshot()
+        # A node whose worker outlived its claim TTL must not read as
+        # offerable here either: fold the worked overlay in as synthetic
+        # claims, and refuse on an unreadable roster rather than offer nodes
+        # whose liveness could not be checked.
+        worked = live_worked_node_ids(strict=True, entries=entries)
+    except ValueError as exc:
+        raise ObserverReadError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - unknown liveness refuses the offer
+        raise ObserverReadError(f"worked overlay unreadable: {exc}") from exc
+    claims = [
+        *claims,
+        *( {"key": f"node:{node_id}", "state": "live-worker"} for node_id in worked ),
+    ]
     try:
         return classify_planned_unclaimed(
             entries,
-            read_claim_snapshot(),
+            claims,
             project=project,
             mission=mission,
             roadmap_id=roadmap_id,

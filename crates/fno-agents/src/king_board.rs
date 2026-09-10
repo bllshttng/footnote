@@ -379,21 +379,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     };
     warnings.extend(claimed_warnings);
 
-    let worked = match s_worked {
-        None => SourceRead::err(budget.spent_error()),
-        Some(slice) => {
-            let mut cmd = fno_py_cmd();
-            cmd.extend([
-                "backlog".to_string(),
-                "worked".to_string(),
-                "--json".to_string(),
-            ]);
-            run_json(cmd, &cwd, slice)
-        }
-    };
-    mark(&mut sources, "worked", &worked, false);
-    let worked_ids = worked_node_ids(&worked);
-
     // The reads that can take real wall time run concurrently: gh pr
     // list, `fno inbox outstanding`, the batched truth
     // probe, the ready selection (in-process; its plan-document disk reads
@@ -407,12 +392,29 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         pr_nodes,
         pr_warnings,
         prs_truncated,
+        worked,
         ready,
         outstanding,
         needs,
         holder_activity,
         truth_panicked,
     ) = std::thread::scope(|s| {
+        // The worked read is a full fno-py cold start plus fleet roster read,
+        // so it rides the concurrent section too: its join waits below, after
+        // the other subprocess threads are already running, and only the
+        // ready thread (its one consumer) waits for the result.
+        let t_worked = s_worked.map(|slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let mut cmd = fno_py_cmd();
+                cmd.extend([
+                    "backlog".to_string(),
+                    "worked".to_string(),
+                    "--json".to_string(),
+                ]);
+                run_json(cmd, &cwd, slice)
+            })
+        });
         let t_prs = s_prs.map(|slice| {
             let cwd = cwd_for_threads.clone();
             s.spawn(move || {
@@ -421,6 +423,14 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 (prs, pr_nodes, w, truncated)
             })
         });
+        let worked = match t_worked {
+            None => SourceRead::err(budget.spent_error()),
+            Some(h) => h
+                .join()
+                .unwrap_or(SourceRead::err("worked: reader panicked")),
+        };
+        mark(&mut sources, "worked", &worked, false);
+        let worked_ids = worked_node_ids(&worked);
         let t_ready = s_ready.map(|_slice| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
@@ -591,6 +601,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             pr_nodes,
             pr_warnings,
             prs_truncated,
+            worked,
             ready,
             outstanding,
             needs,

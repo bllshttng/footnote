@@ -205,6 +205,11 @@ class DispatchClaimObservation:
 
     @property
     def refusal_reason(self) -> Optional[str]:
+        # The action token wins when it is the more specific refusal: a node
+        # at its dead-dispatch limit that also hits a roster failure reports
+        # auto-deferred, not the authority error that merely co-occurred.
+        if self.action in ("auto-deferred", "defer-failed"):
+            return self.action
         if self.block_reason:
             return self.block_reason
         if self.action == "blocked":
@@ -3099,9 +3104,11 @@ def _observe_node_claim(
     )
     action = (
         "blocked"
-        if occupied or worked_error
+        if occupied
         else dead_action
         if dead_action is not None
+        else "blocked"
+        if worked_error
         else "redispatch"
         if verdict == "dead_predecessor"
         else "dispatch"
