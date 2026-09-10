@@ -5678,29 +5678,6 @@ mod tests {
     }
 
     #[test]
-    fn gc_keeps_synthesized_idle_row() {
-        // An adopted orphan row named on no node survives the sweep: NoProvenance
-        // -> Keep, addressable until the operator resumes it or a node names it.
-        let row = crate::gc::GcRow {
-            origin: Some("spawn".into()),
-            crowned: false,
-            work: crate::graph_store::WorkState::NoProvenance,
-            transcript_age_s: Some(10_000),
-            owns_worktree: true,
-            worktree_clean: None,
-            branch_merged: None,
-            planning: None,
-            planning_closed: Vec::new(),
-            confirm_hold: None,
-            session_terminal: None,
-            superseded_by_live_peer: None,
-            node_merged: false,
-            pid_gone: false,
-        };
-        assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);
-    }
-
-    #[test]
     fn synthesize_and_adopt_registry_hit_is_idempotent() {
         let _g = crate::claims::test_env_lock()
             .lock()

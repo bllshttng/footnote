@@ -1960,4 +1960,29 @@ mod tests {
             (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
         ));
     }
+
+    /// An adopted orphan row named on no node survives the sweep:
+    /// NoProvenance -> Keep, addressable until the operator resumes it or a
+    /// node names it. Moved here from client_verbs.rs, which is over the
+    /// file budget and may only shrink; the policy is this module's.
+    #[test]
+    fn gc_keeps_synthesized_idle_row() {
+        let row = GcRow {
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: WorkState::NoProvenance,
+            transcript_age_s: Some(10_000),
+            owns_worktree: true,
+            worktree_clean: None,
+            branch_merged: None,
+            planning: None,
+            planning_closed: Vec::new(),
+            confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
+        };
+        assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
+    }
 }
