@@ -1983,6 +1983,9 @@ _print_bind_hint() {
     fi
     bind_target="${node_id:-$claims_id}"
     [[ -z "$bind_target" ]] && return 0
+    # A malformed extraction (an empty flow list, a stray bracket) must never
+    # reach the hint as a copy-paste id. Same shape the dispatch resolver reads.
+    [[ "$bind_target" =~ ^[A-Za-z][A-Za-z0-9]{0,7}-[0-9a-fA-F]{4,8}$ ]] || return 0
     local abs_path
     abs_path="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
     echo "validate-plan.sh: plan validated for $bind_target. Bind it so the graph can see it:" >&2
