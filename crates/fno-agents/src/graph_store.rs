@@ -1034,6 +1034,59 @@ pub fn lock_timestamp_quality(entry: &Value) -> &'static str {
     }
 }
 
+/// The open-do-row TTL, read from TASK_DO_TTL_HOURS at first use. 12.0 sits
+/// far above any legitimate do window (x-7649 was live at 2.5 hours) and far
+/// above the seventeen-minute spawn-handover window that made x-5c25 look
+/// identical to a strand, so youth is never misread as strandedness.
+fn do_ttl_hours() -> f64 {
+    static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        std::env::var("TASK_DO_TTL_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12.0)
+    })
+}
+
+/// The open do row `open_do_row_quality` reports: quality plus the offending
+/// row's session_id (the first row past the TTL, else the first whose
+/// started_at will not parse). None means fresh.
+fn open_do_quality_and_holder(entry: &Value) -> Option<(&'static str, String)> {
+    let rows = entry.get("sessions").and_then(Value::as_array)?;
+    let mut unreadable_holder: Option<String> = None;
+    for row in rows.iter().filter(|r| is_open_do_row(r)) {
+        let ts = row
+            .get("started_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let holder = row.get("session_id").and_then(Value::as_str).unwrap_or("");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"));
+        let Ok(parsed) = parsed else {
+            if unreadable_holder.is_none() {
+                unreadable_holder = Some(holder.to_string());
+            }
+            continue;
+        };
+        let elapsed = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+        if (elapsed as f64) / 3600.0 > do_ttl_hours() {
+            return Some(("old", holder.to_string()));
+        }
+    }
+    unreadable_holder.map(|h| ("unreadable", h))
+}
+
+/// Classify the node's open do row(s) by age without deciding writer death -
+/// the open-do counterpart of [`lock_timestamp_quality`] (x-f8b1 change 4).
+/// `fresh` when no open do row exists or the youngest reading is inside the
+/// TTL, `unreadable` when a row's started_at will not parse as RFC3339, `old`
+/// past the TTL.
+pub fn open_do_row_quality(entry: &Value) -> &'static str {
+    match open_do_quality_and_holder(entry) {
+        Some((quality, _)) => quality,
+        None => "fresh",
+    }
+}
+
 /// Apply lazy migration defaults to graph entries (store._apply_graph_defaults)
 /// - the one migration seam every reader routes through. Mutates in place.
 pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
@@ -1442,6 +1495,13 @@ pub fn recompute_statuses_with_plan_rungs(
             None
         };
         let has_pr = e.get("pr_number").map(|v| !v.is_null()).unwrap_or(false);
+        // Computed before the mutable borrow below, same as lock_quality:
+        // decisions read first, mutations after.
+        let do_quality = if !locked {
+            open_do_quality_and_holder(e)
+        } else {
+            None
+        };
         let open_do = e
             .get("sessions")
             .and_then(Value::as_array)
@@ -1496,6 +1556,32 @@ pub fn recompute_statuses_with_plan_rungs(
                     "holder".to_string(),
                     obj.get("locked_by").cloned().unwrap_or(Value::Null),
                 );
+                defect.insert("liveness".to_string(), Value::String("unverified".into()));
+                obj.insert("ownership_defect".to_string(), Value::Object(defect));
+            }
+        } else {
+            // The open-do route gets the same diagnostic, symmetric with the
+            // lock route above: a row whose writer died is otherwise
+            // indistinguishable from one whose writer is typing (x-f8b1). The
+            // status word is not touched - age records uncertainty, it never
+            // clears an owner. A lock defect already stamped keeps priority.
+            if let Some((quality, holder)) = do_quality {
+                let kind = if quality == "old" {
+                    "stale-open-do-unverified"
+                } else {
+                    "do-row-timestamp-unreadable"
+                };
+                let mut defect = Map::new();
+                defect.insert("kind".to_string(), Value::String(kind.into()));
+                defect.insert(
+                    "node_id".to_string(),
+                    obj.get("id").cloned().unwrap_or(Value::Null),
+                );
+                if !holder.is_empty() {
+                    defect.insert("holder".to_string(), Value::String(holder.to_string()));
+                } else {
+                    defect.insert("holder".to_string(), Value::Null);
+                }
                 defect.insert("liveness".to_string(), Value::String("unverified".into()));
                 obj.insert("ownership_defect".to_string(), Value::Object(defect));
             }
@@ -2579,6 +2665,118 @@ mod tests {
         recompute_statuses(&mut entries);
         // Parent with all-done children and no live work of its own -> done.
         assert_eq!(s_str(&entries[0], "status"), Some("done"));
+    }
+
+    #[test]
+    fn open_do_row_quality_classifies_age() {
+        // No open do row at all -> fresh.
+        assert_eq!(open_do_row_quality(&json!({"id": "n"})), "fresh");
+        // A row started 17 minutes ago is inside the TTL: x-5c25's
+        // spawn-handover window must never read as strandedness.
+        let fresh = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-fresh",
+                "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
+            }],
+        });
+        assert_eq!(open_do_row_quality(&fresh), "fresh");
+        // 11 days old: x-4c23's specimen age.
+        let old = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-old",
+                "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
+            }],
+        });
+        assert_eq!(open_do_row_quality(&old), "old");
+        // A started_at that will not parse is unreadable, never silently fresh.
+        let bad = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-bad",
+                "started_at": "not-a-date",
+            }],
+        });
+        assert_eq!(open_do_row_quality(&bad), "unreadable");
+    }
+
+    #[test]
+    fn recompute_stamps_the_stale_open_do_row_and_keeps_the_status() {
+        // An 11-day-old open do row carries the diagnostic and the node is
+        // STILL in_progress: age records uncertainty, it never clears an owner.
+        let old_row = json!({
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "s-old",
+            "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
+        });
+        let mut entries = vec![json!({
+            "id": "n-stale",
+            "status": "in_progress",
+            "sessions": [old_row],
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("in_progress"));
+        let defect = entries[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "stale-open-do-unverified");
+        assert_eq!(defect.get("holder").unwrap(), "s-old");
+        assert_eq!(defect.get("liveness").unwrap(), "unverified");
+
+        // Positive control: a 17-minute row gets NO marker and no status
+        // change - youth is not strandedness.
+        let fresh_row = json!({
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "s-fresh",
+            "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
+        });
+        let mut fresh = vec![json!({
+            "id": "n-fresh",
+            "status": "in_progress",
+            "sessions": [fresh_row],
+        })];
+        recompute_statuses(&mut fresh);
+        assert_eq!(s_str(&fresh[0], "status"), Some("in_progress"));
+        assert!(fresh[0].get("ownership_defect").is_none());
+
+        // A locked node keeps the lock's own marker; the do stamp never
+        // overwrites it.
+        let mut locked = vec![json!({
+            "id": "n-locked",
+            "status": "in_progress",
+            "locked_by": "worker",
+            "locked_at": (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
+            "sessions": [old_row],
+        })];
+        recompute_statuses(&mut locked);
+        let defect = locked[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "stale-active-owner-unverified");
+    }
+
+    #[test]
+    fn recompute_stamps_the_unreadable_do_row_timestamp() {
+        let mut entries = vec![json!({
+            "id": "n-bad",
+            "status": "in_progress",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-bad",
+                "started_at": "not-a-date",
+            }],
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("in_progress"));
+        let defect = entries[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "do-row-timestamp-unreadable");
+        assert_eq!(defect.get("holder").unwrap(), "s-bad");
     }
 
     #[test]

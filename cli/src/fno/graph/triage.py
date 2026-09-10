@@ -1595,6 +1595,26 @@ def cmd_health(
             }
         )
 
+    # 7b. Ownership defects (x-f8b1 change 5): every node carrying an
+    # ownership_defect stamped by the Rust recompute - a stale graph lock, or
+    # an open do row past the do TTL. Surfacing only: the section names the
+    # verification pair a human or king runs, because the graph cannot decide
+    # liveness from a timestamp (Locked Decision #2 posture, same as the
+    # stranded section above).
+    ownership_defects: list[dict] = []
+    for e in entries:
+        defect = e.get("ownership_defect") if isinstance(e, dict) else None
+        if not isinstance(defect, dict):
+            continue
+        ownership_defects.append(
+            {
+                "id": e.get("id"),
+                "kind": defect.get("kind"),
+                "holder": defect.get("holder"),
+                "status": e.get("status"),
+            }
+        )
+
     # 8. Batch-lane verdict (advisory, best-effort): surfaced only when batch
     # ship/abandon events exist and the measured verdict says act. Never gates
     # the health exit code.
@@ -1766,6 +1786,7 @@ def cmd_health(
         "supersession_unverified": supersession_unverified,
         "blocked_by_held": blocked_by_held,
         "stranded_by_failed_blocker": stranded_payload,
+        "ownership_defects": ownership_defects,
         **({"batch_verdict": batch_verdict} if batch_verdict else {}),
         **({"evals": evals_summary} if evals_summary else {}),
         "totals": {
@@ -1779,6 +1800,7 @@ def cmd_health(
             "stranded_by_failed_blocker": sum(
                 len(s["dependents"]) for s in stranded_payload
             ),
+            "ownership_defects": len(ownership_defects),
         },
     }
 
@@ -1966,6 +1988,17 @@ def cmd_health(
             typer.echo(f"  {s['blocker']} deferred ({s['deferred_reason']}) strands:")
             for d in s["dependents"]:
                 typer.echo(f"    - {d['id']} [{d['status']}] {d['title']}")
+    if ownership_defects:
+        typer.echo("")
+        typer.echo("Ownership defects (age records uncertainty, never an owner-death verdict):")
+        for d in ownership_defects:
+            typer.echo(f"  {d['id']} [{d['status']}] {d['kind']} holder={d['holder']}")
+        typer.echo(
+            "  liveness is not decided here. For each row: the transcript mtime under\n"
+            "  ~/.claude/projects/<slug>/<session>.jsonl AND the registry row from\n"
+            "  `fno agents list --json`. A claim lockfile confirms a live holder; its\n"
+            "  absence confirms nothing."
+        )
     if dnm["violations"]:
         typer.echo("")
         typer.echo(
