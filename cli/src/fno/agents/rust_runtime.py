@@ -663,14 +663,12 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
     substrate = _has_explicit_substrate(toks)
     if substrate is None:
         return
-    harness = (_spawn_flag_value(toks, "--harness", "-H") or "").strip().lower()
-    if not harness:
-        try:
-            from fno.harness_identity import resolve_harness_identity
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
 
-            harness = (resolve_harness_identity(os.environ).harness or "claude").lower()
-        except Exception:
-            harness = "claude"
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
     refusal = seedless_thread_refusal(
         harness,
         substrate,
