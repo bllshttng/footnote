@@ -997,8 +997,8 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
 /// ships the whole graph for one derived value.
 fn handle_read_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
     let entries = match state.read_source {
-        ReadSource::Json => (*cached_entries(state, false, false)?).clone(),
-        ReadSource::Sqlite => read_state(state, false, true)?,
+        ReadSource::Json => cached_entries(state, false, false)?,
+        ReadSource::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
     };
     let refs: Vec<Value> = entries
         .iter()
