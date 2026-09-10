@@ -657,7 +657,8 @@ fn cached_snapshot(state: &StoreState) -> Result<(String, Arc<Vec<Value>>), Stor
 /// directly) landing between the publish and this check fails the digest
 /// match and caches nothing, so a mispaired identity/entries row can never
 /// enter the cache.
-fn seed_cache(state: &StoreState, entries: Vec<Value>, published_version: &str) {
+fn seed_cache(state: &StoreState, mut entries: Vec<Value>, published_version: &str) {
+    graph_store::apply_defaults(&mut entries, false);
     let mut cache = state.cache.write().unwrap_or_else(|e| e.into_inner());
     let ident = FileIdent::of(&state.graph);
     let verified =
