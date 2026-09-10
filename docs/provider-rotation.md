@@ -1137,7 +1137,7 @@ The headline scenario (`test_ac3_1_opus_locked_sonnet_free`) pins the user-visib
 
 ## Combos and round-robin (Plan B)
 
-Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`) and add per-combo cursor state in the same `provider-runtime-state.json` so parallel target spawns within a multi-node campaign share rotation.
+Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`). Per-combo cursor state lives in the same `provider-runtime-state.json`, so parallel target spawns within a multi-node campaign share rotation.
 
 ### Schema
 

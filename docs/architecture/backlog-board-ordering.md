@@ -47,9 +47,7 @@ Rank never changes a node's column.
 
 ## Board order == work order
 
-Board order and work order share the whole decision suffix rather than only the rank term.
-The Obsidian board, HTML master board, HTML project boards, public roadmap, `fno backlog next`, `fno backlog ready`, and the active-backlog daemon all call `make_selection_sort_key`.
-No renderer carries an independent priority/created-at fallback that can drift from the walker.
+Board order and work order share the whole decision suffix rather than only the rank term. The Obsidian board, HTML master board, HTML project boards, public roadmap, `fno backlog next`, `fno backlog ready`, and the active-backlog daemon all call `make_selection_sort_key`. No renderer carries an independent priority/created-at fallback that can drift from the walker.
 
 The project prefix is an explicit display exception.
 Default `fno backlog next` is project-scoped, so its order matches that project's board lane.

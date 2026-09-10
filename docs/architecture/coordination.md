@@ -65,17 +65,7 @@ Two modes, mutually exclusive per claim:
   Valid range is 60s to 24h.
 
 **Hybrid arm (TTL claims that also record a pid).** A TTL claim whose
-clock has expired is not unconditionally stale: if its recorded pid is a
-live process on this host (passing the same host + `create_time` guards as
-PID-liveness), it stays LIVE. This keeps a session that is alive but idle
-or SIGSTOP-suspended past its TTL from having its claim reclaimed by a peer,
-a case TTL refresh cannot cover because a suspended process cannot run its
-own refresh. The arm is purely additive: it only ever extends liveness, so
-a TTL claim whose recorded pid is transient, dead, missing, or off-host
-falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>`
-target claims opt in by recording a durable session pid (see below); the
-retired megawalk walker recorded a transient pid, so the arm never fired
-for it and its TTL park-exclusion is unchanged.
+clock has expired is not unconditionally stale: if its recorded pid is a live process on this host (passing the same host + `create_time` guards as PID-liveness), it stays LIVE. This keeps a session that is alive but idle or SIGSTOP-suspended past its TTL from having its claim reclaimed by a peer, a case TTL refresh cannot cover because a suspended process cannot run its own refresh. The arm is purely additive: it only ever extends liveness, so a TTL claim whose recorded pid is transient, dead, missing, or off-host falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>` target claims opt in by recording a durable session pid (see below); the retired megawalk walker recorded a transient pid, so the arm never fired for it and its TTL park-exclusion is unchanged.
 
 **Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
@@ -236,26 +226,8 @@ sessions (or a `/target` racing an autonomous dispatch) from both
 picking up the same backlog node. Two properties make this work, and both
 differ from the per-walker `walker:` claim:
 
-- **Global root.** Node ids are global (they live in `~/.fno/graph.json`),
-  so the lock must coordinate across worktrees, not land in a worktree-local
-  `cwd/.fno/claims`. Node-claim call sites set `FNO_CLAIMS_ROOT=$HOME`
-  so the lock is written to `~/.fno/claims`, a sibling of the global
-  graph. `claims_dir()` honors that env var when no explicit `root` is passed;
-  `global_claims_root()` is the in-process resolver (env, else `$HOME`). The
-  `walker:` singleton keeps its per-root (cwd) location by passing an explicit
-  root, so it is unaffected.
-- **TTL with a durable-pid hybrid arm.** A `/target` node claim is acquired by
-  the one-shot `fno do target init` subprocess, which exits immediately - so a pure
-  PID-liveness claim would be stale on birth and the next session would reclaim
-  it. Node claims are therefore TTL claims (`--ttl ${TARGET_CLAIM_TTL:-2h}`),
-  acquired in `init-target-state.sh` and released by the stop hook. To stop a
-  session that is alive but idle or suspended past its TTL from being reclaimed,
-  init ALSO records a durable session pid (`--pid`, resolved by `fno agents claim
-  session-pid` walking the process tree to the nearest `claude` ancestor) so the
-  hybrid arm keeps the claim LIVE while that process lives. This is degrade-safe:
-  if the durable pid is uncapturable, no `--pid` is recorded and the claim is
-  TTL-only exactly as before. A crashed session's lock self-heals when its pid
-  dies and the TTL expires.
+- **Global root.** Node ids are global (they live in `~/.fno/graph.json`), so the lock must coordinate across worktrees, not land in a worktree-local `cwd/.fno/claims`. Node-claim call sites set `FNO_CLAIMS_ROOT=$HOME` so the lock is written to `~/.fno/claims`, a sibling of the global graph. `claims_dir()` honors that env var when no explicit `root` is passed; `global_claims_root()` is the in-process resolver (env, else `$HOME`). The `walker:` singleton keeps its per-root (cwd) location by passing an explicit root, so it is unaffected.
+- **TTL with a durable-pid hybrid arm.** A `/target` node claim is acquired by the one-shot `fno do target init` subprocess, which exits immediately - so a pure PID-liveness claim would be stale on birth and the next session would reclaim it. Node claims are therefore TTL claims (`--ttl ${TARGET_CLAIM_TTL:-2h}`), acquired in `init-target-state.sh` and released by the stop hook. To stop a session that is alive but idle or suspended past its TTL from being reclaimed, init ALSO records a durable session pid (`--pid`, resolved by `fno agents claim session-pid` walking the process tree to the nearest `claude` ancestor) so the hybrid arm keeps the claim LIVE while that process lives. This is degrade-safe: if the durable pid is uncapturable, no `--pid` is recorded and the claim is TTL-only exactly as before. A crashed session's lock self-heals when its pid dies and the TTL expires.
 - **A shared host pid never earns the prover stamp.** The hybrid arm needs a pid that dies with its session. Only a harness that forks one binary per session supplies such a pid. codex does not. Its nearest harness ancestor is a shared `codex app-server`. That server hosts every codex session on the machine and outlives all of them. A live reading there proves the server is up. It says nothing about the session. Measured 2026-09-03: a codex claim read LIVE 3h45m past its TTL. Its session had been dead five hours. `fno agents claim reap` cleared nothing. If a harness shares one host process, its claim now stamps `ambient` at write time. `classify` also refuses to extend an expired lease for such a record. It reads the record's own `harness`, which reaches claims already on disk. The deny-list is `pid_dies_with_session` in `crates/fno-agents/src/claims.rs`. `cli/src/fno/claims/session_pid.py` mirrors it. Adding a name costs a measurement. Run one session, walk to its harness ancestor, end the session, and read whether that pid still lives. An unmeasured harness keeps the extension. Most records carry no harness, and a denial there lets a peer reclaim a suspended session's claim.
 
 Two enforcement points:
@@ -386,7 +358,7 @@ fno agents claim release node:ab-stuck --force --reason "operator intervention; 
 
 The archived claim survives in `.fno/claims/.expired/`.
 
-**Why isn't any dispatcher picking up this ready node?** Cross-check the
+**Why is no dispatcher picking up this ready node?** Cross-check the
 graph status against any held claim:
 
 ```bash
@@ -429,11 +401,7 @@ archive-then-recreate).
 
 ## Coordination today
 
-`fno agents claim` is the coordination primitive across target (and the
-later king/reign loop arms). Megawalk's legacy coordination mechanisms (`megawalk-state.md`,
-`in_flight_nodes`, the PID lock) have been removed in favor of the
-`walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide
-observability into what is in flight.
+`fno agents claim` is the coordination primitive across target (and the later king/reign loop arms). Megawalk's legacy coordination mechanisms (`megawalk-state.md`, `in_flight_nodes`, the PID lock) have been removed in favor of the `walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide observability into what is in flight.
 
 One legacy mirror remains: `/target` still writes a graph `session_id`
 onto the backlog node when it claims (alongside acquiring the `node:`

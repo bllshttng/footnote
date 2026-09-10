@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document covers the stop-hook decision verb (`fno-agents loop-check`) that runs INSIDE a session. For the driver loop that dispatches sessions from outside - the target driver today; the megawalk and megatron arms were removed - see [unified-loop.md](unified-loop.md) (step 5).
+This document covers the stop-hook decision verb (`fno-agents loop-check`) that runs INSIDE a session. For the driver loop that dispatches sessions from outside, see [unified-loop.md](unified-loop.md) (step 5). The target driver is live today. The megawalk and megatron arms were removed.
 
 ## Principle
 

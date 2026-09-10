@@ -46,7 +46,7 @@ In any Claude Code session:
 /plugin install fno@footnote
 ```
 
-The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel, which bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route instead: it builds the Rust front door with your Rust toolchain, and the front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
+The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel. The wheel bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route. It builds the Rust front door with your Rust toolchain. The front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
 
 ### Windows (WSL2)
 
@@ -106,7 +106,7 @@ fno config unset config.auto_merge.enabled          # remove a key (reverts to i
 fno config doctor                                    # what resolved, and any suspicious values
 ```
 
-`fno config set` also takes a whole block as JSON when you need it: `fno config set config.review '{"github_apps":["chatgpt-codex-connector"]}'`.
+`fno config set` also takes a whole block as JSON: `fno config set config.review '{"github_apps":["chatgpt-codex-connector"]}'`.
 
 ### The settings you'll touch first
 
@@ -134,9 +134,9 @@ Budget and skip behavior are not config keys; they're flags you pass to a run, f
 /fno:target "add a health check endpoint that returns server status"
 ```
 
-Target explores the design, plans it, implements with TDD, runs the internal review, and opens the PR. Watch it or walk away; it won't quit until the PR is open and CI is green. The internal review is the configured inline lane: one head-pinned reviewer by default (`config.review.posture` floors at `self_review`), with at most `config.review.max_rounds` rounds (default 2). With no `config.review.github_apps` set there is no external-bot gate; name a bot there to make target also wait for that review.
+Target explores the design, plans it, implements with TDD, runs the internal review, and opens the PR. Watch it or walk away. It will not quit until the PR is open and CI is green. The internal review is the configured inline lane: one head-pinned reviewer by default (`config.review.posture` floors at `self_review`), with at most `config.review.max_rounds` rounds (default 2). With no `config.review.github_apps` set there is no external-bot gate. Name a bot there to make target also wait for that review.
 
-A green, reviewed PR is the finish line, not a merge. Target merges on its own only when you set `config.auto_merge.enabled` (default `false`); otherwise it stops and the merge is yours.
+A green, reviewed PR is the finish line, not a merge. Target merges on its own only with `config.auto_merge.enabled` (default `false`). Otherwise it stops and the merge is yours.
 
 ### Option B: drive it step by step
 
@@ -190,7 +190,7 @@ Each agent runs its own loop; Claude, Codex, and Gemini, one project.
 
 ### Keep going past one feature
 
-The backlog is the queue. Capture work, see what's ready, ship it:
+The backlog is the queue. Capture work, see what is ready, ship it:
 
 ```bash
 fno backlog idea "add webhook retries"   # capture work as a backlog node
@@ -198,7 +198,7 @@ fno backlog next                          # what's ready to ship now
 /fno:target <node-id>                     # ship a ready node end to end
 ```
 
-To work a whole board instead of one node: `/fno:target bg --all-ready` dispatches every ready, non-deferred node as background workers, and `fno backlog advance` (opt-in, merge-triggered) dispatches a node's dependents once its PR merges. The backlog is optional; `/fno:target "feature"` runs end to end with no backlog required.
+To work a whole board instead of one node: `/fno:target bg --all-ready` dispatches every ready, non-deferred node as background workers. `fno backlog advance` (opt-in, merge-triggered) dispatches a node's dependents after its PR merges. The backlog is optional. `/fno:target "feature"` runs end to end with no backlog required.
 
 ## Keeping fno up to date
 

@@ -23,7 +23,7 @@ fno backlog next                          # what a dispatcher would pick next
 fno agents claim list --prefix node:      # in-flight or parked node claims
 ```
 
-Termination events land in `.fno/events.jsonl`; the loop terminates on `DonePRGreen`, `NoWork`, `Budget`, or `NoProgress`.
+Termination events land in `.fno/events.jsonl`. The loop terminates on `DonePRGreen`, `NoWork`, `Budget`, or `NoProgress`.
 
 ## Cancel
 
@@ -42,4 +42,4 @@ fno agents claim release node:<id> --force --reason "..." # release for re-dispa
 
 ## History
 
-The old `fno megawalk status / pause / resume / bootstrap / reset / watch` subcommands were removed with the Python walker, and the `/megawalk` skill, the `--driver megawalk` arm, and `loop_megawalk.rs` followed (removed 2026-08-03; see [path-census.md](../architecture/path-census.md)). The surface-change record from the earlier megawalk cleanup is in [megawalk-migration.md](../architecture/megawalk-migration.md).
+The old `fno megawalk status / pause / resume / bootstrap / reset / watch` subcommands were removed with the Python walker. The `/megawalk` skill, the `--driver megawalk` arm, and `loop_megawalk.rs` followed (removed 2026-08-03, see [path-census.md](../architecture/path-census.md)). The surface-change record from the earlier megawalk cleanup is in [megawalk-migration.md](../architecture/megawalk-migration.md).

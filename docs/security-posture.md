@@ -10,7 +10,7 @@ This is also a constraint when footnote is shared with others.
 
 ## The trust boundary
 
-You should run the loop only against plans you have read or trust the author of. Specifically:
+You must run the loop only against plans you have read or trust the author of. Specifically:
 
 - **Plans you wrote:** safe by definition (modulo your own mistakes).
 - **Plans someone you trust wrote:** safe to the degree you trust them.
