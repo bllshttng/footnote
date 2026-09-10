@@ -1424,7 +1424,7 @@ pub(crate) use crate::liveness_sweep::{
 };
 pub(crate) use crate::row_truth::{
     apply_title_changes, batched_row_probes, fold_positive_death, row_truth_handle,
-    row_truth_handles, served_fresh_liveness, title_changes,
+    row_truth_handles, served_fresh_liveness, served_liveness_basis, title_changes,
 };
 
 pub fn now_epoch_secs() -> i64 {
@@ -5318,7 +5318,7 @@ where
                 req.id,
                 ErrorCode::InvalidStatus,
                 format!(
-                    "invalid --status '{st}' (expected: writing | quiet | parked | orphaned | unknown)"
+                    "invalid --status '{st}' (status is served activity: writing | quiet | parked | orphaned | unknown; process liveness is the liveness field on fno agents list --json)"
                 ),
             );
         }
@@ -5595,13 +5595,13 @@ where
                     "last_message_at": e.last_message_at,
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
-                    // The SERVED liveness pair, written only by the
-                    // sweep: the word is served only while its stamp is
-                    // young (the same two-sweep-budget window the mux-side
-                    // reader applies); an older word is withheld rather
-                    // than republished as current, and the stamp stays so
-                    // every reader can show its age.
+                    // The SERVED liveness triple: word, stamp, basis; the
+                    // freshness rule lives in crates/fno/src/served_liveness.rs.
                     "liveness": served_fresh_liveness(
+                        e.liveness.as_deref(),
+                        e.liveness_measured_at.as_deref(),
+                    ),
+                    "liveness_basis": served_liveness_basis(
                         e.liveness.as_deref(),
                         e.liveness_measured_at.as_deref(),
                     ),

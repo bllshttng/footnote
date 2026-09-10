@@ -148,3 +148,15 @@ pub(crate) fn served_fresh_liveness<'a>(
         crate::daemon::now_epoch_secs() as u64,
     )
 }
+
+/// Why the row's served `liveness` reads the way it does: `fresh` inside
+/// the shared window, `stale` once the window passed (the word is
+/// withheld), `never-measured` with no word or no stamp. Sits beside
+/// `liveness` on every list row (law d-d6cb1827: a field with a basis
+/// shows the basis, never blank).
+pub(crate) fn served_liveness_basis(word: Option<&str>, measured_at: Option<&str>) -> &'static str {
+    let stamp = measured_at
+        .and_then(crate::state::rfc3339_like_to_secs)
+        .map(|s| s as u64);
+    fno::served_liveness::served_liveness_basis(word, stamp, crate::daemon::now_epoch_secs() as u64)
+}
