@@ -41,11 +41,15 @@ fn sh_server(scratch: &Scratch) -> common::ServerProc {
 }
 
 /// Run the real `fno` binary with `FNO_MUX_DIR` pointed at this scratch (no
-/// TTY - the mux verbs are plain subprocess surfaces).
+/// TTY - the mux verbs are plain subprocess surfaces). FNO_AGENTS_HOME rides
+/// along so a store-touching verb (workspace prune) writes the SAME isolated
+/// store the server uses instead of tripping the build-tree guard against
+/// the developer's real ~/.fno.
 fn fno_cmd(scratch: &Scratch, args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
         .args(args)
         .env("FNO_MUX_DIR", &scratch.0)
+        .env("FNO_AGENTS_HOME", &scratch.0.join("iso-agents"))
         .output()
         .unwrap()
 }
@@ -925,22 +929,9 @@ fn workspace_prune_converges_the_spectating_clients_catalog() {
     // Poll the SAME instrument the fold reads (pane ls's pristine flag); the
     // active tab's pane is exempt: the last-in-squad guard keeps it whatever
     // it reads.
-    let iso_cmd = |args: &[&str]| {
-        // The store pass must write the SAME isolated store the server uses
-        // (spawn_server pins FNO_AGENTS_HOME); without it the build-tree
-        // guard refuses the write to the developer's real ~/.fno.
-        let store_home = scratch.0.join("iso-agents");
-        std::fs::create_dir_all(&store_home).unwrap();
-        std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
-            .args(args)
-            .env("FNO_MUX_DIR", &scratch.0)
-            .env("FNO_AGENTS_HOME", &store_home)
-            .output()
-            .unwrap()
-    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let out = iso_cmd(&["mux", "pane", "ls", "--json"]);
+        let out = fno_cmd(&scratch, &["mux", "pane", "ls", "--json"]);
         assert!(out.status.success(), "pane ls failed");
         let pristine = String::from_utf8_lossy(&out.stdout)
             .matches("\"pristine_idle_shell\":true")
@@ -960,7 +951,7 @@ fn workspace_prune_converges_the_spectating_clients_catalog() {
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b joins", |l| active_tabs(l) == Some(3));
 
-    let out = iso_cmd(&["mux", "workspace", "prune", "--json"]);
+    let out = fno_cmd(&scratch, &["mux", "workspace", "prune", "--json"]);
     assert!(
         out.status.success(),
         "prune failed: {}",
@@ -968,7 +959,7 @@ fn workspace_prune_converges_the_spectating_clients_catalog() {
     );
     let receipt = String::from_utf8_lossy(&out.stdout);
     assert!(
-        receipt.contains("\"tabs_closed\":2") || receipt.contains("\"tabs_closed\": 2"),
+        receipt.contains("\"tabs_closed\":2"),
         "the fold closed the two surplus tabs: {receipt}"
     );
 
