@@ -12,7 +12,7 @@ use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, restart_daemon, ClientError,
     RestartError, RestartOutcome,
 };
-use fno_agents::drift::drift_warning;
+use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
@@ -2037,7 +2037,7 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 /// but the arms rows print either way.
 async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
-    let arms = arms_readout(&home);
+    let mut arms = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -2046,6 +2046,18 @@ async fn run_status(json_out: bool) -> i32 {
                 exit_code_for(err.code)
             }
             ResponsePayload::Ok(mut result) => {
+                // One drift read feeds both the stderr warning below and the
+                // facts the arms rows are explained against.
+                let drift = drift_from_status(&result);
+                let uptime_s = result
+                    .pointer("/daemon/uptime_secs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let drifted = matches!(drift, DriftState::Drifted { .. });
+                fno_agents::tick_ledger::explain(
+                    &mut arms,
+                    &fno_agents::tick_ledger::DaemonFacts::Up { uptime_s, drifted },
+                );
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert(
                         "arms".into(),
@@ -2068,7 +2080,7 @@ async fn run_status(json_out: bool) -> i32 {
                     .and_then(|d| d.get("pid"))
                     .and_then(Value::as_u64)
                     .map(|p| p as u32);
-                if let Some(w) = drift_warning(&drift_from_status(&result), pid) {
+                if let Some(w) = drift_warning(&drift, pid) {
                     eprintln!("{w}");
                 }
                 0
@@ -2077,6 +2089,10 @@ async fn run_status(json_out: bool) -> i32 {
         Err(ClientError::DaemonNotRunning) => {
             // The arms table is exactly what a dead control plane needs to
             // show; print it beside the down-daemon signal rather than nothing.
+            fno_agents::tick_ledger::explain(
+                &mut arms,
+                &fno_agents::tick_ledger::DaemonFacts::Down,
+            );
             let payload = json!({
                 "schema_version": 1,
                 "daemon": null,
@@ -2096,6 +2112,12 @@ async fn run_status(json_out: bool) -> i32 {
         Err(e) => {
             // Unreachable daemon (socket error, timeout, ...): same degraded
             // shape as DaemonNotRunning - the arms readout stands on its own.
+            // Daemon rules do not fire on Unknown, so stale rows read
+            // `unexplained` rather than blaming a daemon of unknown health.
+            fno_agents::tick_ledger::explain(
+                &mut arms,
+                &fno_agents::tick_ledger::DaemonFacts::Unknown,
+            );
             let payload = json!({
                 "schema_version": 1,
                 "daemon": null,
@@ -2134,36 +2156,13 @@ fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
     fno_agents::tick_ledger::read_arms(&journals, now_unix)
 }
 
-/// The human render: one line per arm (red rows first-class), then the daemon
-/// block the JSON payload carries.
+/// The human render: one owned line per arm (red rows first-class), then the
+/// daemon block the JSON payload carries. `explain` filled every row's
+/// `line`, so the render prints them without re-formatting.
 fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus]) {
     println!("control-plane arms:");
     for arm in arms {
-        let verdict = if arm.stale { "STALE" } else { "ok" };
-        let age = match arm.age_s {
-            Some(s) => format!("{s}s ago"),
-            None => "never".to_string(),
-        };
-        let skip = arm
-            .skip_reason
-            .as_deref()
-            .map(|r| format!(" skip={r}"))
-            .unwrap_or_default();
-        let acted = arm.acted.map(|n| format!(" acted={n}")).unwrap_or_default();
-        let scheduler = arm
-            .scheduler
-            .as_deref()
-            .map(|s| format!(" via={s}"))
-            .unwrap_or_default();
-        let detail = arm
-            .detail
-            .as_deref()
-            .map(|d| format!(" {d}"))
-            .unwrap_or_default();
-        println!(
-            "  {:<16} {:<5} {:>10}{}{}{}{}",
-            arm.arm, verdict, age, acted, skip, scheduler, detail
-        );
+        println!("  {}", arm.line);
     }
     let Some(daemon) = result.get("daemon").and_then(Value::as_object) else {
         return;

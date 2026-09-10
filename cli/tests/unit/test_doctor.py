@@ -1629,6 +1629,68 @@ def test_ac2_ui_non_cargo_binary_never_reports_stale(
     )
 
 
+def test_doctor_prints_the_reader_line_for_red_arms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-d7dc: a red (stale or failing) arm prints the line the Rust reader
+    rendered, exactly once; an ok arm in the same payload is never named.
+    """
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="xyz",
+        marker="xyz",
+        capture_present="present",
+    )
+    red_line = (
+        "active_backlog    STALE      never skip=never via=daemon "
+        "cause=stale_daemon (daemon predates the installed build; run fno agents restart)"
+    )
+    red_row = {"arm": "active_backlog", "stale": True, "failing": False, "line": red_line}
+    ok_row = {"arm": "stop_hook", "stale": False, "failing": False,
+              "line": "stop_hook        ok         never"}
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"arms": [red_row, ok_row], "red": [red_row], "unknown_reason": None},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
+    combined = result.stdout + result.stderr
+    expected = f"fno doctor: control-plane arm {red_line}"
+    assert expected in combined, f"missing owned line. Got:\n{combined}"
+    assert combined.count(red_line) == 1, "the red line must print exactly once"
+    assert "stop_hook" not in combined, "an ok arm must never be named"
+
+
+def test_doctor_falls_back_to_the_sentence_for_rows_without_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-d7dc: a red row with no `line` (an older binary) prints the old
+    sentence instead of failing."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="xyz",
+        marker="xyz",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"red": [{"arm": "reap", "stale": True, "age_s": 4600,
+                          "interval_s": 60, "skip_reason": "never"}],
+                 "unknown_reason": None},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "control-plane arm reap is STALE" in combined, f"Got:\n{combined}"
+    assert "last tick 4600s ago" in combined, f"Got:\n{combined}"
+    assert "interval 60s" in combined, f"Got:\n{combined}"
+    assert "skip: never" in combined, f"Got:\n{combined}"
+
+
 def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

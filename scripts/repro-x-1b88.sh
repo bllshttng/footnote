@@ -1,12 +1,12 @@
 #!/bin/bash
 # repro-x-1b88: end-to-end arms-readout proof in a sandbox, no machine state touched.
 #
-# Emits five real control_plane_tick rows through the Python emitter into a
-# pinned sandbox journal, then reads them back through the Rust reader
-# (`fno-agents status --json`) with FNO_AGENTS_HOME pointed at the same
-# sandbox, and asserts the readout renders every arm green. Proves the whole
-# chain this repo ships (emitter -> journal -> reader -> staleness verdict)
-# without deploying anything onto the live daemon or launchd agents.
+# Emits real control_plane_tick rows for every interval-driven arm through the
+# Python emitter into a pinned sandbox journal, then reads them back through
+# the Rust reader (`fno-agents status --json`) with FNO_AGENTS_HOME pointed at
+# the same sandbox, and asserts the readout renders every arm green. Proves
+# the whole chain this repo ships (emitter -> journal -> reader -> staleness
+# verdict) without deploying anything onto the live daemon or launchd agents.
 #
 # The live post-deploy check is the readout against the REAL journals:
 #   fno agents status          (arms table, red when an arm stopped ticking)
@@ -25,9 +25,13 @@ mkdir -p "$T/ah"
 
 FNO_EVENTS_PATH="$T/ah/events.jsonl" uv run --project "$ROOT/cli" python -c '
 from fno.control_plane import emit_tick
-for arm in ("king_wake", "watchdog", "pr_watch_merge", "active_backlog", "auto_continue"):
+# Every interval-driven arm must tick, or its never-ticked row reads stale
+# and the green assert below is a false alarm. stop_hook is event-driven
+# (interval 0) and cannot read stale from quiet, so it is not emitted.
+for arm in ("king_wake", "watchdog", "pr_watch_merge", "active_backlog",
+            "auto_continue", "notify_watch", "reap", "retire"):
     assert emit_tick(arm, scheduler="probe", interval_s=600, acted=1), arm
-print("emitted 5 tick rows")
+print("emitted 8 tick rows")
 '
 
 BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
@@ -43,7 +47,7 @@ import json, sys
 d = json.load(sys.stdin)
 arms = d["arms"]
 stale = [a["arm"] for a in arms if a.get("stale")]
-assert len(arms) >= 5 and not stale, (len(arms), stale)
+assert len(arms) >= 8 and not stale, (len(arms), stale)
 print("arms green", len(arms))
 '
 rm -rf "$T"
