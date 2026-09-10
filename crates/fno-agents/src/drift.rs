@@ -107,6 +107,23 @@ pub fn classify(running: Option<&ExeFingerprint>, on_disk: Option<&ExeFingerprin
     }
 }
 
+/// Self-drift for a long-lived process: compare the fingerprint the process
+/// captured at startup against what its own executable path holds NOW. This
+/// is the census question ("is this running process an older build than the
+/// binary it was launched from?"), answered without a daemon round-trip.
+pub fn self_drift(startup: &ExeFingerprint) -> DriftState {
+    classify(Some(startup), ExeFingerprint::of(&startup.path).as_ref())
+}
+
+/// The one-word label every consumer prints. No second rule.
+pub fn drift_label(state: &DriftState) -> &'static str {
+    match state {
+        DriftState::Fresh => "fresh",
+        DriftState::Drifted { .. } => "drifted",
+        DriftState::DaemonDown | DriftState::Unknown => "unknown",
+    }
+}
+
 /// Format the operator-facing drift warning, or `None` when there is nothing to
 /// warn about (`Fresh`/`DaemonDown`/`Unknown`). The message is advisory and
 /// names the exact remedy verb. The caller routes it to **stderr** only, so a
@@ -240,6 +257,36 @@ mod tests {
         // And Unknown never warns.
         assert_eq!(drift_warning(&DriftState::Unknown, None), None);
         assert_eq!(drift_warning(&DriftState::DaemonDown, None), None);
+    }
+
+    #[test]
+    fn self_drift_reads_fresh_then_drifted_after_a_rewrite() {
+        let p = tmp_path("self");
+        write_file(&p, b"bin");
+        let fp = ExeFingerprint::of(&p).unwrap();
+        assert_eq!(drift_label(&self_drift(&fp)), "fresh");
+        write_file(&p, b"bin by a newer build");
+        assert_eq!(drift_label(&self_drift(&fp)), "drifted");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn drift_label_maps_every_state() {
+        let fp = ExeFingerprint {
+            path: PathBuf::from("/x"),
+            mtime_nanos: 1,
+            size: 1,
+        };
+        assert_eq!(drift_label(&classify(Some(&fp), Some(&fp))), "fresh");
+        assert_eq!(drift_label(&classify(Some(&fp), None)), "unknown");
+        let drifted = classify(
+            Some(&fp),
+            Some(&ExeFingerprint {
+                size: 2,
+                ..fp.clone()
+            }),
+        );
+        assert_eq!(drift_label(&drifted), "drifted");
     }
 
     #[test]

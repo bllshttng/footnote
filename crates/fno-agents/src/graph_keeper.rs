@@ -297,6 +297,10 @@ struct StoreState {
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
     /// stands down (AC2-ERR).
     sock_ino: Option<(u64, u64)>,
+    /// The build this keeper process launched from: drift is computed fresh
+    /// at every Identify, and the WouldBlock arm self-retires when the
+    /// binary under the keeper is rewritten while it idles.
+    startup_fp: Option<crate::drift::ExeFingerprint>,
 }
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
@@ -525,6 +529,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     let sock_ino = std::fs::metadata(&cfg.sock)
         .ok()
         .map(|md| (md.dev(), md.ino()));
+    let startup_fp = crate::drift::ExeFingerprint::current();
 
     let state = Arc::new(StoreState {
         graph: cfg.graph.clone(),
@@ -538,6 +543,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         events: cfg.events.clone(),
         read_source: cfg.read_source,
         sock_ino,
+        startup_fp,
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -602,6 +608,14 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
     let mut last_seat_check = std::time::Instant::now();
+    let mut last_drift_check = std::time::Instant::now();
+    // x-f188 change 3: the drift tick period. 30s default, env-overridable
+    // for tests, next to its idle-exit sibling's override.
+    let drift_check_every = std::env::var("FNO_STORE_KEEPER_DRIFT_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
     // bound to that test run's lifetime, not the longer-lived idle bound
     // above: a wedged test that never sends Shutdown must not leak this
@@ -671,6 +685,25 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                     last_seat_check = std::time::Instant::now();
                     if !seat_still_ours(&cfg.sock, sock_ino) {
                         break;
+                    }
+                }
+                // Drift self-retire (x-f188 change 3): a keeper idling on a
+                // binary that a rebuild replaced is a stale server no
+                // restart reaches. Every drift tick with no client,
+                // re-stat the own executable; Drifted -> break so the
+                // inode-guarded unlink runs and the next caller respawns
+                // on the installed binary.
+                if active_clients.load(Ordering::SeqCst) == 0
+                    && last_drift_check.elapsed() >= drift_check_every
+                {
+                    last_drift_check = std::time::Instant::now();
+                    if let Some(fp) = &state.startup_fp {
+                        if matches!(
+                            crate::drift::self_drift(fp),
+                            crate::drift::DriftState::Drifted { .. }
+                        ) {
+                            break;
+                        }
                     }
                 }
                 if let Some(limit) = cfg.idle_limit {
@@ -826,7 +859,26 @@ fn serve_client(
                 return;
             }
             Incoming::Identify => {
-                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, &identify));
+                // Build + drift computed LIVE at each Identify: a binary
+                // rewritten after this keeper started reads drifted in the
+                // next census, not one restart behind. New JSON keys are
+                // not a frame-shape change (PROTOCOL_VERSION stays 1).
+                let mut id: Value = serde_json::from_slice(&identify).unwrap_or(json!({}));
+                if let (Some(obj), Some(fp)) = (id.as_object_mut(), &state.startup_fp) {
+                    obj.insert(
+                        "build".to_string(),
+                        json!({
+                            "path": fp.path.display().to_string(),
+                            "mtime_nanos": fp.mtime_nanos,
+                            "size": fp.size,
+                        }),
+                    );
+                    obj.insert(
+                        "drift".to_string(),
+                        json!(crate::drift::drift_label(&crate::drift::self_drift(fp))),
+                    );
+                }
+                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, id.to_string().as_bytes()));
                 let _ = stream.flush();
             }
             Incoming::Shutdown => {
@@ -835,6 +887,31 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
+                // Wait out an in-flight mutation first (x-f188 change 3):
+                // a bounded try_write ladder; when it cannot land within
+                // lock_timeout, answer busy and KEEP SERVING instead of
+                // exiting mid-write.
+                let deadline = std::time::Instant::now() + state.lock_timeout;
+                let mut gate_guard: Option<std::sync::RwLockWriteGuard<'_, ()>> = None;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(g) = state.gate.try_write() {
+                        gate_guard = Some(g);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(gate_guard) = gate_guard else {
+                    let _ = stream.write_all(&encode(
+                        TAG_RESPONSE,
+                        json!({"id": 0, "ok": false, "error": {"kind": "busy",
+                              "message": "a mutation is in flight"}})
+                        .to_string()
+                        .as_bytes(),
+                    ));
+                    let _ = stream.flush();
+                    return;
+                };
+                drop(gate_guard);
                 let _ = stream.write_all(&encode(
                     TAG_RESPONSE,
                     json!({"id": 0, "ok": true, "result": "shutdown"})
@@ -2585,6 +2662,7 @@ mod tests {
             events: None,
             read_source: ReadSource::Json,
             sock_ino: None,
+            startup_fp: None,
         }
     }
 
@@ -2654,6 +2732,7 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
             sock_ino: None,
+            startup_fp: None,
             read_source: ReadSource::Json,
         }
     }
@@ -3013,6 +3092,7 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
             sock_ino: None,
+            startup_fp: None,
             read_source: ReadSource::Json,
         };
         let stale = json!({

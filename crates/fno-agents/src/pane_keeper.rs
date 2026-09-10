@@ -271,6 +271,10 @@ struct Keeper {
     /// must know it is a probe, or it wires a pane that never receives
     /// output and never gets input honored.
     identify: OnceLock<serde_json::Value>,
+    /// The build this keeper launched from: drift is merged into the
+    /// Identify reply at answer time, so a binary rewritten after start
+    /// reads drifted in the census while the pane keeps running.
+    startup_fp: Option<crate::drift::ExeFingerprint>,
     /// The child's pid: the Kill frame's target and the Identify reply's
     /// answer. The keeper owns the master; the CHILD is the process every
     /// fleet count and later kill must aim at.
@@ -449,6 +453,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         client: Mutex::new(None),
         client_gen: AtomicU64::new(0),
         identify: OnceLock::new(),
+        startup_fp: crate::drift::ExeFingerprint::current(),
         child_pid: AtomicU32::new(child_pid),
         master: Mutex::new(pair.master),
         input: Mutex::new(Some(input)),
@@ -638,6 +643,29 @@ fn serve_client(
                             if let Some(value) = keeper.identify.get() {
                                 let mut value = value.clone();
                                 value["subscriber"] = serde_json::json!(is_subscriber);
+                                // Build + drift merged at reply time (x-f188
+                                // change 3): live re-stat, not a startup
+                                // snapshot, so a rewritten binary reads
+                                // drifted in the next census while the
+                                // keeper and its child stay alive.
+                                if let (Some(obj), Some(fp)) =
+                                    (value.as_object_mut(), keeper.startup_fp.as_ref())
+                                {
+                                    obj.insert(
+                                        "build".to_string(),
+                                        serde_json::json!({
+                                            "path": fp.path.display().to_string(),
+                                            "mtime_nanos": fp.mtime_nanos,
+                                            "size": fp.size,
+                                        }),
+                                    );
+                                    obj.insert(
+                                        "drift".to_string(),
+                                        serde_json::json!(crate::drift::drift_label(
+                                            &crate::drift::self_drift(fp)
+                                        )),
+                                    );
+                                }
                                 reply_on(&encode(&Frame::IdentifyReply(
                                     value.to_string().into_bytes(),
                                 )));

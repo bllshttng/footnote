@@ -402,3 +402,126 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
     let _ = old_ino;
 }
+
+// x-f188 change 3: build drift self-report, self-retire, busy Shutdown.
+// ---------------------------------------------------------------
+
+#[test]
+fn a_keeper_on_a_rewritten_binary_self_retires_when_idle() {
+    let home = short_home("drift");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let copy = home.join("worker-copy");
+    std::fs::copy(WORKER_BIN, &copy).unwrap();
+    let mut keeper = Command::new(&copy)
+        .args([
+            "--store-keeper",
+            "--sock",
+            sock.to_str().unwrap(),
+            "--graph",
+            graph.to_str().unwrap(),
+            "--session",
+            "drift",
+        ])
+        .env("FNO_STORE_KEEPER_DRIFT_CHECK_SECS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn keeper from copy");
+    wait_for_socket(&sock);
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::write(&copy, b"newer build bytes").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = keeper.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(0), "retire exits 0, got {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "stale keeper never self-retired");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!sock.exists(), "a retiring keeper unlinks its own socket");
+    let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
+
+#[test]
+fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
+    // AC3-ERR: write ops blocked on a foreign graph-file flock hold the
+    // keeper's write gate. Three chained ops keep the gate held past the
+    // Shutdown ladder's bound (both paced by --lock-timeout-secs 2): the
+    // keeper answers kind busy inside lock_timeout and keeps serving.
+    let home = short_home("busy");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let mut keeper = spawn_keeper("busy-test", &graph, &sock);
+    wait_for_socket(&sock);
+    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().expect("foreign wedge lock");
+
+    // Six chained write ops keep the gate held well past the Shutdown
+    // ladder's bound (lock_timeout 10s): each op holds the gate for its own
+    // 10s flock wait, so the ladder expires into the busy reply instead of
+    // slipping into the gap between two ops.
+    let op_sock = sock.clone();
+    let op_thread = std::thread::spawn(move || {
+        // Pre-stage every request BEFORE Shutdown: each handler thread then
+        // queues on the write gate, and the gate hands over between ops
+        // without a connect gap the Shutdown ladder could slip into.
+        let req = json!({
+            "name": "append_progress_note",
+            "params": {"node_id": "ab-x", "note": {"ts": "t", "text": "y"}}
+        });
+        let frame = {
+            let payload =
+                serde_json::to_vec(&json!({"id": 1, "method": "op", "params": req})).unwrap();
+            let mut f = vec![TAG_REQUEST];
+            f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            f.extend_from_slice(&payload);
+            f
+        };
+        let mut streams = Vec::new();
+        for _ in 0..6 {
+            if let Ok(mut s) = UnixStream::connect(&op_sock) {
+                let _ = s.write_all(&frame);
+                streams.push(s);
+            }
+        }
+        for mut s in streams {
+            let _ = read_frame(&mut s);
+        }
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let mut s = UnixStream::connect(&sock).unwrap();
+    write_frame(&mut s, TAG_SHUTDOWN, &[]);
+    let started = Instant::now();
+    let (tag, payload) = read_frame(&mut s).expect("busy reply frame");
+    let elapsed = started.elapsed();
+    assert_eq!(tag, TAG_RESPONSE, "busy rides the response tag");
+    let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(reply["ok"], false, "busy is a refusal: {reply}");
+    assert_eq!(reply["error"]["kind"], "busy", "kind is busy: {reply}");
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "busy answers inside lock_timeout, got {elapsed:?}"
+    );
+    // The keeper kept serving: Identify still answers after the busy.
+    let mut probe = UnixStream::connect(&sock).unwrap();
+    write_frame(&mut probe, TAG_IDENTIFY, &[]);
+    let (itag, _ipayload) = read_frame(&mut probe).expect("identify after busy");
+    assert_eq!(itag, TAG_IDENTIFY_REPLY, "the keeper kept serving");
+    // Unwedge and reap.
+    drop(holder);
+    let _ = op_thread.join();
+    let _ = keeper.child.kill();
+    let _ = keeper.child.wait();
+    let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
