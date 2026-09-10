@@ -364,6 +364,17 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     std::fs::write(&graph, &fixture).unwrap();
     let rs = rust_probe(&graph, &ops);
 
+    // Schema-change regeneration: with REGENERATE_GOLDENS=1 the live probe
+    // output replaces the frozen golden instead of asserting against it. A
+    // run's delta must be reviewed (diff the regenerated files); the mode
+    // exists so a schema addition does not have to hand-encode payload
+    // strings at every escaping layer.
+    if std::env::var("REGENERATE_GOLDENS").as_deref() == Ok("1") {
+        std::fs::write(&golden_path, serde_json::to_vec_pretty(&rs).unwrap())
+            .expect("write regenerated golden");
+        return;
+    }
+
     assert_frozen(
         name,
         "read",
