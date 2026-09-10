@@ -170,7 +170,16 @@ cat > "$FIX/scripts/ci/check-file-budget.sh" <<'EOF'
 [[ -f POISON ]] && { echo "check-file-budget: POISON step failed"; exit 1; }
 echo "check-file-budget: ok (no over-budget file grew; stub)"
 EOF
-chmod +x "$FIX/scripts/ci/check-tracker-partition.sh" "$FIX/scripts/ci/check-tracker-consumers.sh" "$FIX/scripts/ci/check-file-budget.sh"
+# Reign-arms gate stub: the leg runs the candidate tree's copy and this fixture
+# ships no arm list. Without the stub the leg exits 127, every run reads RED,
+# no attestation is minted, and AC1-FR's cache probe falls through to the
+# live-lock wait and hangs.
+cat > "$FIX/scripts/ci/check-reign-arm-signals.sh" <<'EOF'
+#!/usr/bin/env bash
+[[ -f POISON ]] && { echo "check-reign-arm-signals: POISON step failed"; exit 1; }
+echo "check-reign-arm-signals: OK (stub)"
+EOF
+chmod +x "$FIX/scripts/ci/check-tracker-partition.sh" "$FIX/scripts/ci/check-tracker-consumers.sh" "$FIX/scripts/ci/check-file-budget.sh" "$FIX/scripts/ci/check-reign-arm-signals.sh"
 echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
