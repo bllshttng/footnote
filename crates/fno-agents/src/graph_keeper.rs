@@ -1177,8 +1177,10 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if let Ok(value) = &outcome {
-        seed_cache(state, value.entries.clone(), &value.version);
+    if state.read_source == ReadSource::Json {
+        if let Ok(value) = &outcome {
+            seed_cache(state, value.entries.clone(), &value.version);
+        }
     }
     drop(gate);
     record_gate(
@@ -1368,8 +1370,10 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if let Ok(value) = &outcome {
-        seed_cache(state, value.entries.clone(), &value.version);
+    if state.read_source == ReadSource::Json {
+        if let Ok(value) = &outcome {
+            seed_cache(state, value.entries.clone(), &value.version);
+        }
     }
     drop(gate);
     record_gate(
@@ -2364,7 +2368,9 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         },
         state.lock_timeout,
     )?;
-    seed_cache(state, outcome.entries.clone(), &outcome.version);
+    if state.read_source == ReadSource::Json {
+        seed_cache(state, outcome.entries.clone(), &outcome.version);
+    }
     Ok(json!({
         "op": op_result,
         "outcome": outcome_json(&outcome),
