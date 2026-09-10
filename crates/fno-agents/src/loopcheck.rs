@@ -8409,21 +8409,32 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     );
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
-    if check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
-        emit(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id,
-                "reason": "Interrupted",
-                "message": "cancel sentinel present"
-            }),
-        );
+    if let Some(hit) = check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
+        let message = format!("cancel sentinel present{}", hit.attribution());
+        let mut data = serde_json::json!({
+            "session_id": session_id,
+            "reason": "Interrupted",
+            "message": message,
+        });
+        if let Some(author) = &hit.author {
+            data["cancel_author"] = serde_json::json!(author);
+        }
+        if let Some(reason) = &hit.reason {
+            data["cancel_reason"] = serde_json::json!(reason);
+        }
+        emit("termination", data);
+        // One-shot: once a sentinel has terminated this run it has done its
+        // job. Consuming it is what stops a cancel from re-terminating every
+        // later stop of a session that recovers and keeps working.
+        if hit.kind == crate::cancel_sentinel::CancelKind::TargetSentinel {
+            let _ = std::fs::remove_file(&hit.path);
+        }
         return (
             0,
             allow_output(
                 "allow",
                 Some(TerminationReason::Interrupted),
-                "cancel sentinel present; exiting",
+                &message,
                 0,
                 None,
             ),
@@ -11824,7 +11835,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         )
     };
 
-    if check_cancel_sentinel(
+    if let Some(hit) = check_cancel_sentinel(
         &parsed.cwd,
         &parsed.state_path,
         &manifest.created_at,
@@ -11832,7 +11843,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     ) {
         return terminate(
             TerminationReason::Interrupted,
-            "cancel sentinel present; exiting",
+            &format!("cancel sentinel present{}", hit.attribution()),
             0,
             0,
             &[],

@@ -202,6 +202,9 @@ pub struct Cancelled {
     pub path: Option<PathBuf>,
     pub age_secs: Option<u64>,
     pub clear_hint: String,
+    /// Attribution read from the sentinel payload, if it carried one.
+    pub author: Option<String>,
+    pub reason: Option<String>,
 }
 
 impl Cancelled {
@@ -218,14 +221,26 @@ impl Cancelled {
         if let Some(age_secs) = self.age_secs {
             data["cancel_age_seconds"] = json!(age_secs);
         }
+        if let Some(author) = &self.author {
+            data["cancel_author"] = json!(author);
+        }
+        if let Some(reason) = &self.reason {
+            data["cancel_reason"] = json!(reason);
+        }
         data
     }
 
     fn refusal_message(&self) -> String {
+        let attribution = match (&self.author, &self.reason) {
+            (Some(a), Some(r)) => format!("\n  author: {a}\n  reason: {r}"),
+            (Some(a), None) => format!("\n  author: {a}"),
+            (None, Some(r)) => format!("\n  reason: {r}"),
+            (None, None) => String::new(),
+        };
         match (&self.path, self.age_secs) {
             (Some(path), Some(age_secs)) => {
                 let mut message = format!(
-                    "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}\n  age:   {}\n  clear: {}",
+                    "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}{attribution}\n  age:   {}\n  clear: {}",
                     path.display(),
                     format_cancel_age(age_secs),
                     self.clear_hint
@@ -238,7 +253,7 @@ impl Cancelled {
                 message
             }
             (Some(path), None) => format!(
-                "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}\n  age:   unavailable\n  clear: {}",
+                "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}{attribution}\n  age:   unavailable\n  clear: {}",
                 path.display(),
                 self.clear_hint
             ),
