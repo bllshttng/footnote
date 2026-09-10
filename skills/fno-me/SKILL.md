@@ -30,6 +30,10 @@ take, so delivery is coherent and a missed send is recoverable by the same id. I
 derived handle. Exit 3 means the session has no addressable harness identity
 (nothing to register) - report that rather than inventing a handle.
 
-This joins only THIS session. To auto-join every hand-started session in scope, set `agents.auto_register_sessions = true` in config; the default (`false`) is opt-in, which is exactly this skill.
+This joins only THIS session. To auto-join every hand-started session in scope, set `agents.auto_register_sessions = true` in config. The default (`false`) is opt-in, which is exactly this skill.
 
 That knob joins sessions at SessionStart only, so a session already running, or one another skill tells to join (reign, on crowning), still invokes this. This is a skill, not a command. The codex plugin manifest and the agy bundle ship `skills/` only, and a skill is the surface an agent can invoke itself.
+
+## Known Limitations and Deferred Work
+
+- See [LIMITATIONS.md](LIMITATIONS.md).
