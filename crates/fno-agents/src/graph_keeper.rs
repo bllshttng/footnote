@@ -766,6 +766,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
         "read_ids" => handle_read_ids(state, &params),
+        "plan_refs" => handle_plan_refs(state),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
@@ -988,6 +989,29 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
         }
     }
     Ok(json!({"entries": out, "missing": missing}))
+}
+
+/// The plan-rung inputs: id plus the two fields the Python rung table
+/// (`ladder.plan_rung`) reads on its side of the seam. The typed-op client
+/// derives the rung map from this light read instead of a full begin, which
+/// ships the whole graph for one derived value.
+fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
+    let entries = match state.read_source {
+        ReadSource::Json => cached_entries(state, false, false)?,
+        ReadSource::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
+    };
+    let refs: Vec<Value> = entries
+        .iter()
+        .filter(|e| graph_store::is_dict(e))
+        .map(|e| {
+            json!({
+                "id": e.get("id"),
+                "plan_path": e.get("plan_path"),
+                "cwd": e.get("cwd"),
+            })
+        })
+        .collect();
+    Ok(json!({ "entries": refs }))
 }
 
 fn read_state(
@@ -2771,6 +2795,53 @@ mod tests {
             "strict must diagnose without writing"
         );
         assert!(state.cache.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_refs_ships_only_the_rung_inputs() {
+        // The typed-op client derives the plan-rung map from this read, so
+        // each row carries id + plan_path + cwd and nothing else: one
+        // derived value must not cost a full begin. Absent fields ride as
+        // null, which ladder.plan_rung reads as no plan, same as before.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let body = serde_json::to_string(&json!({
+            "entries": [
+                {"id": "x-planned", "title": "planned", "status": "ready",
+                 "plan_path": "docs/plans/p.md", "cwd": "/tmp/proj",
+                 "progress_notes": [{"ts": "t", "text": "x"}]},
+                {"id": "x-bare", "title": "bare", "status": "idea"},
+                {"id": "x-anchored", "slug": "third-node", "title": "third",
+                 "plan_path": "p.md#anchor", "cwd": "~/proj"},
+            ]
+        }))
+        .unwrap();
+        std::fs::write(&graph, body).unwrap();
+        let state = read_state(&graph);
+        let reply = handle_plan_refs(&state).unwrap();
+        let entries = reply["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        for e in entries {
+            let keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
+            assert!(
+                keys.iter()
+                    .all(|k| matches!(*k, "id" | "plan_path" | "cwd")),
+                "only the rung inputs ship, got {keys:?}"
+            );
+        }
+        assert_eq!(entries[0]["plan_path"], json!("docs/plans/p.md"));
+        assert_eq!(entries[0]["cwd"], json!("/tmp/proj"));
+        assert!(
+            entries[1]["plan_path"].is_null(),
+            "a plan-less node ships a null plan_path, not guessed fields"
+        );
+        // The cache leg: a second call parses nothing new.
+        let _ = handle_plan_refs(&state).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "plan_refs must ride the cache"
+        );
     }
 
     #[test]
