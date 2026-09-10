@@ -190,3 +190,79 @@ def test_is_deliverable_refuses_a_landed_ack(tmp_path, monkeypatch):
 
     assert is_deliverable(ack) is False
     assert is_deliverable(send) is True
+
+
+def _durable_send_and_ack(*, to: str = "king") -> str:
+    """One durable `send` row plus the `landed` row acknowledging it: the exact
+    pair the field incident rendered as a blank message (x-22ce)."""
+    from fno.bus.log import Envelope, append, record_landed
+
+    send = Envelope.new(from_="worker", to=to, kind="send", body="status report")
+    append(send)
+    record_landed(msg_id=send.id, sender="worker", recipient=to)
+    return send.id
+
+
+def test_reader_1_scan_unread_shows_the_message_never_the_ack(
+    tmp_path, monkeypatch
+):
+    """The inbox choke point: seven readers drain through scan_unread. The
+    equality names the surviving id, kind and body; a merely-shorter list would
+    also pass for a reader that hid everything."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.bus.cursor import scan_unread
+
+    send_id = _durable_send_and_ack()
+
+    unread = scan_unread("king")
+
+    assert [(m.id, m.kind, m.body) for m in unread] == [
+        (send_id, "send", "status report")
+    ]
+
+
+def test_reader_1_unread_cli_reports_one_real_message(
+    tmp_path, monkeypatch
+):
+    """End to end through the verb a king actually ran during the incident:
+    `mail unread -n king --json` must show one message with a body, never the
+    seven empty rows the old reader produced."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    send_id = _durable_send_and_ack()
+
+    res = CliRunner().invoke(app, ["mail", "unread", "-n", "king", "--json"])
+
+    assert res.exit_code == 0
+    rows = _json.loads(res.stdout)
+    assert [(r["id"], r["kind"], r["body"]) for r in rows] == [
+        (send_id, "send", "status report")
+    ]
+
+
+def test_reader_4_markdown_render_shows_the_message_never_the_ack(
+    tmp_path, monkeypatch
+):
+    """The markdown inbox shares `is_deliverable` with scan_unread, so the one
+    predicate change must reach it too: exactly one thread file, carrying the
+    sent body."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.inbox.store import inbox_dir_for, rebuild_render
+
+    send_id = _durable_send_and_ack()
+
+    written = rebuild_render("king")
+    inbox = inbox_dir_for("king")
+    text = "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(inbox.glob("*.md"))
+    )
+
+    assert written == 1
+    assert len(list(inbox.glob("*.md"))) == 1
+    assert send_id in text
+    assert "status report" in text
