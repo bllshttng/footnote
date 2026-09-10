@@ -225,7 +225,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # king faq add/list (x-9e1e) added no leaves here: they live under the
     # collapsed `agents` group (mapped-count only), not the top-level `king`
     # hidden alias.
-    assert len(leaves) <= 129
+    # +1 for `workspace reap`, the explicit state-retention operator control.
+    assert len(leaves) <= 130
     assert "fno-agents" in leaves
 
 
