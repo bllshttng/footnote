@@ -89,13 +89,15 @@ def _canonical_cli_dir() -> str:
         return "cli"
 
 
-def _git_archive_cli(tree: str, cwd: str) -> Optional[bytes]:
+def _git_archive_cli(tree: str, toplevel: str) -> Optional[bytes]:
     """The tar bytes of ``cli/`` in ``tree``, or None. ``_proc.run`` is
-    text-mode, which would corrupt the archive, so this shells out directly."""
+    text-mode, which would corrupt the archive, so this shells out directly.
+    Runs from the toplevel: the ``cli`` pathspec is cwd-relative, and a probe
+    launched from a subdirectory would otherwise find no ``cli`` under it."""
     try:
         proc = subprocess.run(
             ["git", "archive", "--format=tar", tree, "cli"],
-            cwd=cwd,
+            cwd=toplevel,
             capture_output=True,
             timeout=30,
             check=False,
@@ -133,7 +135,7 @@ def static_verdict_for_tree(tree: str, cwd: str) -> tuple[str, str]:
     toplevel = _rev("--show-toplevel", cwd) or cwd
     tmp = tempfile.mkdtemp(prefix="fno-merge-result-")
     try:
-        archive = _git_archive_cli(tree, cwd)
+        archive = _git_archive_cli(tree, toplevel)
         if archive is None:
             return ("unknown", "could not read cli/ from the merge tree (git archive failed)")
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
