@@ -11334,9 +11334,7 @@ def cmd_maintain(
 
     # Leg 9: abandoned do rows (x-f714); detection, reaping, and rendering
     # live in maintain.abandoned_leg.
-    ab_report, ab_lines, ab_warn = _maintain.abandoned_leg(
-        entries, claimed, _graph_path(), apply
-    )
+    ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
     if ab_warn:
         typer.echo(f"warning: {ab_warn}", err=True)
 
@@ -11574,7 +11572,6 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
         "stale_ready_truncated": stale_ready_truncated,
-        **ab_report,
     }
     try:
         from fno.health_monitor import append_history
@@ -11747,8 +11744,8 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
-    for _al in ab_lines:
-        typer.echo(_al)
+    if ab_lines:
+        typer.echo("\n".join(ab_lines))
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "

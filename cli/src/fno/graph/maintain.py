@@ -2054,18 +2054,13 @@ def run_validity_sweep(
     )
 
 
-# Leg 9: abandoned do rows (x-f714) - an open do row wedges its node
-# in_progress, and in_progress hides the row from the Rust settle's
-# done+merged gate. Contract: docs/backlog-usage.md "Abandoned do rows".
+# Leg 9 (x-f714): contract in docs/backlog-usage.md "Abandoned do rows".
 
-AbandonedDoRow = namedtuple(
-    "AbandonedDoRow", "node harness session_id verdict reason"
-)
+AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason")
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
-    """Proof of session death from transcript truth; False holds with a named
-    reason. Never raises."""
+    """Proof of session death from transcript truth; False holds with a named reason. Never raises."""
     try:
         if harness not in {"claude", "codex"}:
             return False, "harness not file-backed"
@@ -2088,8 +2083,7 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
 def detect_abandoned_do_rows(
     entries, *, live_claimed, live_worked, prover, now_s, quiet_after_s
 ):
-    """Stamp every non-terminal, unclaimed open-do-row node gone or held;
-    vetoes outrank the prover, held candidates are named, never skipped."""
+    """Stamp every non-terminal, unclaimed open-do-row node gone or held; vetoes outrank the prover."""
     from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
 
     out: list[AbandonedDoRow] = []
@@ -2115,17 +2109,14 @@ def detect_abandoned_do_rows(
 
 
 def abandoned_leg(entries, claimed, graph_path, apply):
-    """Detect + reap + render for cmd_maintain; see backlog-usage.md. Returns
-    ``(report_fragment, human_lines, warning)``."""
+    """Detect + reap + render for cmd_maintain; contract in backlog-usage.md. Returns ``(lines, warning)``."""
     try:
         from fno.config import load_settings
-
         hours = load_settings().backlog.maintain.abandoned_do_row_hours
     except Exception:
         hours = 24
     try:
         from fno.graph.statuses import live_worked_node_ids
-
         rows = detect_abandoned_do_rows(
             entries, live_claimed=claimed,
             live_worked=live_worked_node_ids(strict=True, entries=entries),
@@ -2134,10 +2125,9 @@ def abandoned_leg(entries, claimed, graph_path, apply):
             quiet_after_s=hours * 3600,
         )
     except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
-        return {}, [], f"abandoned-do-row leg skipped: {exc}"
+        return [], f"abandoned-do-row leg skipped: {exc}"
 
-    reaped: dict = {}
-    truncated = 0
+    reaped, truncated = {}, 0
     if apply:
         gone = [r for r in rows if r.verdict == "gone"]
         truncated = max(0, len(gone) - AUTO_DEFER_BLAST_CAP)
@@ -2171,5 +2161,4 @@ def abandoned_leg(entries, claimed, graph_path, apply):
     if truncated:
         lines.append(f"  NOTE: abandoned-do-row blast cap hit - {truncated} gone "
                      f"row(s) not reaped (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue")
-    return {"abandoned_do_rows": len(reaped) if apply else len(rows),
-            "abandoned_do_row_truncated": truncated}, lines, None
+    return lines, None
