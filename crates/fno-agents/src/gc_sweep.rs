@@ -1895,7 +1895,7 @@ fn reap_pr_status_rows(
         let lock = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(apply)
+            .create(false)
             .truncate(false)
             .open(&lock_path)
         {
@@ -2046,6 +2046,7 @@ struct StateReapRoots {
     agents_root: PathBuf,
     agents_dir: PathBuf,
     state_root: PathBuf,
+    pr_status_dir: PathBuf,
 }
 
 fn reap_state_files_with_roots(
@@ -2086,17 +2087,16 @@ fn reap_state_files_with_roots(
         &mut summary.agent_locks,
         &|_| {},
     );
-    let pr_status_dir = roots.state_root.join("cache/pr-status");
     reap_pr_status_rows(
         &roots.state_root,
-        &pr_status_dir,
+        &roots.pr_status_dir,
         config.pr_status_cache_retain_days,
         apply,
         &mut summary.pr_status_cache,
     );
     reap_lock_family(
         &roots.state_root,
-        &pr_status_dir,
+        &roots.pr_status_dir,
         config.locks_retain_days,
         apply,
         &mut summary.pr_status_cache,
@@ -2126,6 +2126,7 @@ pub fn reap_state_files(
             agents_root: root.to_path_buf(),
             agents_dir: root.join("agents"),
             state_root: root.to_path_buf(),
+            pr_status_dir: root.join("cache/pr-status"),
         },
         config,
         apply,
@@ -2152,6 +2153,9 @@ pub fn reap_state_files_for_cwd(
     let Some(state_root) = crate::agents_config::state_dir(cwd) else {
         return unavailable_state_reap("state root unavailable");
     };
+    let Some(pr_status_dir) = crate::agents_config::pr_status_cache_dir(cwd) else {
+        return unavailable_state_reap("PR-status cache root unavailable");
+    };
     let Some(locks_root) = locks_dir.parent().map(Path::to_path_buf) else {
         return unavailable_state_reap("machine locks root unavailable");
     };
@@ -2163,6 +2167,7 @@ pub fn reap_state_files_for_cwd(
             agents_root: home.root().parent().unwrap_or(home.root()).to_path_buf(),
             agents_dir: home.root().to_path_buf(),
             state_root,
+            pr_status_dir,
         },
         config,
         apply,
@@ -2174,6 +2179,23 @@ fn unavailable_state_reap(reason: &str) -> StateFilesReapSummary {
         skip_reason: Some(reason.into()),
         ..Default::default()
     }
+}
+
+pub fn state_reap_has_failures(summary: &StateFilesReapSummary) -> bool {
+    summary.skip_reason.is_some()
+        || [
+            &summary.expired_claims,
+            &summary.plan_locks,
+            &summary.agent_locks,
+            &summary.pr_status_cache,
+        ]
+        .iter()
+        .flat_map(|family| family.kept.iter())
+        .any(|kept| {
+            kept.reason.contains("failed")
+                || kept.reason.contains("unavailable")
+                || kept.reason.contains("revalidation")
+        })
 }
 
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {

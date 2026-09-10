@@ -958,7 +958,14 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let root = tempfile::tempdir().unwrap();
         let prior_claims = std::env::var_os("FNO_CLAIMS_ROOT");
+        let prior_home = std::env::var_os("HOME");
+        let prior_pr_cache = std::env::var_os("FNO_PR_STATUS_CACHE_DIR");
         std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        std::env::set_var("HOME", root.path());
+        std::env::set_var(
+            "FNO_PR_STATUS_CACHE_DIR",
+            root.path().join(".fno/cache/pr-status"),
+        );
         let home = AgentsHome::at(root.path().join("agents"));
         home.ensure_root().unwrap();
         let cwd = root.path().join("repo");
@@ -1064,6 +1071,14 @@ mod tests {
         match prior_claims {
             Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
             None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match prior_pr_cache {
+            Some(value) => std::env::set_var("FNO_PR_STATUS_CACHE_DIR", value),
+            None => std::env::remove_var("FNO_PR_STATUS_CACHE_DIR"),
         }
     }
 

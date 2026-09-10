@@ -2231,7 +2231,7 @@ fn run_reap(rest: &[String]) -> i32 {
             "{}",
             fno_agents::reap_render::render_state_files_reap(&summary, json_out)
         );
-        return 0;
+        return i32::from(fno_agents::gc_sweep::state_reap_has_failures(&summary));
     }
 
     // The verify probe (x-70e1 task 5): read-only audit of the receipts

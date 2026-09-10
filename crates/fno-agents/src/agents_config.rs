@@ -170,6 +170,14 @@ pub fn machine_locks_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno/locks"))
 }
 
+/// PR-status cache directory, including its process-local override.
+pub fn pr_status_cache_dir(cwd: &Path) -> Option<PathBuf> {
+    if let Some(path) = non_empty_env("FNO_PR_STATUS_CACHE_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    Some(state_dir(cwd)?.join("cache/pr-status"))
+}
+
 fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
     t.get("agents")?
         .as_table()?
