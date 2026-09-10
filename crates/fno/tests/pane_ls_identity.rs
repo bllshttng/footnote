@@ -105,6 +105,20 @@ fn session_id_shape_rejects_names_and_short_ids() {
 }
 
 #[test]
+fn the_listing_state_is_the_refusal_state() {
+    // The send gate refuses exactly the panes this listing already marks:
+    // a reconciled pane reads `resolved`, and the unresolved:spawned-name
+    // row is the one a plain send refuses, so the listing predicts it.
+    let reconciled = pane(
+        Some("01a05fce-0000-7ccc-8000-000000000000"),
+        Some("t-e2e-crew"),
+    );
+    assert_eq!(pane_identity_cell(&reconciled).0, "resolved");
+    let refused = pane(None, Some("bp-f8b1-unplanned"));
+    assert_eq!(pane_identity_cell(&refused).0, "unresolved:spawned-name");
+}
+
+#[test]
 fn pane_help_says_identity_not_idleness() {
     // AC6: the help states what the column answers and names the verb that
     // answers idleness, so `pane ls` stops being read as a reuse decision.
