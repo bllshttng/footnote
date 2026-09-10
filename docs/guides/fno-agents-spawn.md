@@ -31,6 +31,10 @@ A **harness name on the provider axis is refused by name**: `--provider claude` 
 
 Two shorts moved to make room. `-H` takes a harness value; it used to mean headless. `-p` now means headless, mirroring the harnesses' own one-shot short (`claude -p`), which is why the provider axis takes the capital `-P`. A one-shot is `--headless`, `-p`, `--once`, `-o`, or `--substrate headless`.
 
+## The default substrate
+
+A spawn with no `--substrate` seats a **thread** wherever the harness seats one. A harness with no thread lane falls back to a **pane**. Thread is the persistent lane: closing a view never ends the worker. Two spawn inputs still imply the pane: the pane placement flags (`--workspace`, `--split`, `--at`, `--tab`) and a `--` passthrough fence. Only the pane argv builders honor those, so the implicit thread refuses them with a pointer to `--substrate pane`.
+
 ## Routing a worker to another vendor
 
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
@@ -130,7 +134,7 @@ A thread hosts no pane until a portal opens one. Before `--portal`, that took tw
 fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1
 ```
 
-When the command completes, portal 1 is open and already shows the new worker. Omit `--portal` and the spawn creates a thread with no portal, so nothing appears on screen. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
+When the command completes, portal 1 is open and already shows the new worker. Outside a mux, omitting `--portal` creates the thread with no portal and nothing appears on screen. From inside a mux, a spawn that takes the default thread substrate opens portal 0 on the new worker automatically. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
 
 ### Choose the geometry
 

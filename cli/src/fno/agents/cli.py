@@ -1032,14 +1032,16 @@ def cmd_spawn(
         ),
     ),
     substrate: str = typer.Option(
-        "pane",
+        "",
         "--substrate",
         help=(
-            "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
-            "4a-G2) | thread (claude --bg / opencode serve; bg is a deprecated "
-            "alias) | headless (-p/--exec one-shot). Python owns the pane back "
-            "half (fno mux pane run + registry mux ref); thread/headless keep "
-            "their existing lanes."
+            "Session substrate (x-2c27): thread (the default where the "
+            "harness seats one: persistent, viewed through a portal; bg is a "
+            "deprecated alias) | pane (mux-hosted PTY, the closable fallback "
+            "for harnesses with no thread lane) | headless (-p/--exec "
+            "one-shot). Pane placement flags and a `--` passthrough fence "
+            "imply pane. Python owns the pane back half (fno mux pane run + "
+            "registry mux ref); thread/headless keep their existing lanes."
         ),
     ),
     headless: bool = typer.Option(
@@ -1483,22 +1485,34 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-    # Provenance rides the pane receipt's harness_source field below (the
-    # default substrate) - it is the HARNESS axis's provenance, so it is not
-    # named provider_*, which now holds the vendor. The bg/once stdout
-    # receipts stay byte-parity-locked with the Rust client, so they don't
-    # carry it.
+    # Provenance rides the pane receipt's harness_source field below - it is
+    # the HARNESS axis's provenance, not the vendor's. The bg/once stdout
+    # receipts stay byte-parity-locked with the Rust client, so they skip it.
 
-    # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
-    # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
-    # spawns out of the binary route), `bg`/`headless` keep their existing
-    # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
-    # headless still maps onto the `once` lever.
-    # --headless is the ergonomic shortcut for --substrate headless (x-c772). It
-    # wins over an explicit --substrate so `--headless` always resolves to the
-    # one-shot lane. (The -H short moved to --harness in x-6de8.)
+    # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
+    # an empty value resolves to the built-in default (thread where seated).
+    defaulted = False
     if headless:
         substrate = "headless"
+    if not substrate and once:  # --once always means a one-shot
+        substrate = "headless"
+    if not substrate:
+        # Empty = unset: pane capability implies pane; else thread where seated.
+        defaulted = True
+        from fno.agents.harness_map import DispatchResolveError, thread_seatable
+
+        pane_implied = bool(
+            passthrough or split or at or tab or bounded_placement or squad
+            or monitor is not None
+        )
+        try:
+            seatable = thread_seatable(harness)
+        except DispatchResolveError:  # an undeclared harness seats no thread
+            seatable = False
+        if pane_implied or not seatable:
+            substrate = "pane"
+        else:
+            substrate = "thread"
     # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
     # --substrate headless; the spawn gate counts it as headless) but Python leaves
     # it on the pane default. That only bites the routed lane, where the substrate
@@ -1507,22 +1521,6 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    if substrate not in ("pane", "thread", "bg", "headless"):
-        print(
-            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if substrate == "bg":
-        print(
-            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
-            "the alias will be removed after one release",
-            file=sys.stderr,
-        )
-    # Keep the lower-level spawn branches stable while the public substrate
-    # vocabulary migrates to `thread`.
-    if substrate == "thread":
-        substrate = "bg"
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
     # composed-argv refusals live. The seam refuses the explicit-flag spelling
     # for the Rust-routed lane; this is the same refusal for the Python lane,
@@ -1533,22 +1531,9 @@ def cmd_spawn(
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    if monitor is not None and monitor != "happy":
-        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if monitor == "happy" and (substrate != "pane" or once):
-        print(
-            "--monitor happy is pane-only; bg and headless workers do not pass "
-            "the happy launcher seam",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if monitor == "happy" and harness != "claude":
-        print(
-            f"--monitor happy requires the claude harness; got harness {harness!r}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
+    from fno.agents.spawn_defaults import resolve_spawn_gates
+
+    substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
 
     if output_format is not None and (
         harness != "claude" or substrate != "headless" or output_format != "json"
@@ -2626,7 +2611,7 @@ def cmd_spawn(
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
         # QoS (x-c5cc): a bg worker is claude's child, so its exec can't be
-        # wrapped — demote post-hoc via the roster, bounded and non-fatal.
+        # wrapped, demote post-hoc via the roster, bounded and non-fatal.
         # After the receipt flush so line-parsing consumers never wait on it.
         if substrate == "bg" and result.provider == "claude" and result.short_id:
             from fno.agents.spawn_gate import qos_demote_bg_worker
@@ -2636,6 +2621,16 @@ def cmd_spawn(
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
+
+    pane_view = (
+        defaulted and substrate == "bg" and spawn_succeeded
+        and result.kind == "created" and os.environ.get("FNO_PANE")
+    )
+    if pane_view:
+        # Post-receipt, best effort: a placement failure never recolors the verdict.
+        from fno.agents.spawn_defaults import place_default_view
+
+        place_default_view(result.name)
 
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:

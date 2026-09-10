@@ -1765,3 +1765,83 @@ def routing_enforcement_state(settings: object = None) -> str:
         return "enforced" if _routing_enforced(settings) else "unenforced"
     except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
         return "unenforced"
+
+# --------------------------------------------------------------------------- #
+# The CLI's substrate posture gates, moved here from cmd_spawn (file budget):
+# the value gate + bg alias, and the monitor gate.
+
+
+def resolve_spawn_gates(substrate, monitor, *, once, harness):
+    """Validate the substrate/monitor posture; canonicalize ``thread``->``bg``.
+
+    Exit 2 on a value outside the closed set or a monitor combination without
+    support (exactly claude+zai on a pane). The deprecated ``bg`` spelling
+    warns and still works. Portal gates live on the Rust lane only: the
+    Python parser must not advertise a flag whose placement it cannot run.
+    """
+    if substrate not in ("pane", "thread", "bg", "headless"):
+        print(
+            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if substrate == "bg":
+        print(
+            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
+            "the alias will be removed after one release",
+            file=sys.stderr,
+        )
+    if substrate == "thread":
+        substrate = "bg"
+    if monitor is not None and monitor != "happy":
+        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
+        raise SystemExit(2)
+    if monitor == "happy" and (substrate != "pane" or once):
+        print(
+            "--monitor happy is pane-only; bg and headless workers do not pass "
+            "the happy launcher seam",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if monitor == "happy" and harness != "claude":
+        print(
+            f"--monitor happy requires the claude harness; got harness {harness!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return substrate
+
+
+def place_default_view(worker: str) -> bool:
+    """Open the built-in default view (portal 0) on a freshly seated thread.
+
+    The bare spawn's view rides the SAME two-call seam a user names by hand
+    (``fno mux thread <name> --portal 0``); the spawn parser itself never
+    declares a portal flag. Best effort by contract: a failure prints a named
+    note with the manual reach and returns False - the worker receipt keeps
+    its own verdict.
+    """
+    import subprocess
+
+    argv = ["fno", "mux", "thread", worker, "--portal", "0"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"fno agents spawn: default view unavailable ({exc}); open it by "
+            f"hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit {proc.returncode}"
+        print(
+            f"fno agents spawn: default view not placed ({reason}); open it "
+            f"by hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    return True

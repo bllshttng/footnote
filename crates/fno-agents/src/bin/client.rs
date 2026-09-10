@@ -765,20 +765,34 @@ async fn run(args: Vec<String>) -> i32 {
         // PTY host (retiring at G4; a silent daemon fallback is exactly what
         // AC1-ERR forbids). FNO_AGENTS_RUNTIME=python stops the front door
         // routing straight back here.
-        let substrate = params
+        let mut substrate = params
             .get("substrate")
             .and_then(|v| v.as_str())
-            .unwrap_or("pane");
+            .unwrap_or_else(|| default_substrate(&params))
+            .to_string();
         // `thread` is the public substrate name. The lower-level dispatch arms
         // retain their historical `bg` selector until their wire contract moves.
-        let substrate = if substrate == "thread" {
-            "bg"
-        } else {
-            substrate
-        };
+        if substrate == "thread" {
+            substrate = "bg".to_string();
+        }
+        let substrate = substrate.as_str();
         if let Err(message) = validate_spawn_placement(&params, substrate) {
             eprintln!("{message}");
             return 2;
+        }
+        // The default view (mirrors the Python seam): a bare spawn that took
+        // the built-in thread default from INSIDE a mux opens portal 0 on its
+        // worker. An explicit --portal wins; outside a mux nothing auto-opens.
+        if substrate == "bg"
+            && params.get("substrate").is_none()
+            && params.get("portal").is_none()
+            && std::env::var("FNO_PANE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("portal".into(), Value::from(0u8));
+            }
         }
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
@@ -1421,11 +1435,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let substrate = params
         .get("substrate")
         .and_then(|v| v.as_str())
-        .unwrap_or("pane");
+        .unwrap_or_else(|| default_substrate(&params))
+        .to_string();
     let substrate = if substrate == "thread" {
         "bg"
     } else {
-        substrate
+        substrate.as_str()
     };
 
     // unwrap_or_default is acceptable HERE (unlike the ask pre-check, which
@@ -2732,6 +2747,28 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
         if is_pty_lane && !params.contains_key("session_id") && !params.contains_key("resume_id") {
             params.insert("session_id".into(), Value::String(mint_session_uuid()));
         }
+    }
+}
+
+/// The substrate a spawn with NO explicit `--substrate` gets: thread where the
+/// harness seats one, else the closable pane. The Python seam (the public
+/// `fno agents spawn` front door) resolves the SAME default in its own body
+/// and opens the thread's default view through the mux thread verb, so this
+/// helper only answers for a DIRECT binary call.
+/// It seats only the three lanes this client itself routes (claude/codex
+/// bg, opencode serve); a keeper-lane harness (pi, cursor-agent, grok, agy)
+/// keeps the pane default here and seats its thread through the Python seam's
+/// keeper carve-out instead. The harness default matches the daemon's
+/// `handle_spawn` provider default (codex) so a bare direct call and the
+/// daemon route cannot disagree.
+fn default_substrate(params: &Value) -> &'static str {
+    let harness = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
+    match harness {
+        "claude" | "codex" | "opencode" => "thread",
+        _ => "pane",
     }
 }
 
