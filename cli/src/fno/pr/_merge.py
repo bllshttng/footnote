@@ -765,10 +765,20 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
             return
 
         def _mut(entries: List[dict]) -> List[dict]:
+            # The merged PR may be the node's PRIMARY ref or one of its
+            # additional refs (x-2774 change 7): stamp whichever it is, so a
+            # merged additional PR is recorded merged and the reaper's
+            # recorded-openness test can settle its do rows. Unrecorded stays
+            # open everywhere - this is the recorder, never the assertion.
             for e in entries:
                 if e.get("pr_number") == pr_number:
                     e["merge_status"] = merge_status
-                    break
+                    return entries
+            for e in entries:
+                for extra in e.get("additional_prs") or []:
+                    if isinstance(extra, dict) and extra.get("number") == pr_number:
+                        extra["merge_status"] = merge_status
+                        return entries
             return entries
 
         locked_mutate_graph(path, _mut)
