@@ -1039,7 +1039,7 @@ def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
             proc.wait(timeout=15)
 
 
-# -- the by-id read (x-1601 wave 3) --
+# -- the by-id read --
 
 
 def test_read_nodes_by_ids_returns_exact_rows(tmp_path):
@@ -1147,7 +1147,7 @@ def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkey
     assert returned == "zz-none"
 
 
-# -- the bounded retry (x-1601 wave 4, absorbed x-ae7b) --
+# -- the bounded retry --
 
 from fno.graph import store as store_mod  # noqa: E402 - the tx-loop section
 

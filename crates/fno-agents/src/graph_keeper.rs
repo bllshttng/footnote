@@ -379,29 +379,30 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The read path every owned-graph read serves through: validate the cache
-/// by file identity (one stat), clone the `Arc` on a hit, and on a miss parse
-/// under a read guard (reads share; an in-flight commit's write guard still
-/// excludes this). The cache is filled only by a clean, non-empty parse whose
-/// file did not move during the read, and the stored version is the digest of
-/// exactly the bytes parsed.
-fn cached_entries(
+/// The read path every owned-graph read serves through. CALLER MUST HOLD
+/// `state.gate` in at least read mode: the entries and the tx digest this
+/// returns describe ONE gate-held window, so an intervening keeper-side
+/// commit can never pair a fresh version with stale entries (that pairing is
+/// what makes the tx conflict instead of silently clobbering).
+///
+/// Cache hit: identity-validated, the paired digest comes free. Miss: the
+/// digest is computed BEFORE the parse (the pre-cache order), so even the
+/// uncached remainder keeps the property that any interleave degrades to a
+/// commit conflict. Filled only by a clean, non-empty parse whose file did
+/// not move between the two stats, and the stored version digests exactly
+/// the bytes parsed.
+fn cached_entries_gated(
     state: &StoreState,
-    keep_malformed: bool,
     strict: bool,
-) -> Result<Arc<Vec<Value>>, StoreError> {
-    if keep_malformed {
-        // load_graph's discovery caller: rare, and its junk-keeping parse is
-        // not the list the write path publishes. Serve fresh; cache nothing.
-        return graph_store::read_defaulted(&state.graph, true).map(Arc::new);
-    }
-    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+) -> Result<(Arc<Vec<Value>>, String), StoreError> {
     let pre_ident = FileIdent::of(&state.graph);
     let Some(pre_ident) = pre_ident else {
         // No identity, no trust: a stat failure invalidates and the read
         // answers fresh, exactly as an unreadable stat read today.
         *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
-        return graph_store::read_defaulted_opts(&state.graph, false, !strict).map(Arc::new);
+        let version = file_version(&state.graph);
+        let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+        return Ok((Arc::new(entries), version));
     };
     if let Some(cached) = state
         .cache
@@ -410,26 +411,58 @@ fn cached_entries(
         .as_ref()
     {
         if cached.ident == pre_ident {
-            return Ok(Arc::clone(&cached.entries));
+            return Ok((Arc::clone(&cached.entries), cached.version.clone()));
         }
     }
+    // Digest first, parse second: with the gate held, a keeper-side write
+    // cannot interleave, and a FOREIGN one (gc_sweep on the file) moves the
+    // post-parse identity, which the fill check below refuses.
+    let version = file_version(&state.graph);
     state.file_opens.fetch_add(1, Ordering::SeqCst);
     let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
     let entries = Arc::new(entries);
     // Re-stat after the parse: cache only when the bytes parsed are the bytes
-    // the post-parse stat and digest describe. A file replaced mid-read is a
-    // consistent instant but the wrong instant to pin, so it is not cached.
+    // the digest describes. A file replaced mid-read is a consistent instant
+    // but the wrong instant to pin, so it is not cached.
     if let Some(post_ident) = FileIdent::of(&state.graph) {
         if post_ident == pre_ident && !entries.is_empty() {
-            let version = graph_store::file_content_version(&state.graph);
             *state.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(CachedGraph {
                 ident: post_ident,
-                version,
+                version: version.clone(),
                 entries: Arc::clone(&entries),
             });
         }
     }
-    Ok(entries)
+    Ok((entries, version))
+}
+
+/// The owned-graph entries without the digest, for readers that do not run a
+/// transaction: the gate is taken here so every caller shares the same
+/// window discipline.
+fn cached_entries(
+    state: &StoreState,
+    keep_malformed: bool,
+    strict: bool,
+) -> Result<Arc<Vec<Value>>, StoreError> {
+    if keep_malformed {
+        // load_graph's discovery caller: rare, and its junk-keeping parse is
+        // not the list the write path publishes. Serve fresh; cache nothing.
+        // Still gate-held: a read mid-publish waits out the publish, exactly
+        // as every other read does.
+        let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        return graph_store::read_defaulted(&state.graph, true).map(Arc::new);
+    }
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    Ok(cached_entries_gated(state, strict)?.0)
+}
+
+/// Begin's consistent pair: entries and the digest from one gate-held
+/// window, so a retrying writer's snapshot is provably the file the digest
+/// names.
+fn cached_snapshot(state: &StoreState) -> Result<(String, Arc<Vec<Value>>), StoreError> {
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    let (entries, version) = cached_entries_gated(state, false)?;
+    Ok((version, entries))
 }
 
 /// The write path's cache half: publish landed, so the published entries and
@@ -669,15 +702,17 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .and_then(Value::as_i64)
             .unwrap_or_else(|| crate::claims::now_ms()),
     };
-    let entries: Vec<Value> = match params.get("entries") {
-        Some(Value::Array(_)) => params
-            .get("entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-        _ => (*cached_entries(state, false, false)?).clone(),
+    // Borrowed in both arms: a deep clone of the owned graph per ready call
+    // would re-spend most of what the cache just saved.
+    let cached;
+    let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
+        Some(a) => a,
+        None => {
+            cached = cached_entries(state, false, false)?;
+            &cached
+        }
     };
-    match select(&entries, &opts) {
+    match select(entries, &opts) {
         Ok(reply) => Ok(json!({
             "rows": reply.rows,
             "drops": reply
