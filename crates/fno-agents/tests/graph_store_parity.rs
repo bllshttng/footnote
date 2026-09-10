@@ -31,6 +31,7 @@ fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
         | E::Unreadable(_, _)
         | E::EmptyFieldUpdate(_)
         | E::Invalid(_)
+        | E::Sqlite(_)
         | E::Io(_)
         | E::LockTimeout(_, _)
         | E::Conflict => "GraphUnreadableError".to_string(),
