@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
+****footnote** is a Claude Code plugin: an autonomous pipeline from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session).
 
 ## Precedence and output style
 
@@ -25,13 +25,13 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel proven to reach every harness at session start, and codex sees this body, not linked rule bodies.
+Traps a fresh agent re-hits because no lint, guard or refusal catches them yet. Inlined, not linked: this file is the one channel proven to reach every harness at session start.
 
-**Cap: bytes, not count.** Every entry is paid at session start. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first near 5. This prose is at its floor; funding growth is unsolved.
+**Cap: bytes, not count.** Every entry is paid at session start. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first near 5.
 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove an entry in the PR where its guard lands.
 
-AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
+AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test): `kdc-delivery-sentinel-1932`.
 
 ### Assert a positive marker, never an absence
 
@@ -62,20 +62,20 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 ```
 footnote/
 ├── .claude-plugin/   # Plugin manifest
-├── skills/           # Skills (advertised set in using-fno)
-├── agents/           # Subagents (target, code-reviewer, hunters)
+├── skills/           # Skills
+├── agents/           # Subagents
 ├── commands/         # Slash commands
 ├── hooks/            # Stop hooks, session-start, context monitor
 ├── scripts/          # Validation, metrics, orchestration, diagnostics
 ├── cli/              # `fno` CLI (Python + uv) + tests
 ├── crates/           # Rust runtime (fno-agents)
-└── internal ->       # Obsidian vault symlink (plans/docs; not git-tracked)
+└── internal ->       # Obsidian vault symlink (not git-tracked)
 ```
 
 ### Conventions
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
-- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees). Scope any `grep -r` to a path. For a load-bearing sweep use `RIPGREP_CONFIG_PATH= rg -uu`, not a bare `rg -uu` (`-u` ignores files, not globs).
+- **Search:** prefer `rg` / Grep over `grep -r` (descends into nested worktrees). Scope any `grep -r` to a path. Load-bearing sweep: `RIPGREP_CONFIG_PATH= rg -uu`, never a bare `rg -uu` (`-u` ignores files, not globs).
 - **Prose style:** a paragraph is ONE physical line. A newline starts the next block. House style, and the gate: [docs/style-rules.md](docs/style-rules.md).
 - **File budget:** a source file over 5,000 lines is shrink-only. The refusal in `scripts/ci/check-file-budget.sh` names the remedy.
 - **Large files:** a source file over 1,000 lines gets read the exact range, edit, re-read, and a test count proved with `rg -c '#\[test\]'` (or `def test_`) before and after.
@@ -193,6 +193,10 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **Self-containment (CI-enforced):** driver skills (`/target`) must be portable. They allow no `${REPO_ROOT}/scripts/` refs, path escapes, or runtime `Skill()` calls between drivers. Build-time reuse uses `skill-bundles.yaml` and `fno doctor bundle`. The `bundle check` action gates freshness.
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
+
+## graphify
+
+Query `graphify-out/graph.json` before source reads. `/graphify` loads the skill first. Prefer `query`/`path`/`explain`, wiki for navigation, report as fallback. Dirty output expected. Skip on explicit opt-out or graph debugging. After edits run `graphify update .`.
 
 ## Deep-dive docs
 
