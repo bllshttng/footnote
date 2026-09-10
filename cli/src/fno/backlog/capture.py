@@ -636,6 +636,27 @@ def _replace_item_line(text: str, fu_id: str, new_line: str) -> str:
     return new_text
 
 
+def _item_source_ref(text: str, fu_id: str) -> Optional[str]:
+    """The item's ``source:`` sub-line value (x-1005 origin evidence).
+
+    Capture records a substrate reference (PR#, commit, file, URL) when an
+    item is added; promotion carries it onto the node so the birth keeps the
+    producing reference. ``None`` when the item block has no source line."""
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        m = _ITEM_RE.match(line)
+        if m is None or m.group(2) != fu_id:
+            continue
+        for sub in lines[idx + 1 :]:
+            if _ITEM_RE.match(sub) or (sub and not sub[0].isspace()):
+                break
+            stripped = sub.strip()
+            if stripped.startswith("source:"):
+                return stripped[len("source:") :].strip() or None
+        return None
+    return None
+
+
 def _create_graph_node(
     *,
     title: str,
@@ -645,6 +666,7 @@ def _create_graph_node(
     graph_path: Optional[Path] = None,
     blocks_everything: bool = False,
     source_kind: str = "organic",
+    origin_evidence: Optional[str] = None,
 ) -> str:
     """Create a plan-less idea node on the graph; return its ab-id.
 
@@ -686,6 +708,8 @@ def _create_graph_node(
             project=project,
             cwd=resolved_cwd,
             source_kind=source_kind,
+            origin_channel="capture_promote",
+            origin_evidence=origin_evidence,
             known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
@@ -757,6 +781,10 @@ def promote_item(
 
         title, parsed_priority = _split_priority(m.group(3))
         node_priority = priority or parsed_priority or "p2"
+        # Origin evidence (x-1005): the capture itself is the producing event,
+        # and the item's source sub-line is where that event points.
+        source_ref = _item_source_ref(text, fu_id)
+        origin_ref = f"{fu_id} source: {source_ref}" if source_ref else fu_id
         # Node creation acquires the graph lock; we hold the inbox lock. The
         # ordering is always inbox -> graph (add/promote/dismiss never take the
         # graph lock first), so there is no deadlock.
@@ -767,6 +795,7 @@ def promote_item(
             graph_path=graph_path,
             blocks_everything=blocks_everything,
             source_kind=source_kind,
+            origin_evidence=origin_ref,
         )
 
         new_line = f"- [x] {fu_id} - {m.group(3)} -> {node_id}"

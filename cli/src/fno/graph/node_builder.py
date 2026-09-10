@@ -231,16 +231,19 @@ def _build_backlog_node(
 
     # Request origin (x-1005): the native decision, stamped once at birth and
     # never rewritten by later updates. Fail-open stamps unknown; a recorder
-    # harness or an organic default never establishes origin.
-    origin_receipt = resolve_birth_origins(
+    # harness or an organic default never establishes origin. The evidence
+    # reference is the CALLER's own birth fact, so it is normalized and
+    # stamped here and never depends on the transport resolving.
+    origin_evidence_ref = (origin_evidence or "").strip() or None
+    origin = resolve_birth_origins(
         [
             {
                 "source_kind": source_kind,
                 "birth_channel": origin_channel,
-                "origin_evidence": origin_evidence,
+                "origin_evidence": origin_evidence_ref,
             }
         ]
-    )[0]
+    )[0]["origin"]
 
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
@@ -293,8 +296,8 @@ def _build_backlog_node(
         "source_cwd": prov["source_cwd"],
         "source_node_id": prov["source_node_id"],
         "source_plan_path": prov["source_plan_path"],
-        "request_origin": origin_receipt["origin"],
-        "origin_evidence": origin_receipt["evidence"],
+        "request_origin": origin,
+        "origin_evidence": origin_evidence_ref,
     }
 
 

@@ -988,6 +988,7 @@ def _create_node_impl(
     source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
+    origin_evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1114,6 +1115,8 @@ def _create_node_impl(
             tags=resolved_tags,
             source_node=resolved_source_node,
             source_kind=source_kind,
+            origin_channel="idea",
+            origin_evidence=origin_evidence,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1300,6 +1303,15 @@ def cmd_add(
         "-e",
         help="Record why the creator encountered this node. Optional.",
     ),
+    origin_evidence: Optional[str] = typer.Option(
+        None,
+        "--origin-evidence",
+        help=(
+            "Producing-event reference (mail id, event id, path). With "
+            "--source-kind from_observation/from_supervisor this is what makes "
+            "the node an agent discovery; without it the origin stays unknown."
+        ),
+    ),
     description: Optional[str] = typer.Option(
         None,
         "--description",
@@ -1360,6 +1372,7 @@ def cmd_add(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1494,6 +1507,15 @@ def cmd_idea(
         "--evidence",
         "-e",
         help="Record why the creator encountered this node. Optional.",
+    ),
+    origin_evidence: Optional[str] = typer.Option(
+        None,
+        "--origin-evidence",
+        help=(
+            "Producing-event reference (mail id, event id, path). With "
+            "--source-kind from_observation/from_supervisor this is what makes "
+            "the node an agent discovery; without it the origin stays unknown."
+        ),
     ),
     description: Optional[str] = typer.Option(
         None,
@@ -1741,6 +1763,7 @@ def cmd_idea(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -2082,6 +2105,8 @@ def cmd_decompose(
                     difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    origin_channel="decompose",
+                    origin_evidence=f"parent:{epic_resolved_id}",
                     known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]

@@ -2466,3 +2466,154 @@ def test_observed_model_not_file_backed_harness_is_not_called_prefix_shaped(tmp_
 
     assert got == {"kind": "not-file-backed"}
     assert _observe_model("gemini", "whatever-id")["kind"] == "not-file-backed"
+
+
+# ---------------------------------------------------------------------------
+# Request origin (x-1005) - birth stamping through the native transport
+# ---------------------------------------------------------------------------
+
+
+def test_origin_hp_build_stamps_native_receipt(monkeypatch):
+    """AC1-HP: the birth dict carries the transport's category and the
+    caller's evidence reference, once, at birth."""
+    import fno.graph.node_builder as nb
+
+    def fake_transport(records):
+        assert records[0]["source_kind"] == "operator_request"
+        assert records[0]["birth_channel"] == "new"
+        return [{"origin": "operator_request", "evidence": "brief:20260905.md"}]
+
+    monkeypatch.setattr(nb, "resolve_birth_origins", fake_transport)
+    node = nb._build_backlog_node(
+        title="Operator asked",
+        difficulty="medium",
+        source_kind="operator_request",
+        origin_evidence="brief:20260905.md",
+    )
+    assert node["request_origin"] == "operator_request"
+    assert node["origin_evidence"] == "brief:20260905.md"
+
+
+def test_origin_fail_open_stamps_unknown_and_keeps_evidence(monkeypatch):
+    """A missing binary fail-opens to unknown; the evidence reference is the
+    caller's own birth fact and never depends on the transport resolving."""
+    import fno.graph.node_builder as nb
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    node = nb._build_backlog_node(
+        title="Stale binary",
+        difficulty="medium",
+        origin_channel="capture_promote",
+        origin_evidence="fu-a1b2c3 source: PR#1700",
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == "fu-a1b2c3 source: PR#1700"
+
+
+def test_origin_blank_evidence_normalizes_to_none():
+    """Whitespace evidence is no evidence; the field stays None, not ''."""
+    from fno.graph.node_builder import _build_backlog_node
+
+    node = _build_backlog_node(title="Blank", difficulty="medium", origin_evidence="   ")
+    assert node["origin_evidence"] is None
+    assert node["request_origin"] == "unknown"
+
+
+def test_origin_decompose_child_record_carries_parent_evidence(monkeypatch):
+    """A decomposed child declares the automated channel and its parent as
+    the producing reference, so it never silently gains human origin."""
+    import fno.graph.node_builder as nb
+
+    captured: list[dict] = []
+
+    def fake_transport(records):
+        captured.extend(records)
+        return [{"origin": "unknown", "evidence": records[0]["origin_evidence"]}]
+
+    monkeypatch.setattr(nb, "resolve_birth_origins", fake_transport)
+    nb._build_backlog_node(
+        title="Child",
+        difficulty="medium",
+        origin_channel="decompose",
+        origin_evidence="parent:x-37af",
+    )
+    assert captured[0]["birth_channel"] == "decompose"
+    assert captured[0]["origin_evidence"] == "parent:x-37af"
+
+
+def test_origin_ac2_edge_update_never_rewrites_birth(tmp_path, monkeypatch):
+    """AC2-EDGE: updating a born node leaves its birth origin and evidence
+    byte-stable; later rulings are separate fields the update path writes."""
+    g = _make_graph(
+        tmp_path,
+        [
+            {
+                "id": "ab-origin01",
+                "title": "Born operator",
+                "status": "idea",
+                "domain": "code",
+                "project": "fno",
+                "source_kind": "operator_request",
+                "request_origin": "operator_request",
+                "origin_evidence": "fu-a1b2c3 source: PR#1700",
+            }
+        ],
+    )
+    _patch_graph(monkeypatch, g)
+
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["backlog", "update", "ab-origin01", "--details", "a later ruling"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    entries = json.loads(g.read_text())["entries"]
+    node = next(e for e in entries if e["id"] == "ab-origin01")
+    assert node["details"] == "a later ruling"
+    assert node["request_origin"] == "operator_request"
+    assert node["origin_evidence"] == "fu-a1b2c3 source: PR#1700"
+
+
+def test_origin_intake_preserves_plan_sources_without_claiming_origin(
+    tmp_path, monkeypatch
+):
+    """AC2-HP (intake half): the plan's own references land as birth evidence
+    and the category stays unknown when the plan declares no source kind."""
+    from fno.graph import _intake
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# t\n", encoding="utf-8")
+    monkeypatch.setattr(
+        _intake,
+        "resolve_node_project_and_cwd",
+        lambda *_a, **_k: (None, str(tmp_path), {"sources": ["brief-a.md", "brief-b.md"]}),
+    )
+    node = _intake._build_intake_node(
+        {"plan_path": str(plan), "title": "From plan", "priority": "p2", "deps": [], "roadmap_id": None},
+        [],
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == "brief-a.md; brief-b.md"
+
+
+def test_origin_intake_without_sources_falls_back_to_plan_path(tmp_path, monkeypatch):
+    from fno.graph import _intake
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# t\n", encoding="utf-8")
+    monkeypatch.setattr(
+        _intake,
+        "resolve_node_project_and_cwd",
+        lambda *_a, **_k: (None, str(tmp_path), {}),
+    )
+    node = _intake._build_intake_node(
+        {"plan_path": str(plan), "title": "From plan", "priority": "p2", "deps": [], "roadmap_id": None},
+        [],
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == f"plan:{plan}"

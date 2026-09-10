@@ -95,6 +95,8 @@ def _default_create(
             difficulty_source="retro",
             domain=domain,
             details=details,
+            origin_channel="retro_land",
+            origin_evidence=caused_by,
             known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
