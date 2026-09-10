@@ -599,6 +599,32 @@ def test_gate_refusal_maps_the_gate_exit_family():
     )
 
 
+def test_gate_refusal_reads_the_sandbox_probe_exit_as_lane_scoped():
+    """A sandbox that blocks gh blocks it for every node the codex lane takes,
+    so the refusal skips instead of charging the node."""
+    from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
+
+    line = (
+        "sandbox-probe: gh is unreachable inside the codex workspace-write sandbox "
+        "(error connecting to api.github.com); no worker launched, node stays dispatchable"
+    )
+    detail = adv._gate_refusal_detail(f"{line}\nremedy: allow it in ~/.codex/config.toml")
+    assert detail == line
+    refusal = adv.gate_refusal(
+        adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=detail)
+    )
+    assert refusal is not None and refusal.reason == "sandbox-unreachable"
+    assert refusal.exit_code == EXIT_SANDBOX_UNREACHABLE and refusal.detail == line
+    # The number alone is not proof, and neither is the gate family's marker.
+    for other in ("Traceback (most recent call last):", _GATE_LINE):
+        assert (
+            adv.gate_refusal(
+                adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=other)
+            )
+            is None
+        )
+
+
 def test_gate_refusal_carries_queue_retry_at():
     from fno.agents.spawn_gate import EXIT_PROVIDER_CAP
 

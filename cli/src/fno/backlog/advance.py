@@ -56,6 +56,7 @@ from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name, slug_component
 from fno.agents import spawn_gate as _spawn_gate
+from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -254,6 +255,7 @@ _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
     _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+    EXIT_SANDBOX_UNREACHABLE: "sandbox-unreachable",
 }
 
 
@@ -268,24 +270,25 @@ class GateRefusal:
 
 
 def _gate_refusal_detail(stderr: str) -> str:
-    """The gate's refusal sentence: the LAST ``spawn-gate:`` line (the gate warns
-    before its verdict); stderr head as fallback."""
+    """The refusal sentence: the LAST ``spawn-gate:`` or ``sandbox-probe:`` line
+    (the gate warns before its verdict); stderr head as fallback."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
-    gate_lines = [ln for ln in lines if ln.startswith("spawn-gate:")]
+    gate_lines = [ln for ln in lines if ln.startswith(("spawn-gate:", "sandbox-probe:"))]
     return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
     """A :class:`GateRefusal` for a machine-scoped gate refusal, else None. The
-    ``spawn-gate:`` marker is REQUIRED provenance: ``_codex_create_path``
-    propagates a provider crash's raw exit, so the number alone cannot prove
-    the machine refused."""
+    ``spawn-gate:`` marker (``sandbox-probe:`` for the sandbox probe's exit) is
+    REQUIRED provenance: ``_codex_create_path`` propagates a provider crash's
+    raw exit, so the number alone cannot prove the machine refused."""
     code = getattr(exc, "exit_code", None)
     if not isinstance(code, int):
         return None
     reason = _GATE_REFUSAL_REASONS.get(code)
     detail = (getattr(exc, "detail", "") or "").strip()
-    if reason is None or not detail.startswith("spawn-gate:"):
+    marker = "sandbox-probe:" if code == EXIT_SANDBOX_UNREACHABLE else "spawn-gate:"
+    if reason is None or not detail.startswith(marker):
         return None
     return GateRefusal(reason, code, detail, getattr(exc, "retry_at", None))
 
