@@ -815,7 +815,7 @@ def ready(
         # The keeper's own refusal wording: an unreadable claims root is
         # UNKNOWN claim state, which must refuse, never read as "nothing is
         # claimed". The parent-side strict read can hit that refusal first.
-        raise RuntimeError(f"live claim state is unavailable ({exc})") from exc
+        raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
     try:
         worked = set(live_worked_node_ids())
     except Exception as exc:  # noqa: BLE001 - claims stay fail-closed

@@ -4140,6 +4140,10 @@ event_types:
         action:
           type: string
           enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed, reaped-abandoned]
+        block_reason:
+          type: [string, "null"]
+        worker:
+          type: string
         session_basis:
           type: [string, "null"]
     consumers: [operator]

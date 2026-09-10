@@ -296,11 +296,7 @@ def live_worked_node_ids(
     *, strict: bool = False, entries: list[dict] | None = None
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose session rows name live roster workers.
-
-    The graph session row identifies the node and phase; the one fleet roster
-    reading identifies the worker. A missing or finished roster row is not a
-    positive live-worker marker, so it does not suppress dispatch. An unreadable
-    roster is a loud degradation rather than an empty-work answer.
+    Missing markers are not live work; unreadable roster state fails closed.
     """
     try:
         from fno.claims.roster import _really_finished, read_roster
@@ -309,6 +305,12 @@ def live_worked_node_ids(
 
         if entries is None:
             entries = read_graph_strict(graph_json())
+        if not any(isinstance(row, dict) and isinstance(row.get("phase"), str)
+                   and is_open_phase_row(row, row["phase"])
+                   for entry in entries if isinstance(entry, dict)
+                   for row in entry.get("sessions") or []
+                   if entry.get("status") not in TERMINAL_RUNGS):
+            return {}
         reading = read_roster()
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
