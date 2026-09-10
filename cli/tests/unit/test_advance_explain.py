@@ -252,3 +252,107 @@ def test_preview_stops_when_the_load_gate_would_refuse(monkeypatch):
     report = build_lane_fill_report(epic="x-epic")
     assert report["selection"]["stop"] == "load-refused"
     assert report["decision"]["would_dispatch"] == ["x-win"]
+
+
+# ---------------------------------------------------------------------------
+# ROUTING derives the slot from the node's verb (x-4890)
+#
+# routing_for used to hand resolve_slot the literal "target", so the preview
+# narrated the target slot for every node whatever its dispatch_verb - the
+# exact mismatch that produced two wrong diagnoses. The dispatch grid pick
+# derives the slot from the verb through advance's one wrapper; the preview
+# derives through the SAME wrapper, so the two readers cannot drift.
+# ---------------------------------------------------------------------------
+
+def _explain_node(nid, **kw):
+    base = {"id": nid, "title": f"t-{nid}", "priority": "p1", "difficulty": "medium",
+            "project": "fno", "domain": "code", "plan_path": None}
+    base.update(kw)
+    return base
+
+
+def _slot_world(monkeypatch):
+    """Spy resolve_slot, the one resolver both the preview and the dispatch
+    grid pick call. The fake answers per verb so a hardcoded verb is visible
+    in the chain, the candidate, and the grid pick's model."""
+    from fno import route_resolve
+
+    calls = []
+
+    def _fake_slot(verb, node, capacity, **kw):
+        calls.append(verb)
+        return (
+            {"harness": "claude", "model": f"model-for-{verb}"},
+            [f"slot agents.profiles.{verb} lanes walked in declared order"],
+            "armed",
+        )
+
+    monkeypatch.setattr(route_resolve, "resolve_inventory", lambda: object())
+    monkeypatch.setattr(route_resolve, "runtime_capacity", lambda inventory=None: {})
+    monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
+    return calls
+
+
+def test_explain_routes_a_blueprint_verb_node_through_the_blueprint_slot(monkeypatch):
+    calls = _slot_world(monkeypatch)
+    from fno.backlog.explain import routing_for
+
+    routing = routing_for(_explain_node("x-f188", dispatch_verb="/fno:blueprint"))
+    assert calls == ["blueprint"]
+    assert routing["candidate"]["model"] == "model-for-blueprint"
+    assert any("agents.profiles.blueprint" in s for s in routing["chain"])
+
+
+def test_explain_routes_a_target_verb_node_through_the_target_slot(monkeypatch):
+    """Not a constant swap: a target verb, and no verb at low difficulty,
+    still walk the target profile."""
+    calls = _slot_world(monkeypatch)
+    from fno.backlog.explain import routing_for
+
+    routing_for(_explain_node("x-t", dispatch_verb="/fno:target", difficulty="low"))
+    routing_for(_explain_node("x-noverb", difficulty="low"))
+    assert calls == ["target", "target"]
+
+
+def test_explain_renders_the_blueprint_profile_for_a_blueprint_node(monkeypatch):
+    _slot_world(monkeypatch)
+    from fno.backlog.explain import _render_gates_routing_decision, routing_for
+
+    out = []
+    _render_gates_routing_decision(
+        {"gates": [], "routing": routing_for(_explain_node("x-f188", dispatch_verb="/fno:blueprint"))},
+        out,
+    )
+    text = "\n".join(out)
+    assert "agents.profiles.blueprint" in text
+    assert "agents.profiles.target" not in text
+
+
+def test_explain_and_the_dispatch_grid_pick_name_the_same_model(monkeypatch):
+    """The acceptance pair: the model ROUTING names equals the model the
+    dispatch path resolves for the same node, on both verbs."""
+    _slot_world(monkeypatch)
+    from fno.backlog import advance as adv
+    from fno.backlog.explain import routing_for
+
+    for verb, difficulty in (("/fno:blueprint", "medium"), ("/fno:target", "low")):
+        node = _explain_node("x-parity", dispatch_verb=verb, difficulty=difficulty)
+        explained = routing_for(node)["candidate"]["model"]
+        _h, model, _r, _a, why = adv._grid_lane_for(
+            node, model=None, provider=None, verb=adv._node_effective_verb(node)
+        )
+        assert why is None
+        assert explained == model
+        assert explained == f"model-for-{verb.lstrip('/').split(':')[-1]}"
+
+
+def test_explain_reports_an_unanswerable_verb_instead_of_the_target_slot(monkeypatch):
+    """A node no lifecycle rung answers gets the refusal in the chain, never a
+    silent walk of the target profile."""
+    calls = _slot_world(monkeypatch)
+    from fno.backlog.explain import routing_for
+
+    routing = routing_for(_explain_node("x-undecided", difficulty=None))
+    assert calls == []
+    assert routing["candidate"] is None
+    assert "verb unresolved" in routing["chain"][0]
