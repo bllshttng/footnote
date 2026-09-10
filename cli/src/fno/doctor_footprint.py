@@ -242,6 +242,20 @@ def _row_is_advancing(row: Any) -> bool:
         return False
 
 
+_SHARED_DAEMON_BY_HARNESS: dict[str, str] = {"codex": "codex-app-server"}
+
+
+def _shared_daemon_label(row: Any) -> str | None:
+    """Name the shared daemon hosting this row's work, or None.
+
+    Deliberately not a ``_pidless_route`` widening: that answers which
+    identity handle resolves a row to its own process, and a shared-daemon
+    row has none, the work runs inside the daemon (x-cb2b). A table, so the
+    next harness with a shared daemon plugs in beside codex.
+    """
+    return _SHARED_DAEMON_BY_HARNESS.get(str(getattr(row, "harness", "")))
+
+
 def _claim_witness(name: str) -> str | None:
     """The ``worker:<name>`` claim state, or None when the store cannot answer.
 
@@ -315,6 +329,7 @@ def _live_root_pids(
     deadline: float | None = None,
     snapshot_pids: set[int] | None = None,
     snapshot_at: float | None = None,
+    serves: dict[str, str] | None = None,
 ) -> tuple[set[int], str | AttributionGap | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
@@ -364,8 +379,24 @@ def _live_root_pids(
         pidless_rows = [
             row for row in rows if row.status in LIVE_STATUSES and row.pid is None
         ]
-        unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
-        routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
+        serves = serves or {}
+        # A row whose work runs inside a shared daemon is attributed by that
+        # daemon's verdict, not by an identity route of its own (x-cb2b). A
+        # live verdict means the cost already sits inside the attributed
+        # shared root; any other verdict falls through to the per-row
+        # identity chain below (the rollout fd, then advancing, then the
+        # witness), which still fails closed to a gap.
+        daemon_rows = [
+            row for row in pidless_rows if _shared_daemon_label(row) is not None
+        ]
+        attributed_daemon = {
+            id(row)
+            for row in daemon_rows
+            if serves.get(_shared_daemon_label(row) or "", "unreadable") == "live"
+        }
+        own_rows = [row for row in pidless_rows if id(row) not in attributed_daemon]
+        unrouted_rows = [row for row in own_rows if _pidless_route(row) is None]
+        routed_rows = [row for row in own_rows if _pidless_route(row) is not None]
         routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
         # x-9958: a codex thread row's session id has an accepting route (the
         # rollout fd) even though the claude short-id oracle cannot answer for
@@ -472,42 +503,134 @@ def _live_root_pids(
         return roots, "worker root discovery unavailable"
 
 
-def _live_shared_serve_root_pids(
-    *, snapshot_pids: set[int] | None = None
-) -> tuple[set[int], str | None]:
-    """Return the confirmed PID of the detached shared opencode serve."""
-    roots: set[int] = set()
-    try:
-        from fno import paths
+def _shared_serve_verdict(
+    descriptor: dict[str, Any], *, snapshot_pids: set[int] | None
+) -> tuple[set[int], str | None, str]:
+    """``(roots, fatal error, verdict)`` for one shared-serve descriptor.
 
-        record = json.loads(
-            (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
-        )
+    The verdict is ``live``, ``absent`` (every oracle cleanly names no live
+    process) or ``unreadable`` (some oracle could not be read, so absence is
+    unproven and the caller must fail closed).
+    """
+    roots: set[int] = set()
+    fatal = descriptor["fatal"]
+    oracles: list[tuple[Path, str, str | None]] = [
+        (descriptor["state"], descriptor["pid_key"], descriptor["token_key"])
+    ]
+    oracles += [tuple(fb) for fb in descriptor["fallbacks"]]
+    all_absent = True
+    for path, pid_key, token_key in oracles:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except Exception:
+            all_absent = False
+            if fatal:
+                return roots, "shared serve root discovery unavailable", "unreadable"
+            continue
         if not isinstance(record, dict):
-            return roots, "shared serve root discovery unavailable"
-        pid = record.get("pid")
-        pid_start = record.get("pid_start")
+            all_absent = False
+            if fatal:
+                return roots, "shared serve root discovery unavailable", "unreadable"
+            continue
+        pid = record.get(pid_key)
+        token = record.get(token_key) if token_key is not None else None
         if (
             not isinstance(pid, int)
             or isinstance(pid, bool)
             or pid <= 0
-            or not isinstance(pid_start, int)
-            or isinstance(pid_start, bool)
-            or pid_start <= 0
+            or (
+                token_key is not None
+                and (
+                    not isinstance(token, int)
+                    or isinstance(token, bool)
+                    or token <= 0
+                )
+            )
         ):
-            return roots, "shared serve root liveness unavailable"
-        root_live = _root_pid_is_live(pid, pid_start)
+            all_absent = False
+            if fatal:
+                return roots, "shared serve root liveness unavailable", "unreadable"
+            continue
+        root_live = _root_pid_is_live(pid, token)
         if root_live is None:
-            return roots, "shared serve root liveness unavailable"
+            if fatal:
+                return roots, "shared serve root liveness unavailable", "unreadable"
+            return roots, None, "unreadable"
         if root_live:
             roots.add(pid)
-        elif snapshot_pids is not None and pid in snapshot_pids:
-            return roots, "shared serve root liveness unavailable"
-    except FileNotFoundError:
-        return roots, None
+            return roots, None, "live"
+        if snapshot_pids is not None and pid in snapshot_pids:
+            all_absent = False
+            if fatal:
+                return roots, "shared serve root liveness unavailable", "unreadable"
+            continue
+        # A dead root is a positive answer: no live process sits here.
+    if not all_absent:
+        return roots, None, "unreadable"
+    return roots, None, "absent"
+
+
+def _live_shared_serve_root_pids(
+    *, snapshot_pids: set[int] | None = None
+) -> tuple[set[int], str | None, dict[str, str]]:
+    """Attribute every detached shared serve whose state file fno owns.
+
+    Returns the confirmed live root PIDs, a fatal error, and each serve's
+    verdict (``live`` / ``absent`` / ``unreadable``) keyed by label; the
+    verdict disposes the pidless rows that daemon hosts (x-cb2b). The work of
+    such a row runs inside the shared root, so a live verdict attributes it
+    without the row carrying a pid of its own.
+    """
+    roots: set[int] = set()
+    serves: dict[str, str] = {}
+    try:
+        from fno import paths
+
+        codex_home = Path(
+            os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+        ).expanduser()
+        # One descriptor per detached shared serve. A ``fatal`` descriptor
+        # keeps the pre-table behavior: an unreadable state kills the whole
+        # reading; a non-fatal one answers ``unreadable`` and its rows degrade
+        # to a named gap instead (x-cb2b).
+        descriptors = [
+            {
+                "label": "opencode-serve",
+                "state": paths.agents_home_dir() / "opencode-serve.json",
+                "pid_key": "pid",
+                "token_key": "pid_start",
+                "fatal": True,
+                "fallbacks": [],
+            },
+            {
+                "label": "codex-app-server",
+                "state": codex_home / "app-server-daemon" / "fno-harness-daemon.json",
+                "pid_key": "pid",
+                "token_key": "processStartToken",
+                "fatal": False,
+                "fallbacks": [
+                    # The provider's own pid file carries no start token.
+                    (
+                        codex_home / "app-server-daemon" / "app-server.pid",
+                        "pid",
+                        None,
+                    ),
+                ],
+            },
+        ]
+        for descriptor in descriptors:
+            serve_roots, error, verdict = _shared_serve_verdict(
+                descriptor, snapshot_pids=snapshot_pids
+            )
+            roots |= serve_roots
+            serves[str(descriptor["label"])] = verdict
+            if error is not None:
+                return roots, error, serves
     except Exception:
-        return roots, "shared serve root discovery unavailable"
-    return roots, None
+        return roots, "shared serve root discovery unavailable", serves
+    return roots, None, serves
 
 
 def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None]:
@@ -525,8 +648,16 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     if error is not None or ps_output is None:
         return None, error or "footprint unavailable: ps returned no output"
     snapshot_pids = _snapshot_pids(ps_output)
+    shared_serve_pids, shared_serve_error, serves = _live_shared_serve_root_pids(
+        snapshot_pids=snapshot_pids
+    )
+    if shared_serve_error is not None:
+        return None, f"footprint unavailable: {shared_serve_error}"
     root_pids, root_error = _live_root_pids(
-        deadline=deadline, snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
+        deadline=deadline,
+        snapshot_pids=snapshot_pids,
+        snapshot_at=snapshot_at,
+        serves=serves,
     )
     attribution_gap = None
     if isinstance(root_error, AttributionGap):
@@ -536,11 +667,6 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         root_error = None
     if root_error is not None:
         return None, f"footprint unavailable: {root_error}"
-    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
-        snapshot_pids=snapshot_pids
-    )
-    if shared_serve_error is not None:
-        return None, f"footprint unavailable: {shared_serve_error}"
     if (root_pids | shared_serve_pids) - snapshot_pids:
         return None, "footprint unavailable: discovered worker root missing from ps snapshot"
     reading = parse_footprint(
