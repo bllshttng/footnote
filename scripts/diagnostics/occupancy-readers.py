@@ -36,13 +36,19 @@ _BINDING = re.compile(r'^\s*(\w+)\s*=\s*f"node:\{')
 BAD_SITE = 'info = claim_status(f"node:{node_id}")\n'
 
 
+#: Files the census could not read. A file excluded silently reads as clean,
+#: which is the false zero this node is about - the gate refuses on any.
+UNREADABLE: list[str] = []
+
+
 def scan(root: Path) -> list[tuple[str, int, str]]:
     """(relpath, lineno, stripped source line) for every occupancy read."""
     hits: list[tuple[str, int, str]] = []
     for py in sorted(root.rglob("*.py")):
         try:
             lines = py.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
+            UNREADABLE.append(f"{py}: {exc}")
             continue
         rel = py.relative_to(REPO) if py.is_relative_to(REPO) else py
         for i, line in enumerate(lines):
@@ -89,6 +95,19 @@ def self_test() -> bool:
     return True
 
 
+def _refuse_unreadable() -> bool:
+    if not UNREADABLE:
+        return False
+    print(
+        f"{len(UNREADABLE)} file(s) unreadable, excluded from the census; "
+        "a file the census could not read is a hole in the guard:",
+        file=sys.stderr,
+    )
+    for entry in UNREADABLE:
+        print(f"  {entry}", file=sys.stderr)
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-test", action="store_true", help="prove the detector detects")
@@ -97,6 +116,8 @@ def main() -> int:
         return 0 if self_test() else 1
 
     hits = scan(SRC)
+    if _refuse_unreadable():
+        return 1
     registered = _allowlisted()
     missing = [
         (rel, n, s)
