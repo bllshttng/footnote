@@ -32,7 +32,7 @@ use crate::chrome;
 mod rename_overlay;
 mod sweep_scope;
 
-pub(crate) use sweep_scope::{build_sweep_modal, sweep_apply_args};
+use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
 
@@ -1369,6 +1369,10 @@ enum SweepScope {
     UsedShells,
     Dead,
     Both,
+    /// Named-workspace tabs, gated behind their own row.
+    Named,
+    /// The bare prune: stale squad rows, gated behind their own row.
+    Squads,
 }
 
 /// A sweep verb the run loop should spawn: a counts probe for the choice
@@ -1382,16 +1386,11 @@ enum SweepAction {
 /// What a finished sweep verb reports back to the UI loop.
 #[derive(Debug, Clone)]
 enum SweepMsg {
-    Counts {
-        tabs: usize,
-        dead: usize,
-        /// (x-cf97) The used-shell population, counted on every probe so its
-        /// modal row can carry its own number even though the flag is off.
-        used: usize,
-    },
+    Counts(SweepCounts),
     Applied {
         closed: usize,
         reaped: usize,
+        removed: usize,
     },
     Failed(String),
 }
@@ -2170,8 +2169,8 @@ pub(crate) enum AuxAction {
     /// is the confirmation.
     RestartAgents,
     /// Probe `mux workspace prune --dry-run` once and open the centered
-    /// sweep-threads choice modal from its counts. Both halves of the prune
-    /// (surplus pristine tabs, dead member rows) live behind this one entry.
+    /// sweep-threads choice modal from its counts. Every scope of the prune
+    /// lives behind this one entry.
     OpenSweep,
     /// Apply the prune with one scope. Each choice is the confirmation: the
     /// modal named the counts, the tap picked the half.
@@ -2182,6 +2181,8 @@ pub(crate) enum AuxAction {
     SweepUsedShells,
     SweepDeadAgents,
     SweepBoth,
+    SweepNamed,
+    SweepSquads,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -2364,47 +2365,7 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
         Ok(v) => v,
         Err(e) => return SweepMsg::Failed(format!("prune output unparseable ({e})")),
     };
-    match action {
-        SweepAction::Counts => {
-            // A missing field means the two processes disagree about the JSON
-            // shape (a stale deployed binary): fail the probe rather than open
-            // a modal with fabricated zeros.
-            let (Some(tabs), Some(dead)) = (
-                parsed["tabs_would_close"].as_u64().map(|v| v as usize),
-                parsed["members_reaped"].as_u64().map(|v| v as usize),
-            ) else {
-                return SweepMsg::Failed("prune output missing count fields".into());
-            };
-            // (x-cf97) The used-shell population rides every probe: the field
-            // is missing only when the deployed CLI predates it, which is the
-            // same two-process disagreement the tabs/dead reads refuse on -
-            // but the refusal names the remedy instead of a dead end.
-            // (review) A zero default would grey the row out and LIE about a
-            // population the stale CLI cannot count, so the probe stays
-            // fail-loud.
-            let Some(used) = parsed["tabs_used_shells"].as_u64().map(|v| v as usize) else {
-                return SweepMsg::Failed(
-                    "prune output missing count fields - stale fno CLI? run fno doctor update"
-                        .into(),
-                );
-            };
-            if let Some(notice) = parsed["notice"].as_str() {
-                if !notice.is_empty() {
-                    return SweepMsg::Failed(notice.to_string());
-                }
-            }
-            SweepMsg::Counts { tabs, dead, used }
-        }
-        SweepAction::Apply(_) => {
-            let (Some(closed), Some(reaped)) = (
-                parsed["tabs_closed"].as_u64().map(|v| v as usize),
-                parsed["members_reaped"].as_u64().map(|v| v as usize),
-            ) else {
-                return SweepMsg::Failed("prune output missing count fields".into());
-            };
-            SweepMsg::Applied { closed, reaped }
-        }
-    }
+    parse_sweep_receipt(action, &parsed)
 }
 
 impl View {
@@ -11261,23 +11222,24 @@ async fn attach_and_run(
                 // stomped by a landing probe.
                 view.sweep_inflight = false;
                 match msg {
-                    SweepMsg::Counts { tabs, used, dead } => {
+                    SweepMsg::Counts(counts) => {
                         // A popup opened after the tap is the operator's
                         // NEWER intent; it is never stomped by a landing
                         // probe. The tap is answered with a notice instead
                         // of silently dropped.
                         if view.aux.is_none() {
-                            view.aux = Some(build_sweep_modal(tabs, used, dead));
+                            view.aux = Some(build_sweep_modal(&counts));
                             view.aux_esc.clear();
                         } else {
                             view.set_notice(format!(
-                                "sweep ready: tabs {tabs}, used shells {used}, dead agents {dead} - reopen the menu"
+                                "sweep ready: tabs {}, used shells {}, dead agents {}, named tabs {}, stale rows {} - reopen the menu",
+                                counts.tabs, counts.used, counts.dead, counts.named, counts.squads
                             ));
                         }
                     }
-                    SweepMsg::Applied { closed, reaped } => {
+                    SweepMsg::Applied { closed, reaped, removed } => {
                         view.set_notice(format!(
-                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s)"
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} squad row(s)"
                         ));
                     }
                     SweepMsg::Failed(reason) => {
@@ -13971,6 +13933,8 @@ async fn execute_aux_action(
                 view.restart_agents_want = true;
             }
         }
+        AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
+        AuxAction::SweepSquads => begin_sweep_apply(view, SweepScope::Squads),
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).

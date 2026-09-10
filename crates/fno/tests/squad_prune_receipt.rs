@@ -9,6 +9,22 @@
 mod common;
 
 use common::{spawn_server, FakeClient, Scratch};
+use fno::proto::Command;
+
+fn prune_receipt(scratch: &Scratch, flags: &[&str]) -> serde_json::Value {
+    let out = scratch
+        .command()
+        .args(["mux", "workspace", "prune", "--json"])
+        .args(flags)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("prune --json emits JSON")
+}
 
 fn now_stamp() -> String {
     let out = std::process::Command::new("date")
@@ -255,4 +271,76 @@ fn dead_only_scope_reaps_members_and_leaves_tabs_alone() {
         "the dead member was reaped: {after}"
     );
     assert!(after.contains(&origin), "the squad row survives: {after}");
+}
+
+/// The sweep modal's named row shows `tabs_named_would_close` from the
+/// default dry-run, and its tap runs `--tabs-only --include-named`. A named
+/// workspace with two pristine tabs: the dry-run skips both and counts one
+/// closable (the last tab is never surplus), and the apply closes exactly one.
+#[test]
+fn the_named_row_tap_closes_exactly_the_count_the_dry_run_showed() {
+    let scratch = Scratch::new("receipt-named-tabs");
+    let sock = scratch.main_sock();
+    let _server = spawn_server(&sock, &[("SHELL", "/bin/bash")]);
+    let mut client = FakeClient::attach(&sock, 24, 80, &scratch.home_cwd());
+    client.wait_layout(10, "a pane to exist", |l| !l.panes.is_empty());
+    client.cmd(Command::NewSquad {
+        name: "named".into(),
+        origin: Some(scratch.home_cwd()),
+    });
+    client.wait_layout(10, "the named workspace", |l| {
+        l.squads.iter().any(|s| s.name == "named")
+    });
+    // Wait for each shell to DRAW: a pane that has not spoken reads
+    // unmeasured, never pristine, and the fold would keep it for that.
+    let first = client.focus();
+    client.wait_pane_text(15, first, |text| !text.trim().is_empty());
+    client.cmd(Command::NewTab);
+    client.wait_layout(10, "a second named tab", |l| {
+        l.squads
+            .iter()
+            .any(|s| s.name == "named" && s.tabs.len() == 2)
+    });
+    let second = client.focus();
+    client.wait_pane_text(15, second, |text| !text.trim().is_empty());
+
+    let dry = prune_receipt(&scratch, &["--dry-run"]);
+    assert_eq!(dry["tabs_skipped_named"], 2, "{dry}");
+    assert_eq!(dry["tabs_would_close"], 0, "{dry}");
+    assert_eq!(dry["tabs_named_would_close"], 1, "{dry}");
+
+    let applied = prune_receipt(&scratch, &["--tabs-only", "--include-named"]);
+    assert_eq!(
+        applied["tabs_closed"], dry["tabs_named_would_close"],
+        "the tap closes exactly what the row displayed: {applied}"
+    );
+}
+
+/// The stale-row tap is a bare prune, and it removes exactly the
+/// `pruned_count` the default dry-run showed on that row.
+#[test]
+fn the_stale_row_tap_removes_exactly_the_count_the_dry_run_showed() {
+    let scratch = Scratch::new("receipt-stale-rows");
+    let agents_home = scratch.0.join("iso-agents");
+    std::fs::create_dir_all(&agents_home).unwrap();
+    let gone = scratch.0.join("gone-origin");
+    let gone = gone.to_str().expect("utf8 scratch path");
+    std::fs::write(
+        agents_home.join("squads.json"),
+        format!(
+            r#"{{"version":1,"squads":[
+  {{"name":"","key":"stale","origins":["{gone}"],"members":[],"created_at":"2001-01-01T00:00:00Z"}}
+]}}"#
+        ),
+    )
+    .unwrap();
+
+    let dry = prune_receipt(&scratch, &["--dry-run"]);
+    assert_eq!(dry["pruned_count"], 1, "{dry}");
+    let applied = prune_receipt(&scratch, &[]);
+    assert_eq!(applied["pruned_count"], dry["pruned_count"], "{applied}");
+    assert!(
+        !store_after(&scratch).contains(gone),
+        "the stale row is gone"
+    );
 }
