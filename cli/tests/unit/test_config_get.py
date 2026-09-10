@@ -155,8 +155,8 @@ def test_get_unknown_key_without_prefix_still_errors(tmp_path, monkeypatch):
 # project layer had silently overridden the operator kill switch. The rename
 # alone does not fix that; the source line does. Value stays ALONE on stdout
 # (normalize.sh pipes the whole stream through tr); the source line, including
-# an overrides clause exactly when a lower-precedence file also sets the key,
-# is stderr-only.
+# an overrides clause exactly when a lower-precedence file set a value the
+# merge discarded, is stderr-only.
 # ---------------------------------------------------------------------------
 
 
@@ -239,7 +239,8 @@ def test_get_equal_values_in_both_layers_credit_the_higher_file(
 def test_get_source_line_without_lower_override_has_no_overrides_clause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The overrides clause appears exactly when a lower file also sets the key."""
+    """The overrides clause appears exactly when a lower file set a value
+    the merge discarded."""
     _pin_two_layers(
         tmp_path,
         monkeypatch,
