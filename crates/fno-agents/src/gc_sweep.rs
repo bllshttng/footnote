@@ -2504,6 +2504,7 @@ mod tests {
             7,
             &|_| panic!("empty registry must return before graph read"),
             &|_| None,
+            &|_| std::collections::HashMap::new(),
             &|_| false,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
