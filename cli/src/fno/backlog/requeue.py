@@ -133,8 +133,9 @@ def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: st
     """The post-commit read-back for ``update --locked-by``: the Updated
     receipt answers "was the command accepted", never "is the value there",
     and only the committed row can answer the second. Refuses the receipt
-    when the stored owner differs, and warns when a non-null stamp has no
-    backing claim lockfile: mirror-only state that claim hygiene clears.
+    when the stored owner differs; a non-null stamp with no backing claim
+    lockfile warns (mirror-only state claim hygiene clears); a null release
+    that leaves an open do row wedged refuses, naming the settling verb.
     """
     from fno.claims.io import node_has_live_claim
 
@@ -150,6 +151,17 @@ def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: st
         )
         raise typer.Exit(code=1)
     if expected_owner is None:
+        # Earned-success rule, same as unclaim: a lock clear that left the
+        # node in_progress on its own open do rows did not return it to the
+        # queue, so the receipt refuses and names the verb that settles it.
+        if stored_node.get("status") == "in_progress":
+            from fno.graph.statuses import is_open_do_row
+
+            _wedge_refusal(
+                "update",
+                node_id,
+                sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
+            )
         return
     try:
         has_claim = node_has_live_claim(f"node:{node_id}")
