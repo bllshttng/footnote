@@ -1495,11 +1495,9 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-    # Provenance rides the pane receipt's harness_source field below (the
-    # default substrate) - it is the HARNESS axis's provenance, so it is not
-    # named provider_*, which now holds the vendor. The bg/once stdout
-    # receipts stay byte-parity-locked with the Rust client, so they don't
-    # carry it.
+    # Provenance rides the pane receipt's harness_source field below - it is
+    # the HARNESS axis's provenance, not the vendor's. The bg/once stdout
+    # receipts stay byte-parity-locked with the Rust client, so they skip it.
 
     # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
     # an empty value resolves to the built-in default (thread where seated).
