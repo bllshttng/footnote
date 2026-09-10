@@ -1947,6 +1947,22 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let prefix = format!("{}.bak.", name);
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for legacy in entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            {
+                let source = legacy.path();
+                let target = dir.join(legacy.file_name());
+                if std::fs::rename(&source, &target).is_err()
+                    && std::fs::copy(&source, &target).is_ok()
+                {
+                    let _ = std::fs::remove_file(source);
+                }
+            }
+        }
+    }
     let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1960,16 +1976,6 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
     if existing.len() > GRAPH_BACKUP_KEEP {
         for old in &existing[..existing.len() - GRAPH_BACKUP_KEEP] {
             let _ = std::fs::remove_file(old);
-        }
-    }
-    if let Some(parent) = path.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for legacy in entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
-            {
-                let _ = std::fs::remove_file(legacy.path());
-            }
         }
     }
     Some(backup)

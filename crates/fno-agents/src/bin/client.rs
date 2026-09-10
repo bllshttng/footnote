@@ -2221,8 +2221,9 @@ fn run_reap(rest: &[String]) -> i32 {
         }
         let home = AgentsHome::from_env();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let summary = fno_agents::gc_sweep::reap_state_files(
+        let summary = fno_agents::gc_sweep::reap_state_files_for_cwd(
             &home,
+            &cwd,
             fno_agents::agents_config::state_reap_config(&cwd),
             apply,
         );

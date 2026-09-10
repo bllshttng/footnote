@@ -23,7 +23,7 @@
 //! afterwards.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1623,7 +1623,18 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
         return; // the clock itself unreadable: prune nothing
     };
     let window_secs = retain_days.saturating_mul(86_400);
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                keep_state_file(
+                    summary,
+                    state_path(shared_root, dir),
+                    format!("read entry failed: {error}"),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -1833,6 +1844,95 @@ fn reap_mtime_family(
     }
 }
 
+fn reap_pr_status_rows(
+    shared_root: &Path,
+    dir: &Path,
+    retain_days: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+) {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        summary.scanned += 1;
+        let name = state_path(shared_root, &path);
+        let row = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                keep_state_file(summary, name, format!("open failed: {error}"));
+                continue;
+            }
+        };
+        let metadata = match row.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                keep_state_file(summary, name, format!("metadata failed: {error}"));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                keep_state_file(summary, name, format!("metadata failed: {error}"));
+                continue;
+            }
+        };
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, name, "within retention window");
+            continue;
+        }
+        let lock_path = path.with_extension("lock");
+        if !apply && !lock_path.exists() {
+            match opened_path_matches(&row, &path) {
+                Ok(true) => {
+                    record_state_file_action(&path, name, metadata.len(), age_s, false, summary)
+                }
+                Ok(false) => keep_state_file(summary, name, "path replaced"),
+                Err(error) => {
+                    keep_state_file(summary, name, format!("path revalidation failed: {error}"))
+                }
+            }
+            continue;
+        }
+        let lock = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(apply)
+            .truncate(false)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                keep_state_file(summary, name, format!("row lock unavailable: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = lock.try_lock() {
+            keep_state_file(summary, name, format!("row lock held: {error}"));
+            continue;
+        }
+        match opened_path_matches(&row, &path) {
+            Ok(true) => {
+                record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
+            }
+            Ok(false) => keep_state_file(summary, name, "path replaced"),
+            Err(error) => {
+                keep_state_file(summary, name, format!("path revalidation failed: {error}"))
+            }
+        }
+        let _ = lock.unlock();
+    }
+}
+
 fn reap_lock_family(
     shared_root: &std::path::Path,
     dir: &std::path::Path,
@@ -1950,11 +2050,15 @@ fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
     }
 }
 
-/// Reap only expendable state files, never agent rows. `apply = false` runs
-/// the identical age, flock, and inode checks and enumerates every candidate
-/// in `would_delete_entries` without unlinking it.
-pub fn reap_state_files(
-    home: &AgentsHome,
+struct StateReapRoots {
+    claims_root: PathBuf,
+    locks_root: PathBuf,
+    agents_root: PathBuf,
+    state_root: PathBuf,
+}
+
+fn reap_state_files_with_roots(
+    roots: StateReapRoots,
     config: crate::agents_config::StateReapConfig,
     apply: bool,
 ) -> StateFilesReapSummary {
@@ -1967,46 +2071,40 @@ pub fn reap_state_files(
         summary.skip_reason = Some("disabled".to_string());
         return summary;
     }
-    let Some(shared_root) = home.root().parent() else {
-        summary.applied = false;
-        summary.skip_reason = Some("state root unavailable".to_string());
-        return summary;
-    };
     reap_mtime_family(
-        shared_root,
-        &shared_root.join("claims/.expired"),
+        &roots.claims_root,
+        &roots.claims_root.join("claims/.expired"),
         config.expired_claims_retain_days,
         None,
         apply,
         &mut summary.expired_claims,
     );
     reap_lock_family(
-        shared_root,
-        &shared_root.join("locks"),
+        &roots.locks_root,
+        &roots.locks_root.join("locks"),
         config.locks_retain_days,
         apply,
         &mut summary.plan_locks,
         &|_| {},
     );
     reap_lock_family(
-        shared_root,
-        &shared_root.join("agents/locks"),
+        &roots.agents_root,
+        &roots.agents_root.join("locks"),
         config.locks_retain_days,
         apply,
         &mut summary.agent_locks,
         &|_| {},
     );
-    let pr_status_dir = shared_root.join("cache/pr-status");
-    reap_mtime_family(
-        shared_root,
+    let pr_status_dir = roots.state_root.join("cache/pr-status");
+    reap_pr_status_rows(
+        &roots.state_root,
         &pr_status_dir,
         config.pr_status_cache_retain_days,
-        Some("json"),
         apply,
         &mut summary.pr_status_cache,
     );
     reap_lock_family(
-        shared_root,
+        &roots.state_root,
         &pr_status_dir,
         config.locks_retain_days,
         apply,
@@ -2015,6 +2113,69 @@ pub fn reap_state_files(
     );
     summary.totals = state_reap_totals(&summary);
     summary
+}
+
+/// Test/injected-home entry point. Production callers use
+/// [`reap_state_files_for_cwd`] so each family follows its canonical resolver.
+pub fn reap_state_files(
+    home: &AgentsHome,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let Some(root) = home.root().parent() else {
+        let mut summary = StateFilesReapSummary::default();
+        summary.skip_reason = Some("state root unavailable".into());
+        return summary;
+    };
+    reap_state_files_with_roots(
+        StateReapRoots {
+            claims_root: root.to_path_buf(),
+            locks_root: root.to_path_buf(),
+            agents_root: root.join("agents"),
+            state_root: root.to_path_buf(),
+        },
+        config,
+        apply,
+    )
+}
+
+/// Production entry point: claims, machine locks, agent locks, and PR cache
+/// remain independent roots instead of inheriting `FNO_AGENTS_HOME`'s parent.
+pub fn reap_state_files_for_cwd(
+    home: &AgentsHome,
+    cwd: &std::path::Path,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let Some(claims_root) = crate::claims::global_claims_root() else {
+        return unavailable_state_reap("claims root unavailable");
+    };
+    let Some(locks_dir) = crate::agents_config::machine_locks_dir() else {
+        return unavailable_state_reap("machine locks root unavailable");
+    };
+    let Some(state_root) = crate::agents_config::state_dir(cwd) else {
+        return unavailable_state_reap("state root unavailable");
+    };
+    let Some(locks_root) = locks_dir.parent().map(Path::to_path_buf) else {
+        return unavailable_state_reap("machine locks root unavailable");
+    };
+    reap_state_files_with_roots(
+        StateReapRoots {
+            claims_root,
+            locks_root,
+            agents_root: home.root().to_path_buf(),
+            state_root,
+        },
+        config,
+        apply,
+    )
+}
+
+fn unavailable_state_reap(reason: &str) -> StateFilesReapSummary {
+    StateFilesReapSummary {
+        skip_reason: Some(reason.into()),
+        ..Default::default()
+    }
 }
 
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {

@@ -684,8 +684,12 @@ pub fn state_file_sweep(
     emitter: &EventEmitter,
     cwd: &std::path::Path,
 ) -> gc_sweep::StateFilesReapSummary {
-    let summary =
-        gc_sweep::reap_state_files(home, crate::agents_config::state_reap_config(cwd), true);
+    let summary = gc_sweep::reap_state_files_for_cwd(
+        home,
+        cwd,
+        crate::agents_config::state_reap_config(cwd),
+        true,
+    );
     let _ = emitter.emit("state_reap", &state_reap_event_payload(&summary));
     summary
 }

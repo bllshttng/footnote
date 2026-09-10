@@ -142,6 +142,34 @@ pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
     })
 }
 
+fn resolve_state_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    Some(if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    })
+}
+
+/// Configured Python state root, including its `~/.fno` default.
+pub fn state_dir(cwd: &Path) -> Option<PathBuf> {
+    if let Some(raw) =
+        config_lookup(cwd, &["state_dir"]).and_then(|value| value.as_str().map(str::to_string))
+    {
+        return resolve_state_path(&raw, cwd);
+    }
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno"))
+}
+
+/// Config-independent plan/quota lock directory used by Python's `locks_dir`.
+pub fn machine_locks_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno/locks"))
+}
+
 fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
     t.get("agents")?
         .as_table()?
