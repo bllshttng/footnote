@@ -45,48 +45,17 @@ class SpawnerStatus:
     verb: Optional[str] = None  # dispatch verb code, or "resolved" at runtime
 
 
-@dataclass(frozen=True)
-class ProvenanceRow:
-    """One entry of the x-84b2 dispatch-provenance inventory.
+def dispatch_provenance() -> list[tuple[str, str, str]]:
+    """The 18 dispatch paths (x-84b2) as ``(site, source, verb)`` rows: the 13
+    autonomous spawners of the status table plus spawn-on-blueprint and the
+    four extra paths from the operator input brief. Data lives in
+    ``cli/src/fno/agents/naming-codes.yaml``."""
+    from fno.agents.naming import provenance_rows
 
-    Every path that can mint a worker name carries exactly one source code
-    and one verb code. ``verb == "resolved"`` marks the advance family, whose
-    verb comes from the harness-map receipt at dispatch time (t/bp/r/th/f).
-    """
-
-    site: str
-    source: str
-    verb: str
+    return [tuple(row) for row in provenance_rows()]
 
 
-#: The 18 dispatch paths (x-84b2): the 13 autonomous spawners of the status
-#: table plus spawn-on-blueprint and the four extra paths from the operator
-#: input brief (outage handoff, target self-handoff, foreign wave, backlog
-#: join). ``site`` is the status-table spawner name when one exists, else a
-#: stable label - the CI provenance audit (check-autonomy-registry.sh) fails
-#: when this inventory is short a path or a code.
-DISPATCH_PROVENANCE: tuple[ProvenanceRow, ...] = (
-    ProvenanceRow("dispatch_lanes (parallel fill)", "ab", "resolved"),
-    ProvenanceRow("epic converge (mission drain)", "ab", "resolved"),
-    ProvenanceRow("advance (node-walk)", "ac", "resolved"),
-    ProvenanceRow("spawn on blueprint", "sob", "resolved"),
-    ProvenanceRow("reconcile_dispatch (G4 de-stub)", "rd", "t"),
-    ProvenanceRow("spawn_think (context /think)", "th", "th"),
-    ProvenanceRow("post-merge ritual", "pm", "r"),
-    ProvenanceRow("pr_watch (headless PR poll)", "pw", "r"),
-    ProvenanceRow("recovery sweep (crash respawn)", "rec", "resolved"),
-    ProvenanceRow("keep_going (autonomous follow-up)", "kg", "t"),
-    ProvenanceRow("groom (_spawn_groom_worker)", "gr", "th"),
-    ProvenanceRow("restart (_revive_orphans)", "ro", "resolved"),
-    ProvenanceRow("evals runner", "ev", "th"),
-    ProvenanceRow("king loop", "kl", "th"),
-    ProvenanceRow("outage handoff", "oh", "t"),
-    ProvenanceRow("target self-handoff", "sh", "t"),
-    ProvenanceRow("execute foreign wave", "ex", "t"),
-    ProvenanceRow("backlog join", "jn", "t"),
-)
-
-_PROVENANCE_BY_SPAWNER = {row.site: row for row in DISPATCH_PROVENANCE}
+_PROVENANCE_BY_SPAWNER = {row[0]: row for row in dispatch_provenance()}
 
 
 def _settings_for(project_root: Optional[Path]):
@@ -356,18 +325,11 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _king_loop_status(project_root),
     ]
     # x-84b2: stamp each row with its dispatch provenance codes.
-    return [
-        replace(
-            r,
-            source=(
-                _PROVENANCE_BY_SPAWNER[r.name].source if r.name in _PROVENANCE_BY_SPAWNER else None
-            ),
-            verb=(
-                _PROVENANCE_BY_SPAWNER[r.name].verb if r.name in _PROVENANCE_BY_SPAWNER else None
-            ),
-        )
-        for r in rows
-    ]
+    stamped = []
+    for r in rows:
+        codes = _PROVENANCE_BY_SPAWNER.get(r.name)
+        stamped.append(replace(r, source=codes[1] if codes else None, verb=codes[2] if codes else None))
+    return stamped
 
 
 def format_table(rows: list[SpawnerStatus]) -> str:
@@ -425,32 +387,33 @@ def status_command(
 def audit_dispatch_provenance() -> None:
     """Positive completeness marker for the x-84b2 vocabulary (AC5-GUARD).
 
-    Prints one row per registered dispatch path, then the terminal marker the
-    CI provenance audit (check-autonomy-registry.sh) greps for. Exits 1 when
-    the inventory is short 18 paths, a code is unknown, or the sob/ac split
-    and the two active-backlog rows lost their distinction - an empty grep is
-    never the evidence; the marker line is.
+    Prints one row per dispatch path, then the marker the CI provenance audit
+    greps for. Exits 1 on a short inventory, an unknown code, duplicate
+    sites, or a lost sob/ac split or ab pair - the marker line, not an empty
+    grep, is the evidence.
     """
-    from fno.agents.naming import DISPATCH_SOURCES, DISPATCH_VERBS
+    from fno.agents.naming import dispatch_sources, dispatch_verbs
 
+    rows = dispatch_provenance()
+    sources_set, verbs_set = dispatch_sources(), dispatch_verbs()
     problems: list[str] = []
-    if len(DISPATCH_PROVENANCE) != 18:
-        problems.append(f"expected 18 coded paths, found {len(DISPATCH_PROVENANCE)}")
-    for row in DISPATCH_PROVENANCE:
-        if row.source not in DISPATCH_SOURCES:
-            problems.append(f"{row.site}: unknown source {row.source!r}")
-        if row.verb not in DISPATCH_VERBS and row.verb != "resolved":
-            problems.append(f"{row.site}: unknown verb {row.verb!r}")
-    sites = [row.site for row in DISPATCH_PROVENANCE]
+    if len(rows) != 18:
+        problems.append(f"expected 18 coded paths, found {len(rows)}")
+    for site, source, verb in rows:
+        if source not in sources_set:
+            problems.append(f"{site}: unknown source {source!r}")
+        if verb not in verbs_set and verb != "resolved":
+            problems.append(f"{site}: unknown verb {verb!r}")
+    sites = [row[0] for row in rows]
     if len(set(sites)) != len(sites):
         problems.append("duplicate site labels in the inventory")
-    sources = {row.source for row in DISPATCH_PROVENANCE}
+    sources = {row[1] for row in rows}
     if {"sob", "ac"} - sources:
         problems.append("sob and ac must be distinct inventory rows")
-    if sum(1 for row in DISPATCH_PROVENANCE if row.source == "ab") != 2:
+    if sum(1 for row in rows if row[1] == "ab") != 2:
         problems.append("both active-backlog rows must carry ab")
-    for row in DISPATCH_PROVENANCE:
-        typer.echo(f"{row.site}\t{row.source}\t{row.verb}")
+    for site, source, verb in rows:
+        typer.echo(f"{site}\t{source}\t{verb}")
     if problems:
         for problem in problems:
             typer.echo(f"error: {problem}", err=True)

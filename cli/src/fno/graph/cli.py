@@ -4691,11 +4691,7 @@ def cmd_dispatch_lanes(
     source: Optional[str] = typer.Option(
         None,
         "--source",
-        help=(
-            "Dispatch origin stamped into every lane worker's name (x-84b2): "
-            "the active-backlog daemon passes ab. An attended manual run "
-            "passes nothing."
-        ),
+        help="Dispatch origin for every lane worker's name (x-84b2): the daemon passes ab; an attended run passes nothing.",
     ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
@@ -4713,17 +4709,9 @@ def cmd_dispatch_lanes(
         DispatchFlagError,
         reject_empty_model,
     )
-    from fno.agents.naming import DISPATCH_SOURCES
     from fno.backlog.advance import dispatch_lanes
 
-    # x-84b2: an unknown source refuses at the door, never defaults.
-    if source is not None and source not in DISPATCH_SOURCES:
-        typer.echo(
-            f"dispatch-lanes: unknown --source {source!r}; known: "
-            f"{', '.join(sorted(DISPATCH_SOURCES))}",
-            err=True,
-        )
-        raise typer.Exit(code=2)
+    _refuse_unknown_source("dispatch-lanes", source)
 
     try:
         model = reject_empty_model(model)
@@ -8810,6 +8798,21 @@ def cmd_reopen(
 
 
 @cli.command("advance", hidden=True)
+def _refuse_unknown_source(verb_name: str, source: Optional[str]) -> None:
+    """x-84b2: an unknown --source refuses at the door (exit 2, a usage
+    error), never defaults - fabricating provenance is what the vocabulary
+    stops."""
+    from fno.agents.naming import dispatch_sources
+
+    if source is not None and source not in dispatch_sources():
+        typer.echo(
+            f"{verb_name}: unknown --source {source!r}; "
+            f"known: {', '.join(sorted(dispatch_sources()))}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
 def cmd_advance(
     closed: Optional[str] = typer.Option(
         None,
@@ -8874,12 +8877,7 @@ def cmd_advance(
     source: Optional[str] = typer.Option(
         None,
         "--source",
-        help=(
-            "Dispatch origin stamped into the worker name (x-84b2): ab "
-            "active-backlog daemon, ac merge continuation, sob spawn-on-"
-            "blueprint. Omit on an attended manual call: the name carries no "
-            "source segment."
-        ),
+        help="Dispatch origin for the worker name (x-84b2): ab daemon, ac merge continuation, sob blueprint. Omit when attended.",
     ),
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
@@ -8901,19 +8899,12 @@ def cmd_advance(
         reject_empty_model,
         resolve_dispatch_harness,
     )
-    from fno.agents.naming import DISPATCH_SOURCES
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
     # x-84b2: an unknown source refuses at the door (exit 2, a usage error),
     # never defaults - fabricating provenance is what the vocabulary stops.
-    if source is not None and source not in DISPATCH_SOURCES:
-        typer.echo(
-            f"advance: unknown --source {source!r}; known: "
-            f"{', '.join(sorted(DISPATCH_SOURCES))}",
-            err=True,
-        )
-        raise typer.Exit(code=2)
+    _refuse_unknown_source("advance", source)
 
     # --explain returns BEFORE every dispatch path, including the pin validation
     # below: it is a read, so an unparseable --model must not stop it from

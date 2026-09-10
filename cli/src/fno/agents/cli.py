@@ -2663,61 +2663,26 @@ def cmd_name(
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
-    Prints one name on stdout. Shell callers delegate here instead of
-    reimplementing the budget: the assembled 64-char precedence rule differs
-    from a `cut -c1-64`, which shaves the uniqueness discriminator and collapses
-    two dispatches onto one dedup token.
-
-    Two forms. The x-84b2 dispatch form passes `--verb` (a code or a work-verb
-    word, which the vocabulary owner maps) and optionally `--source`; the name
-    is `[<source>-]<verb>-<node>`. The legacy form passes a positional prefix
-    and no `--verb`; behavior is unchanged.
-
-    Exit 3 (NOT 2) is the naming refusal, including an unknown --source or
-    --verb. Exit 2 is Click's usage error, which an `fno` too old to know this
-    verb also returns for "no such command" - a caller treating 2 as a refusal
-    would read every ordinary node as unrepresentable and refuse the whole
-    fleet on a stale install.
+    Prints one name on stdout; shell callers never reimplement the 64-char
+    budget. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage error,
+    which an `fno` too old to know this verb also returns - a caller treating
+    2 as a refusal would refuse the whole fleet on a stale install.
     """
-    from fno.agents.naming import (
-        DISPATCH_VERBS,
-        AgentNameError,
-        agent_name as _agent_name,
-        dispatch_agent_name,
-        verb_code_for,
-    )
+    from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
     try:
-        if verb or source:
-            if prefix:
-                typer.echo(
-                    "error: pass the legacy prefix form or --source/--verb, not both",
-                    err=True,
-                )
-                raise typer.Exit(2)
-            if not verb:
-                typer.echo("error: --source requires --verb", err=True)
-                raise typer.Exit(2)
-            verb_code = verb if verb in DISPATCH_VERBS else verb_code_for(verb)
-            name = dispatch_agent_name(
-                source or None,
-                verb_code,
-                node_id,
-                slug=slug or None,
-                qualifier=qualifier or None,
-                discriminator=discriminator or None,
-            )
-        else:
-            if not prefix:
-                typer.echo("error: a prefix or --verb is required", err=True)
-                raise typer.Exit(2)
-            name = _agent_name(
-                prefix,
-                node_id,
-                slug=slug or None,
-                qualifier=qualifier or None,
-                discriminator=discriminator or None,
-            )
+        name = bridge_name(
+            prefix,
+            node_id,
+            slug=slug or None,
+            qualifier=qualifier or None,
+            discriminator=discriminator or None,
+            source=source or None,
+            verb=verb or None,
+        )
+    except BridgeUsageError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2)
     except AgentNameError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(NAME_REFUSED_EXIT)

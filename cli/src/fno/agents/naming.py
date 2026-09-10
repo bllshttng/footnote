@@ -1,22 +1,20 @@
 """The single owner of agent-name generation.
 
-Every dispatcher that assembles a provenance-carrying worker name
-(``<verb>-<node-id>-<slug>``) routes through :func:`agent_name`. Before x-3218
-four call sites carried their own copy of the policy and only one of them
-capped the ASSEMBLED name at the daemon's 64-character limit, so a long
-configured node id produced a name ``fno agents spawn`` rejected - a silent
-dispatch loss with no session and no event.
-
-The daemon (``crates/fno-agents/src/daemon.rs``) stays the validator at the
-protected spawn boundary; it must never become the generator, because
-truncating there would make the name a caller reasons about differ from the
-name the runtime registers.
+Every dispatcher that assembles a provenance-carrying worker name routes
+through :func:`agent_name` (budget) or :func:`dispatch_agent_name` (the
+x-84b2 source/verb vocabulary, data in ``naming-codes.yaml``). The daemon
+(``crates/fno-agents/src/daemon.rs``) stays the validator at the protected
+spawn boundary; it must never become the generator, because truncating there
+would make the name a caller reasons about differ from the name the runtime
+registers.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 #: The daemon's public agent-name contract: 1-64 chars of ``[A-Za-z0-9_-]``.
@@ -24,78 +22,91 @@ MAX_LEN = 64
 _VALID_NAME = re.compile(r"[A-Za-z0-9_-]{1,%d}\Z" % MAX_LEN)
 
 #: Per-component cap for human-readable text, matching the shell dispatchers'
-#: ``cut -c1-30``. The assembled budget below is what actually protects the
-#: daemon contract; this only keeps one runaway title from eating it all.
+#: ``cut -c1-30``.
 SLUG_CAP = 30
 
-#: Dispatch source codes (x-84b2). ``ab`` covers both active-backlog rows
-#: (parallel fill and mission converge): same owner, same gate, and the name
-#: describes the source that launched the worker, not the internal branch.
-#: Attended operator/king launches carry no source at all.
-DISPATCH_SOURCES = frozenset(
-    {
-        "ab", "ac", "sob", "rd", "th", "pm", "pw", "rec", "kg",
-        "gr", "ro", "ev", "kl", "oh", "sh", "ex", "jn",
-    }
-)
-
-#: Dispatch verb codes, following the kings' prefixes.
-DISPATCH_VERBS = frozenset({"t", "bp", "r", "th", "f"})
-
-#: Harness-map work verb (the receipt's word) -> name code. One table here so
-#: no producer keeps a second mapping that can drift (x-84b2 Locked Decision 1).
-#: ``builtin`` is the no-declared-verb target path.
-WORK_VERB_CODES = {
-    "target": "t",
-    "blueprint": "bp",
-    "review": "r",
-    "research": "r",
-    "think": "th",
-    "fix": "f",
-    "builtin": "t",
-}
-
-
-def verb_code_for(word: Optional[str]) -> str:
-    """The dispatch verb code for a harness-map work-verb word.
-
-    Accepts the spellings the receipt carries: ``/target``,
-    ``/fno:blueprint``, ``$fno:blueprint``, ``blueprint``, ``builtin``. An
-    unknown word raises rather than defaulting to ``t``: fabricating
-    provenance is what the vocabulary exists to stop.
-    """
-    v = (word or "").strip()
-    if v.startswith("/fno:"):
-        v = v[len("/fno:"):]
-    elif v.startswith("$fno:"):
-        v = v[len("$fno:"):]
-    v = v.lstrip("/") or "target"
-    code = WORK_VERB_CODES.get(v)
-    if code is None:
-        raise AgentNameError(
-            f"unknown dispatch verb {word!r}; known: {', '.join(sorted(WORK_VERB_CODES))}"
-        )
-    return code
+_NODE_SHAPE_RE = re.compile(r"([a-z][a-z0-9]*-[0-9a-f]+)(?:-(.*))?\Z")
 
 #: First tokens that open a typed non-node identity rather than a graph node
 #: prefix. ``session-`` wins over the node-shape regex because a session
 #: handle can itself be node-shaped.
 _TYPED_IDENTITY_TOKENS = frozenset({"backlog", "evals", "session"})
 
-_NODE_SHAPE_RE = re.compile(r"([a-z][a-z0-9]*-[0-9a-f]+)(?:-(.*))?\Z")
-
 
 class AgentNameError(ValueError):
     """The required identity cannot be represented under the daemon contract."""
 
 
-def slug_component(raw: Optional[str], cap: int = SLUG_CAP) -> str:
-    """Normalize free text to a name-safe tail, byte-for-byte with the shell.
+class BridgeUsageError(ValueError):
+    """`fno agents name` invoked with no usable form (a usage error, exit 2 -
+    never conflated with the exit-3 naming refusal a stale install cannot
+    distinguish from a usage error otherwise)."""
 
-    Mirrors ``sanitize_name`` in skills/agent/scripts/normalize.sh: lowercase,
-    any non-``[a-z0-9-]`` run becomes a hyphen, repeats collapse, ends trim,
-    then cut and re-trim a hyphen the cut exposed.
-    """
+
+def bridge_name(
+    prefix: str,
+    node_id: str,
+    *,
+    slug: Optional[str] = None,
+    qualifier: Optional[str] = None,
+    discriminator: Optional[str] = None,
+    source: Optional[str] = None,
+    verb: Optional[str] = None,
+) -> str:
+    """The `fno agents name` assembly. ``--verb``/``--source`` select the
+    x-84b2 dispatch form (``--verb`` accepts a code or a work-verb word); a
+    positional prefix with no ``--verb`` is the legacy form."""
+    if verb or source:
+        if prefix:
+            raise BridgeUsageError(
+                "pass the legacy prefix form or --source/--verb, not both"
+            )
+        if not verb:
+            raise BridgeUsageError("--source requires --verb")
+        code = verb if verb in dispatch_verbs() else verb_code_for(verb)
+        return dispatch_agent_name(
+            source or None, code, node_id,
+            slug=slug, qualifier=qualifier, discriminator=discriminator,
+        )
+    if not prefix:
+        raise BridgeUsageError("a prefix or --verb is required")
+    return agent_name(
+        prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator
+    )
+
+
+@lru_cache(maxsize=1)
+def _codes() -> dict:
+    """The vocabulary tables from ``naming-codes.yaml`` (see that file)."""
+    import yaml
+
+    raw = yaml.safe_load((Path(__file__).parent / "naming-codes.yaml").read_text())
+    return {
+        "sources": frozenset(raw["sources"]),
+        "verbs": frozenset(raw["verbs"]),
+        "word_codes": dict(raw["word_codes"]),
+        "provenance": tuple(
+            (row["site"], row["source"], row["verb"]) for row in raw["provenance"]
+        ),
+    }
+
+
+def dispatch_sources() -> frozenset:
+    return _codes()["sources"]
+
+
+def dispatch_verbs() -> frozenset:
+    return _codes()["verbs"]
+
+
+def provenance_rows() -> tuple[tuple[str, str, str], ...]:
+    """``(site, source, verb)`` per registered dispatch path."""
+    return _codes()["provenance"]
+
+
+def slug_component(raw: Optional[str], cap: int = SLUG_CAP) -> str:
+    """Normalize free text to a name-safe tail, byte-for-byte with the shell
+    (``sanitize_name`` in skills/agent/scripts/normalize.sh)."""
     if not raw:
         return ""
     s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", raw.lower())).strip("-")
@@ -110,18 +121,12 @@ def agent_name(
     qualifier: Optional[str] = None,
     discriminator: Optional[str] = None,
 ) -> str:
-    """Build the canonical worker name ``<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]``.
+    """Build ``<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]``.
 
-    Budget precedence, highest first: the operation ``prefix``, the full
-    ``node_id``, any ``qualifier`` (a lifecycle reason) and ``discriminator``
-    (a per-invocation uniqueness token), and last the expendable human-readable
-    ``slug``, which absorbs whatever budget is left over.
-
-    The slug is the only component that gives way. Shaving a discriminator
-    instead would silently collapse two distinct dispatches onto one name, and
-    the name IS the deduplication token for `fno agents spawn`. When the
-    required components alone overflow, this raises rather than inventing an
-    altered identity.
+    Budget precedence: prefix, node id, qualifier, discriminator are required;
+    the expendable human slug absorbs what is left. The name is the dedup
+    token for ``fno agents spawn``, so a discriminator is never shaved, and an
+    over-budget required identity raises rather than inventing an altered one.
 
     :raises AgentNameError: on an empty or over-budget required identity, or a
         required component carrying characters outside the daemon contract.
@@ -157,6 +162,22 @@ def agent_name(
     return name
 
 
+def verb_code_for(word: Optional[str]) -> str:
+    """The verb code for a harness-map work-verb word (``/target``,
+    ``/fno:blueprint``, ``$fno:blueprint``, ``builtin``, ...). Unknown words
+    raise: nothing defaults to ``t`` (AC1-EDGE)."""
+    v = (word or "").strip()
+    if v.startswith("/fno:"):
+        v = v[len("/fno:"):]
+    elif v.startswith("$fno:"):
+        v = v[len("$fno:"):]
+    v = v.lstrip("/") or "target"
+    code = _codes()["word_codes"].get(v)
+    if code is None:
+        raise AgentNameError(f"unknown dispatch verb {word!r}")
+    return code
+
+
 def dispatch_agent_name(
     source: Optional[str],
     verb: str,
@@ -166,33 +187,20 @@ def dispatch_agent_name(
     qualifier: Optional[str] = None,
     discriminator: Optional[str] = None,
 ) -> str:
-    """Build the canonical dispatch name ``[<source>-]<verb>-<identity>[-...]``.
+    """Build ``[<source>-]<verb>-<identity>[-...]`` (x-84b2).
 
-    The x-84b2 vocabulary owner: ``source`` is one of :data:`DISPATCH_SOURCES`
-    (or ``None`` for an attended operator/king launch, which mints the
-    source-less manual form) and ``verb`` is one of :data:`DISPATCH_VERBS`.
-    ``identity`` is the full configured node id, or a typed non-node identity
-    such as ``backlog``, ``evals``, or ``session-<handle>``.
-
-    Unknown sources and verbs raise; a dispatcher never falls back to ``t``:
-    fabricating provenance in the name is exactly what the vocabulary exists
-    to stop. Budget precedence is :func:`agent_name`'s - source, verb, and
-    identity are required; only the slug gives way.
+    ``source`` None is the attended manual form; unknown codes raise rather
+    than fabricating provenance. Budget is :func:`agent_name`'s.
     """
     v = (verb or "").strip()
-    if v not in DISPATCH_VERBS:
-        raise AgentNameError(
-            f"unknown dispatch verb {verb!r}; known: {', '.join(sorted(DISPATCH_VERBS))}"
-        )
+    if v not in dispatch_verbs():
+        raise AgentNameError(f"unknown dispatch verb {verb!r}")
     if source is None:
         prefix = v
     else:
         s = source.strip()
-        if s not in DISPATCH_SOURCES:
-            raise AgentNameError(
-                f"unknown dispatch source {source!r}; known: "
-                f"{', '.join(sorted(DISPATCH_SOURCES))}"
-            )
+        if s not in dispatch_sources():
+            raise AgentNameError(f"unknown dispatch source {source!r}")
         prefix = f"{s}-{v}"
     return agent_name(
         prefix, identity, slug=slug, qualifier=qualifier, discriminator=discriminator
@@ -201,12 +209,9 @@ def dispatch_agent_name(
 
 @dataclass(frozen=True)
 class DispatchName:
-    """A parsed canonical dispatch name.
-
-    ``source`` is ``None`` for the manual (attended) form. ``node`` is the
-    extracted graph node id when the identity is node-shaped, else ``None``
-    (typed identities stay opaque: ``tail`` carries the remainder verbatim).
-    """
+    """A parsed canonical name. ``source`` is None for the manual form;
+    ``node`` is the graph node id when the identity is node-shaped, else None
+    (typed identities stay opaque in ``tail``)."""
 
     name: str
     source: Optional[str]
@@ -215,41 +220,22 @@ class DispatchName:
     tail: str
 
 
-def legacy_verb_code(name: Optional[str]) -> Optional[str]:
-    """The verb code for a pre-cutover convention name, else ``None``.
-
-    The legacy-read window (x-84b2): ``target-*`` rows read as ``t`` and
-    ``think-*`` as ``th`` so recovery/restart can stamp a resumed worker's
-    name while old rows are still in the fleet. Anything else is not a legacy
-    dispatch name and returns ``None``.
-    """
-    if not name:
-        return None
-    if name.startswith("target-"):
-        return "t"
-    if name.startswith("think-"):
-        return "th"
-    return None
-
-
 def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
-    """Parse a canonical ``[<source>-]<verb>-<identity>`` name, else ``None``.
+    """Parse ``[<source>-]<verb>-<identity>``, else None.
 
-    Positional grammar: the first token is a source only when the second
-    token is a verb, so a node id whose configured prefix collides with a
-    code (``t-ab-4040eee8``) cannot misread. Pre-cutover names (``target-*``,
-    ``think-*``, ``reconcile-*``, ``j-*``) are NOT canonical and return
-    ``None`` - rollout readers keep their legacy fallbacks (AC3-EDGE), the
-    legacy-read window is documented in
-    ``docs/architecture/fno-agents-registry-and-dispatch.md``.
+    Positional grammar: the first token is a source only when the second is a
+    verb, so a node id whose configured prefix collides with a code cannot
+    misread. Pre-cutover names are NOT canonical (readers keep legacy
+    fallbacks; AC3-EDGE).
     """
     if not name:
         return None
     tokens = name.split("-")
+    verbs = dispatch_verbs()
     source: Optional[str] = None
-    if len(tokens) >= 2 and tokens[0] in DISPATCH_SOURCES and tokens[1] in DISPATCH_VERBS:
+    if len(tokens) >= 2 and tokens[0] in dispatch_sources() and tokens[1] in verbs:
         source, rest = tokens[0], tokens[2:]
-    elif tokens[0] in DISPATCH_VERBS:
+    elif tokens[0] in verbs:
         rest = tokens[1:]
     else:
         return None
@@ -262,3 +248,15 @@ def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
     if m:
         return DispatchName(name, source, verb, m.group(1), m.group(2) or "")
     return DispatchName(name, source, verb, None, "-".join(rest))
+
+
+def legacy_verb_code(name: Optional[str]) -> Optional[str]:
+    """Verb code for a pre-cutover convention name (``target-*`` -> ``t``,
+    ``think-*`` -> ``th``), else None: the legacy-read window helper."""
+    if not name:
+        return None
+    if name.startswith("target-"):
+        return "t"
+    if name.startswith("think-"):
+        return "th"
+    return None
