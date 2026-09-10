@@ -7,6 +7,7 @@ pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     pub(crate) top_row: Option<String>,
     pub(crate) unreadable: i64,
+    pub(crate) over_budget: i64,
     pub(crate) actionable_ids: Vec<String>,
     pub(crate) operator_question_sessions: Vec<String>,
     pub(crate) operator_questions_unreadable: bool,
@@ -28,6 +29,10 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         .get("unreadable")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
+    let over_budget = value
+        .get("over_budget")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let mut top_row = None;
     let mut actionable_ids: Vec<String> = Vec::new();
     let mut operator_question_sessions: Vec<String> = Vec::new();
@@ -35,15 +40,18 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            if name == "operator_question"
-                && queue.get("status").and_then(|v| v.as_str()) == Some("unreadable")
-            {
+            let status = queue.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if name == "operator_question" && crate::king_board::not_read_status(status) {
                 operator_questions_unreadable = true;
             }
-            if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
+            if crate::king_board::not_read_status(status) {
                 if top_row.is_none() {
                     let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                    top_row = Some(format!("{name} is unreadable: {err}"));
+                    top_row = Some(if status == "over_budget" {
+                        format!("{name} not read: {err}")
+                    } else {
+                        format!("{name} is unreadable: {err}")
+                    });
                 }
                 continue;
             }
@@ -78,6 +86,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         actionable,
         top_row,
         unreadable,
+        over_budget,
         actionable_ids,
         operator_question_sessions,
         operator_questions_unreadable,
@@ -101,4 +110,57 @@ pub(crate) fn read_king_board(
         "unparseable board payload: the collector returned a shape parse_king_board_value cannot read"
             .to_string()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn board_with_queues(queues: Value) -> Value {
+        json!({
+            "actionable": 0,
+            "unreadable": 1,
+            "over_budget": 1,
+            "queues": queues,
+        })
+    }
+
+    #[test]
+    fn an_over_budget_top_row_says_not_read_never_unreadable() {
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "over_budget",
+             "error": "killed at its 28.5s slice of the board budget; the source did not fail",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        let top = parsed.top_row.unwrap();
+        assert!(top.starts_with("undispatched not read:"), "{top}");
+        assert!(!top.contains("unreadable"), "{top}");
+    }
+
+    #[test]
+    fn an_unreadable_top_row_still_says_unreadable() {
+        let board = board_with_queues(json!([
+            {"name": "claims", "status": "unreadable", "error": "exit 1: boom",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        let top = parsed.top_row.unwrap();
+        assert!(top.contains("is unreadable: exit 1"), "{top}");
+    }
+
+    #[test]
+    fn the_two_kinds_count_apart() {
+        let board = board_with_queues(json!([
+            {"name": "claims", "status": "unreadable", "error": "exit 1: boom",
+             "actionable": true, "rows": []},
+            {"name": "undispatched", "status": "over_budget",
+             "error": "killed at its 28.5s slice of the board budget",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert_eq!(parsed.unreadable, 1);
+        assert_eq!(parsed.over_budget, 1);
+    }
 }
