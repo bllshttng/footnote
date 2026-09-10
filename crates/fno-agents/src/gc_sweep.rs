@@ -14,7 +14,11 @@
 //! the session provenance (phase, harness, session id, started_at) survives,
 //! stamped `ended_by: "reap-sweep"` because the sweep infers the end instant
 //! rather than observing it. A row the settle cannot fill on a node still in
-//! flight keeps under `open do row on done node`.
+//! flight keeps under `open do row on done node`. That stranded population
+//! (an open do row is what holds its node out of this settle's own gate) has
+//! its own lane: `fno backlog maintain` detects it in Python, where the
+//! transcript resolver lives, and reaps a row only after the prover proves
+//! the session gone. Widen THIS gate never; extend that lane instead.
 //!
 //! Retirement removes the session from its harness's ACTIVE surface only
 //! (the agent list, the session index); the native history is never deleted,
