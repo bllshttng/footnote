@@ -474,21 +474,19 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // production pane (no such env) is unaffected - this thread never
     // spawns for one.
     if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
-        std::thread::Builder::new()
-            .name("fno-keeper-test-owner".into())
-            .spawn(move || loop {
-                if !crate::test_run::owner_alive(owner_pid, owner_birth) {
-                    // SAFETY: same kill(pid, SIGKILL) the explicit Frame::Kill
-                    // path already sends to this same child.
-                    unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
-                    eprintln!(
-                        "fno-agents-worker: test_keeper_reaped child_pid={child_pid} owner_pid={owner_pid} owner_birth={owner_birth}"
-                    );
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            })
-            .ok();
+        crate::test_run::spawn_owner_watchdog(
+            owner_pid,
+            owner_birth,
+            "fno-keeper-test-owner",
+            move || {
+                // SAFETY: same kill(pid, SIGKILL) the explicit Frame::Kill path
+                // already sends to this same child.
+                unsafe { libc::kill(child_pid as libc::pid_t, libc::SIGKILL) };
+                eprintln!(
+                "fno-agents-worker: test_keeper_reaped child_pid={child_pid} owner_pid={owner_pid} owner_birth={owner_birth}"
+            );
+            },
+        );
     }
 
     // The pty-reader thread: master -> ring + Output frames. Blocking reads

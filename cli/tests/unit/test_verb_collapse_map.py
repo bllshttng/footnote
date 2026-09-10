@@ -128,10 +128,13 @@ def test_map_covers_current_surface_once():
     # `agents distress-verdicts`, the king board's watchdog-verdict lookup
     # (hidden verb): 583 -> 584. The court scope fold allocates
     # `agents court-fold`, the native read `fno agents court -n` relays to
-    # (hidden verb): 584 -> 585. This branch allocates `agents spawn-axes`,
-    # the spawn seam's axes round-trip (hidden verb): 585 -> 586.
-    # This branch allocates `agents workspace reap`: 586 -> 587.
-    assert len(mapped) == 587, (
+    # (hidden verb): 584 -> 585. Upstream allocates `agents spawn-axes`, the
+    # spawn seam's axes round-trip (hidden verb): 585 -> 586, then
+    # independently allocates `agents workspace reap`: 586 -> 587. This
+    # branch independently allocates `agents test-run`, the native
+    # test-suite process-group owner (hidden verb): counted from the merged
+    # file, not taken from either side, 587 -> 588.
+    assert len(mapped) == 588, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

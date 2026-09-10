@@ -152,6 +152,28 @@ pub fn owner_alive(pid: u32, birth: u64) -> bool {
     crate::daemon::process_start_time(pid) == Some(birth)
 }
 
+/// Spawn a background thread that polls a declared test-run owner's liveness
+/// at least every 250ms and calls `on_death` once, then exits - the one
+/// shape both keeper families (`pane_keeper.rs`, `graph_keeper.rs`) use to
+/// bind their lifetime to that owner instead of each hand-rolling its own
+/// poll.
+pub fn spawn_owner_watchdog(
+    owner_pid: u32,
+    owner_birth: u64,
+    thread_name: &str,
+    on_death: impl FnOnce() + Send + 'static,
+) {
+    let _ = std::thread::Builder::new()
+        .name(thread_name.to_string())
+        .spawn(move || loop {
+            if !owner_alive(owner_pid, owner_birth) {
+                on_death();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        });
+}
+
 /// Block until the claim is ours or `deadline` passes. A contender spawns
 /// ZERO workers while waiting: the loop returns before any `Command` is
 /// built.
@@ -233,11 +255,13 @@ fn exit_code_of(status: std::process::ExitStatus) -> i32 {
 enum Unfinished {
     TimedOut,
     Signalled(i32),
+    WaitFailed(std::io::Error),
 }
 
 /// Poll until the child exits, `deadline` passes, or this OWNER itself
 /// receives SIGINT/SIGTERM. `Ok` carries the real exit code (a `wait()`, not
-/// a guess); `Err` means the child is still running and must be cleaned up.
+/// a guess); `Err` means the child is still running (or its status could not
+/// be read) and must be cleaned up.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<i32, Unfinished> {
     loop {
         match child.try_wait() {
@@ -251,7 +275,7 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<i32, Unfinished>
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
-            Err(_) => return Err(Unfinished::TimedOut),
+            Err(e) => return Err(Unfinished::WaitFailed(e)),
         }
     }
 }
@@ -386,6 +410,10 @@ pub fn run_test_run(args: &[String]) -> i32 {
             // POSIX convention (128 + signal number), matching a shell's own
             // report of a signal-terminated command.
             return 128 + sig;
+        }
+        Err(Unfinished::WaitFailed(e)) => {
+            eprintln!("fno-agents test-run: wait() failed: {e}; process group killed");
+            return 2;
         }
     };
     if !cleaned {

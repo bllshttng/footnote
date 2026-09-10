@@ -252,29 +252,29 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
     // bound to that test run's lifetime, not the longer-lived idle bound
     // above: a wedged test that never sends Shutdown must not leak this
-    // store past its own run (the same mechanism the pane keeper uses, one
-    // keeper family over). Resolved once - the env does not change mid-run -
-    // and polled at most every 250ms, cheap enough to share the accept
-    // loop's own tick.
-    let test_owner = crate::test_run::owner_from_env();
-    let mut last_owner_check = std::time::Instant::now();
+    // store past its own run. The watchdog sets the SAME `shutdown` flag an
+    // explicit Shutdown frame does, so the accept loop below needs no
+    // separate owner-liveness check of its own.
+    if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
+        let shutdown = Arc::clone(&shutdown);
+        crate::test_run::spawn_owner_watchdog(
+            owner_pid,
+            owner_birth,
+            "fno-store-test-owner",
+            move || {
+                eprintln!(
+                "fno-agents-worker: test_keeper_reaped graph_keeper owner_pid={owner_pid} owner_birth={owner_birth}"
+            );
+                shutdown.store(1, Ordering::SeqCst);
+            },
+        );
+    }
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("cannot poll {}: {e}", cfg.sock.display()))?;
     loop {
         if shutdown.load(Ordering::SeqCst) == 1 {
             break;
-        }
-        if let Some((owner_pid, owner_birth)) = test_owner {
-            if last_owner_check.elapsed() >= Duration::from_millis(250) {
-                last_owner_check = std::time::Instant::now();
-                if !crate::test_run::owner_alive(owner_pid, owner_birth) {
-                    eprintln!(
-                        "fno-agents-worker: test_keeper_reaped graph_keeper owner_pid={owner_pid} owner_birth={owner_birth}"
-                    );
-                    break;
-                }
-            }
         }
         match listener.accept() {
             Ok((stream, _addr)) => {
