@@ -102,7 +102,8 @@ jobs:
   # over a small one. Selection only: `--list` maps and prints, it runs
   # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
   # the raw estimate (the run job's fit assertion compares against it) and the
-  # ceiling actually applied, the estimate clamped at 45.
+  # ceiling actually applied, the estimate scaled by headroom and clamped
+  # at 75.
   changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -140,7 +141,13 @@ jobs:
             exit 1
           fi
           echo "estimate_minutes=$est" >> "$GITHUB_OUTPUT"
-          echo "timeout_minutes=$(( est > 45 ? 45 : est ))" >> "$GITHUB_OUTPUT"
+          # The ceiling needs headroom over its own estimate, or a packet that
+          # runs one percent over its price dies on every push (measured
+          # 2026-09-09: a 15-estimate Rust packet was killed at 22m44s twice
+          # with every test passing). Half again the estimate, clamped at 75:
+          # the clamp must stay above estimate x this factor for any real
+          # packet, or the fit assertion refuses to run the packet at all.
+          echo "timeout_minutes=$(( est * 3 / 2 > 75 ? 75 : est * 3 / 2 ))" >> "$GITHUB_OUTPUT"
 
     outputs:
       estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
@@ -348,7 +355,12 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 killed the heaviest shard at 15m15s on four consecutive 2026-09-09
+    # runs, and 25 was still not enough, when a Rust-source change put a
+    # workspace cargo rebuild in the shard's path; the other three shards
+    # finish in 8 to 11 minutes. 40 bounds the hang without starving the
+    # rebuild.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -374,7 +386,7 @@ jobs:
           STRESS_TRIALS: "3"
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 15 || true' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 40 || true' EXIT
           uv run --project cli fno-py doctor test smoke --skip 'Pytest*' --shard ${{ matrix.shard }}/4
 
       # Static dead-import guard: a module move down a layer can leave
