@@ -3491,8 +3491,18 @@ fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool 
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
 /// default `fno`). One resolver so a stubbed test and a live gate cannot
 /// disagree about which binary answered.
-fn loopcheck_fno_bin() -> String {
+pub(crate) fn loopcheck_fno_bin() -> String {
     std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+}
+
+/// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
+/// verb reaches for when no `--global-events` override is given. Hand-built
+/// (no Rust resolver for events.jsonl exists yet, x-1571 debt this file
+/// already carries) rather than a new duplicate of the same literal in
+/// every caller.
+pub(crate) fn default_global_events_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(&home).join(".fno/events.jsonl")
 }
 
 /// Best-effort `fno inbox notify TITLE BODY`. Spawned detached and never waited on;
@@ -7978,7 +7988,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     })
 }
 
-fn try_flag_value(arg: &str, flag: &str, args: &[String], i: &mut usize) -> Option<String> {
+pub(crate) fn try_flag_value(
+    arg: &str,
+    flag: &str,
+    args: &[String],
+    i: &mut usize,
+) -> Option<String> {
     if arg == flag {
         *i += 1;
         args.get(*i).cloned()
@@ -8037,7 +8052,7 @@ pub(crate) fn resolve_review_inputs(
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
+        .unwrap_or_else(default_global_events_path);
 
     // Scopes the review_coverage event written into the cross-project global
     // log. The git remote is the one identifier canonical and every one of its
@@ -8377,37 +8392,21 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // no-gh mode), because it is a side channel that must fire once per stop
     // regardless of how the stop itself is decided. The node id is resolved
     // here once; the review-findings scan below reuses the same binding.
-    // NEWEST entry only on the transcript fallback (mirroring the intent
-    // read's newest-entry rule for watching): a distress in an older entry
-    // was handled at that entry's own stop, and re-reading it here would
-    // re-fire it. The fallback matters because the agy, opencode, and codex
-    // stop hooks are transcript-only invocations - `last_assistant_message`
-    // is always absent there (codex round on PR 1282) - and the emitter must
-    // not silently not exist on those harnesses.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
     });
-    let distress_text: Option<String> = last_assistant_message.clone().or_else(|| {
-        crate::distress::newest_assistant_text_via_reader(
-            &loopcheck_fno_bin(),
-            &transcript_path,
-            &cwd,
-        )
-    });
-    if let Some(distress) = distress_text
-        .as_deref()
-        .and_then(crate::distress::extract_help_distress)
-    {
-        crate::distress::emit_help_distress_blocked(
-            &project_events,
-            &global_events,
-            &cwd,
-            &session_id,
-            node_id.as_deref(),
-            &distress,
-        );
-    }
+    let harness = scan_manifest_field(&manifest_content, "harness");
+    crate::distress::scan_and_emit(
+        &project_events,
+        &global_events,
+        &cwd,
+        &session_id,
+        node_id.as_deref(),
+        harness.as_deref(),
+        &transcript_path,
+        last_assistant_message.as_deref(),
+    );
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
     if check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
@@ -17042,6 +17041,7 @@ git_bounded();";
         // `<level>` placeholder, and a missing binary keeps the placeholder.
         // Without the pin the expectation would depend on whatever fno the
         // host has installed.
+        let _env_guard = crate::distress::fno_bin_env_test_lock().lock().unwrap(); // shared: distress.rs races this var too
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let mut pr = reviewers_gate_pr();

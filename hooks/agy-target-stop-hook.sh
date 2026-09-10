@@ -56,6 +56,16 @@ if [[ -z "$CONVERSATION_ID" ]]; then
         | sed -n 's/.*"conversationId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 fi
 
+# Extracted here too (jq-optional, same fallback shape as conversationId)
+# because the pre-manifest visitor-allowed exit below needs it before the
+# jq-confirmed re-extraction at "Synthesize a claude-shaped transcript" runs.
+EARLY_TRANSCRIPT_PATH=""
+[[ $HAVE_JQ -eq 1 ]] && EARLY_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2>/dev/null || true)
+if [[ -z "$EARLY_TRANSCRIPT_PATH" ]]; then
+    EARLY_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" \
+        | sed -n 's/.*"transcriptPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+fi
+
 # Resolve the WORKSPACE ROOT, not $PWD. agy can fire Stop from a subdirectory, or
 # via the global ~/.gemini/config/hooks.json with an unrelated cwd; a relative
 # .fno/target-state.md lookup would then miss the manifest init writes at the git
@@ -111,6 +121,11 @@ resolve_agents_bin() {
 BIN=""
 TARGET_RESOLVE_BROKEN=0
 TARGET_NO_MATCH=0
+# Set ONLY when no manifest file exists at all (the "else" branch below),
+# never when one exists but names a foreign session: a resident manifest
+# already has an owner to scan its own distress (same reasoning as
+# target-stop-hook.sh's PRE_MANIFEST_NO_FILE).
+PRE_MANIFEST_NO_FILE=0
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     RESIDENT_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' \
         "$LIVE_STATE_FILE" 2>/dev/null \
@@ -158,6 +173,7 @@ else
             TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             TARGET_NO_MATCH=1
+            PRE_MANIFEST_NO_FILE=1
         elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
             TARGET_RESOLVE_BROKEN=1
         fi
@@ -307,6 +323,16 @@ if [[ ! -f "$STATE_FILE" ]]; then
     fi
     if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
         echo "loop-check: no manifest names session ${CONVERSATION_ID}; visitor allowed" >&2
+        # Same reasoning as target-stop-hook.sh: a worker that died before
+        # `target init` wrote a manifest still carries a <help> tag nobody
+        # would otherwise read. Side effect only, never a verdict. Gated on
+        # PRE_MANIFEST_NO_FILE, not the broader TARGET_NO_MATCH: a resident
+        # manifest naming a foreign session must never see the binary
+        # invoked against a stop it does not own.
+        if [[ "$PRE_MANIFEST_NO_FILE" -eq 1 && -n "$EARLY_TRANSCRIPT_PATH" && -n "$BIN" ]]; then
+            "$BIN" distress-scan --transcript "$EARLY_TRANSCRIPT_PATH" \
+                --run "$CONVERSATION_ID" --cwd "$ROOT" --harness agy >&2 || true
+        fi
     fi
     emit '{}'
 fi
@@ -319,7 +345,9 @@ fi
 
 # jq confirmed present from here down.
 CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2>/dev/null || true)
-TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2>/dev/null || true)
+# Already resolved above (jq-optional, needed before jq was confirmed present)
+# for the pre-manifest exit; reuse it rather than a second jq extraction.
+TRANSCRIPT_PATH="$EARLY_TRANSCRIPT_PATH"
 
 # ── 4. Synthesize a claude-shaped transcript loop-check can read ───────────────
 # loop-check reads transcripts through the shared Python reader (fno agents

@@ -258,6 +258,13 @@ RUST_CLIENT_VERBS = frozenset(
         # also satisfy it. Dispatched directly in client.rs before
         # build_request (no daemon RPC, no Python impl).
         "review-coverage",
+        # Pre-manifest <help> tag read: the stop hooks' visitor-allowed
+        # exit calls this directly when no manifest names the session, so a
+        # worker that dies before `target init` still gets its distress heard.
+        # Dispatched directly in client.rs before build_request (no daemon RPC,
+        # no Python impl); this entry keeps the client.rs<->router parity test
+        # in sync and provides the help line.
+        "distress-scan",
         # Manual session restoration (x-d285): hidden-but-invocable operator
         # escape hatch that restores a recorded session under its account and
         # route, refusing until ``--session`` selects between a fork's two
@@ -498,6 +505,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
+    "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
     "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",

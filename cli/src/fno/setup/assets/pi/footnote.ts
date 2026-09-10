@@ -102,7 +102,53 @@ export default function (pi: {
     const dir = process.cwd()
     // Presence guard: the manifest is loop-check's state and the marker that
     // a footnote run owns this directory.
-    if (!fnoSessionId(dir)) return
+    if (!fnoSessionId(dir)) {
+      // A worker that dies before `target init` writes a manifest still
+      // carries a <help> tag nobody would otherwise read (loop-check below
+      // never runs on this path). Side effect only, best-effort, never
+      // throws: this is the shell stop hooks' pre-manifest distress-scan,
+      // ported to pi's agent_settled event.
+      const preSynth = join(
+        dir,
+        ".fno",
+        `.pi-premanifest-${process.pid}-${Date.now()}.jsonl`,
+      )
+      try {
+        const sm = (ctx as { sessionManager?: Record<string, () => unknown> })
+          .sessionManager
+        const read = sm?.buildContextEntries ?? sm?.getBranch
+        const entries = read ? (read.call(sm) as unknown[]) : []
+        writeFileSync(preSynth, synthesizeTranscript(entries))
+        const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+        await new Promise<void>((resolve) => {
+          execFile(
+            bin,
+            [
+              "distress-scan",
+              "--transcript",
+              preSynth,
+              "--run",
+              String(process.env.FNO_AGENT_SESSION_ID),
+              "--harness",
+              "pi",
+              "--cwd",
+              dir,
+            ],
+            { cwd: dir, maxBuffer: 10 * 1024 * 1024 },
+            () => resolve(),
+          )
+        })
+      } catch (e) {
+        console.error(`[footnote] pre-manifest distress-scan skipped (non-fatal): ${e}`)
+      } finally {
+        try {
+          unlinkSync(preSynth)
+        } catch {
+          // nothing to clean up / already gone
+        }
+      }
+      return
+    }
     // ctx.isIdle() is true at agent_settled unless another extension started
     // a run; a busy pi is mid-re-drive or mid-tool and the next settle comes.
     if ((ctx as { isIdle?: () => boolean })?.isIdle?.() === false) return
