@@ -11967,6 +11967,71 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         );
     }
 
+    // Capacity gate (x-df28): naming an undispatched row as next is a claim
+    // that a dispatch could be admitted. Ask the same gate the spawn would
+    // ask; when every candidate is refused for capacity, the stop is
+    // legitimate and re-invoking the model for it is the wake loop this
+    // check exists to end. Asked only when the top row is undispatched, and
+    // a failed probe keeps today's block (never read as saturation).
+    let probe = match board.top_row.as_deref() {
+        Some(top) if top.starts_with("undispatched:") => {
+            crate::king_termination::probe_dispatch_capacity(&parsed.fno_bin, &parsed.cwd).ok()
+        }
+        _ => None,
+    };
+    match crate::king_termination::saturation_verdict(&board, probe.as_ref()) {
+        Some(crate::king_termination::SaturationOutcome::Saturated { blocked }) => {
+            let constraint = probe
+                .as_ref()
+                .and_then(|p| p.message.clone())
+                .or_else(|| probe.as_ref().and_then(|p| p.reason.clone()))
+                .unwrap_or_else(|| "dispatch capacity exhausted".to_string());
+            return terminate(
+                TerminationReason::NoWork,
+                &format!(
+                    "fleet saturated: {constraint}; \
+                     {blocked} actionable rows all blocked on dispatch capacity"
+                ),
+                blocked,
+                dry + 1,
+                &[],
+            );
+        }
+        Some(crate::king_termination::SaturationOutcome::BlockedWithNext { next, blocked }) => {
+            let constraint = probe
+                .as_ref()
+                .and_then(|p| p.message.clone())
+                .or_else(|| probe.as_ref().and_then(|p| p.reason.clone()))
+                .unwrap_or_else(|| "dispatch capacity exhausted".to_string());
+            emit(
+                "king_loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "actionable": board.actionable,
+                    "actionable_now": board.actionable - blocked,
+                    "blocked_on_capacity": blocked,
+                    "actionable_ids": board.actionable_ids,
+                    "cleared": false,
+                }),
+            );
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    &format!(
+                        "{} actionable now; next: {next}; \
+                         {blocked} blocked on dispatch capacity ({constraint})",
+                        board.actionable - blocked
+                    ),
+                    board.actionable,
+                    dry + 1,
+                ),
+            );
+        }
+        None => {}
+    }
+
     // A row the previous fire called actionable and this one does not is work
     // the king cleared. That is the progress signal, read back off the board
     // rather than self-reported, so it needs no producer to exist.
