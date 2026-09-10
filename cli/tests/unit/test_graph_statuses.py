@@ -182,7 +182,7 @@ def test_container_rollup_keeps_parent_open_for_live_child():
     assert parent["status"] == "in_progress"
 
 
-def test_container_rollup_ignores_pending_supersession_child():
+def test_container_rollup_does_not_pin_parent_with_superseded_child():
     entries = [
         _entry("ab-parent003"),
         _entry(
@@ -195,7 +195,9 @@ def test_container_rollup_ignores_pending_supersession_child():
 
     result = recompute_statuses(entries)
 
+    child = next(entry for entry in result if entry["id"] == "ab-child005")
     parent = next(entry for entry in result if entry["id"] == "ab-parent003")
+    assert child["status"] == "superseded"
     assert parent["status"] == "ready"
 
 

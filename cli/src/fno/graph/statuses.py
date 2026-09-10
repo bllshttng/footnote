@@ -249,24 +249,6 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
 
 
 
-
-def pending_supersession_reason(entry: dict) -> str | None:
-    """Describe a proposed supersession that lacks merged-PR proof."""
-    record = entry.get("supersession")
-    if not entry.get("superseded_by") or not isinstance(record, dict):
-        return None
-    if record.get("verified_at"):
-        return None
-    successor = record.get("successor") or entry.get("superseded_by")
-    cause = str(record.get("cause") or "missing cause")
-    surfaces = record.get("surfaces") or []
-    surface_text = ", ".join(str(s) for s in surfaces) or "missing surfaces"
-    return (
-        f"pending supersession: successor={successor}; cause={cause}; "
-        f"surfaces={surface_text}"
-    )
-
-
 def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
     """Node ids that currently hold a LIVE ``node:<id>`` claim.
 

@@ -769,62 +769,6 @@ pub fn compute_readiness(
     ("ready".to_string(), None)
 }
 
-/// Describe a proposed supersession that lacks merged-PR proof
-/// (statuses.pending_supersession_reason).
-pub fn pending_supersession_reason(entry: &Value) -> Option<String> {
-    let superseded_by = entry.get("superseded_by").map(|v| !v.is_null())?;
-    if !superseded_by {
-        return None;
-    }
-    let record = entry.get("supersession")?;
-    if !record.is_object() {
-        return None;
-    }
-    if record
-        .get("verified_at")
-        .map(|v| !v.is_null())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let successor = record
-        .get("successor")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            entry
-                .get("superseded_by")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "missing successor".to_string());
-    let cause = record
-        .get("cause")
-        .and_then(Value::as_str)
-        .unwrap_or("missing cause");
-    let surfaces = record
-        .get("surfaces")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .map(|s| match s {
-                    Value::String(x) => x.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_else(|| "missing surfaces".to_string());
-    let surface_text = if surfaces.is_empty() {
-        "missing surfaces".to_string()
-    } else {
-        surfaces
-    };
-    Some(format!(
-        "pending supersession: successor={successor}; cause={cause}; surfaces={surface_text}"
-    ))
-}
-
 /// Open in the `_reconcile.node_is_open` sense: neither done nor
 /// superseded-closed. Keyed off the underlying fields so it holds on rows
 /// that have not been through a status recompute.
@@ -1001,9 +945,6 @@ pub fn readiness_status(
         if OVERLAY_TERMINAL_STATUSES.contains(&s) {
             return (Some(s.to_string()), None);
         }
-    }
-    if let Some(reason) = pending_supersession_reason(entry) {
-        return (Some("blocked".to_string()), Some(reason));
     }
     let (kind, blocker_id) = compute_readiness(entry, by_id);
     if kind == "ready" {
@@ -1489,7 +1430,6 @@ pub fn recompute_statuses_with_plan_rungs(
         // Decisions read first, mutations after: the derivation functions
         // borrow immutably, the writes need the mutable borrow.
         let completed = e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false);
-        let pending_reason = pending_supersession_reason(e);
         let superseded = e
             .get("superseded_by")
             .map(|v| !v.is_null())
@@ -1507,14 +1447,7 @@ pub fn recompute_statuses_with_plan_rungs(
             .and_then(Value::as_array)
             .map(|rows| rows.iter().any(is_open_do_row))
             .unwrap_or(false);
-        let rung = if !locked
-            && !open_do
-            && !completed
-            && pending_reason.is_none()
-            && !superseded
-            && !deferred
-            && !has_pr
-        {
+        let rung = if !locked && !open_do && !completed && !superseded && !deferred && !has_pr {
             match plan_rungs {
                 Some(map) => Some(supplied_plan_rung(e, map)),
                 // No plan data supplied: the ladder write below is skipped and
@@ -1533,11 +1466,9 @@ pub fn recompute_statuses_with_plan_rungs(
             obj.insert("status".to_string(), Value::String("done".into()));
             continue;
         }
-        if let Some(reason) = pending_reason {
-            obj.insert("status".to_string(), Value::String("blocked".into()));
-            obj.insert("blocked_reason".to_string(), Value::String(reason));
-            continue;
-        }
+        // A superseded_by edge is the terminal fact (x-e8f3): supersession
+        // evidence stays with the record and the reconcile receipts, never in
+        // status, so a superseded row can no longer read as live held work.
         if superseded {
             obj.insert("status".to_string(), Value::String("superseded".into()));
             continue;
@@ -1641,17 +1572,6 @@ pub fn recompute_statuses_with_plan_rungs(
                 .as_object_mut()
                 .unwrap()
                 .insert("status".to_string(), Value::String("done".into()));
-            continue;
-        }
-        if let Some(reason) = pending_supersession_reason(&entries[pidx]) {
-            entries[pidx]
-                .as_object_mut()
-                .unwrap()
-                .insert("status".to_string(), Value::String("blocked".into()));
-            entries[pidx]
-                .as_object_mut()
-                .unwrap()
-                .insert("blocked_reason".to_string(), Value::String(reason));
             continue;
         }
         if entries[pidx]
@@ -2659,6 +2579,27 @@ mod tests {
         recompute_statuses(&mut entries);
         // Parent with all-done children and no live work of its own -> done.
         assert_eq!(s_str(&entries[0], "status"), Some("done"));
+    }
+
+    #[test]
+    fn recompute_persists_superseded_even_when_the_record_is_unverified() {
+        // The supersede edge is the terminal fact (x-e8f3): an unverified
+        // supersession record never holds the row at blocked, so a superseded
+        // node cannot read as live held work after the 19-row legacy drift.
+        let mut entries = vec![json!({
+            "id": "old",
+            "status": "blocked",
+            "superseded_by": "new",
+            "supersession": {
+                "successor": "new",
+                "cause": "consolidation",
+                "surfaces": ["src/old.py"],
+                "verified_at": null,
+            },
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("superseded"));
+        assert_eq!(entries[0].get("blocked_reason"), Some(&Value::Null));
     }
 
     #[test]
