@@ -284,6 +284,62 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     return rows
 
 
+def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
+    """Registry rows whose RUN ended but whose session still answers.
+
+    census() counts runs holding a process (LIVE_STATUSES); a parked row drops
+    out of that view while its transcript keeps moving, and a peer read the
+    absence as "nobody is there" and nearly dispatched a second writer onto a
+    live worktree (x-74aa). These rows are display only: they never enter
+    LiveCensus, so slot_count and every gate decision are untouched.
+    Only a positive UNREACHABLE verdict drops a row here - absence of evidence
+    stays, because absence is the answer that licenses action.
+    """
+    from fno.agents.reachability import UNREACHABLE, classify_reachability, registry_falsifier
+    from fno.agents.registry import load_registry
+    from fno.agents.session_truth import resolve_session_truth
+    from fno.agents.spawn_gate import LIVE_STATUSES
+
+    try:
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return []
+    rows: list[dict] = []
+    for e in entries:
+        if e.status in LIVE_STATUSES:
+            continue
+        truth = resolve_session_truth(e.name)
+        reach = classify_reachability(
+            truth_state=truth.get("state"),
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(e),
+        )
+        if reach.verdict == UNREACHABLE:
+            continue
+        rows.append(
+            {
+                "source": "registry",
+                "name": e.name,
+                "handle": None,
+                "harness": e.harness,
+                "substrate": getattr(e, "substrate", None) or "-",
+                "king": (getattr(e, "spawned_by", None) or "")[:8] or None,
+                "pid": None,
+                "rss_mb": None,
+                "node": None,
+                "progress": None,
+                "reach": reach.verdict,
+                "reach_basis": reach.basis,
+                "status": "run-ended",
+                "status_age_s": reach.age_s,
+                "stored_status": e.status,
+                "status_basis": reach.basis,
+                "crown": crowns.get(e.name),
+            }
+        )
+    return rows
+
+
 def _fmt_age(seconds: float) -> str:
     """Compact floored age: 45s / 12m / 3h."""
     s = int(seconds)
@@ -549,13 +605,22 @@ def render_top(
     ``include_subagents`` appends the sidechain section (x-af92);
     ``include_pane_stats`` appends the per-pane mux counter deltas."""
     c = census()
-    rows = _rows(c.workers, _crown_map())
+    crowns = _crown_map()
+    rows = _rows(c.workers, crowns)
+    run_ended = _run_ended_rows(crowns)
     lanes = lane_rows()
     subagents = _subagent_section() if include_subagents else None
     pane_stats = pane_counter_rows() if include_pane_stats else None
+    predicate = (
+        "rows are RUNS holding a process (census LIVE_STATUSES); a session "
+        "whose run ended is under run_ended, not missing; per-session "
+        "liveness is fno agents truth <handle>"
+    )
     if as_json:
         payload: dict = {
             "workers": rows,
+            "run_ended": run_ended,
+            "predicate": predicate,
             "lanes": lanes,
             "slot_claims": c.slot_claims,
             "warnings": list(c.warnings),
@@ -586,7 +651,7 @@ def render_top(
     )
     out.append(header)
     if not rows:
-        out.append("no live workers")
+        out.append("no live workers (runs holding a process; a run-ended session is not missing)")
     for r in rows:
         # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
         # The registry handle rides along when it differs from this view's own
@@ -607,11 +672,21 @@ def render_top(
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
-    out.append(
-        "census: PID/RSS are the process at scan time; REACH reads the "
-        "transcript (fno agents truth for the full evidence); NODE and the "
-        "retirement line read the graph"
-    )
+    for r in run_ended:
+        name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
+        age_s = r.get("status_age_s")
+        activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
+        out.append(
+            f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
+            f"{r['substrate']:<10} {r['king'] or '-':<9} {'-':>7} "
+            f"{'-':>7} "
+            f"{'-':<8} "
+            f"{'-':<17} {r['reach'] or '-':<11} {activity}"
+            + (f" ({r['status_basis']})" if r.get("status_basis") else "")
+        )
+    out.append(f"census: {predicate}. PID/RSS are the process at scan time; "
+               "REACH reads the transcript (fno agents truth for the full "
+               "evidence); NODE and the retirement line read the graph")
     if subagents is not None:
         out.append("")
         out.extend(subagents["warnings"])
