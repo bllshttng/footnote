@@ -3380,7 +3380,6 @@ def cmd_update(
     from fno._flag_aliases import refuse_retired_model_tier
     from fno.graph._constants import (
         PRIORITY_ORDER,
-        has_node_id_prefix,
         normalize_difficulty,
         normalize_tag,
         validate_priority_write,
