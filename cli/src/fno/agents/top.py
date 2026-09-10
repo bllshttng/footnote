@@ -285,15 +285,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
 
 
 def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
-    """Registry rows whose RUN ended but whose session still answers.
+    """Registry rows whose RUN ended but whose session still answers (x-74aa).
 
-    census() counts runs holding a process (LIVE_STATUSES); a parked row drops
-    out of that view while its transcript keeps moving, and a peer read the
-    absence as "nobody is there" and nearly dispatched a second writer onto a
-    live worktree (x-74aa). These rows are display only: they never enter
-    LiveCensus, so slot_count and every gate decision are untouched.
-    Only a positive UNREACHABLE verdict drops a row here - absence of evidence
-    stays, because absence is the answer that licenses action.
+    census() counts runs holding a process, so a parked row drops out of the
+    table while its transcript keeps moving, and absence licensed a second
+    writer onto a live worktree. Display only: never enters LiveCensus. Only
+    a positive UNREACHABLE verdict drops a row - absence of evidence stays.
     """
     from fno.agents.reachability import UNREACHABLE, classify_reachability, registry_falsifier
     from fno.agents.registry import load_registry
@@ -320,14 +317,10 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
             {
                 "source": "registry",
                 "name": e.name,
-                "handle": None,
                 "harness": e.harness,
                 "substrate": getattr(e, "substrate", None) or "-",
                 "king": (getattr(e, "spawned_by", None) or "")[:8] or None,
                 "pid": None,
-                "rss_mb": None,
-                "node": None,
-                "progress": None,
                 "reach": reach.verdict,
                 "reach_basis": reach.basis,
                 "status": "run-ended",
@@ -652,7 +645,7 @@ def render_top(
     out.append(header)
     if not rows:
         out.append("no live workers (runs holding a process; a run-ended session is not missing)")
-    for r in rows:
+    for r in [*rows, *run_ended]:
         # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
         # The registry handle rides along when it differs from this view's own
         # label, so `top` and `list` can be joined by eye instead of by guessing
@@ -664,26 +657,14 @@ def render_top(
         activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
-            f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
-            f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
-            f"{r['node'] or '-':<8} "
-            f"{r['progress'] or '-':<17} {r['reach'] or '-':<11} {activity}"
+            f"{r['substrate']:<10} {r['king'] or '-':<9} {r.get('pid') or '-':>7} "
+            f"{r['rss_mb'] if r.get('rss_mb') is not None else '-':>7} "
+            f"{r.get('node') or '-':<8} "
+            f"{r.get('progress') or '-':<17} {r['reach'] or '-':<11} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
-    for r in run_ended:
-        name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
-        age_s = r.get("status_age_s")
-        activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
-        out.append(
-            f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
-            f"{r['substrate']:<10} {r['king'] or '-':<9} {'-':>7} "
-            f"{'-':>7} "
-            f"{'-':<8} "
-            f"{'-':<17} {r['reach'] or '-':<11} {activity}"
-            + (f" ({r['status_basis']})" if r.get("status_basis") else "")
-        )
     out.append(f"census: {predicate}. PID/RSS are the process at scan time; "
                "REACH reads the transcript (fno agents truth for the full "
                "evidence); NODE and the retirement line read the graph")

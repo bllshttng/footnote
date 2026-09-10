@@ -1412,15 +1412,13 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         error:     string (only when state == corrupted)
 
     With no ``root``, the store is resolved from the key via
-    :func:`fno.claims.io.claims_root_for`, so a rootless read of
-    ``node:<id>`` answers the global root and ``free`` means the key routed
+    :func:`fno.claims.io.claims_root_for`, so ``free`` means the key routed
     and nothing holds it - never "some tree was read".
     """
     from fno.graph._constants import is_wellformed_node_id
 
     if ":" not in key and is_wellformed_node_id(key):
-        # A bare node id names no store at all; free here is the false zero
-        # that reads as safe-to-dispatch (x-74aa).
+        # A bare node id names no store; free here reads as safe-to-dispatch.
         return {
             "key": key,
             "state": "unknown",

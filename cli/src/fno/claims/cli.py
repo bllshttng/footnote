@@ -920,14 +920,9 @@ def _roster_verdict_line(info: dict) -> str:
 
 
 def _expiry_clause(info: dict) -> str:
-    """One stderr line when a live holder's TTL has lapsed (x-74aa).
-
-    The payload already carries ``expired: True`` beside ``state: live``;
-    without a rendered clause an operator cannot tell a fresh lease from one
-    that lapsed an hour ago. Empty when the claim is not a live one past its
-    TTL - stale already says why it is stale, and "holder live by" would lie
-    there.
-    """
+    """One stderr line when a live holder's TTL lapsed (x-74aa): the word live
+    alone cannot tell a fresh lease from one that lapsed an hour ago. Empty
+    for every non-live state - "holder live by" would lie about stale."""
     if info.get("expired") is not True or info.get("state") != "live":
         return ""
     from .types import now_ms
@@ -1014,8 +1009,7 @@ def status(
             line += f"; session witness: {info['session_basis']}"
         typer.echo(line, err=True)
     clause = _expiry_clause(info)
-    if clause:
-        # STDERR: stdout stays parseable JSON on every path.
+    if clause:  # stderr: stdout stays parseable JSON on every path
         typer.echo(clause, err=True)
 
 
