@@ -53,6 +53,12 @@ cleanup() {
         kill -9 "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
+    # The survivors were the POINT; they are not orphans once the proof is
+    # on the record. End them so the run leaves nothing behind.
+    for pid in $SURVIVOR_PIDS; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -81,6 +87,12 @@ done
 PANE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pane_id"])' "$TMP_DIR/worker.json")"
 PLAIN_PANE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pane_id"])' "$TMP_DIR/plain.json")"
 
+# Survivor pids, captured the moment they are known so the EXIT trap can end
+# them: the keeper and its child detach on purpose (that is the survival
+# under test), and an orphan guard that sees them outliving the test would
+# read the proof as a leak.
+SURVIVOR_PIDS=""
+
 CHILD_PID="$("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
@@ -102,6 +114,7 @@ r=rows[0]
 assert r.get("keeper_pid"), "the keeper row names its own pid"
 print(r["keeper_pid"])' "$CHILD_PID")"
 echo "[before] worker pane $PANE_ID child=$CHILD_PID keeper=$KEEPER_ROW; plain pane $PLAIN_PANE_ID child=$PLAIN_PID"
+SURVIVOR_PIDS="$KEEPER_ROW $CHILD_PID"
 
 # The named death: SIGKILL, never SIGTERM - a graceful path could spare the
 # child through a route that proves nothing about the hangup.
