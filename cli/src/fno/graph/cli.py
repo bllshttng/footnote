@@ -3651,6 +3651,18 @@ def cmd_update(
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
+            # Tell "archived" apart from "absent" (the reopen contract): a
+            # refusal that names the remedy beats a not-found that sends the
+            # operator to double-check a correct id (x-e8f3).
+            archived = _archived_entry(task_id)
+            if archived is not None:
+                archived_id = archived.get("id", task_id)
+                typer.echo(
+                    f"Error: node {archived_id} is archived; run "
+                    f"`fno backlog unarchive {archived_id}` to restore it before updating.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
@@ -13214,12 +13226,13 @@ def cmd_supersede(
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets the compatibility edge plus a pending structured evidence record on
-    the old node. The old row stays active until a merged PR covers every
-    declared surface. Refuses if ``replaces`` still has live children unless
-    ``--force`` is given; under ``--force`` the live children's ``parent`` is
-    cleared so they stay dispatchable instead of stranding under a dead unit.
-    Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a structured evidence record on the old
+    node. The edge terminals the old row's status immediately (x-e8f3); the
+    record stays unverified until a merged PR covers every declared surface,
+    which reconcile reports as receipts. Refuses if ``replaces`` still has
+    live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -13241,10 +13254,11 @@ def cmd_supersede(
     if not cleaned_cause:
         typer.echo(
             "Error: --cause is required and cannot be blank.\n"
-            "A supersede now carries the evidence that closes it: what the old\n"
+            "A supersede carries the evidence trail: what the old\n"
             "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node stays open until a merged PR covers every\n"
-            "declared surface.\n"
+            "replaced it. The old node's status reads superseded from the edge\n"
+            "alone; a merged PR covering every declared surface later stamps the\n"
+            "evidence verified_at.\n"
             f"  {_SUPERSEDE_EXAMPLE}",
             err=True,
         )

@@ -569,10 +569,11 @@ Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
 
 Verify predecessor cause surfaces against one merged PR's file set.
 
-    Returns positive receipts for predecessors that remain pending. A
-    predecessor never becomes terminal from the relationship alone: every
-    declared repo-relative surface must appear in the merged PR's changed-file
-    evidence.
+    Returns positive receipts for predecessors that remain pending. Surfaces
+    govern the EVIDENCE stamp only (x-e8f3): a predecessor's status went
+    terminal from the superseded_by edge alone, so a receipt here never
+    changes whether the row reads as live work - it records which declared
+    paths a merged PR did or did not touch.
 
     ``evidence_complete=False`` says the file list is known to be short of the
     PR's real one. A surface missing from a truncated list is an absence with
@@ -586,9 +587,10 @@ Successor id -> successor node, for pending predecessors already owed proof.
     ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
     successor. A successor that closed at any other moment - an earlier sweep, a
     hand-run ``fno backlog done``, or a supersede recorded against a node that
-    had already shipped - never passes through that path. Its predecessors stay
-    pending, pending reads as blocked, and nothing in the system ever revisits
-    them: the only escape was ``unsupersede``.
+    had already shipped - never passes through that path. Its predecessors keep
+    an unverified record, but the superseded_by edge already terminals their
+    status (x-e8f3), so the row never reads as live work while the evidence
+    stays open.
 
     This finds those rows so the sweep can settle them against the evidence the
     successor already carries.
