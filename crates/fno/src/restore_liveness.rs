@@ -136,6 +136,7 @@ mod tests {
             worker: worker.map(String::from),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 

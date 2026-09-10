@@ -174,6 +174,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         worker: Some("w1".into()),
         harness: Some("claude".into()),
         harness_session_id: None,
+        pane_id: None,
     };
     let journal = crate::spawn_journal::SpawnJournal {
         receipts: HashMap::new(),

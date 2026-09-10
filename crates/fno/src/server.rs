@@ -5422,6 +5422,7 @@ impl Core {
                 worker: Some(detached.name.clone()),
                 harness: detached.harness.clone(),
                 harness_session_id: detached.harness_session_id.clone(),
+                pane_id: None,
             });
         }
         self.persist_squad(detached.squad);
@@ -7062,7 +7063,12 @@ impl Core {
             // miss keeps the last-known cwd rather than erasing it. This is what
             // lets restore spawn a worktree worker back into its own worktree
             // instead of the squad's `origins[0]` (server.rs restore_squads).
+            // The birth pane id rides the same resolve: only a resolvable live
+            // pane overwrites, so a miss keeps the last stored id.
             for (m, pane) in list.iter_mut().zip(member_panes) {
+                if let Some(pid) = pane.filter(|pid| self.panes.contains_key(pid)) {
+                    m.pane_id = Some(pid);
+                }
                 if let Some(cwd) = pane
                     .and_then(|pid| self.panes.get(&pid))
                     .map(|p| p.cwd.clone())
@@ -7289,6 +7295,7 @@ impl Core {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }),
         }
         self.persist_squad(sid);
@@ -7436,6 +7443,7 @@ impl Core {
                     worker: Some(name.to_string()),
                     harness,
                     harness_session_id,
+                    pane_id: None,
                 });
             }
         }
@@ -7453,7 +7461,12 @@ impl Core {
         }
     }
 
+    /// Resolve the pane hosting a squad member: the persisted birth pane id
+    /// while it is still live, else the derived worker joins below.
     fn member_pane(&self, member: &crate::squad_store::StoredMember) -> Option<u64> {
+        if let Some(pane) = member.pane_id.filter(|p| self.panes.contains_key(p)) {
+            return Some(pane);
+        }
         if let Some(worker) = member.worker.as_deref() {
             if let Some(detached) = self.detached_pane_for_member(member) {
                 return Some(detached);
@@ -8503,6 +8516,7 @@ impl Core {
                         worker: None,
                         harness: None,
                         harness_session_id: None,
+                        pane_id: None,
                     });
                     continue;
                 }
@@ -8563,6 +8577,7 @@ impl Core {
                             worker: None,
                             harness: None,
                             harness_session_id: None,
+                            pane_id: None,
                         });
                     }
                     Err(e) => {
@@ -8579,6 +8594,7 @@ impl Core {
                             worker: None,
                             harness: None,
                             harness_session_id: None,
+                            pane_id: None,
                         });
                     }
                 }
@@ -12612,6 +12628,7 @@ impl Core {
                             worker: None,
                             harness: None,
                             harness_session_id: None,
+                            pane_id: None,
                         },
                     );
                     recruited += 1;
@@ -16965,6 +16982,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         let rows = core.agent_rows();
@@ -17012,6 +17030,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         let rows = core.agent_rows();
@@ -17057,6 +17076,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         let rows = core.agent_rows();
@@ -17110,6 +17130,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: Some("sess-old".into()),
+                pane_id: None,
             }],
         );
         let rows = core.agent_rows();
@@ -19702,6 +19723,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         core.squad_members.insert(1, vec![member.clone()]);
         core.attached.insert("a1b2c3d4".into(), 5);
@@ -20467,6 +20489,7 @@ mod tests {
             worker: Some("reused-name".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("old-session".into()),
+            pane_id: None,
         };
         let mut wrong = bg_row("reused-name", "/repo", None);
         wrong.harness = Some("codex".into());
@@ -20489,6 +20512,7 @@ mod tests {
             worker: Some("t-worker".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("01a04191-07ec-7080-aa78-843eb56996e5".into()),
+            pane_id: None,
         };
         let facts = Core::member_resume_facts(&member, "t-worker").expect("durable member");
         assert_eq!(facts.harness, "codex");
@@ -20562,6 +20586,7 @@ mod tests {
                 worker: Some("worker".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
 
@@ -23195,6 +23220,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -23211,6 +23237,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 
@@ -23973,6 +24000,7 @@ mod tests {
                 worker: Some("worker".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         let mut row = bg_row("worker", "/repo", None);
@@ -24012,6 +24040,7 @@ mod tests {
                 worker: Some("reused-name".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         let mut first = bg_row("reused-name", "/repo", None);
@@ -24107,6 +24136,7 @@ mod tests {
                     worker: Some("reused-name".into()),
                     harness: None,
                     harness_session_id: None,
+                    pane_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -24118,6 +24148,7 @@ mod tests {
                     worker: Some("reused-name".into()),
                     harness: None,
                     harness_session_id: None,
+                    pane_id: None,
                 },
             ],
         );
@@ -24152,6 +24183,7 @@ mod tests {
             worker: Some("reused-name".into()),
             harness: Some(harness.into()),
             harness_session_id: Some(session_id.into()),
+            pane_id: None,
         };
         core.squad_members
             .insert(7, vec![member("codex", "session-one")]);
@@ -24193,6 +24225,7 @@ mod tests {
             worker: Some("reused-name".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("session-one".into()),
+            pane_id: None,
         };
         let second = crate::squad_store::StoredMember {
             harness: Some("claude".into()),
@@ -24465,6 +24498,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -24594,6 +24628,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -24657,6 +24692,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -26403,6 +26439,7 @@ mod tests {
             worker: Some("t-keeper-worker".into()),
             harness: Some("claude".into()),
             harness_session_id: Some("sess-1".into()),
+            pane_id: None,
         };
         assert_eq!(
             core.take_adopted_for_member(&member),

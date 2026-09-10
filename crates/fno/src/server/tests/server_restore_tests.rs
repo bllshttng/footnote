@@ -46,6 +46,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                     worker: Some("t-codex-one".into()),
                     harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-one".into()),
+                    pane_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -57,6 +58,7 @@ fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
                     worker: Some("t-codex-two".into()),
                     harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-two".into()),
+                    pane_id: None,
                 },
             ],
         )
@@ -147,6 +149,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
                 worker: Some("t-codex-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("codex-session-one".into()),
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -158,6 +161,7 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
                 worker: Some("t-codex-two".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("codex-session-two".into()),
+                pane_id: None,
             },
         ],
     )
@@ -289,6 +293,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
                 worker: Some("t-done-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("done-session".into()),
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -300,6 +305,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
                 worker: Some("t-live-one".into()),
                 harness: Some("codex".into()),
                 harness_session_id: Some("live-session".into()),
+                pane_id: None,
             },
         ],
     )
@@ -409,6 +415,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: "c0ffee00".into(),
@@ -420,6 +427,7 @@ fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -482,6 +490,7 @@ fn restore_lifts_a_tombstone_against_a_live_registry_row() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -534,6 +543,7 @@ fn restore_keeps_a_tombstone_against_an_exited_row() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -572,6 +582,7 @@ fn restore_refusal_names_the_never_bound_marker() {
         worker: Some("residue".into()),
         harness: None,
         harness_session_id: None,
+        pane_id: None,
     };
     let markers = HashMap::from([(
         String::from("residue"),
@@ -614,6 +625,7 @@ fn restore_legacy_member_uses_unique_receipt_harness() {
         worker: Some("worker".into()),
         harness: None,
         harness_session_id: Some("full-session".into()),
+        pane_id: None,
     };
     let receipts = HashMap::from([(
         (String::from("codex"), String::from("full-session")),
@@ -657,6 +669,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
                 worker: Some("t-codex-live".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -668,6 +681,7 @@ fn restore_prunes_worker_members_whose_registry_row_is_gone() {
                 worker: Some("t-codex-reaped".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -739,6 +753,7 @@ fn restore_retires_a_gone_worker_before_the_hold_branch_and_skips_its_tab() {
             worker: Some("t-corpse".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("corpse-session".into()),
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -818,6 +833,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
                 worker: Some("t-codex-one".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
             crate::squad_store::StoredMember {
                 attach_id: String::new(),
@@ -829,6 +845,7 @@ fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
                 worker: Some("t-codex-two".into()),
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             },
         ],
     )
@@ -1127,6 +1144,7 @@ fn stored_worker(
         worker: Some(name.into()),
         harness: Some(harness.into()),
         harness_session_id: Some(sid.into()),
+        pane_id: None,
     }
 }
 
@@ -1287,6 +1305,7 @@ fn workspace_restore_resumes_members_and_a_rerun_focuses() {
                 worker: None,
                 harness: Some("claude".into()),
                 harness_session_id: None,
+                pane_id: None,
             },
             {
                 let mut dead = stored_worker("gone-row", "codex", "sid-gone", "/x");
