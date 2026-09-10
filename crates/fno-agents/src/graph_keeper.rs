@@ -2514,6 +2514,9 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            events: None,
+            read_source: ReadSource::Json,
         }
     }
 
