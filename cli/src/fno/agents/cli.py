@@ -967,6 +967,17 @@ from fno.agents.spawn_lineage import (  # noqa: E402
 )
 
 
+@agents_app.command("gate-status")
+def cmd_gate_status() -> None:
+    """Print the spawn gate's read-only capacity verdict as JSON (x-df28).
+
+    A non-zero exit means the probe itself failed; the caller must then treat
+    dispatch capacity as unknown, never as free."""
+    from fno.agents.spawn_gate import probe_capacity
+
+    print(json.dumps(probe_capacity()))
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),

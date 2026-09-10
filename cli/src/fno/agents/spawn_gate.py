@@ -1963,6 +1963,147 @@ def run_gate(
         time.sleep(QUEUE_POLL_S)
 
 
+def probe_capacity() -> dict:
+    """Answer "would a dispatch be admitted right now" without touching anything.
+
+    Read-only sibling of :func:`run_gate` for the stop hook (x-df28): no gate
+    mutex, no slot reservations, no refusal events. A probe that mutated or
+    emitted would be part of the wake loop it exists to end. Same settings and
+    condition order as :func:`run_gate`; the first binding condition wins, and
+    the provider lanes refuse only when EVERY capped lane is full (one lane
+    with room means some dispatch could go out, so the verdict is accepted).
+
+    Never raises: an internal fault returns ``verdict: unknown`` so a caller
+    can treat every non-refused answer as "no evidence of saturation".
+    """
+    try:
+        from fno.config import load_settings
+
+        agents_cfg = load_settings().agents
+        cap = int(agents_cfg.max_live)
+        floor_gb = float(agents_cfg.min_free_gb)
+        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
+        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
+        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
+        limits = dict(agents_cfg.provider_limits)
+    except Exception:  # noqa: BLE001 - the same fail-safe run_gate falls back to
+        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
+        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
+        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
+
+        limits = {
+            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
+        }
+
+    from fno.agents.registry import SCHEMA_VERSION, _read_raw_registry, _registry_path
+
+    try:
+        raw = _read_raw_registry(_registry_path(None))
+        on_disk = raw.get("schema_version") if raw else None
+        if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
+            return {
+                "verdict": "refused",
+                "reason": "registry_schema",
+                "message": (
+                    f"registry schema {on_disk} ahead of schema {SCHEMA_VERSION} "
+                    "this fno understands; run fno doctor update"
+                ),
+                "on_disk": on_disk,
+                "understood": SCHEMA_VERSION,
+            }
+    except Exception:  # noqa: BLE001 - unreadable registry skips, as the gate skips
+        pass
+
+    try:
+        caller = None
+        try:
+            from fno.claims.self_identity import resolve_self_identity
+
+            caller = resolve_self_identity().session_id
+        except Exception:  # noqa: BLE001 - no identity, no share check
+            caller = None
+        c = census()
+        slots = c.slot_count
+        if slots >= cap:
+            return {
+                "verdict": "refused",
+                "reason": "max_live",
+                "message": f"{slots} live worker slots >= max_live {cap}",
+                "count": slots,
+                "max_live": cap,
+            }
+        if floor_gb > 0:
+            avail = available_ram_gb()
+            if avail is not None and avail < floor_gb:
+                return {
+                    "verdict": "refused",
+                    "reason": "ram_floor",
+                    "message": (
+                        f"available RAM {avail:.1f}GB below the min_free_gb "
+                        f"floor {floor_gb:.1f}GB"
+                    ),
+                    "available_gb": avail,
+                    "min_free_gb": floor_gb,
+                }
+        decision = load_gate_decision(
+            max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu
+        )
+        if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
+            reason, _, event = decision
+            return {
+                "verdict": "refused",
+                "reason": f"load_{reason}",
+                "message": f"fleet load over the gate ceiling: {reason}",
+                **event,
+            }
+        if caller:
+            reading = share_reading(c, cap, caller)
+            held, share, kings = reading["held"], reading["share"], reading["kings"]
+            if held is not None and share is not None and kings is not None and held >= share:
+                return {
+                    "verdict": "refused",
+                    "reason": "king_share",
+                    "message": (
+                        f"this reign holds {held} of max_live {cap} across "
+                        f"{kings} kings (share {share})"
+                    ),
+                    "king": caller,
+                    "held": held,
+                    "share": share,
+                    "max_live": cap,
+                    "kings": kings,
+                }
+    except Exception as exc:  # noqa: BLE001 - a broken reading is not saturation
+        return {"verdict": "unknown", "reason": "reading_failed", "error": str(exc)}
+
+    lanes: dict[str, dict[str, int]] = {}
+    full: list[str] = []
+    for provider, budget in sorted(limits.items()):
+        lane_cap = provider_lanes_cap(budget)
+        if lane_cap is None:
+            continue
+        try:
+            live = provider_live_count(provider)
+        except Exception as exc:  # noqa: BLE001 - a partial lane read is not saturation
+            return {
+                "verdict": "unknown",
+                "reason": "lane_count_unavailable",
+                "provider": provider,
+                "error": str(exc),
+            }
+        lanes[provider] = {"cap": lane_cap, "live": live}
+        if live >= lane_cap:
+            full.append(f"{provider} {live}/{lane_cap}")
+    if lanes and len(full) == len(lanes):
+        return {
+            "verdict": "refused",
+            "reason": "provider_cap",
+            "message": "every dispatch lane at cap: " + ", ".join(full),
+            "lanes": lanes,
+        }
+    return {"verdict": "accepted", "lanes": lanes}
+
+
 # ---------------------------------------------------------------------------
 # Layer 3: background QoS
 # ---------------------------------------------------------------------------
