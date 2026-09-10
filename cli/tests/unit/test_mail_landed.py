@@ -266,3 +266,39 @@ def test_reader_4_markdown_render_shows_the_message_never_the_ack(
     assert len(list(inbox.glob("*.md"))) == 1
     assert send_id in text
     assert "status report" in text
+
+
+def test_cmd_ack_names_a_landed_row_a_receipt(tmp_path, monkeypatch):
+    """After the kind filter, acking a landed id falls into the refusal branch
+    where it used to read "already delivered (hosted)": false about a row that
+    is the delivery proof, not the mail. The refusal must name the receipt and
+    the id it acknowledges (x-22ce)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from fno.bus.cursor import read_cursor
+    from fno.bus.log import Envelope, append, record_landed
+    from fno.cli import app
+
+    send = Envelope.new(from_="worker", to="king", kind="send", body="status report")
+    append(send)
+    ack = record_landed(msg_id=send.id, sender="worker", recipient="king")
+
+    res = CliRunner().invoke(app, ["mail", "ack", ack.id, "--name", "king"])
+
+    assert res.exit_code == 2
+    assert "landed" in res.stderr
+    assert send.id in res.stderr
+    assert read_cursor("king") is None
+
+    # Positive control: a real durable send row acks cleanly and moves the
+    # cursor, proving the new branch did not swallow the ack path.
+    ok = CliRunner().invoke(app, ["mail", "ack", send.id, "--name", "king"])
+
+    assert ok.exit_code == 0
+    assert read_cursor("king") == send.id
+    assert _json.loads(
+        CliRunner().invoke(app, ["mail", "unread", "-n", "king", "--json"]).stdout
+    ) == []
