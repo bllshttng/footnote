@@ -195,13 +195,13 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
+    if invoke(["mux", "thread", "--server", session, thread_id], 30).returncode:
         raise RetaskTransportError("thread_view_unavailable")
     # The pane opened above stays open on a join miss and its name stamping
     # can lag the open, so the join retries; the miss names the opened pane.
     for _ in range(3):
         try:
-            panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
+            panes = invoke(["mux", "pane", "ls", "--server", session, "--json"], 10)
             rows = json.loads(panes.stdout)
         except RetaskTransportError:
             raise
@@ -662,7 +662,7 @@ def run_retask(
     def read_frame() -> str:
         try:
             result = subprocess.run(
-                ["fno", "mux", "pane", "read", "--session", session, pane, "--lines", "80"],
+                ["fno", "mux", "pane", "read", "--server", session, pane, "--lines", "80"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -677,7 +677,7 @@ def run_retask(
         try:
             subprocess.run(
                 [
-                    "fno", "mux", "pane", "wait", "--session", session, pane,
+                    "fno", "mux", "pane", "wait", "--server", session, pane,
                     "--quiet-ms", "400", "--timeout", "8",
                 ],
                 capture_output=True,
@@ -694,7 +694,7 @@ def run_retask(
 
     def send(text: str, submit: bool) -> bool:
         command = [
-            "fno", "mux", "pane", "send", "--session", session, pane,
+            "fno", "mux", "pane", "send", "--server", session, pane,
             "--text", text, "--raw",
         ]
         if submit:

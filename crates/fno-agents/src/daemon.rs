@@ -6528,14 +6528,7 @@ fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let pane = pane_id.to_string();
     let mut child = match std::process::Command::new("fno")
         .args([
-            "mux",
-            "pane",
-            "read",
-            "--session",
-            session,
-            "--lines",
-            "1",
-            &pane,
+            "mux", "pane", "read", "--server", session, "--lines", "1", &pane,
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

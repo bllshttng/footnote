@@ -220,7 +220,7 @@ fn pane_list_via_fno(session: Option<&str>) -> Vec<PaneSighting> {
     let mut found = Vec::new();
     for s in sessions {
         let Ok(output) = std::process::Command::new("fno")
-            .args(["mux", "pane", "ls", "--session", &s, "--json"])
+            .args(["mux", "pane", "ls", "--server", &s, "--json"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
@@ -291,7 +291,7 @@ fn mux_session_names() -> Vec<String> {
 pub(crate) fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
     let pane_id = pane_id.to_string();
     let mut child = std::process::Command::new("fno")
-        .args(["mux", "pane", "kill", "--session", session, &pane_id])
+        .args(["mux", "pane", "kill", "--server", session, &pane_id])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

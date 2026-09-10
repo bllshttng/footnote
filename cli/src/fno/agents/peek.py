@@ -942,7 +942,7 @@ def _read_mux_pane(
     try:
         proc = _run_mux(
             [
-                "mux", "pane", "read", "--session", str(session),
+                "mux", "pane", "read", "--server", str(session),
                 str(pane_id), "--lines", str(n),
             ],
             run,

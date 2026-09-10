@@ -184,7 +184,7 @@ def _identity_receipt_refusal(
                 "mux",
                 "pane",
                 "read",
-                "--session",
+                "--server",
                 str(session),
                 str(pane_id),
                 "--lines",
@@ -288,7 +288,7 @@ def prompt_refusal(
         try:
             frame = _run_mux(
                 [
-                    "mux", "pane", "read", "--session", str(session), str(pane_id),
+                    "mux", "pane", "read", "--server", str(session), str(pane_id),
                     "--lines", str(GATE_FRAME_LINES),
                 ],
                 runner,

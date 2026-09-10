@@ -108,5 +108,5 @@ def test_thread_viewport_resolver_uses_thread_identity_not_pane_zero(monkeypatch
     monkeypatch.setenv("FNO_SESSION", "main")
 
     assert retask.resolve_thread_viewport(_thread_row()) == ("main", 993)
-    assert calls[0] == ["fno", "mux", "thread", "--session", "main", "thread-session"]
-    assert calls[1][:5] == ["fno", "mux", "pane", "ls", "--session"]
+    assert calls[0] == ["fno", "mux", "thread", "--server", "main", "thread-session"]
+    assert calls[1][:5] == ["fno", "mux", "pane", "ls", "--server"]

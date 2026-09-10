@@ -2909,14 +2909,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
     // it the porcelain picks the board's next ready node (prefix+g). The claim
     // race, lane cap, and verdict shape are identical either way.
-    let mut args = vec![
-        "agents",
-        "dispatch",
-        "one",
-        "--mux-session",
-        session,
-        "--json",
-    ];
+    let mut args = vec!["agents", "dispatch", "one", "--server", session, "--json"];
     if let Some(n) = node {
         args.push("--node");
         args.push(n);

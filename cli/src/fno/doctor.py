@@ -3128,7 +3128,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         baseline_ids = set()
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
-        ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
+        ["mux", "pane", "run", "--server", session, "--cwd", str(cwd), "--", *argv],
         subprocess.run,
     )
     if proc.returncode != 0:

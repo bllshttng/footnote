@@ -3751,7 +3751,7 @@ def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
     if session and pane_id is not None:
         try:
             result = subprocess.run(
-                ["fno", "mux", "pane", "kill", "--session", str(session), str(pane_id)],
+                ["fno", "mux", "pane", "kill", "--server", str(session), str(pane_id)],
                 capture_output=True,
                 text=True,
                 timeout=_DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
@@ -6542,7 +6542,7 @@ def _mux_pane_send(
                 run_env = os.environ.copy()
                 run_env["FNO_REVIEW_INVOCATION_ID"] = review_invocation_id
             proc = subprocess.run(
-                [fno_bin, "mux", "pane", *args, "--session", str(session)],
+                [fno_bin, "mux", "pane", *args, "--server", str(session)],
                 input=stdin_text,
                 capture_output=True,
                 text=True,
@@ -6583,7 +6583,7 @@ def _mux_pane_send(
                     "pane",
                     "ls",
                     "--json",
-                    "--session",
+                    "--server",
                     str(session),
                 ],
                 capture_output=True,

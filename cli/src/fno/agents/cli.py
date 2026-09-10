@@ -3881,7 +3881,7 @@ def cmd_pane_identity(
         )
     )
     listing = _run_mux(
-        ["mux", "pane", "ls", "--session", session_name, "--json"], _subprocess.run
+        ["mux", "pane", "ls", "--server", session_name, "--json"], _subprocess.run
     )
     if listing.returncode != 0 or not (listing.stdout or "").strip():
         detail = (listing.stderr or "").strip() or "pane ls returned non-zero"
