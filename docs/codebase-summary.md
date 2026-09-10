@@ -13,7 +13,6 @@ footnote/                              # Flat root - plugin.json at .claude-plug
 │   ├── plan/                           # Implementation plan generation
 │   ├── do/                             # Lightweight single-session executor
 │   ├── operator/                       # Wave-based task routing
-│   ├── megawalk/                     # Multi-session task orchestration
 │   ├── megaspec/                       # Iterative plan refinement
 │   ├── think/                          # Design exploration, brainstorming
 │   ├── what-if/                        # Scenario exploration, edge cases

@@ -77,5 +77,5 @@ Feature needs a plan?            -> /fno:blueprint, then /fno:execute
 Complex multi-phase feature?     -> /fno:target path/to/plan/
 Starting from an idea?           -> /fno:target "the idea"
 Touches multiple repos?          -> /fno:target --cross-project
-Have a backlog of plans?         -> intake to the backlog, then /fno:megawalk
+Have a backlog of plans?         -> intake to the backlog, then /fno:target bg --all-ready
 ```

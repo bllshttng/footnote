@@ -219,7 +219,7 @@ fno agents spawn "/target ab-1234abcd" --name w1 -H claude --fresh
 
 Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins; `--here` (alias `--in-place`) opts back out of `--fresh` and keeps the caller cwd. `--fresh` is a no-op when the caller is already at canonical, and falls back to the caller cwd (the safe side) when resolution is ambiguous: a bare or `--separate-git-dir` checkout, or no `git` on `$PATH`. A real redirect prints one stderr line so it is never silent.
 
-`--fresh` is opt-in at this layer, so plain interactive `ask` / `host` / `spawn` keep the caller cwd. The policy that turns it on for autonomous single-repo target-class work lives one layer up: `/target bg` (via `dispatch-node.sh`) defaults a node with no recorded cwd to `--fresh`, and a megawalk worker launched from a worktree is rooted at canonical. Cross-project dispatch and non-target verbs are exempt.
+`--fresh` is opt-in at this layer, so plain interactive `ask` / `host` / `spawn` keep the caller cwd. The policy that turns it on for autonomous single-repo target-class work lives one layer up: `/target bg` (via `dispatch-node.sh`) defaults a node with no recorded cwd to `--fresh`. Cross-project dispatch and non-target verbs are exempt.
 
 ## Errors you will see
 

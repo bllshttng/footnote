@@ -6,7 +6,7 @@ Two graph-id resolvers had drifted out of step. The Python resolver
 `cli/src/fno/graph/fuzzy.py::resolve_id` already supported title-token
 substring matching (used by `fno backlog find`), but its `ab-` branch did
 exact equality only. The shell resolver `scripts/lib/graph-resolve.sh`
-(used by `/target`, `/blueprint`, `/megawalk`) had its own embedded Python
+(used by `/target`, `/blueprint`) had its own embedded Python
 heredoc that also did exact equality. Users typing instead of
 the full got "no match" everywhere.
 

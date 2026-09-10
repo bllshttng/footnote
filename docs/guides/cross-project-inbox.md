@@ -127,11 +127,11 @@ Idempotent: re-running on already-migrated projects is a no-op.
 
 The `com.fno.backlog-sync` launchd job mirrors `~/.fno/graph.json` to obsidian; the inbox files already live in the obsidian vault, so no separate sync is needed.
 
-## Megawalk integration
+## Draining
 
-Megawalk drains the inbox automatically at the top of every iteration. Only `kind: question` interrupts mid-feature work; all other kinds wait until between features so cross-project chatter cannot derail focused work.
+There is no automatic in-loop drain: the retired megawalk Step 0 was cut with the walker. Recipients drain with `fno agents mail drain` - manually, or from an autonomous worker. Only `kind: question` interrupts mid-feature work; all other kinds wait until between features so cross-project chatter cannot derail focused work.
 
-See `skills/megawalk/references/inbox-handlers.md` for the per-kind dispatch table.
+The retired per-kind handler reference (`skills/megawalk/references/inbox-handlers.md`) went away with the skill; `fno agents mail` is the messaging surface now.
 
 ## Linting and recovering from corruption
 

@@ -439,7 +439,7 @@ The target pipeline runs as a persistent loop until the feature is complete.
 
 **Cross-session loop:**
 
-- One Rust runtime drives the loop: `fno-agents loop run --driver target|megawalk|megatron` (the old `fno loop` verb is removed)
+- One Rust runtime drives the loop: `fno-agents loop run --driver target` (the megawalk and megatron arms are removed; the old `fno loop` verb is gone too)
 - The walk stops on a `TerminationReason` event (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted, Aborted) or the iteration ceiling
 
 **External review polling:**

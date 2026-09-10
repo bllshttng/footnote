@@ -1,10 +1,12 @@
 ---
-note: "Shared reference. Linked from removal redirect messages in megawalk SKILL and from CLAUDE.md."
+note: "Historical record. The megawalk surface itself has since been retired entirely; see the supported routes in guides/megawalk-walker.md."
 ---
 
 <!-- prescribed-verbs: describe -->
 
 # Megawalk Migration (2026-04-20)
+
+> **Historical.** Every `/megawalk` spelling below is retired. The whole megawalk surface (skill, CLI verbs, and loop driver) was removed; the supported routes are `/fno:target` per node, `/fno:target bg --all-ready` for a board, `fno backlog advance` for merge-triggered continuation, and `/fno:reign` for a crowned ongoing session. This page is kept so old links and old muscle memory can see the shape of each change in one place.
 
 Four subcommands were removed as part of the megawalk surface cleanup. This page is the single source of truth for the before/after so users who hit a "command was removed" message can see the whole shape in one place.
 

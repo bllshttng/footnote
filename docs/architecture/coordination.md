@@ -74,8 +74,8 @@ own refresh. The arm is purely additive: it only ever extends liveness, so
 a TTL claim whose recorded pid is transient, dead, missing, or off-host
 falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>`
 target claims opt in by recording a durable session pid (see below); the
-megawalk walker records a transient pid, so the arm never fires for it and
-its TTL park-exclusion is unchanged.
+retired megawalk walker recorded a transient pid, so the arm never fired
+for it and its TTL park-exclusion is unchanged.
 
 **Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
@@ -232,7 +232,7 @@ When in doubt, fail toward leaving the row ready. A node fault misread as capaci
 ## Selection-time enforcement (node claims)
 
 `node:<id>` claims are the cross-session mutex that stops two `/target`
-sessions (or a `/target` racing a megawalk-dispatched target) from both
+sessions (or a `/target` racing an autonomous dispatch) from both
 picking up the same backlog node. Two properties make this work, and both
 differ from the per-walker `walker:` claim:
 
@@ -386,7 +386,7 @@ fno agents claim release node:ab-stuck --force --reason "operator intervention; 
 
 The archived claim survives in `.fno/claims/.expired/`.
 
-**Why isn't megawalk picking up this ready node?** Cross-check the
+**Why isn't any dispatcher picking up this ready node?** Cross-check the
 graph status against any held claim:
 
 ```bash
@@ -429,8 +429,8 @@ archive-then-recreate).
 
 ## Coordination today
 
-`fno agents claim` is the coordination primitive across target, megawalk, and
-megatron. Megawalk's legacy coordination mechanisms (`megawalk-state.md`,
+`fno agents claim` is the coordination primitive across target (and the
+later king/reign loop arms). Megawalk's legacy coordination mechanisms (`megawalk-state.md`,
 `in_flight_nodes`, the PID lock) have been removed in favor of the
 `walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide
 observability into what is in flight.

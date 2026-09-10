@@ -1035,7 +1035,7 @@ Plan A introduces a NEW state file at `.fno/provider-runtime-state.json` for per
 | File | Owns | Lifetime | Lock |
 |---|---|---|---|
 | `failover-state.json` | phase storm-cap, no-swap-back | per-phase (resets on phase boundary) | `<path>.lock` |
-| `provider-runtime-state.json` | per-provider backoff_level + rate_limited_until | survives target spawns within a megawalk campaign; 1h TTL | `<path>.update.lock` |
+| `provider-runtime-state.json` | per-provider backoff_level + rate_limited_until | survives target spawns within a multi-node campaign; 1h TTL | `<path>.update.lock` |
 
 The two files use different sidecar lock paths so the runtime-state writer cannot self-deadlock on `atomic_write`'s internal lock. The `failover-state.json` schema (phase_id, swaps_this_phase, last_swap_from, last_swap_at_iso) is unchanged.
 
@@ -1137,7 +1137,7 @@ The headline scenario (`test_ac3_1_opus_locked_sonnet_free`) pins the user-visib
 
 ## Combos and round-robin (Plan B)
 
-Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`) and add per-combo cursor state in the same `provider-runtime-state.json` so parallel target spawns within a megawalk campaign share rotation.
+Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`) and add per-combo cursor state in the same `provider-runtime-state.json` so parallel target spawns within a multi-node campaign share rotation.
 
 ### Schema
 
@@ -1242,10 +1242,10 @@ Single-provider combos short-circuit (cursor never advances past `idx=0`).
 
 | Surface | How combo is supplied |
 |---------|-----------------------|
-| `/target` skill | `/target combo my-stack "feature"` (positional 2-token modifier) |
-| `/megawalk` skill | `/megawalk combo my-stack` |
+| `/target` skill | `/fno:target combo my-stack "feature"` (positional 2-token modifier) |
 | `run-target-loop.sh` | `TARGET_COMBO=my-stack bash scripts/run-target-loop.sh <plan>` (env; the `fno loop` verb is removed) |
-| `fno megawalk` | `fno megawalk --combo my-stack` |
+
+(The `/megawalk` skill and `fno megawalk` combo rows are gone with the retired megawalk surface.)
 
 All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawned subprocesses (`spawn_with_provider_snapshot` already propagates env to target children).
 
