@@ -2054,18 +2054,13 @@ def run_validity_sweep(
     )
 
 
-# Leg 9: abandoned do rows; contract in docs/backlog-usage.md.
-
 AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason")
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
     """Proof of session death from transcript truth; False holds with a named reason. Never raises."""
     try:
-        from fno.provenance.observed import (
-            FILE_BACKED_HARNESSES,
-            resolve_transcript_path,
-        )
+        from fno.provenance.observed import FILE_BACKED_HARNESSES, resolve_transcript_path
         from fno.agents.watchdog import finished_with_the_tree, tail_facts
 
         if harness not in FILE_BACKED_HARNESSES:
@@ -2073,8 +2068,6 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
 
         facts = tail_facts(session_id, cwd, agent=harness)
         if facts is None:
-            # Unresolvable pointer (no file for this harness/session) vs a
-            # file that exists but cannot be read: two holds, two reasons.
             if resolve_transcript_path(harness, session_id, cwd) is None:
                 return False, "transcript unresolved"
             return False, "transcript unreadable"
@@ -2115,7 +2108,7 @@ def detect_abandoned_do_rows(
 
 
 def abandoned_leg(entries, claimed, graph_path, apply):
-    """Detect + reap + render for cmd_maintain; contract in backlog-usage.md. Returns ``(lines, warning)``."""
+    """Detect + reap + render for cmd_maintain; returns ``(lines, warning)``."""
     try:
         from fno.config import load_settings
         hours = load_settings().backlog.maintain.abandoned_do_row_hours

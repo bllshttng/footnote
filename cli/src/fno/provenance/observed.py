@@ -21,8 +21,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 
-# The harnesses with a per-session transcript FILE; opencode keeps a shared
-# SQLite store, anything else no store a path can point at.
 FILE_BACKED_HARNESSES = frozenset({"claude", "codex"})
 
 

@@ -11332,8 +11332,6 @@ def cmd_maintain(
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
 
-    # Leg 9: abandoned do rows; detection, reaping, and rendering
-    # live in maintain.abandoned_leg.
     ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
     if ab_warn:
         typer.echo(f"warning: {ab_warn}", err=True)
