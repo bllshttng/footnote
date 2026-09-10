@@ -9617,6 +9617,7 @@ def _reconcile_once(
     repo: Optional[str],
 ) -> None:
     """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
+    _refuse_tracker_owned_on_external_backend("reconcile")
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
