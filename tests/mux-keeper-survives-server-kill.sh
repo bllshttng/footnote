@@ -30,6 +30,23 @@ SESSION="fk-$$"
 export SESSION
 SERVER_PID=""
 
+# The worker needs a durable session identity: a harness-stub `claude` whose
+# resume form carries a real session id, so the pane is ADDRESSABLE - a
+# labelled pane whose identity resolves. A bare responder with a worker name
+# and no session id is exactly the unresolved:spawned-name shape the send
+# gate refuses, by design. The stub answers every line it is sent and never
+# exits, which is the survival behavior under test.
+STUB_DIR="$TMP_DIR/stubbin"
+mkdir -p "$STUB_DIR"
+cat >"$STUB_DIR/claude" <<'STUB'
+#!/bin/sh
+while IFS= read -r l; do echo "GOT:$l"; done
+STUB
+chmod +x "$STUB_DIR/claude"
+export PATH="$STUB_DIR:$PATH"
+WORKER_SESSION="01a0f1ce-0000-4c1e-8a1c-2d3e4f5a6b7c"
+export WORKER_SESSION
+
 cleanup() {
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -54,8 +71,10 @@ done
 
 # The worker pane: a responder that answers every line it is sent. It is
 # the harness under test - after the server's death IT must still answer.
+# The resume form is what stamps the session id at spawn, the same
+# birthright a real worker carries.
 "$MUX_BIN" mux pane run --session "$SESSION" --worker proof-worker --json -- \
-    bash -c 'while IFS= read -r l; do echo "GOT:$l"; done' >"$TMP_DIR/worker.json"
+    claude --resume "$WORKER_SESSION" >"$TMP_DIR/worker.json"
 # The control: a plain pane, which is CORRECT to die with its server.
 "$MUX_BIN" mux pane run --session "$SESSION" --json -- sleep 600 >"$TMP_DIR/plain.json"
 
@@ -148,6 +167,18 @@ else
     echo "FAIL: the re-adopted pane vanished" >&2
     exit 1
 fi
+
+# The identity, not just the pid: the re-adopted pane still answers to the
+# worker's own session id - the birth pane id carried the resume birthright
+# across the restart, so the pane is ADDRESSABLE, not merely alive.
+"$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+import json,os,sys
+rows=json.load(sys.stdin)
+rows=[r for r in rows if r.get("pane_id")==int(sys.argv[1])]
+assert len(rows)==1, f"expected one row for pane {sys.argv[1]}, got {rows}"
+got = rows[0].get("harness_session_id") or rows[0].get("fno_id")
+assert got==os.environ["WORKER_SESSION"], f"the re-adopted pane lost its session identity: {rows[0]}"' "$CHILD_PID_AFTER"
+echo "[identity] pane $CHILD_PID_AFTER still carries session $WORKER_SESSION"
 
 # The answer: the surviving pane still ANSWERS a prompt. A live pid hosting
 # a wedged harness is not a survival. The pane's ID is the fresh server's

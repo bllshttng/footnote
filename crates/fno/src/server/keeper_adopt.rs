@@ -150,6 +150,19 @@ impl Core {
                             entry.unreconciled = true;
                         }
                     }
+                    // The resume birthright rides the adoption: the argv's
+                    // resume token is the session id the identity join answers
+                    // with on THIS server, exactly as the spawning server
+                    // recorded it. Without this, a restart drops a resumed
+                    // worker's only address and every send to it refuses.
+                    if let Some(session_id) = resume_target_from_argv(&argv) {
+                        let harness = argv
+                            .iter()
+                            .find(|a| !a.contains('='))
+                            .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
+                            .unwrap_or_default();
+                        self.worker_session_pane.insert((harness, session_id), id);
+                    }
                     self.keeper_adopted.push(AdoptedKeeper {
                         pane: id,
                         child_pid,
