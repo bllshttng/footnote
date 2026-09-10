@@ -11844,7 +11844,7 @@ def cmd_maintain(
                 f"status_after {rep['status_after']} ({r.reason})"
             )
         else:
-            verb = "would reap" if r.verdict == "gone" else "holds"
+            verb = "would reap" if r.verdict == "gone" else "held"
             typer.echo(
                 f"  {verb} do row {r.node} ({r.harness} {str(r.session_id)[:8]}): {r.reason}"
             )
