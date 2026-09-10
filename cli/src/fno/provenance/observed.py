@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 
+# The harnesses with a per-session transcript FILE; opencode keeps a shared
+# SQLite store, anything else no store a path can point at.
+FILE_BACKED_HARNESSES = frozenset({"claude", "codex"})
+
+
 def resolve_transcript_path(
     agent: str,
     session_id: str,
@@ -41,7 +46,7 @@ def resolve_transcript_path(
     ``fno.graph.store._observe_model``. Never raises; an unresolvable pointer is
     ``None``, which ``observed_model`` reports as ``no-transcript``.
     """
-    if agent not in {"claude", "codex"}:
+    if agent not in FILE_BACKED_HARNESSES:
         return None
     try:
         from fno.provenance.resolver import resolve_transcript

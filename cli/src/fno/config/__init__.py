@@ -261,7 +261,7 @@ class MaintainBlock(BaseModel):
 
     staleness_days: int = 30
     max_failed_attempts: int = 3
-    # Transcript-quiet hours before the abandoned-do-row leg reaps (x-f714).
+    # Transcript-quiet hours before the abandoned-do-row leg reaps.
     abandoned_do_row_hours: int = 24
     # Validity sweep. No raising validators: a nonpositive/oversized
     # value degrades to a bounded default IN THE LEG (per Failure Modes) so a bad
