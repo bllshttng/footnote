@@ -282,10 +282,18 @@ provision_codegraph() {
     echo "setup-worktree: codegraph: CLI missing, skipping" >&2
     return 0
   fi
-  if codegraph init -y "$WORKTREE"; then
+  # Background build: a full index costs minutes on a large repo (measured
+  # ~6 min / 227 MB here), and worktree cold-start must not pay it inline.
+  # The 2s poll still catches an instant failure so the receipt names it.
+  codegraph init -y "$WORKTREE" >"$WORKTREE/.codegraph-init.log" 2>&1 &
+  _cg_pid=$!
+  sleep 2
+  if kill -0 "$_cg_pid" 2>/dev/null; then
+    echo "setup-worktree: codegraph: index build running in background (log: $WORKTREE/.codegraph-init.log)"
+  elif wait "$_cg_pid"; then
     echo "setup-worktree: codegraph: initialized fresh index for $WORKTREE"
   else
-    echo "setup-worktree: codegraph: init failed, continuing without an index" >&2
+    echo "setup-worktree: codegraph: init failed, continuing without an index (log: $WORKTREE/.codegraph-init.log)" >&2
   fi
 }
 

@@ -18,6 +18,8 @@
 #  T3 existing real targets -> preserved byte-for-byte, stub not invoked.
 #  T4 existing symlink targets -> refused, not followed, exit 0.
 #  T5 indexer failure -> warning, exit 0, no .codegraph, graphify still copied.
+#  T5b slow indexer -> setup returns on a background receipt, the build
+#     outlives the script and finishes.
 #  T6 codegraph CLI absent -> named skip, exit 0.
 #  T7 repo .gitignore covers root + nested graphify-out and .codegraph.
 #
@@ -81,6 +83,7 @@ make_stub_bin() {
     printf '#!/usr/bin/env bash\n'
     printf 'printf "%%s\\n" "$*" >> "%s"\n' "$log"
     printf 'if [ -n "${CODEGRAPH_STUB_FAIL:-}" ]; then exit 1; fi\n'
+    printf 'if [ -n "${CODEGRAPH_STUB_SLOW:-}" ]; then sleep "${CODEGRAPH_STUB_SLOW}"; fi\n'
     printf 'wt="$3"\n'
     printf 'mkdir -p "$wt/.codegraph"\n'
     printf 'printf stub-db > "$wt/.codegraph/db"\n'
@@ -203,6 +206,33 @@ check_true "T5: no .codegraph left behind" test ! -e "$SBX5/worktree/.codegraph"
 check_true "T5: graphify-out still copied" test -d "$SBX5/worktree/graphify-out"
 
 # ---------------------------------------------------------------------------
+# T5b: slow indexer - setup returns while the build still runs, and the
+# background job outlives the script to finish its index
+# ---------------------------------------------------------------------------
+SBX5B="$(mktemp -d)"
+make_canonical_with_indexes "$SBX5B/canonical"
+mkdir -p "$SBX5B/worktree"
+STUB5B="$SBX5B/stub-bin"
+LOG5B="$SBX5B/stub.log"
+make_stub_bin "$STUB5B" "$LOG5B"
+OUT5B="$(PATH="$SYS_PATH:$STUB5B" CODEGRAPH_STUB_SLOW=5 CANONICAL="$SBX5B/canonical" WORKTREE="$SBX5B/worktree" bash "$SETUP" 2>&1)"
+RC5B=$?
+
+check_eq "T5b: exits 0 without waiting out the build" "0" "$RC5B"
+check_contains "T5b: background receipt names the log" "running in background" "$OUT5B"
+DB5B=0
+i=0
+while [ "$i" -lt 24 ]; do
+  if [ -f "$SBX5B/worktree/.codegraph/db" ]; then
+    DB5B=1
+    break
+  fi
+  sleep 0.5
+  i=$((i+1))
+done
+check_eq "T5b: the background build outlives setup and finishes" "1" "$DB5B"
+
+# ---------------------------------------------------------------------------
 # T6: codegraph CLI absent - named skip, exit 0
 # ---------------------------------------------------------------------------
 SBX6="$(mktemp -d)"
@@ -239,7 +269,7 @@ else
   pass=$((pass+1))
 fi
 
-rm -rf "$SBX1" "$SBX2" "$SBX3" "$SBX4" "$SBX5" "$SBX6"
+rm -rf "$SBX1" "$SBX2" "$SBX3" "$SBX4" "$SBX5" "$SBX5B" "$SBX6"
 
 # ---------------------------------------------------------------------------
 # Summary
