@@ -170,7 +170,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Same `matches!` treatment as `reentry-plan` - it is not an `fno agents`
     // verb, so the routable-verb parity guard never sees it.
     if matches!(verb, "resume-argv") {
-        return fno_agents::client_verbs::run_resume_argv(&args[1..]);
+        return fno_agents::pane_relaunch::run_resume_argv(&args[1..]);
     }
 
     if matches!(verb, "manifest-for-session") {

@@ -114,6 +114,165 @@ pub(crate) fn mux_pane_run_argv(
     v
 }
 
+use std::path::Path;
+
+use crate::client_verbs::shlex_quote;
+
+/// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
+/// Returns `None` for an unsupported provider AND for an unreadable capability
+/// contract, but the caller only ever sees the second kind through a narrow
+/// door. `interactive_resume_supported` also reads the packaged contract and
+/// `unwrap_or(false)`s a failure, so an unreadable contract refuses as "not
+/// supported" before this function runs. What actually reaches the caller's
+/// "resume contract is invalid" message is a contract that LOADS and declares
+/// the form, then fails to render it: a malformed token template.
+///
+/// The grant and the directory pin ride ONE `cwd` here, which is what the CLI
+/// verb lane wants (it validates the cwd exists before launching). The mux
+/// gesture needs them SPLIT: the grant follows the directory the worker will
+/// actually get, while `--cd` must not pin a fallback directory (AC3-GONE),
+/// so it calls [`build_resume_argv_split`] directly.
+pub(crate) fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    let cwd = cwd.filter(|c| !c.is_empty());
+    build_resume_argv_split(provider, session_id, cwd, cwd.is_some())
+}
+
+/// The grant/pin split behind [`build_resume_argv`] (x-eb79): `grant_cwd`
+/// decides the codex writable-roots grant (None/empty = no grant), `pin_cd`
+/// decides `--cd` independently. The mux gesture grants the directory the
+/// worker will actually get and pins it only when it is the row's own
+/// recorded cwd - pinning a fallback ($HOME, the squad canonical cwd) raises
+/// codex's folder-trust screen, an unattended hang (AC3-GONE).
+pub(crate) fn build_resume_argv_split(
+    provider: &str,
+    session_id: &str,
+    grant_cwd: Option<&str>,
+    pin_cd: bool,
+) -> Option<Vec<String>> {
+    // The declared form is the whole identity: cursor-agent's interactive_resume
+    // tokens already end in --trust, and a second one is a duplicated flag,
+    // never a stronger one. Python's builder renders the same form with no
+    // cursor arm, so runtimes stay byte-identical by rendering and nothing else.
+    let mut argv = crate::harness_capabilities::render_session_argv(
+        provider,
+        "interactive_resume",
+        Some(session_id),
+    )
+    .ok()?;
+    // codex's bounded sandbox re-resolves from config on `resume`, so the git +
+    // plan grants ride as `-c` tokens spliced right after the `codex` binary
+    // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
+    // lane that does not. `-c` is kept because one grant builder serves both.)
+    if provider == "codex" {
+        // The grant follows the directory the worker will actually get; `--cd`
+        // rides separately. An empty grant_cwd is absent for both, which is
+        // what Python's `if cwd` does and the parity test pins (AC4-EDGE).
+        if let Some(cwd) = grant_cwd.filter(|c| !c.is_empty()) {
+            let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
+            let grant_len = grant.len();
+            if !grant.is_empty() {
+                argv.splice(1..1, grant);
+            }
+            // Without --cd, codex asks session-directory vs current-directory
+            // and defaults to the SESSION directory: the canonical checkout
+            // recorded at spawn, not the worktree the row works in. Unattended
+            // that prompt is a hang. Attended it is a wrong default a human
+            // must catch.
+            //
+            // Conditional, per codex's own docs: the prompt appears only when
+            // the process cwd differs from the session's saved directory. The
+            // config key `tui.resume_cwd` answers it globally, and --cd
+            // outranks that. This lane wants --cd because it is per
+            // invocation and names the directory outright.
+            //
+            // Spliced BEFORE the subcommand, beside the grant, which is the
+            // only global-before-subcommand precedent in this tree. The spawn
+            // lanes are not it: they spell the flag `-C`, after `exec` in the
+            // headless lane and on a bare `codex` in the pane lane. Both
+            // positions parse on codex 0.149.1, so this is a choice about
+            // where a reader expects a global, not a fix.
+            //
+            // NO permission bypass rides here, deliberately. A registry row
+            // records no sandbox posture, so this lane cannot tell a bounded
+            // worker from a yolo one, and an unconditional bypass would resume
+            // every bounded worker with approvals off. See the Python twin.
+            // Right after the grant, so the token order matches the Python
+            // twin exactly. `test_rust_verb_parity` compares the two argvs
+            // element for element, so "both are globals" is not enough here.
+            // The split caller (the mux gesture) omits `--cd` when it passes
+            // `pin_cd == false`: the worker lands on a fallback directory and
+            // codex's own session-directory offer is the one a human can take.
+            if pin_cd {
+                let at = (1 + grant_len).min(argv.len());
+                argv.splice(at..at, ["--cd".to_string(), cwd.to_string()]);
+            }
+        }
+    }
+    Some(argv)
+}
+
+/// The `fno-agents resume-argv` verb (x-eb79): render one harness's
+/// interactive-resume argv through the ONE builder the CLI verb lane uses,
+/// so the mux gesture consumes the same argv instead of re-deriving the
+/// declared form and losing the codex writable-roots grant. `--cwd` supplies
+/// the grant (and the `--cd` value); `--cd` pins the directory separately,
+/// so a fallback directory can be granted without being pinned (AC3-GONE).
+/// `--json` prints `{"argv":[...]}`. A harness the capability table does not
+/// name (or one whose declared form cannot render) exits 1: the mux gesture
+/// treats any failure as the fail-open signal and renders the declared form
+/// itself, never a second argv builder.
+pub fn run_resume_argv(rest: &[String]) -> i32 {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut cwd: Option<String> = None;
+    let mut pin_cd = false;
+    let mut json = false;
+    let mut it = rest.iter();
+    while let Some(tok) = it.next() {
+        match tok.as_str() {
+            "--cwd" => match it.next() {
+                Some(v) => cwd = Some(v.to_string()),
+                None => {
+                    eprintln!("resume-argv: --cwd needs a path");
+                    return 2;
+                }
+            },
+            "--cd" => pin_cd = true,
+            "--json" => json = true,
+            t if t.starts_with('-') => {
+                eprintln!("resume-argv: unknown flag {t}");
+                return 2;
+            }
+            t => positional.push(t),
+        }
+    }
+    if positional.len() != 2 {
+        eprintln!(
+            "usage: fno-agents resume-argv <harness> <session-id> [--cwd <path>] [--cd] [--json]"
+        );
+        return 2;
+    }
+    let harness = positional[0];
+    let session_id = positional[1];
+    match build_resume_argv_split(harness, session_id, cwd.as_deref(), pin_cd) {
+        Some(argv) => {
+            if json {
+                println!("{}", serde_json::json!({ "argv": argv }).to_string());
+            } else {
+                let quoted = argv
+                    .iter()
+                    .map(|a| shlex_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("{quoted}");
+            }
+            0
+        }
+        None => {
+            eprintln!("resume-argv: harness {harness} declares no renderable resume form");
+            1
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{mesh_identity_assignments, mux_pane_run_argv, pane_relaunch_target, worker_token};
