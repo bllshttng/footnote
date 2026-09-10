@@ -331,7 +331,7 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 
 **Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every king's share fills with dead rows, dispatch stops, and no reader reports it.
 
-**Specimen, the clean case.** A worker shipped its pull request, the pull request merged, and the node closed with its claim released. Its row then read `parked` rather than disappearing, and the share stayed full. Delivery, merge and closure all happened, and none of them released the lane.
+**Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
 
 *Graduates to:* a lane released on delivery, rather than on an exit event that never arrives.
 
