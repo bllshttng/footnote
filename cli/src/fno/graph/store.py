@@ -54,9 +54,12 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_MD,
 )
 
-# Transaction retry budget: each begin/commit pair re-reads under the
-# keeper's lock, so a conflict means an interleaved writer landed and the
-# retry sees fresh data. Five is generous for human-rate contention.
+# Transaction retry budget: a conflict means another writer committed between
+# our begin and commit, and the fleet is not human-rate - colliding writers
+# are correlated by construction, so the retry sleeps a FULL-JITTER
+# exponential delay (uniform in [0, base * 2**attempt], ceiling-capped) that
+# decorrelates them instead of waking every loser at the same instant. Five
+# attempts stay; the terminal error when they are spent is unchanged.
 _TX_ATTEMPTS = 5
 
 # Full-jitter backoff between retries. An immediate `continue` made N
@@ -65,6 +68,13 @@ _TX_ATTEMPTS = 5
 # floor is its own herd.
 _TX_BACKOFF_BASE_S = 0.05
 _TX_BACKOFF_CAP_S = 2.0
+
+
+def _tx_backoff_secs(attempt: int) -> float:
+    """The delay before retry attempt `attempt + 1` of the tx loop. Module
+    function so tests can drive the real draw through an injected sleep."""
+    bound = min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt)
+    return random.uniform(0.0, bound)
 
 # Bounded lock deadline handed to the keeper (its own default is 10s when
 # the spawn omits the flag).
@@ -510,6 +520,14 @@ class _Keeper:
         del path
         return self.request("read_file", {})
 
+    def read_ids(self, ids: "list[str]") -> dict:
+        """Exact id/slug rows through the keeper's by-id read: the reply
+        carries the matched rows (readiness overlay applied server-side, the
+        blockers' list is server-side knowledge) plus the unmatched tokens.
+        The single-graph keeper, so no path; a stale keeper that predates
+        the verb raises through ``request`` and every caller falls back."""
+        return self.request("read_ids", {"ids": list(ids)})
+
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     """A keeper connection for `path`, spawning the keeper when absent.
@@ -953,6 +971,21 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     return _client_for(path).read(path, strict=True)["entries"]
 
 
+def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
+    """Exact rows by id/slug through the keeper's by-id read, or None.
+
+    The single-node fast path's seam: the keeper reply (``entries`` plus
+    ``missing``) on an answer, and None whenever the fast path cannot
+    answer -- no keeper, a stale keeper that predates ``read_ids``, an
+    unreadable graph -- so the caller falls back to the full read and
+    resolution never changes shape.
+    """
+    try:
+        return _client_for(Path(path)).read_ids(tokens)
+    except Exception:  # noqa: BLE001 - the fast path is an optimization; the full read owns correctness
+        return None
+
+
 def read_archive_entries() -> list[dict]:
     """The archived nodes, best-effort: an absent archive is []. Callers that
     may test many ids read once and pass the list to
@@ -1230,9 +1263,9 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 raise RuntimeError(
                     f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
                 ) from None
-            time.sleep(
-                random.uniform(0, min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt))
-            )
+            # Full jitter between attempts: the colliding writers all woke at
+            # the same instant, so a fixed delay would only line them up again.
+            time.sleep(_tx_backoff_secs(attempt))
             continue
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")
@@ -1256,6 +1289,16 @@ def _resolve_node_id(
     """
     from fno.graph._intake import _find_node
 
+    if entries_out is None:
+        # The by-id fast path: one exact row instead of a whole-graph begin.
+        # The tier guard keeps resolution identical to _find_node's exact
+        # tiers (exact id, exact slug); anything else falls through to the
+        # snapshot so title-fuzzy and id-prefix never change.
+        fast = read_nodes_by_ids(client_keeper_path, [node_id])
+        if fast and fast["entries"] and not fast["missing"]:
+            row = fast["entries"][0]
+            if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
+                return row.get("id")
     snap = _client_for(client_keeper_path).request("begin", {})
     if entries_out is not None:
         entries_out.extend(snap["entries"])

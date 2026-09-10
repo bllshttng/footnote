@@ -1037,3 +1037,210 @@ def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
         for proc in (doomed, kept):
             proc.kill()
             proc.wait(timeout=15)
+
+
+# -- the by-id read --
+
+
+def test_read_nodes_by_ids_returns_exact_rows(tmp_path):
+    """AC9-HP client half: one id, one row back, nothing unmatched."""
+    from fno.graph.store import read_nodes_by_ids
+
+    path = _make_graph(
+        tmp_path,
+        [
+            {"id": "ab-1", "slug": "first-one", "title": "One"},
+            {"id": "ab-2", "slug": "second-one", "title": "Two"},
+        ],
+    )
+    result = read_nodes_by_ids(path, ["second-one", "ab-1", "zz-none"])
+    assert result is not None
+    assert [e["id"] for e in result["entries"]] == ["ab-2", "ab-1"]
+    assert result["missing"] == ["zz-none"]
+
+
+def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_path, monkeypatch):
+    """AC10-EDGE: a stale keeper (installed worker behind the source) answers
+    `unknown store method`; the fast path degrades to None and the caller
+    falls back, so an old binary never breaks a current client."""
+    from fno.graph import store as store_mod
+
+    def stale_request(self, method, params):
+        raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
+    assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
+
+
+def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
+    """Change 4's resolve site: exact id and exact slug through one row,
+    no whole-graph begin."""
+    from fno.graph import store as store_mod
+
+    path = _make_graph(
+        tmp_path,
+        [
+            {"id": "ab-1", "slug": "first-one", "title": "One"},
+            {"id": "ab-2", "slug": "second-one", "title": "Two"},
+        ],
+    )
+    assert store_mod._resolve_node_id(path, "second-one") == "ab-2"
+    assert store_mod._resolve_node_id(path, "ab-1") == "ab-1"
+
+
+def test_resolve_node_id_falls_back_to_the_begin_snapshot(tmp_path, monkeypatch):
+    """AC10-EDGE at the resolve site: any fast-path absence keeps riding the
+    begin snapshot, so the snapshot resolver's own tiers are unchanged."""
+    from fno.graph import store as store_mod
+
+    path = _make_graph(
+        tmp_path,
+        [{"id": "ab-12345678", "slug": "first-one", "title": "One"}],
+    )
+
+    def no_fast(path, tokens):
+        return None
+
+    monkeypatch.setattr(store_mod, "read_nodes_by_ids", no_fast)
+    # The exact id resolves through the snapshot when the fast path is out.
+    assert store_mod._resolve_node_id(path, "ab-12345678") == "ab-12345678"
+    # ...and a genuinely absent node still resolves to None.
+    assert store_mod._resolve_node_id(path, "zz-none") is None
+
+
+def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkeypatch, capsys):
+    """The get fast path: the row renders through the same renderer, the miss
+    falls back by returning the token unchanged."""
+    import typer
+
+    from fno.graph import get_batch
+
+    row = {"id": "ab-1", "slug": "first-one", "title": "One", "status": "idea"}
+    payload = {"entries": [dict(row)], "missing": []}
+
+    def fake_fast(path, tokens):
+        return dict(payload)
+
+    # get_batch imports the helper from store at call time; patch it there.
+    from fno.graph import store as store_mod
+
+    monkeypatch.setattr(store_mod, "read_nodes_by_ids", fake_fast)
+    monkeypatch.setattr(get_batch, "_graph_path", lambda: tmp_path / "graph.json")
+    # Exact id: served, rendered, never returns.
+    with pytest.raises(typer.Exit) as exc:
+        get_batch.resolve_or_dispatch(["ab-1"], field=None, grouped=False, strict=False)
+    assert exc.value.exit_code == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "ab-1"
+
+    # A case-different id must NOT serve: resolve_node tier 1 is exact, so
+    # a fast path hit here would widen resolution.
+    payload["entries"] = [dict(row)]
+    payload["missing"] = []
+    returned = get_batch.resolve_or_dispatch(["AB-1"], field=None, grouped=False, strict=False)
+    assert returned == "AB-1"
+
+    # Miss: the token falls through to the caller's full path.
+    payload["entries"] = []
+    payload["missing"] = ["zz-none"]
+    returned = get_batch.resolve_or_dispatch(["zz-none"], field=None, grouped=False, strict=False)
+    assert returned == "zz-none"
+
+
+# -- the bounded retry --
+
+from fno.graph import store as store_mod  # noqa: E402 - the tx-loop section
+
+
+class _ScriptedClient:
+    """A keeper client whose commits conflict a scripted number of times.
+
+    The tx loop's mechanics (backoff, jitter, budget) are client-side, so the
+    contention tests script the transport instead of racing real writers."""
+
+    def __init__(self, conflicts: int, path: Path = Path("/tmp/x1601-tx.json")):
+        self.conflicts = conflicts
+        self.begins = 0
+        self.path = path
+
+    def request(self, method, params):
+        if method == "begin":
+            self.begins += 1
+            return {"version": f"v{self.begins}", "entries": []}
+        if method == "commit":
+            if self.conflicts > 0:
+                self.conflicts -= 1
+                raise store_mod._Conflict()
+            return {
+                "entries": [],
+                "dropped": 0,
+                "backup": None,
+                "closure_releases": [],
+                "is_canonical": False,
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+
+def _run_tx(client, monkeypatch, record):
+    monkeypatch.setattr(store_mod, "_client_for", lambda _path: client)
+    # Patch time.sleep on the store module (the loop's call path), the same
+    # seam the sibling tx-backoff tests record through.
+    monkeypatch.setattr(store_mod.time, "sleep", record)
+    return store_mod.locked_mutate_graph(client.path, lambda e: e)
+
+
+def test_two_colliding_writers_both_land_and_their_delays_differ(tmp_path, monkeypatch):
+    """AC13-HP + AC15-HP: the loser retries once and lands (both commits
+    land), and the two writers' drawn delays differ - asserted on the drawn
+    values through the injected sleep, never wall-clock timing."""
+    winner = _ScriptedClient(conflicts=0)
+    loser = _ScriptedClient(conflicts=1)
+    delays: list[float] = []
+    _run_tx(winner, monkeypatch, delays.append)
+    _run_tx(loser, monkeypatch, delays.append)
+    assert len(delays) == 1, "the un-contended winner must never sleep"
+    assert 0.0 <= delays[0] <= store_mod._TX_BACKOFF_BASE_S
+    # The draw is real (not injected), so two colliders at the same instant
+    # draw different values - the whole point of full jitter.
+    second = _ScriptedClient(conflicts=1)
+    delays2: list[float] = []
+    _run_tx(second, monkeypatch, delays2.append)
+    assert delays[0] != delays2[0], "two colliding writers must not draw equal delays"
+
+
+def test_the_retry_budget_is_bounded_and_every_delay_sits_in_its_band(tmp_path, monkeypatch):
+    """AC16-EDGE: across a full five-attempt budget every delay lies within
+    its attempt's full-jitter bound and the total wait stays under the stated
+    ceiling. A retry budget with no ceiling is the defect in a slower coat."""
+    spender = _ScriptedClient(conflicts=4)
+    delays: list[float] = []
+    _run_tx(spender, monkeypatch, delays.append)
+    assert len(delays) == 4, "four conflicts, four sleeps, no sleep after the last"
+    total = 0.0
+    for attempt, delay in enumerate(delays):
+        bound = min(
+            store_mod._TX_BACKOFF_BASE_S * 2**attempt,
+            store_mod._TX_BACKOFF_CAP_S,
+        )
+        assert 0.0 <= delay <= bound, f"attempt {attempt} drew {delay}, bound {bound}"
+        total += delay
+    # The stated ceiling: every band summed, since the bands are the whole
+    # budget the loop can spend before the fifth attempt raises.
+    ceiling = sum(
+        min(store_mod._TX_BACKOFF_BASE_S * 2**attempt, store_mod._TX_BACKOFF_CAP_S)
+        for attempt in range(4)
+    )
+    assert total <= ceiling + 1e-9
+
+
+def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypatch):
+    """AC14-EDGE: the failure contract is not part of this change - same
+    RuntimeError type, same message, when all five attempts conflict."""
+    doomed = _ScriptedClient(conflicts=5)
+    delays: list[float] = []
+    with pytest.raises(RuntimeError) as exc:
+        _run_tx(doomed, monkeypatch, delays.append)
+    assert str(exc.value) == (
+        "graph mutated under us 5 times at /tmp/x1601-tx.json; retrying stopped"
+    )
+    assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
