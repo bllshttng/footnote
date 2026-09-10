@@ -157,6 +157,7 @@ def test_lanes_3_caps_nextest_at_three(tmp_path, monkeypatch, capsys):
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)
     cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
 
     import fno.doctor_lanes as lanes
 
@@ -166,12 +167,47 @@ def test_lanes_3_caps_nextest_at_three(tmp_path, monkeypatch, capsys):
     assert "3 more fit" in capsys.readouterr().out
 
 
+def test_lanes_exceed_cpu_ceiling_caps_at_core_count(tmp_path, monkeypatch, capsys):
+    """The bug this cap fixes: 54 lanes on a 12-core box must never become
+    `--test-threads 54` - the CPU count is the hard ceiling, not the lane
+    reading."""
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(54))
+    assert test_cmd._run_rust([]) == 0
+    assert cmds[0][:5] == ["cargo", "nextest", "run", "--test-threads", "12"]
+    out = capsys.readouterr().out
+    assert "54 more fit" in out
+    assert "capped at 12 (requested 54, ceiling 12)" in out
+
+
+def test_unknown_cpu_count_serializes(tmp_path, monkeypatch, capsys):
+    """`os.cpu_count()` can return `None` (containers, exotic platforms) - an
+    unknown ceiling must serialize rather than trust the lane reading."""
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: None)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(54))
+    assert test_cmd._run_rust([]) == 0
+    assert cmds[0][:5] == ["cargo", "nextest", "run", "--test-threads", "1"]
+
+
 def test_cargo_test_path_puts_flag_after_user_args(tmp_path, monkeypatch, capsys):
     """No nextest: the libtest flag rides behind `--`, which must come after
     every cargo-level arg the caller passed."""
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)
     cmds = _capture_rust_cmds(monkeypatch, nextest=False)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
 
     import fno.doctor_lanes as lanes
 
@@ -188,6 +224,32 @@ def test_cargo_test_path_puts_flag_after_user_args(tmp_path, monkeypatch, capsys
         "3",
     ]
     assert "capped at 3" in capsys.readouterr().out
+
+
+def test_cargo_test_path_with_existing_separator_reuses_it(tmp_path, monkeypatch, capsys):
+    """A caller's own `--` must not be duplicated: our flag rides inside the
+    existing separator, ahead of the caller's binary args."""
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch, nextest=False)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(3))
+    assert test_cmd._run_rust(["--manifest-path", "crates/alpha/Cargo.toml", "--", "--nocapture"]) == 0
+    assert cmds[0] == [
+        "cargo",
+        "test",
+        "-q",
+        "--manifest-path",
+        "crates/alpha/Cargo.toml",
+        "--",
+        "--test-threads",
+        "3",
+        "--nocapture",
+    ]
+    assert cmds[0].count("--") == 1
 
 
 def test_refused_reading_keeps_runner_default(tmp_path, monkeypatch, capsys):
@@ -207,32 +269,83 @@ def test_refused_reading_keeps_runner_default(tmp_path, monkeypatch, capsys):
     assert "cpu arm dark" in out
 
 
-def test_user_parallelism_flag_wins(tmp_path, monkeypatch, capsys):
+def test_build_jobs_flag_does_not_suppress_thread_cap(tmp_path, monkeypatch, capsys):
+    """`-j4` is cargo's own BUILD parallelism, unrelated to test concurrency -
+    it must not suppress the thread cap. It is bounded to the same ceiling
+    independently, but 4 <= 12 here so it passes through unchanged."""
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)
     cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
 
     import fno.doctor_lanes as lanes
 
     monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
     assert test_cmd._run_rust(["-j4"]) == 0
-    assert all("--test-threads" not in cmd for cmd in cmds)
-    assert "user parallelism flag wins" in capsys.readouterr().out
+    assert cmds[0][:5] == ["cargo", "nextest", "run", "--test-threads", "12"]
+    assert "-j4" in cmds[0]
+    assert "capped at 12" in capsys.readouterr().out
 
 
-def test_separator_counts_as_user_override(tmp_path, monkeypatch, capsys):
-    """A caller's `--` means libtest args follow; injecting a second separator
-    after it would hand our flag to the test binary as a literal."""
+def test_excessive_build_jobs_flag_is_clamped(tmp_path, monkeypatch, capsys):
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)
     cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
+    assert test_cmd._run_rust(["--jobs=32"]) == 0
+    assert "--jobs=12" in cmds[0]
+    assert "build jobs 32 capped at 12" in capsys.readouterr().out
+
+
+def test_separator_alone_does_not_suppress_the_cap(tmp_path, monkeypatch, capsys):
+    """A bare `--` (libtest args follow) is not a thread-count override: the
+    cap must still apply, riding ahead of the caller's own `--`."""
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
 
     import fno.doctor_lanes as lanes
 
     monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
     assert test_cmd._run_rust(["--", "--nocapture"]) == 0
-    assert all("--test-threads" not in cmd for cmd in cmds)
-    assert "user parallelism flag wins" in capsys.readouterr().out
+    assert cmds[0][:5] == ["cargo", "nextest", "run", "--test-threads", "12"]
+    assert cmds[0][-2:] == ["--", "--nocapture"]
+    assert "capped at 12" in capsys.readouterr().out
+
+
+def test_explicit_test_threads_flag_is_kept_when_within_ceiling(tmp_path, monkeypatch, capsys):
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
+    assert test_cmd._run_rust(["--test-threads", "4"]) == 0
+    assert "--test-threads" in cmds[0]
+    assert cmds[0][cmds[0].index("--test-threads") + 1] == "4"
+    assert cmds[0].count("--test-threads") == 1
+    assert "explicit --test-threads 4 kept" in capsys.readouterr().out
+
+
+def test_explicit_test_threads_equals_form_is_clamped(tmp_path, monkeypatch, capsys):
+    _fake_checkout(tmp_path, monkeypatch)
+    _reset_lanes(monkeypatch)
+    cmds = _capture_rust_cmds(monkeypatch)
+    monkeypatch.setattr(test_cmd.os, "cpu_count", lambda: 12)
+
+    import fno.doctor_lanes as lanes
+
+    monkeypatch.setattr(lanes, "read_lanes", lambda: _reading(64))
+    assert test_cmd._run_rust(["--test-threads=54"]) == 0
+    assert "--test-threads=12" in cmds[0]
+    assert "explicit --test-threads 54 capped at 12" in capsys.readouterr().out
 
 
 def test_reading_failure_keeps_default_parallelism(tmp_path, monkeypatch, capsys):
