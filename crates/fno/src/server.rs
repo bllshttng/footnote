@@ -6363,11 +6363,9 @@ impl Core {
             plan = Some(verdict);
             staged_argv = None;
         } else {
-            // (x-eb79) The codex grant + --cd ride a resolved argv, and
-            // resolving it shells a Python-booting binary - never on this
-            // loop. Staged by the replay (or the bulk apply, which keeps its
-            // sync render): run. Otherwise fire the off-loop resolution and
-            // stop; `ResumeArgvReady` re-dispatches this gesture.
+            // (x-eb79) The argv (codex grant + --cd) resolves off-loop. If
+            // nothing is staged, fire the resolution and stop: the
+            // `ResumeArgvReady` replay re-dispatches this gesture.
             match self.staged_resume_argv.take() {
                 Some(argv) => staged_argv = Some(argv),
                 None => {
@@ -6599,13 +6597,9 @@ impl Core {
                 }
             }
             let structural = member_structural_refusal(&member);
-            // (x-eb79) The bulk path keeps the sync declared-form render: it
-            // stages a pre-rendered argv so `resume_one`'s non-claude arm
-            // never fires the off-loop resolution per member here. Codex
-            // members resumed by BULK restore get the grant when a later
-            // gesture resumes them; a gesture through resume_one can tell a
-            // bulk-stage from a fire-needed miss, so codex members resumed by
-            // bulk restore resume byte-identical to before.
+            // (x-eb79) Pre-stage the sync render so the non-claude arm never
+            // fires the off-loop resolution per bulk member: bulk restore
+            // stays byte-identical to before.
             if harness_name.as_deref().is_some_and(|h| h != "claude") {
                 self.staged_resume_argv = resume_argv_for(
                     harness_name.as_deref().unwrap_or(""),
@@ -6708,9 +6702,8 @@ impl Core {
 
     /// (x-eb79) The directory a resumed member spawns at, and the missing
     /// recorded directory when it is gone. Extracted from
-    /// [`Core::resume_worker_into`] so the OFF-LOOP argv resolution hands the
-    /// shell-out the same grant directory the spawn will use - a second
-    /// derivation here could land the grant and the pane in different trees.
+    /// [`Core::resume_worker_into`] so the off-loop argv resolution grants
+    /// the SAME directory the spawn will use.
     fn member_resume_cwd(&self, sid: u64, stored_cwd: Option<&str>) -> (String, Option<String>) {
         let fallback_cwd = self
             .session
@@ -11303,9 +11296,8 @@ impl Core {
                         // (x-d285) A claude row's held resume runs the
                         // canonical re-entry plan; the `None` arm fires the
                         // off-loop resolution and this focus replays with the
-                        // verdict staged. (x-eb79) A non-claude row resolves
-                        // its argv off-loop the same way: the codex grant +
-                        // --cd ride the staged argv on the replay.
+                        // verdict staged. (x-eb79) A non-claude row does the
+                        // same with its resolved argv.
                         let plan;
                         let staged_argv;
                         if facts.harness == "claude" {
