@@ -515,6 +515,31 @@ def test_maintain_config_rejects_non_positive_max_failed_attempts():
         MaintainBlock(max_failed_attempts=0)
 
 
+def test_maintain_config_default_abandoned_do_row_hours():
+    from fno.config import ConfigBlock
+
+    assert ConfigBlock().backlog.maintain.abandoned_do_row_hours == 24
+
+
+def test_maintain_config_custom_abandoned_do_row_hours():
+    from fno.config import BacklogBlock
+
+    assert (
+        BacklogBlock(maintain={"abandoned_do_row_hours": 48}).maintain.abandoned_do_row_hours
+        == 48
+    )
+
+
+def test_maintain_config_rejects_non_positive_abandoned_do_row_hours():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import MaintainBlock
+
+    with pytest.raises(ValidationError):
+        MaintainBlock(abandoned_do_row_hours=0)
+
+
 # --- failure-streak helper (ab-5b7cf63a / #34, task 1.2) -------------------
 
 from fno.graph import failure as f  # noqa: E402
