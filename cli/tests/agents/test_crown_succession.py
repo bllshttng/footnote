@@ -13,6 +13,7 @@ sees two live crowns over one scope and none sees zero.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -361,3 +362,55 @@ def test_an_attended_human_may_grant_anything(court, monkeypatch) -> None:
     _spawn_over("alpha")
 
     assert _row("heir").crown_scope == "alpha"
+
+
+def _events() -> list:
+    """Every parsed line of the tmp journal. The real events.emit writes the
+    real file; a monkeypatched list would re-prove only the call."""
+    from fno import paths
+
+    journal = paths.state_dir() / "events.jsonl"
+    if not journal.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_a_succession_journals_the_vacate_and_the_grant(court) -> None:
+    """The handoff lands in the journal: one vacate naming the sitting king
+    and its heir, one grant naming the heir, and the registry still shows
+    exactly one live holder."""
+    _seat("sitting-king", CALLER_SESSION)
+
+    _spawn_heir(succeed=True)
+
+    vacates = [e for e in _events() if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    assert vacates[0]["cause"] == "succession"
+    assert vacates[0]["holder"] == "sitting-king"
+    assert vacates[0]["successor"] == "heir"
+    assert vacates[0]["scope"] == SCOPE
+    crowns = [e for e in _events() if e["kind"] == "agent_crowned"]
+    assert [c["name"] for c in crowns] == ["heir"]
+    assert crowns[0]["scope"] == SCOPE
+    holders = [e for e in load_registry() if e.crown_scope == SCOPE]
+    assert [h.name for h in holders] == ["heir"]
+
+
+def test_a_declined_spawn_journals_no_crown_event(court, monkeypatch) -> None:
+    """An uncrowned launch moved no crown, so the journal stays silent."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("other-king", "a-different-session")
+
+    _spawn_heir()
+
+    assert _row("heir").crown_level is None
+    crown_events = [
+        e
+        for e in _events()
+        if e["kind"] in ("agent_crown_vacated", "agent_crowned")
+    ]
+    assert crown_events == []

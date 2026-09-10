@@ -334,6 +334,79 @@ def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
     assert [row.name for row in load_registry() if row.crown_scope == "epic-x"] == [
         "king-epic"
     ]
+    # The reclaim is journaled from the committed write: holder_terminal for
+    # the dead row, the grant for the new one.
+    from fno import paths
+
+    journal = paths.state_dir() / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    vacates = [e for e in events if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    assert vacates[0]["cause"] == "holder_terminal"
+    assert vacates[0]["holder"] == "dead-king"
+    assert vacates[0]["holder_session"] == "dead-session"
+    assert vacates[0]["scope"] == "epic-x"
+    crowns = [e for e in events if e["kind"] == "agent_crowned"]
+    assert [c["name"] for c in crowns] == ["king-epic"]
+
+
+def _crown_row(name: str, *, status: str = "busy", scope="epic-x"):
+    from fno.agents.registry import AgentEntry
+
+    return AgentEntry(
+        name=name,
+        cwd="/w",
+        log_path="",
+        harness="claude",
+        harness_session_id=f"{name}-sess",
+        status=status,
+        crown_level=2 if scope else None,
+        crown_scope=scope,
+        crown_grantor="human" if scope else None,
+    )
+
+
+def test_settle_spawn_crown_outcomes() -> None:
+    """The four answers the guard can give, with no spawn at all: granted,
+    succeeded, declined, and the terminal clear that rides a reclaim."""
+    from fno.agents.crown import settle_spawn_crown
+
+    rows, outcome, vacated = settle_spawn_crown(
+        [_crown_row("a", scope=None)],
+        scope="epic-x",
+        succession=False,
+        succession_caller_name=None,
+    )
+    assert outcome == "granted"
+    assert vacated == []
+
+    caller = _crown_row("caller")
+    rows, outcome, vacated = settle_spawn_crown(
+        [caller], scope="epic-x", succession=True, succession_caller_name="caller"
+    )
+    assert outcome == "succeeded"
+    assert [r.crown_scope for r in rows] == [None]
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
+
+    stranger = _crown_row("stranger")
+    rows, outcome, vacated = settle_spawn_crown(
+        [stranger], scope="epic-x", succession=True, succession_caller_name="caller"
+    )
+    assert outcome == "declined"
+    assert rows[0].crown_scope == "epic-x", "a declined spawn leaves the holder alone"
+    assert vacated == []
+
+    dead = _crown_row("dead", status="exited")
+    rows, outcome, vacated = settle_spawn_crown(
+        [dead], scope="epic-x", succession=False, succession_caller_name=None
+    )
+    assert outcome == "granted"
+    assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
+    assert rows[0].crown_scope is None
 
 
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:

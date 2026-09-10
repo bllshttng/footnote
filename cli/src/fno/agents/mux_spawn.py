@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 import uuid as _uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -73,6 +73,8 @@ from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
     grant_error,
+    journal_spawn_crown,
+    settle_spawn_crown,
 )
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
@@ -4664,11 +4666,19 @@ def dispatch_spawn_pane(
         row_status: AgentStatus = "live"
         crown_declined = False
         crown_succeeded = False
+        # The spawn's crown INTENT, captured before the write: a declined or
+        # terminal-row write nulls the live variables, and the journal call
+        # after the commit still needs what the spawn asked for.
+        crown_asked_level = crown_level
+        crown_asked_scope = crown_scope
+        crown_asked_grantor = crown_grantor_val
+        crown_outcome: Optional[str] = None
+        crown_cleared: list = []
         king_loop_armed: Optional[bool] = None
         king_unarmed_reason = ""
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, crown_outcome, crown_cleared, king_loop_armed, king_unarmed_reason
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4727,41 +4737,15 @@ def dispatch_spawn_pane(
                 crown_scope = None
                 crown_grantor_val = None
             if crown_level is not None and crown_scope:
-                # Reclaiming an abandoned scope also clears the terminal
-                # holder's stale crown in this same write. Terminal rows are
-                # excluded from `holders`, but their crown fields still make
-                # them appear crowned to readers and can create a double-rule
-                # after re-registration.
-                rows = [
-                    replace(
-                        r,
-                        crown_level=None,
-                        crown_scope=None,
-                        crown_grantor=None,
-                    )
-                    if r.crown_scope == crown_scope
-                    and r.status in TERMINAL_STATUSES
-                    else r
-                    for r in rows
-                ]
-                holders = [
-                    r
-                    for r in rows
-                    if r.crown_scope == crown_scope
-                    and r.status not in TERMINAL_STATUSES
-                ]
-
-                if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
-                    for idx, r in enumerate(rows):
-                        if r.crown_scope == crown_scope and r.name == succession_caller_name:
-                            rows[idx] = replace(
-                                r,
-                                crown_level=None,
-                                crown_scope=None,
-                                crown_grantor=None,
-                            )
+                rows, crown_outcome, crown_cleared = settle_spawn_crown(
+                    rows,
+                    scope=crown_scope,
+                    succession=succession,
+                    succession_caller_name=succession_caller_name,
+                )
+                if crown_outcome == "succeeded":
                     crown_succeeded = True
-                elif holders:
+                elif crown_outcome == "declined":
                     crown_level = None
                     crown_scope = None
                     crown_grantor_val = None
@@ -4895,6 +4879,14 @@ def dispatch_spawn_pane(
                 route_settings_path = route_settings_path_for(route_env, account_env)
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
+            journal_spawn_crown(
+                crown_outcome,
+                crown_cleared,
+                name=name,
+                level=crown_asked_level,
+                scope=crown_asked_scope,
+                grantor=crown_asked_grantor,
+            )
             if crown_declined and _declined_scope:
                 print(
                     f"spawn: crown declined (scope {_declined_scope!r} already held "
