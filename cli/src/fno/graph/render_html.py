@@ -1121,8 +1121,7 @@ def _dashboard_rows(
                         if isinstance(bid, str)
                     ],
                     # Request origin (x-1005); local-only, evidence can be private.
-                    "ro": str(entry.get("request_origin") or "unknown"),
-                    "oe": str(entry.get("origin_evidence") or ""),
+                    "ro": str(entry.get("request_origin") or "unknown"), "oe": str(entry.get("origin_evidence") or ""),
                 }
             )
             # Emitted on EVERY local row, zero included. A vote surface
