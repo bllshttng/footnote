@@ -25,8 +25,8 @@
 # Targets default to the two files in the checkout this script runs from, so
 # the arm list and its guard move together; a kind dropped from the arm list
 # stops being checked the same commit, which is the honest direction to fail
-# in. Optional args replace the defaults (the seeded-token negative test uses
-# that).
+# in. Optional args replace the defaults, so a caller can check another
+# file's arm list the same way.
 #
 # Exit 0 naming every token covered; exit 1 naming the file and token
 # otherwise.
@@ -137,6 +137,16 @@ if [[ $fail -ne 0 ]]; then
   echo "  king armed on that name watches for a signal nothing emits. Fix: name a" >&2
   echo "  kind that exists (check with: fno doctor event find <kind> --since 7d -J)," >&2
   echo "  or land the producer the documentation promises." >&2
+  exit 1
+fi
+
+# An empty covered set means the awk anchor matched no numbered arm lines, so
+# nothing was checked and a green here would be vacuous - the quiet board this
+# script exists to refuse, wearing a pass verdict.
+if [[ -z "${covered// /}" ]]; then
+  echo "check-reign-arm-signals: FAIL - extracted zero arm-list tokens." >&2
+  echo "  The section anchor matched nothing, so no arm list was read. Fix the" >&2
+  echo "  awk anchor or the section headers it matches." >&2
   exit 1
 fi
 
