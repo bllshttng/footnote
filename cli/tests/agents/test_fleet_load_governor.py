@@ -15,6 +15,8 @@ machine backstop that refuses regardless of whose load it is.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fno.agents import spawn_gate
@@ -341,3 +343,92 @@ def test_a_settings_object_missing_new_fields_keeps_its_cap(monkeypatch):
     assert float(getattr(cfg, "max_fleet_cpu_share", 0.5)) == 0.5
     assert float(getattr(cfg, "hard_max_load_per_cpu", 40.0)) == 40.0
     assert int(cfg.max_live) == 9
+
+
+class TestCauseMainProbeEntry:
+    """x-0c69 AC1-HP: the console script IS the verb, byte for byte.
+
+    The Rust gate reads the probe's stdout and exit code; if the narrow entry
+    point ever answered differently from `fno-py doctor footprint --json
+    --cause-only`, the two halves of the probe transport would disagree about
+    the same machine. So the parity is asserted directly, under the same
+    patched reading.
+    """
+
+    @staticmethod
+    def _reading(gap=None):
+        from fno.footprint import parse_footprint
+
+        rows = "\n".join(
+            f"{100 + i} 1 01:00:00 {20 - i}.0 1024 fno-agents-worker worker-{i}"
+            for i in range(3)
+        )
+        reading = parse_footprint(f"PID PPID ELAPSED %CPU RSS COMMAND\n{rows}")
+        return reading._replace(attribution_gap=gap)
+
+    def _run_both(self, monkeypatch, capsys, *, gap=None, error=None):
+        import typer
+        from types import SimpleNamespace
+
+        from fno import doctor_footprint
+
+        if error is not None:
+            monkeypatch.setattr(
+                doctor_footprint, "cause_reading", lambda **kw: (None, error)
+            )
+        else:
+            reading = self._reading(gap)
+            monkeypatch.setattr(
+                doctor_footprint, "cause_reading", lambda **kw: (reading, None)
+            )
+        # Pin the load axis: the box's 1-min load moves between the two calls,
+        # and a moving number would make identical producers disagree.
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_spawn_load_snapshot",
+            lambda: SimpleNamespace(
+                spawn_load_status="unavailable", load_1m=None, load_ceiling=None
+            ),
+        )
+
+        def invoke(entry):
+            # footprint_command raises typer.Exit in-process; cause_main
+            # translates it to SystemExit, which is the parity under test.
+            with pytest.raises((typer.Exit, SystemExit)) as ei:
+                entry()
+            code = getattr(ei.value, "exit_code", None)
+            if code is None:
+                code = ei.value.code
+            return capsys.readouterr().out, code
+
+        verb_out, verb_code = invoke(
+            lambda: doctor_footprint.footprint_command(json_output=True, cause_only=True)
+        )
+        probe_out, probe_code = invoke(doctor_footprint.cause_main)
+        return (verb_out, verb_code), (probe_out, probe_code)
+
+    def test_complete_reading_parity(self, monkeypatch, capsys):
+        (verb, verb_code), (probe, probe_code) = self._run_both(monkeypatch, capsys)
+        assert (probe, probe_code) == (verb, verb_code)
+        assert probe_code == 0
+        assert json.loads(probe)["exit_code"] == 0
+
+    def test_gapped_reading_parity_still_answers_with_disclaimer(self, monkeypatch, capsys):
+        (verb, verb_code), (probe, probe_code) = self._run_both(
+            monkeypatch, capsys, gap="21 unmapped bg-socket rows"
+        )
+        assert (probe, probe_code) == (verb, verb_code)
+        assert probe_code == 4
+        payload = json.loads(probe)
+        assert payload["exit_code"] == 4 and "attribution_gap" in payload
+
+    def test_failed_reading_names_the_error_and_exits_4(self, monkeypatch, capsys):
+        (verb, verb_code), (probe, probe_code) = self._run_both(
+            monkeypatch, capsys, error="footprint unavailable: ps failed"
+        )
+        assert (probe, probe_code) == (verb, verb_code)
+        assert probe_code == 4
+        assert json.loads(probe) == {
+            "error": "footprint unavailable: ps failed",
+            "exit_code": 4,
+        }

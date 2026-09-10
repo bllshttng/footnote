@@ -6,6 +6,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from functools import lru_cache
@@ -1050,3 +1051,14 @@ def footprint_command(
         process_threshold=len(roster_rows) + DAEMON_ALLOWANCE,
         json_output=json_output,
     )
+
+
+def cause_main() -> None:
+    """Console-script entry (``fno-footprint-cause``): the Rust spawn gate's
+    probe. Calls ``footprint_command`` so the verb and the probe share one
+    payload producer; outside a typer app its ``typer.Exit`` does not become a
+    process exit on its own, so translate it here."""
+    try:
+        footprint_command(json_output=True, cause_only=True)
+    except typer.Exit as exc:
+        sys.exit(exc.exit_code)
