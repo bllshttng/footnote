@@ -655,40 +655,23 @@ def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
 
 
 def _refuse_codex_spawn_with_unreachable_tools(args: Sequence[str]) -> None:
-    """Refuse a bounded Codex code spawn whose sandbox blocks a tool it needs.
-
-    A worker launched into that sandbox reports ready and then waits forever,
-    so the refusal names the tool here, before any claim, gate slot, or row.
-    A probe that could not run at all launches unprobed: it proves nothing.
-    """
+    """Refuse a bounded Codex code spawn whose sandbox blocks a tool it needs, before any row."""
     if not _is_bounded_codex_code_spawn(args):
         return
     from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE, probe_codex_sandbox
 
-    cwd = _spawn_flag_value(args, "--cwd", "-c") or str(Path.cwd())
-    probe = probe_codex_sandbox(Path(cwd))
+    probe = probe_codex_sandbox(Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()))
     if probe.verdict == "unknown":
-        print(
-            "sandbox-probe: could not run a command inside the codex sandbox "
-            f"({probe.note}); launching unprobed",
-            file=sys.stderr,
-        )
-        return
-    if probe.verdict != "blocked":
-        return
+        print(f"sandbox-probe: could not judge the codex sandbox ({probe.note}); launching unprobed",
+              file=sys.stderr)
     for tool, evidence in probe.blocked:
-        print(
-            f"sandbox-probe: {tool} is unreachable inside the codex workspace-write "
-            f"sandbox ({evidence}); no worker launched, node stays dispatchable",
-            file=sys.stderr,
-        )
-    print(
-        "remedy: allow it in ~/.codex/config.toml (gh needs "
-        "[sandbox_workspace_write] network_access = true; git needs the git common "
-        "dir writable), or dispatch unsandboxed with --yolo",
-        file=sys.stderr,
-    )
-    raise SystemExit(EXIT_SANDBOX_UNREACHABLE)
+        print(f"sandbox-probe: {tool} is unreachable inside the codex workspace-write sandbox "
+              f"({evidence}); no worker launched, node stays dispatchable", file=sys.stderr)
+    if probe.blocked:
+        print("remedy: allow it in ~/.codex/config.toml (gh needs [sandbox_workspace_write] "
+              "network_access = true; git needs the git common dir writable), or dispatch "
+              "unsandboxed with --yolo", file=sys.stderr)
+        raise SystemExit(EXIT_SANDBOX_UNREACHABLE)
 
 
 def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
@@ -1561,8 +1544,7 @@ def make_agents_group_cls() -> type:
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                     _export_worker_dirs_at_seam(args)
-                    if verb == "spawn":
-                        # After the export: the probe grants the roots it publishes.
+                    if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)

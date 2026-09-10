@@ -228,9 +228,8 @@ class SpawnAlreadyRunning(RuntimeError):
 
 
 class SpawnError(RuntimeError):
-    """``fno agents spawn`` failed re-dispatchably. A gate refusal (75-81) or a
-    sandbox-probe refusal (82) also carries ``exit_code`` plus the refusal's own
-    sentence in ``detail``."""
+    """``fno agents spawn`` failed re-dispatchably. A gate (75-81) or sandbox-probe (82) refusal
+    also carries ``exit_code`` plus its own refusal sentence in ``detail``."""
 
     def __init__(self, message: str, exit_code: Optional[int] = None, detail: str = ""):
         super().__init__(message)
@@ -248,10 +247,9 @@ class SpawnQueueRefused(SpawnError):
         self.retry_at = retry_at
 
 
-#: spawn exit -> machine verdict. 75-80 are capacity conditions true for every
-#: caller equally; 81 is a registry no spawn can pass; 82 is a codex sandbox
-#: that blocks a tool every code payload on that lane needs. Constants are read
-#: off the module so a rename breaks loudly.
+#: spawn exit -> machine verdict. 75-80 are capacity conditions true for every caller equally;
+#: 81 is a registry no spawn can pass; 82 is a codex sandbox blocking a tool its lane needs.
+#: Constants are read off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",

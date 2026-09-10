@@ -119,7 +119,7 @@ def test_a_long_first_line_keeps_both_its_ends():
         + "/deep" * 40
         + "/x.lock': Operation not permitted"
     )
-    kept = sandbox_probe._first_line(f"{line}\nsecond line\n")
+    kept = sandbox_probe._why(_done([], 128, stderr=f"{line}\nsecond line\n"))
     assert len(kept) <= 160
     assert kept.startswith("fatal: prepare: cannot lock ref")
     assert kept.endswith("Operation not permitted")
