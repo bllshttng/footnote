@@ -101,7 +101,7 @@ def cmd_resolve(
         None, "--command", help="Command template. Default: config.dispatch.command > '/target --no-merge {id}'."
     ),
     verb: Optional[str] = typer.Option(
-        None, "--verb", help="Node dispatch verb (validated against config.dispatch.allowed_verbs); assembled as '<verb> {id}'. Wins over --command's config/builtin default."
+        None, "--verb", help="Node dispatch verb (validated against config.dispatch.allowed_verbs or config.dispatch.verb_registry); assembled as '<verb> {id}' for allowlisted verbs, rendered from its descriptor for registry verbs. Wins over --command's config/builtin default."
     ),
     brief: Optional[str] = typer.Option(
         None, "--brief", help="Node dispatch brief; returned in env.TARGET_BRIEF (never the command line). Capped at 8 KB."

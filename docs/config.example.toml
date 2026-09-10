@@ -371,6 +371,8 @@ harness = ""
 substrate = ""
 # Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.
 command = ""
+# Dispatch verbs from outside fno, as [dispatch.verb_registry.<name>] tables with the descriptor fields (invocation, invocations, requires, takes_node_id, asserts). Unioned with the allowed_verbs allowlist at resolve; a key naming an allowlisted verb is dropped, so a project cannot redefine a shipped one. invocation is the worker's exact spelling and is rendered verbatim (never fno-namespaced); invocations maps harness to spelling and doubles as the harness allowlist, so a dispatch to any other harness refuses. requires=skill probes the harness skill roots at resolve and refuses naming them; asserts records what a completion proves (pr | doc | invocation).
+verb_registry = {}
 # Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think, /blueprint).
 allowed_verbs = ["/target", "/think", "/blueprint"]
 # DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none|dispatch>`. Formerly the per-project merge posture for autonomous dispatch.
