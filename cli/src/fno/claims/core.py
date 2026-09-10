@@ -45,6 +45,7 @@ from .io import (
     atomic_create_exclusive,
     claim_path,
     claims_dir,
+    claims_root_for,
     decode_key,
     dedup_claims_roots,
     global_claims_root,
@@ -1402,13 +1403,32 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
 
     Keys in the returned dict:
         key:       echo of input
-        state:     one of free | live | suspect | stale | corrupted
+        state:     one of free | live | suspect | stale | corrupted | unknown
         basis:     why the state (only when state in {live, suspect, stale});
-                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared
+                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared;
+                   unknown/key-unrouted when a node-shaped key lost its prefix
         holder:    string (only when state in {live, suspect, stale})
         pid, host, acquired_at, expires_at, reason, metadata: when readable
         error:     string (only when state == corrupted)
+
+    With no ``root``, the store is resolved from the key via
+    :func:`fno.claims.io.claims_root_for`, so a rootless read of
+    ``node:<id>`` answers the global root and ``free`` means the key routed
+    and nothing holds it - never "some tree was read".
     """
+    from fno.graph._constants import is_wellformed_node_id
+
+    if ":" not in key and is_wellformed_node_id(key):
+        # A bare node id names no store at all; free here is the false zero
+        # that reads as safe-to-dispatch (x-74aa).
+        return {
+            "key": key,
+            "state": "unknown",
+            "basis": "key-unrouted",
+            "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
+        }
+    if root is None:
+        root = claims_root_for(key)
     path = claim_path(key, root=root)
     try:
         claim = read_claim_file(path)
