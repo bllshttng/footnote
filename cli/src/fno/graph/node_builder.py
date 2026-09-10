@@ -26,28 +26,12 @@ from fno.graph._constants import (
     validate_source_kind,
 )
 
-ORIGIN_EVIDENCE_HELP = (
-    "Producing-event reference (mail id, event id, fu-id, path). With "
-    "--source-kind from_observation/from_supervisor this is what makes the "
-    "node an agent discovery; without it the origin stays unknown."
-)
+ORIGIN_EVIDENCE_HELP = "Producing-event reference (mail id, event id, fu-id, path). With --source-kind from_observation/from_supervisor this is what makes the node an agent discovery; without it the origin stays unknown."
 ENCOUNTER_EVIDENCE_HELP = "Record why the creator encountered this node. Optional."
-DESCRIPTION_HELP = (
-    "Alias for --details. Reads more naturally for an idea-stage row. "
-    "Mutually exclusive with --details."
-)
-SOURCE_KIND_HELP = (
-    "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-    "Mark an operator ask with operator_request."
-)
-SOURCE_NODE_HELP = (
-    "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-    "ambient capture. Refuses if it does not resolve."
-)
-RELATED_HELP = (
-    "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-    "comma-separate. Refuses an id that does not resolve."
-)
+DESCRIPTION_HELP = "Alias for --details. Reads more naturally for an idea-stage row. Mutually exclusive with --details."
+SOURCE_KIND_HELP = "organic|from_inbox|from_observation|from_supervisor|operator_request. Mark an operator ask with operator_request."
+SOURCE_NODE_HELP = "Origin node this filing came out of (id, slug, or bare hex). Overrides ambient capture. Refuses if it does not resolve."
+RELATED_HELP = "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or comma-separate. Refuses an id that does not resolve."
 TAG_HELP = "Tag (repeatable, lowercase-kebab)."
 
 
