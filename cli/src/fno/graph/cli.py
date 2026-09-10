@@ -54,6 +54,9 @@ cli = typer.Typer(
 # Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
 _register_node_builder(cli)
+from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
+
+cli.command("worked", hidden=True)(_cmd_worked)
 
 cli.add_typer(_triage_cli, name="triage")
 
@@ -4685,9 +4688,6 @@ def cmd_next(
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
 
-# -- undispatched --
-
-
 @cli.command("undispatched", hidden=True)
 def cmd_undispatched(
     project: Optional[str] = typer.Option(None, "--project", "-p"),
@@ -4733,9 +4733,6 @@ def cmd_undispatched(
     typer.echo(json.dumps(receipt, indent=2))
 
 
-# -- ready --
-
-
 @cli.command("ready", hidden=True)
 def cmd_ready(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
@@ -4763,9 +4760,6 @@ def cmd_ready(
         "--mission",
         help="Restrict to nodes whose mission_id matches (same contract as `next`).",
     ),
-    # ponytail: `ready` already always emits JSON; the flag exists only so a
-    # caller passing --json (inbox triage) isn't rejected with Typer exit 2.
-    # Accepted-and-ignored, never a behavior switch.
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
     ),
@@ -13690,6 +13684,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "find",
         "next",
         "ready",
+        "worked",
         "queued",
         "provenance",
         "roadmap",

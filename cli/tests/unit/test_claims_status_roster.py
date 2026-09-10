@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import RosterReading, cli
+from fno.claims import roster as roster_module
 
 
 runner = CliRunner()
@@ -26,6 +27,16 @@ def _unresolved(name: str, cwd: str) -> dict:
 
 def _reading(rows_scanned: int, unresolved: list[dict]) -> RosterReading:
     return RosterReading(True, rows_scanned, {}, "", {}, len(unresolved), tuple(unresolved))
+
+
+def test_roster_reader_module_is_authority():
+    from fno.claims import cli as claims_cli
+
+    assert claims_cli.RosterReading is roster_module.RosterReading
+    assert claims_cli.read_roster is roster_module.read_roster
+    assert claims_cli._finished_row_states is roster_module._finished_row_states
+    assert claims_cli._transcript_activity is roster_module._transcript_activity
+    assert claims_cli._really_finished is roster_module._really_finished
 
 
 @pytest.fixture

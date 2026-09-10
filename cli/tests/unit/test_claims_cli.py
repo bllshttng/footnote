@@ -1018,7 +1018,7 @@ def test_a_lying_done_row_still_raises_the_alarm(cwd_tmp, fake_roster, monkeypat
     positively still moving overrules the row, so an operator deciding whether
     to staff this node is told a worker is on it."""
     monkeypatch.setattr(
-        "fno.claims.cli._transcript_activity", lambda *_a, **_kw: False
+        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: False
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
@@ -1031,7 +1031,7 @@ def test_an_aged_out_transcript_leaves_the_row_standing(cwd_tmp, fake_roster, mo
     on an empty node, and one that fires on every finished session whose
     transcript has aged out teaches operators to ignore the alarm."""
     monkeypatch.setattr(
-        "fno.claims.cli._transcript_activity", lambda *_a, **_kw: None
+        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: None
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])

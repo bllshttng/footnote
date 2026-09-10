@@ -314,6 +314,16 @@ The scanned count is the point. A scan of forty rows finding nobody is a differe
 
 The join resolves a row's node from the worktree manifest and then the session-keyed ledger, both machine-written. **Never a name regex.** Eight auto-named workers read as nobody-on-this-node on 2026-08-15 and were nearly double-dispatched. Worker names carry their node only by convention, and a convention is not a guard.
 
+### Live work remains visible after the claim window
+
+The claim TTL is not the work duration. A `spawn-handover:` reservation can expire while its blueprint worker is still writing, and a `target-session:` claim can expire when renewal did not run. In both cases the old claim-only reader answers free even though the worker is live.
+
+The positive late-window binding is the session row the spawn already writes, joined to one whole-fleet roster read. `fno backlog worked --json` reports the node id and worker name only when the graph row is open for any phase, the roster row exists for that session id, and the worker is not in a terminal state. Terminal graph nodes are skipped.
+
+The board, ready selection, and dispatch observation consume that worked overlay. They suppress a live node and name the worker; they do not mint a second claim kind. If the roster row transitions to `killed` or leaves the fleet while the graph session row remains open and no plan exists, the overlay disappears on the next read and the node is offered again. The test observes that flip directly; it never waits for a TTL.
+
+An unreadable roster is not an empty worked set without evidence. The overlay emits a named degradation reason, strict mutation paths refuse when required, and the board records the worked source as unreadable. Claim state remains independently fail-closed.
+
 ### Two kinds of death, two proofs
 
 The store also failed in the opposite direction. When nobody was building, it said HELD. Which proof a claim needs depends on what its holder is.

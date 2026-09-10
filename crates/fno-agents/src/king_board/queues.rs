@@ -5,7 +5,7 @@ use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
     SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, TERMINAL_RUNGS,
+    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -332,6 +332,7 @@ pub(crate) fn queue_json(q: &Queue) -> Value {
 pub(crate) struct BoardInputs {
     pub(crate) ready: SourceRead,
     pub(crate) claims: SourceRead,
+    pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     pub(crate) prs: SourceRead,
@@ -860,8 +861,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS}"),
-            &if inputs.ready.is_ok() && inputs.claims.is_ok() {
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
+            &if inputs.ready.is_ok() && inputs.claims.is_ok() && inputs.worked.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -870,6 +871,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.worked.error.clone())
                         .unwrap_or_default(),
                 )
             },
