@@ -18,7 +18,7 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
-from fno.agents.harness_map import PERMISSION_MODE_HELP, lost_verb_refusal
+from fno.agents.harness_map import PERMISSION_MODE_HELP
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -1528,11 +1528,11 @@ def cmd_spawn(
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
-    refusal = lost_verb_refusal(message) or seedless_thread_refusal(
+    seedless = seedless_thread_refusal(
         harness, substrate, message, resume=resume, crown=bool(crown), name=name, node=node
     )
-    if refusal:
-        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+    if seedless:
+        print(f"fno agents spawn: {seedless}", file=sys.stderr)
         raise typer.Exit(code=2)
 
     if output_format is not None and (
