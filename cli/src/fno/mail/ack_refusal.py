@@ -6,7 +6,7 @@ never claims confirmation, a landed row is never mistaken for mail (x-22ce).
 """
 from __future__ import annotations
 
-from fno.bus.log import LANDED_KIND, TYPED_DELIVERY, Envelope
+from fno.bus.log import LANDED_KIND, TYPED_DELIVERY, WITHDRAW_KIND, Envelope
 
 
 def refusal_line(target: Envelope) -> str:
@@ -17,6 +17,8 @@ def refusal_line(target: Envelope) -> str:
             f"message {target.id!r} is a landed receipt, not mail; "
             f"it acknowledges {acked!r}; cursor not advanced"
         )
+    if target.kind == WITHDRAW_KIND:
+        return f"message {target.id!r} is a withdrawal tombstone, not mail; cursor not advanced"
     if target.delivery == TYPED_DELIVERY:
         how = "typed into a pane (delivery unconfirmed)"
     else:

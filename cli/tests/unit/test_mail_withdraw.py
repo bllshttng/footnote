@@ -489,3 +489,19 @@ def test_withdrawing_a_typed_message_refuses_instead_of_pretending(env):
 
     assert result.exit_code == 1
     assert "cannot be recalled" in (result.stderr or result.output)
+
+
+def test_acking_a_tombstone_names_it_a_tombstone(env):
+    """The kind filter routes a tombstone into the ack refusal branch, where
+    "already delivered (hosted)" would be false about a row that retracted mail
+    and was never delivered."""
+    from fno.bus.log import WITHDRAW_KIND, iter_messages
+
+    mid = _send(MY_HANDLE, PEER, "retract me", ts=_ts_ago(3600))
+    assert _run("mail", "withdraw", mid).exit_code == 0
+    tombstone = next(m for m in iter_messages() if m.kind == WITHDRAW_KIND)
+
+    res = _run("mail", "ack", tombstone.id, "--name", PEER)
+
+    assert res.exit_code == 2
+    assert "tombstone" in res.stderr
