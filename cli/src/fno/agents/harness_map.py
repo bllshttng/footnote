@@ -1157,10 +1157,17 @@ _BRIEF_MAX_BYTES = 8192
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
 
 
-#: The verbs the x-ebd2 lifecycle table owns. A declared verb outside this
-#: family (/think, a configured custom verb) abstains and keeps declared
-#: precedence; the table only ever answers target or blueprint.
+#: The verbs the x-ebd2 lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
+#: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
+_DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
+_RUNG_ANSWERS = {
+    "idea": "/blueprint",
+    "design": "/blueprint",
+    "ready": "/target",
+    "in_progress": "/target",
+    "in_review": "/target",
+}
 
 
 def resolve_effective_verb(
@@ -1169,38 +1176,16 @@ def resolve_effective_verb(
     difficulty: Optional[str] = None,
     plan_rung: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
-    """One conditional owns the target/blueprint workflow-verb decision (x-ebd2).
+    """The target/blueprint lifecycle conditional (x-ebd2, d-834b6ff1); full
+    table: docs/architecture/backlog-graph-verb-contracts.md. Intake (rung
+    "none"): difficulty decides. Re-dispatch: the plan rung decides. The
+    stored ``verb`` reconciles through the table; out-of-family abstains to
+    declared precedence.
 
-    Two moments, two keys; neither answers the other's moment.
-
-    INTAKE - no plan exists (``plan_rung == "none"``), so there is no plan
-    status to read and operator law d-834b6ff1 keys on difficulty: ``low``
-    dispatches straight to ``/target`` (planless low is the system working,
-    not a defect); ``medium``/``high`` blueprint on a frontier lane first,
-    then a separate /target builds the resulting plan.
-
-    RE-DISPATCH - a linked plan exists, so its rung decides: ``idea``/
-    ``design`` keep ``/blueprint`` (the draft is unfinished); ``ready``/
-    ``in_progress``/``in_review`` advance to ``/target`` (re-planning finished
-    work is the x-aa4c defect).
-
-    ``verb`` (the node's stored dispatch_verb) is audit input, never lifecycle
-    truth: a target/blueprint-family value is reconciled through the same
-    table and the decision names both spellings, so correctness never depends
-    on the blueprint session closing having rewritten the graph field. A verb
-    OUTSIDE the family abstains - the caller's declared-verb rung keeps it.
-
-    Returns ``(canonical_verb, decision)``. A ``None`` verb means the table
-    abstains: no node context (``plan_rung is None``; the bare resolver keeps
-    the target template for capability introspection) or an out-of-family
-    declared verb.
-
-    Raises :class:`DispatchResolveError` when the node context is positive but
-    unanswerable: an ``unreadable``/``done``/``superseded`` plan, or a planless
-    node whose difficulty is absent or not one of low/medium/high.
-
-    ``plan_rung`` is a ``graph.ladder.Rung`` VALUE string, so this resolver
-    stays pure and never imports the graph package."""
+    Returns ``(canonical_verb, decision)``; ``None`` = abstain (no node
+    context, or out-of-family verb). Raises :class:`DispatchResolveError` on
+    a refusal rung, or planless without low/medium/high difficulty.
+    ``plan_rung`` is a ``graph.ladder.Rung`` value string."""
     raw_verb = (verb or "").strip()
     if raw_verb.startswith("/fno:"):
         raw_verb = "/" + raw_verb[len("/fno:"):]
@@ -1209,32 +1194,17 @@ def resolve_effective_verb(
     if plan_rung is None:
         return None, "verb=lifecycle(no-node-context)"
     rung = plan_rung.strip().lower()
-    if rung == "none":
-        d = (difficulty or "").strip().lower()
-        if d not in ("low", "medium", "high"):
-            raise DispatchResolveError(
-                "dispatch verb cannot be derived: the node has no plan "
-                f"(plan rung none) and its difficulty reads {difficulty!r}; "
-                "law d-834b6ff1 derives it from difficulty (low|medium|high) "
-                "at intake (x-ebd2)"
-            )
-        answer = "/target" if d == "low" else "/blueprint"
+    d = (difficulty or "").strip().lower()
+    if rung == "none" and d in _DIFFICULTY_ANSWERS:
+        answer = _DIFFICULTY_ANSWERS[d]
         note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
-    elif rung in ("idea", "design"):
-        answer = "/blueprint"
-        note = f"verb=lifecycle(plan {rung} -> /blueprint"
-    elif rung in ("ready", "in_progress", "in_review"):
-        answer = "/target"
-        note = f"verb=lifecycle(plan {rung} -> /target"
-    elif rung in ("unreadable", "done", "superseded"):
-        raise DispatchResolveError(
-            "dispatch verb cannot be derived: the linked plan reads rung "
-            f"{rung!r}, which is not dispatchable (x-ebd2); fix the plan's "
-            "status or the node's plan_path"
-        )
+    elif rung in _RUNG_ANSWERS:
+        answer = _RUNG_ANSWERS[rung]
+        note = f"verb=lifecycle(plan {rung} -> {answer}"
     else:
         raise DispatchResolveError(
-            f"unknown plan rung {plan_rung!r}; expected a graph.ladder.Rung value"
+            f"dispatch verb cannot be derived: plan rung {rung!r} with "
+            f"difficulty {d!r} answers no lifecycle rung (x-ebd2)"
         )
     if raw_verb and raw_verb != answer:
         note += f"; stored dispatch_verb {raw_verb} reconciled"
@@ -1258,44 +1228,29 @@ def resolve_dispatch(
 ) -> dict:
     """Map (config + context) -> the dispatch tuple. Pure; never spawns/claims.
 
-    Precedence (each field independent):
-      harness    : explicit > config.dispatch.harness > ``claude``
-      substrate  : explicit > config.dispatch.substrate > per-harness default
-      command    : explicit > node ``verb`` > config.dispatch.command > builtin
-      merge      : builtin rung only; ``config.auto_merge.grant`` picks
-                   ``/target {id}`` over the default ``/target --no-merge {id}``
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md. Field
+    precedence (each independent): harness explicit > stage table >
+    ``claude``; substrate explicit > config > per-harness default; command
+    explicit > x-ebd2 lifecycle derivation > node ``verb`` (allowlist-checked;
+    a graph field is a trust boundary) > ``config.dispatch.command`` >
+    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
+    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
+    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
+    an explicit command bypasses it (reconcile and the other explicit doors
+    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    at 8 KB, never truncated. ``trigger`` is autonomous or attended (pane
+    needs the capability). ``node_id`` substitutes the command's ``{id}``.
+    ``merge_posture`` (x-8151): no-merge injects, allow overrides the config
+    read (an explicit template is never edited), from-config reads the grant.
 
-    ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
-    (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
-    assembled as ``<verb> {id}`` - a graph field is a trust boundary, so an
-    out-of-allowlist verb is refused. ``brief`` is a node's ``dispatch_brief``:
-    it rides ``env['TARGET_BRIEF']`` only (never the command line) and is capped
-    at 8 KB with an explicit error, never truncated.
-
-    ``trigger`` is ``autonomous`` (fire-and-forget) or ``attended``. An
-    autonomous pane requires evidence-backed per-harness capability.
-
-    ``node_id`` when given is substituted into the command's ``{id}`` (exactly
-    once, else an error); when absent the template is returned literally (a bare
-    ``--harness`` resolution just wants the harness/substrate decision).
-
-    ``merge_posture`` (x-8151): ``no-merge`` injects the flag into a
-    /target-family command missing it; ``allow`` overrides the builtin rung's
-    config read (an explicit template is never edited - a refusal it carries
-    wins); ``from-config`` resolves ``config.auto_merge.grant``, errors
-    degrading to no-merge.
-
-    Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
-    an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
-    unsupported autonomous ``pane``, an unknown trigger or substrate, or an
-    empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
-    (for tests)."""
+    Raises :class:`DispatchResolveError` on an unknown/refused harness, a
+    missing substrate lane, an unsupported autonomous pane, an unknown trigger
+    or substrate, an out-of-allowlist verb, an oversized brief, an empty or
+    unsubstituted command, or an unanswerable node lifecycle.
+    ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # x-ebd2: the lifecycle rung derives the effective workflow verb BEFORE the
-    # config read, so the stage table resolves the DERIVED verb's profile row
-    # (agents.profiles.blueprint vs .target) instead of the raw stored verb's.
-    # An explicit command bypasses the table entirely: reconcile and the other
-    # explicit doors spell their own verb and are never re-derived.
+    # The lifecycle rung derives the effective verb BEFORE the config read so
+    # the stage table resolves the DERIVED verb's profile row.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
         lifecycle_verb, lifecycle_note = resolve_effective_verb(
@@ -1394,40 +1349,21 @@ def resolve_dispatch(
             f"{', '.join(h for h in known_harnesses() if thread_seatable(h))})"
         )
 
-    # 3. command template. Precedence: explicit --command > node verb > config
-    # template > per-harness builtin (dispatch_command). A node verb is validated
-    # against the allowlist (a graph field is a trust boundary) and assembled as
-    # `<verb> {id}`; the merge posture (no-merge) is NOT part of the verb string -
-    # it stays a launcher flag.
+    # 3. command template. Precedence: explicit --command > lifecycle > node
+    # verb (allowlist-checked; a graph field is a trust boundary) > config
+    # template > per-harness builtin. A derived /target renders through the
+    # SAME builtin rungs so a low-difficulty planless node dispatches
+    # byte-identically to the pre-x-ebd2 shape (suppress the raw verb and fall
+    # through); a derived /blueprint renders its own verb - the operator's
+    # target template is a target-phase contract and does not apply.
+    if lifecycle_verb == "/target":
+        verb = None
     if command is not None and command.strip():
         template = command.strip()
         decision.append("command=explicit")
     elif lifecycle_verb is not None:
-        # The lifecycle table answered: the derived verb is this dispatch's
-        # phase authority (x-ebd2). A derived /target renders through the SAME
-        # rungs as the builtin (config template above the per-harness
-        # dispatch_command, merge posture from the grant) so a low-difficulty
-        # planless node dispatches byte-identically to the pre-x-ebd2 shape. A
-        # derived /blueprint renders its own verb: the operator's target
-        # template is a target-phase contract and does not apply.
-        if lifecycle_verb == "/target":
-            _cmd = cfg.get("command")
-            _allow_merge = (
-                cfg.get("auto_merge") is True or posture == "allow"
-            ) and posture != "no-merge"
-            template = (
-                _cmd if isinstance(_cmd, str) and _cmd
-                else dispatch_command(chosen_harness, allow_merge=_allow_merge)
-            ).strip()
-            if cfg.get("command"):
-                decision.append("command=config(derived-target)")
-            else:
-                decision.append(
-                    f"command=derived-target({'merge' if _allow_merge else 'no-merge'})"
-                )
-        else:
-            template = f"{lifecycle_verb} {{id}}"
-            decision.append(f"command=derived({lifecycle_verb})")
+        template = f"{lifecycle_verb} {{id}}"
+        decision.append(f"command=derived({lifecycle_verb})")
     elif verb is not None:
         chosen_verb = verb.strip()
         if not chosen_verb:

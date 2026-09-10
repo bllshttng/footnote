@@ -178,14 +178,10 @@ def cmd_resolve(
             node_id=node,
             command=command,
             verb=verb,
-            # x-ebd2: node lifecycle context - the derived verb is the phase
-            # authority, and the stage table reads its profile row.
+            # x-ebd2: node lifecycle context; the derived verb is the phase
+            # authority and the stage table reads its profile row.
             difficulty=(rec or {}).get("difficulty") if node else None,
-            plan_rung=(
-                _node_plan_rung(rec).value
-                if node and isinstance(rec, dict)
-                else None
-            ),
+            plan_rung=_node_plan_rung(rec).value if node and rec else None,
             brief=brief,
             merge_posture=merge_posture,
             trigger=trigger,
@@ -394,19 +390,11 @@ def _cutover_command(
     harness: Optional[str], node_id: str, rec: Optional[dict] = None
 ) -> str:
     """The destination harness's own node-aware dispatch command, or "" if
-    unresolvable.
-
-    This verb hosts a pane in THIS mux session, so the substrate is not the
-    destination's default; only the COMMAND needs the per-harness render
-    (codex takes `$fno:target`, never a raw slash verb). An empty return is the
-    caller's signal to stage nothing - a half-resolved destination must not
-    spawn.
-
-    The workflow verb derives from the node's plan rung and difficulty
-    (x-ebd2), so a planless medium node stages a blueprint pane here exactly as
-    every other door would. This verb always spawns no-merge, on the normal
-    path and on the cutover path alike, so `config.auto_merge.grant` is
-    deliberately overridden: quota exhaustion must not change who may merge."""
+    unresolvable (empty = stage nothing; a half-resolved destination must not
+    spawn; this verb hosts a pane in THIS mux session, so only the command
+    needs the per-harness render). The verb derives from the node's lifecycle
+    (x-ebd2) and this verb always spawns no-merge: quota must not change who
+    may merge, so `config.auto_merge.grant` is deliberately overridden."""
     try:
         from fno.agents.harness_map import resolve_dispatch
         from fno.graph.ladder import plan_rung as _node_plan_rung
@@ -416,9 +404,7 @@ def _cutover_command(
             node_id=node_id,
             merge_posture="no-merge",
             difficulty=(rec or {}).get("difficulty"),
-            plan_rung=(
-                _node_plan_rung(rec).value if isinstance(rec, dict) else None
-            ),
+            plan_rung=_node_plan_rung(rec).value if rec else None,
         )["command"]
     except Exception:  # noqa: BLE001 - an unresolvable harness never spawns
         return ""

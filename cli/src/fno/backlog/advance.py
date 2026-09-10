@@ -1166,14 +1166,10 @@ def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
 
 def _node_effective_verb(node: dict) -> Optional[str]:
     """The x-ebd2 effective workflow verb for a node dict, or None when the
-    lifecycle table abstains (an out-of-family declared verb). Raises
-    ``DispatchResolveError`` on a node the table cannot answer (terminal plan
-    rung, planless without difficulty), so the caller's spawn-failure path
-    owns it.
-
-    One wrapper so every advance door - _spawn_worker's command/name/receipt
-    and the lane placement's grid consult alike - derives ONE answer per node
-    instead of two doors drifting."""
+    lifecycle table abstains. One wrapper so every advance door - the spawn's
+    command/name/receipt and the lane placement's grid consult alike - derives
+    ONE answer per node. Raises DispatchResolveError on an unanswerable node;
+    the caller's spawn-failure path owns it."""
     from fno.agents import harness_map
     from fno.graph.ladder import plan_rung as _node_plan_rung
 
@@ -1359,16 +1355,11 @@ def _spawn_worker(
     """
     is_reconcile = bool(reconcile_manifest)
     node_verb = (verb or "").strip() or None
-    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
-    # to produce a byte-identical dispatch. The `verb` param collapses both to
-    # None; only the node dict carries the difference, so the classification
-    # reads the DICT alone, never the verb param, and a caller whose verb
-    # diverges from the dict surfaces as verb=builtin beside verb_source=
-    # declared (the mismatch this field exists to expose). The lossy case now
-    # REFUSES instead of warning: a dict without the key can only come from a
-    # projection that dropped it, and spending a worker, claim, or model slot
-    # on a guess is the defect (x-ebd2). A None node names no projection at
-    # all; it keeps the warning and the builtin path it has always taken.
+    # x-0961/x-ebd2: classify the RAW declaration from the DICT alone (a
+    # caller whose verb param diverges surfaces as verb=builtin beside
+    # verb_source=declared). A dict without the key is a lossy projection:
+    # REFUSE before any worker, claim, or model slot is spent. A None node
+    # names no projection at all and keeps its warning + builtin path.
     if isinstance(node, dict) and "dispatch_verb" not in node:
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
@@ -1382,14 +1373,13 @@ def _spawn_worker(
     else:
         verb_source = "field-absent"
         print(
-            f"advance: WARNING: dispatching {node_id} without knowing whether it "
-            f"declared a verb: no node dict was passed ({caller}); the builtin "
-            "target path runs with no verb_source evidence (x-0961).",
+            f"advance: WARNING: dispatching {node_id} with no node dict "
+            f"({caller}); the builtin target path runs with no verb_source "
+            "evidence (x-0961).",
             file=sys.stderr,
         )
-    # x-ebd2: the effective workflow verb, from the node's plan rung and
-    # difficulty. Reconcile bypasses: its explicit command already spells the
-    # de-stub pass and the conditional must not re-derive it.
+    # x-ebd2: the effective workflow verb. Reconcile bypasses: its explicit
+    # command already spells the de-stub pass.
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
@@ -1406,19 +1396,13 @@ def _spawn_worker(
     # launched claude carrying codex syntax.
     launch = (provider or "").strip()
 
-    # Capacity-grid deferral receiving end: the automatic dispatch callers pass
-    # resolve_difficulty=False to node_model precisely so difficulty picks the
-    # lane HERE, at the seam that can read live capacity - the spawned argv
-    # always carries an explicit --harness, so the spawn-CLI grid can never fire
-    # on this path. See _grid_lane_for; harness-keyed placement sites resolve
-    # there instead and arrive already pinned - on a grid decline the pin is the
-    # placement harness. An explicit harness therefore skips this consult: under
-    # it the grid could pick a harness the caller's placement did not key for.
-    # A caller that resolved the grid hands its reason in; the consult below
-    # is skipped under an explicit harness. grid_reason=None on a grid PICK.
+    # Capacity-grid deferral receiving end: difficulty picks the lane HERE, at
+    # the seam that can read live capacity (the spawned argv always carries an
+    # explicit --harness, so the spawn-CLI grid can never fire on this path).
+    # An explicit harness skips the consult: under it the grid could pick a
+    # harness the caller's placement did not key for. grid_reason=None on a
+    # grid PICK; a caller that resolved the grid hands its answer in.
     grid_why: Optional[str] = grid_reason
-    # Caller-supplied grid answers first: dispatch_lanes resolves the grid
-    # before placement and pins the harness, so the consult below never runs.
     grid_lane_route: Optional[str] = grid_route
     grid_lane_account: Optional[str] = grid_account
     if harness is None:
@@ -1433,13 +1417,10 @@ def _spawn_worker(
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
 
-    # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
-    # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
-    # config (AC2-EDGE), never the merged repo's. advance takes no per-run flag,
-    # so config is the sole non-builtin rung; any read failure -> no-merge
-    # (Locked Decision 6). The same settings object feeds the resolver
-    # (config.dispatch.*) and the permission-mode read below, so all three
-    # config reads are node-consistent.
+    # x-4391/x-4be1: the grant reads with node_cwd precedence so a
+    # cross-project dispatch reads the DEPENDENT node's config; the same
+    # settings object feeds the resolver and the permission-mode read, so all
+    # config reads are node-consistent. Any read failure -> no-merge.
     settings_obj = None
     try:
         from fno.config import load_settings, load_settings_for_repo
@@ -1470,9 +1451,8 @@ def _spawn_worker(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    # The receipt names the RESOLVED workflow verb (x-ebd2), canonicalized the
-    # same way the resolver's allowlist rung does so receipt and command agree
-    # on the spelling; verb_source (classified above) keeps the RAW state.
+    # The receipt names the RESOLVED verb (x-ebd2); verb_source keeps the RAW
+    # state. Canonicalized so receipt and command agree on the spelling.
     receipt_verb = effective_verb or node_verb or "builtin"
     if receipt_verb.startswith("/fno:"):
         receipt_verb = "/" + receipt_verb[len("/fno:"):]
@@ -1493,9 +1473,7 @@ def _spawn_worker(
             )
     else:
         # x-ebd2: the node's lifecycle context rides so the resolver derives
-        # the same effective verb this caller did (and the stage table reads
-        # its profile row); an out-of-family declared verb abstains there and
-        # takes the verb rung below.
+        # the same effective verb this caller did.
         if isinstance(node, dict):
             from fno.graph.ladder import plan_rung as _node_plan_rung
 
@@ -1819,9 +1797,7 @@ def _grid_lane_for(
     bypasses every patch. A decline surfaces the chain's terminal verbatim,
     never refusing (Locked 10). Route and account ride beside harness/model
     as one row fact. ``verb`` is the effective workflow verb (x-ebd2): its
-    profile row prices the slot, so a derived /blueprint resolves the
-    blueprint profile and /target never acquires planning eligibility merely
-    because its node has no plan. None keeps the target profile. Contract:
+    profile row prices the slot; None keeps the target profile. Contract:
     docs/architecture/backlog-graph-verb-contracts.md"""
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None, None, None

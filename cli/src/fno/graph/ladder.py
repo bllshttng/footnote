@@ -105,14 +105,12 @@ class Rung(Enum):
     """Where a node's plan sits, or why we cannot tell.
 
     ``NONE`` and ``IDEA`` stay distinct even though both derive to graph status
-    ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - the workflow
-    verb derives from the node's difficulty (x-ebd2, law d-834b6ff1): low
-    dispatches ``/target``, which authors the plan; medium/high dispatch
-    ``/blueprint`` first - while ``IDEA`` (a linked-but-undesigned decompose
+    ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - the derived
+    verb authors the plan (x-ebd2: low -> ``/target``, medium/high ->
+    ``/blueprint``) - while ``IDEA`` (a linked-but-undesigned decompose
     scaffold) needs warm inline-fill, so it stays gated behind
     ``--include-ideas``. See :func:`is_cold_dispatchable` and
-    ``harness_map.resolve_effective_verb`` for the full intake/re-dispatch
-    table.
+    ``harness_map.resolve_effective_verb``.
     """
 
     NONE = "none"  # no usable plan_path - nothing on disk
