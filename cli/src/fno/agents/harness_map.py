@@ -1383,8 +1383,8 @@ def resolve_dispatch(
     # template > per-harness builtin. A derived /target renders through the
     # SAME builtin rungs (suppress the raw verb and fall through); a derived
     # /blueprint renders its own verb: the target template is target-phase.
-    # A registry verb sets skip_normalize (its descriptor carries the native
-    # spelling) and, with takes_node_id=false, verb_declares_no_id.
+    # A registry verb sets skip_normalize and, with takes_node_id=false,
+    # verb_declares_no_id (both consumed below).
     skip_normalize = False
     verb_declares_no_id = False
     derived_blueprint = lifecycle_verb == "/blueprint"

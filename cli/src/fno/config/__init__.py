@@ -59,12 +59,8 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
-from fno.config._dispatch_verbs import (
-    DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPATCH_VERBS,
-)
-from fno.config._dispatch_verbs import (
-    DispatchVerbDescriptor as DispatchVerbDescriptor,
-)
+from fno.config._dispatch_verbs import DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPATCH_VERBS
+from fno.config._dispatch_verbs import DispatchVerbDescriptor as DispatchVerbDescriptor
 from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
 from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
 from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
@@ -2075,41 +2071,26 @@ class DispatchBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     # DEPRECATED (x-b2c7): the harness axis lives in the stage table
-    # (`agents.profiles.<verb>.provider`), which AGENTS.md already documents as
-    # reaching autonomous dispatch. This key reads as the fallback rung beneath
-    # the stage table for one release, so an installation setting only it is
-    # unchanged. No config-load alias: the fold runs at resolution time
-    # (`fno.agents.harness_map`), because materializing a profile here would
-    # change the attended spawn door's rung occupancy, not only dispatch. The
-    # operator-facing deprecation surface is `fno config doctor`.
+    # (`agents.profiles.<verb>.provider`); this key reads as the fallback rung
+    # beneath it for one release. The fold runs at resolution time
+    # (fno.agents.harness_map); the operator-facing surface is `fno config doctor`.
     harness: str = ""
     substrate: str = ""
     command: str = ""
-    # Registered dispatch verbs from outside fno, unioned with the allowlist at
-    # resolve (`resolvable_verbs`); a key naming an allowlisted verb is dropped,
-    # so a project cannot redefine a shipped one. Declared directly above
-    # `allowed_verbs` so the two extension surfaces read together.
+    # Registered verbs from outside fno (unioned with allowed_verbs at resolve;
+    # a shipped or allowlisted spelling cannot be redefined here).
     verb_registry: dict[str, DispatchVerbDescriptor] = Field(default_factory=dict)
     # US3 verb allowlist: a node dispatch_verb must match or the resolver refuses.
     allowed_verbs: list[str] = Field(default_factory=lambda: list(_DEFAULT_DISPATCH_VERBS))
-    # DEPRECATED (x-4391/x-4be1): the per-project merge posture for AUTONOMOUS
-    # dispatch, formerly read by every dispatch path. Reads as
-    # `auto_merge.grant` ("dispatch" when true): the alias folds it per layer,
-    # and each path (dispatch-node.sh / normalize.sh / advance.py / the Rust
-    # reader) now reads the grant key. Kept one release so nothing breaks on
-    # upgrade; no consumer reads this field. An explicit
-    # --allow-merge/--no-merge flag always wins.
+    # DEPRECATED (x-4391/x-4be1): reads as `auto_merge.grant` for one release;
+    # every dispatch path reads the grant key now, no consumer reads this field.
+    # An explicit --allow-merge/--no-merge flag always wins.
     auto_merge: bool = False
-    # x-0676: on provider exhaustion, defer (today's floor) or fail over to the
-    # next healthy provider in the active combo. Default "defer" = byte-identical
-    # to today (no combo read). An unknown value degrades to "defer" (a typo never
-    # silently enables failover).
+    # x-0676: defer (default, byte-identical to today) or fail over to the next
+    # healthy provider in the active combo; an unknown value degrades to "defer".
     on_exhaustion: str = "defer"
-    # Proactive LOW cutover, opt-in and OFF by default (0). Minutes: a LOW
-    # window resetting FARTHER out than this is a reason to leave the harness
-    # now, because waiting is the only alternative. Deliberately not
-    # defer_horizon_minutes - that predicate answers the opposite question
-    # (a near reset means wait), so reusing it would route backwards.
+    # Proactive LOW cutover, opt-in, default 0 = off. Deliberately inverted from
+    # defer_horizon_minutes: a distant reset means leave now, not wait.
     cutover_low_after_minutes: int = 0
 
     @field_validator("auto_merge", mode="before")

@@ -12,9 +12,8 @@ class DispatchVerbDescriptor:
     # The unknown-harness default spelling, exactly as the worker must receive
     # it. Rendered verbatim; never fno-namespaced.
     invocation: str
-    # Per-harness overrides. Present means this verb exists ONLY on these
-    # harnesses; absent means `invocation` is correct everywhere. Same field,
-    # same meaning, as ReviewerDescriptor.
+    # Present: this verb exists ONLY on these harnesses. Absent: `invocation`
+    # is correct everywhere. Same field, same meaning, as ReviewerDescriptor.
     invocations: Optional[Mapping[str, str]] = None
     # `skill` is probed against the harness's skill roots at resolve time.
     requires: Literal["none", "skill"] = "none"
@@ -43,9 +42,9 @@ def resolvable_verbs(
     registry: Optional[Mapping[str, DispatchVerbDescriptor]] = None,
     allowed: Optional[Sequence[str]] = None,
 ) -> dict[str, DispatchVerbDescriptor]:
-    """The registry, minus shipped spellings. A key canonicalizing to a
-    built-in or operator-allowlisted verb is dropped, so a project cannot
-    redefine a shipped verb into a weaker descriptor."""
+    """The registry minus shipped spellings: a key canonicalizing to a built-in
+    or operator-allowlisted verb is dropped, so a shipped verb cannot be
+    redefined into a weaker descriptor."""
     allowed_canon = {
         canonical_verb_key(v)
         for v in (tuple(allowed) if allowed is not None else DEFAULT_DISPATCH_VERBS)
