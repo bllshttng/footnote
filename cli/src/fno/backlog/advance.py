@@ -2493,18 +2493,25 @@ def _transcript_recently_active(session_id: str) -> bool:
     """Whether this claude session's transcript moved inside the idle window.
 
     The transcript is the last truth that outlives a dead daemon (liveness
-    probes and stored status fields have both lied). No transcript at all is
-    activity-nothing; an unreadable glob is activity-UNKNOWN and reads False
-    here, so the caller treats it as dead only when the harness store also
-    went quiet - the transcript is the second probe, never the only one.
+    probes and stored status fields have both lied). "Moved" is the newest
+    TIMESTAMPED entry, not the mtime that untimestamped trailing records keep
+    young (x-54cf). No timestamped entry falls back to the mtime; no
+    transcript at all is activity-nothing; an unreadable glob is
+    activity-UNKNOWN and reads False, so the caller treats it as dead only
+    when the harness store also went quiet - the transcript is the second
+    probe, never the only one.
     """
     if not session_id:
         return False
+    from fno.agents.session_truth import newest_entry_epoch
+
     projects = Path.home() / ".claude" / "projects"
     try:
         for transcript in projects.glob(f"*/{session_id}.jsonl"):
-            age = time.time() - transcript.stat().st_mtime
-            if age <= _JOINER_IDLE_WINDOW:
+            epoch = newest_entry_epoch(transcript)
+            if epoch is None:
+                epoch = transcript.stat().st_mtime
+            if time.time() - epoch <= _JOINER_IDLE_WINDOW:
                 return True
     except OSError:
         return False

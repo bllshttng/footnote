@@ -2611,13 +2611,13 @@ fn run_node_route(rest: &[String]) -> i32 {
             );
             entry.harness = Some(harness.to_string());
             let answer = match store.matches(&entry) {
-                Some(hits) if !hits.is_empty() => {
-                    match fno_agents::gc::transcript_age_s(Some(&hits), now) {
-                        Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
-                        Some(_) => serde_json::json!({"state": "quiet"}),
-                        None => serde_json::json!({"state": "unresolved"}),
-                    }
-                }
+                // x-54cf: the age is the newest timestamped entry through the
+                // shared probe, not a file stat.
+                Some(hits) if !hits.is_empty() => match fno_agents::gc::probe_row_age(&entry) {
+                    Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
+                    Some(_) => serde_json::json!({"state": "quiet"}),
+                    None => serde_json::json!({"state": "unresolved"}),
+                },
                 _ => serde_json::json!({"state": "unresolved"}),
             };
             answers.insert(pair.clone(), answer);

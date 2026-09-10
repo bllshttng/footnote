@@ -111,7 +111,12 @@ def _parse_claude_record(rec: dict) -> Optional[Record]:
 
     raw_role = str(msg.get("role") or rec.get("type"))
     role = "peer" if raw_role == "user" and contains_fno_mail_tag(text) else raw_role
-    return Record(role=role, text=text)
+    timestamp = rec.get("timestamp")
+    return Record(
+        role=role,
+        text=text,
+        timestamp=timestamp if isinstance(timestamp, str) else None,
+    )
 
 
 def _parse_codex_record(rec: dict) -> Optional[Record]:

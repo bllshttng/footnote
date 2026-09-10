@@ -40,7 +40,7 @@ Probably not, and four readers will disagree with each other. Know what each one
 |---|---|---|
 | roster `status` in `fno agents list` | what the last reconcile saw | flaps between `unknown`, `quiet`, `orphaned` on a live session |
 | `pgrep -f <session-id>` | a process exists right now | a thread-substrate worker is idle between turns and holds no process |
-| transcript mtime | the session wrote recently | **you read the wrong path** (see below) |
+| transcript mtime | the session wrote recently | **you read the wrong path** (see below), or the right path read by its stat: untimestamped trailing records keep the file young while the conversation is silent (measured median +20 min, max +240 hours) - age the newest timestamped entry, not the file |
 | `fno agents resume <name> --print-command` | nothing about liveness: it renders the route and returns | it prints a command for a session the provider cannot reach, and for one whose cwd is gone |
 
 **Read the right transcript.** Claude Code keys its project directory by the session's **cwd**. A worker running in a worktree writes to a directory named for that worktree, not for the canonical checkout:

@@ -29,9 +29,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
-use crate::gc::{
-    gc_decide, row_handle, transcript_age_s, tree_action, GcAction, GcRow, KeepReason, TreeAction,
-};
+use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason, TreeAction};
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
@@ -881,12 +879,19 @@ pub fn provenance_verdict(
 }
 
 /// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
-/// `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a test
-/// stages the world; production wiring is [`crate::gc::gc_sweep`] /
+/// `age_many`, `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a
+/// test stages the world; production wiring is [`crate::gc::gc_sweep`] /
 /// [`crate::gc::gc_sweep_dry_run`]. `agents_read` is the same kind of seam
 /// for the `claude agents --json --all` snapshot: read at most once per
 /// sweep, lazily, only when a row actually reaches the stop gate - steady
 /// state keeps zero subprocesses on the hot path.
+///
+/// `age_many` is the transcript-age seam (x-54cf): one batched call answers
+/// every candidate row's age in SECONDS, keyed by [`row_handle`]. The
+/// production default reads the newest timestamped transcript entry through
+/// the shared truth probe; a file stat was the retired instrument, because
+/// untimestamped trailing records keep a dead file reading fresh. A row the
+/// seam does not answer reads `None`, and `None` is never quiet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     home: &AgentsHome,
@@ -896,6 +901,7 @@ pub(crate) fn run(
     retain_days: u64,
     read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
+    age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
@@ -939,6 +945,17 @@ pub(crate) fn run(
     // verdict instead of answering the reverse join twice. Entries the
     // origin gates already hold stay None - their buckets are decided in
     // pass 2 without a verdict.
+    // One batched age read for the whole sweep (x-54cf): the seam answers
+    // every candidate through one single-flighted read, keyed by row handle.
+    // A row the seam does not answer reads None, and None is never quiet.
+    let age_entries: Vec<&state::RegistryEntry> = registry
+        .entries
+        .iter()
+        .filter(|e| {
+            e.origin.as_deref() == Some("spawn") && e.crown_level.is_none() && graph.is_some()
+        })
+        .collect();
+    let ages = age_many(&age_entries);
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
@@ -954,7 +971,7 @@ pub(crate) fn run(
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let hits = store_matches(e);
         let verdict = provenance_verdict(e, sid, graph, hits.as_deref());
-        let age = transcript_age_s(hits.as_deref(), now);
+        let age = ages.get(&row_handle(e)).copied().flatten();
         staged.push(Some((verdict, age)));
     }
 
@@ -1179,7 +1196,9 @@ pub(crate) fn run(
         // too: absence on re-read is not quiet. One stat, on rows already
         // classified would-retire, so the hot path pays nothing.
         if !dry_run {
-            let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
+            // The re-read rides the same age seam (x-54cf): a fresh answer for
+            // THIS row, so activity inside the classify-to-apply gap keeps.
+            let fresh_age = age_many(&[e]).get(&row_handle(e)).copied().flatten();
             // x-2774 change 8: activity without a living writer is not
             // activity. A pid that answered ESRCH at the re-check keeps its
             // retirement even if the transcript mtime moved - the write came
@@ -2485,6 +2504,7 @@ mod tests {
             7,
             &|_| panic!("empty registry must return before graph read"),
             &|_| None,
+            &|_| std::collections::HashMap::new(),
             &|_| false,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),

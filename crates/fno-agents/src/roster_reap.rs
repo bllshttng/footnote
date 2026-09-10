@@ -37,7 +37,6 @@ use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
 use crate::daemon::CascadeOutcome;
-use crate::gc::transcript_age_s;
 use crate::gc_sweep::{provenance_verdict, GraphRead};
 use crate::graph_store::WorkState;
 use crate::state::RegistryEntry;
@@ -155,6 +154,7 @@ pub fn run(
     registry: &[RegistryEntry],
     read_graph: &dyn Fn() -> Option<GraphRead>,
     transcripts: &dyn Fn(&RegistryEntry) -> Option<Vec<PathBuf>>,
+    age: &dyn Fn(&RegistryEntry) -> Option<i64>,
     now: i64,
     remove: &dyn Fn(&RegistryEntry) -> CascadeOutcome,
 ) -> RosterReapSummary {
@@ -365,8 +365,10 @@ pub fn run(
         // age rides the reason so a keep is auditable. x-2774 change 8: a
         // provably dead pid (ESRCH) overrides recency here too, the same
         // override the registry sweep makes in grace_gate - recency without
-        // a living writer is not liveness.
-        let age = transcript_age_s(hits.as_deref(), now);
+        // a living writer is not liveness. The age rides the injected seam
+        // (x-54cf; production wires the shared probe): the newest timestamped
+        // entry, not a file stat.
+        let age = age(&entry);
         let pid_gone = row.pid.is_some_and(crate::daemon::pid_is_gone);
         match age {
             None => summary.kept.push(judgement(
@@ -476,6 +478,7 @@ pub fn roster_reap(
         &registry.entries,
         &|| crate::gc_sweep::read_graph_entries(home),
         &|e| store.borrow_mut().matches(e),
+        &crate::gc::probe_row_age,
         crate::daemon::now_epoch_secs(),
         &crate::gc_native::apply_active_surface_removal,
     )
@@ -537,6 +540,25 @@ mod tests {
         dir
     }
 
+    /// The test age seam (x-54cf): the age answers from the staged transcript
+    /// files' mtimes, exactly what the pre-probe stat read.
+    fn mtime_age(paths: &[PathBuf]) -> Option<i64> {
+        paths
+            .iter()
+            .filter_map(|p| {
+                let t = std::fs::metadata(p).ok()?.modified().ok()?;
+                Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+            })
+            .max()
+            .map(|newest| {
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64)
+                    .saturating_sub(newest)
+            })
+    }
+
     fn no_home() -> crate::paths::AgentsHome {
         crate::paths::AgentsHome::at(std::path::Path::new("/nonexistent-roster-reap"))
     }
@@ -557,6 +579,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -584,6 +607,7 @@ mod tests {
             &roster(rows),
             &[entry],
             &|| Some(graph_done("x-aaaa")),
+            &|_| None,
             &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
@@ -617,6 +641,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -652,6 +677,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -683,6 +709,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_| None,
+            &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -703,6 +730,7 @@ mod tests {
             &roster(rows),
             &[],
             &|| Some(GraphRead::default()),
+            &|_| None,
             &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
@@ -730,6 +758,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -749,6 +778,7 @@ mod tests {
             &ClaudeAgentsSnapshot::unknown("claude exited 1"),
             &[],
             &|| Some(graph_done("x-aaaa")),
+            &|_| None,
             &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
@@ -772,6 +802,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("rm exited 3".into()),
         );
@@ -800,6 +831,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Removed,
         );
@@ -839,6 +871,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("injected refusal".into()),
         );
@@ -890,6 +923,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -918,6 +952,7 @@ mod tests {
                 &roster(rows.clone()),
                 &[],
                 &|| Some(GraphRead::default()),
+                &|_| None,
                 &|_| None,
                 crate::daemon::now_epoch_secs(),
                 &|_| CascadeOutcome::NotApplicable,
@@ -951,6 +986,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -980,6 +1016,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -998,6 +1035,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1034,6 +1072,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1056,6 +1095,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1082,6 +1122,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1114,6 +1155,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );

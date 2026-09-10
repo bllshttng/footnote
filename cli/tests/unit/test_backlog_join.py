@@ -1165,3 +1165,48 @@ def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
     assert receipt["spawned"] == [
         "j-x-8d1d-1", "j-x-8d1d-2", "j-x-8d1d-3", "j-x-8d1d-4",
     ]
+
+
+def test_joiner_transcript_probe_reads_the_newest_entry(tmp_path, monkeypatch):
+    """The joiner's activity probe ages the newest TIMESTAMPED entry, not the
+    file mtime: trailing untimestamped records kept a worker silent past the
+    window reading active (x-54cf). Unreadable stays False, never a raise."""
+    import os
+    import time as time_mod
+    from datetime import datetime, timezone
+
+    sid = "0badc0de-54cf-0000-0000-000000000005"
+    projects = tmp_path / "home" / ".claude" / "projects" / "slug"
+    projects.mkdir(parents=True)
+    transcript = projects / f"{sid}.jsonl"
+
+    def _write_entry(age_s):
+        stamp = datetime.fromtimestamp(
+            time_mod.time() - age_s, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        transcript.write_text(
+            json.dumps({"type": "assistant", "timestamp": stamp,
+                        "message": {"role": "assistant",
+                                    "content": [{"type": "text", "text": "turn"}]}})
+            + "\n"
+        )
+        now = time_mod.time()
+        os.utime(transcript, (now, now))
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    # Entry 1h old, mtime fresh: mtime would call this active; the entry
+    # correctly does not (window is 30m).
+    _write_entry(3600)
+    assert advance._transcript_recently_active(sid) is False
+
+    # Positive control, same run: a 10s-old entry reads active.
+    _write_entry(10)
+    assert advance._transcript_recently_active(sid) is True
+
+    # No timestamped entry: the mtime fallback answers, never raises.
+    transcript.write_text(json.dumps({"type": "last-prompt"}) + "\n")
+    assert advance._transcript_recently_active(sid) is True  # fresh mtime
+
+    # An absent transcript is activity-nothing -> False.
+    assert advance._transcript_recently_active("0badc0de-54cf-0000-0000-ffffffffffff") is False

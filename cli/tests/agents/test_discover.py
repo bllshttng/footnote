@@ -16,6 +16,7 @@ import fcntl
 import json
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1162,7 +1163,7 @@ def test_us2_codex_old_watching_rollout_is_not_bulk_enumerated(tmp_path):
 
 
 def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
-    """One discovery scan serves tail content and mtime classification."""
+    """One discovery scan serves tail content and age classification."""
     codex = tmp_path / "codex"
     rollout = _write_codex_rollout(codex, session_id="019f48e1-direct", cwd="/x", mtime_age=5.0)
     with rollout.open("a", encoding="utf-8") as fh:
@@ -1170,6 +1171,8 @@ def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
             json.dumps(
                 {
                     "type": "response_item",
+                    "timestamp": datetime.now(timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "payload": {
                         "type": "message",
                         "role": "assistant",
