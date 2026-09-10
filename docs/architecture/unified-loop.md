@@ -4,6 +4,7 @@
 - **Group 1 shipped:** runtime + target driver + exec shim
 - **Group 2 shipped:** megawalk driver (driver arm removed 2026-08-03, see "The megawalk driver" below)
 - **Group 3:** planned - see "What lands later" below
+
 **Sibling doc:** [control-plane-loop.md](control-plane-loop.md) - the stop-hook decision verb INSIDE a session
 
 ## Scope

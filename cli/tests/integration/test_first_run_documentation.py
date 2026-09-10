@@ -153,6 +153,10 @@ def _norm_default(cell):
 def test_documented_fno_commands_resolve(cwd_tmp):
     cmds, skipped = _documented_commands()
     assert cmds, "no fno commands found in the first-run docs"
+    assert len(skipped) <= 5, (
+        "compound/placeholder doc lines left unprobed (raise the bound deliberately):\n"
+        + "\n".join(skipped)
+    )
     bad = []
     for where, argv in cmds:
         ok, detail = _probe(argv)
