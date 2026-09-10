@@ -99,7 +99,7 @@ The terminal wizard also offers, defaulting to No, to wire footnote's SessionSta
 ### Reading and editing config directly
 
 ```bash
-fno config get config.review.required_bots          # read one value
+fno config get config.review.github_apps            # read one value
 fno config set config.auto_merge.enabled true       # set one key (atomic, schema-checked)
 fno config set a.b=1 c.d=2                           # set several keys in one atomic call
 fno config unset config.auto_merge.enabled          # remove a key (reverts to its default)
@@ -114,14 +114,14 @@ These are real keys in `config.toml` (run `fno config get <key>` to read any of 
 
 | Key | What it does | Default |
 |-----|--------------|---------|
-| `config.review.github_apps` | External review bots that must approve before `target` calls a PR done | none (no gate) |
-| `config.review.posture` | How much review a code PR needs before it can merge (nine-rung ladder) | `self_review` |
+| `config.review.github_apps` | External review bots that must approve before `target` calls a PR done; none set means no external gate | none |
+| `config.review.posture` | How much review a code PR needs before it can merge; unset floors at `self_review` (nine-rung ladder) | none |
 | `config.review.max_rounds` | Review rounds per PR, counted across its whole life | `2` |
-| `config.review.external_reviewers` | Which reviewer(s) `pr check` waits on (e.g. `gemini`, `codex`) | none |
+| `config.review.external_reviewers` | Which reviewer(s) `pr check` waits on (e.g. `gemini`, `codex`) | `[]` |
 | `config.auto_merge.enabled` | Let `target` merge a PR itself once review passes | `false` |
 | `config.target.defaults.max_iterations` | How many times `target` retries before stopping | `40` |
-| `config.backlog.id_prefix` | The prefix for minted backlog node ids (e.g. `fno-a3f9`) | `ab-` |
-| `config.obsidian.enabled` + `.vault` | Store plans and design docs in an Obsidian vault | off |
+| `config.backlog.id_prefix` | The prefix for minted backlog node ids (e.g. `fno-a3f9`); unset falls back to `ab-` | none |
+| `config.obsidian.enabled` + `.vault` | Store plans and design docs in an Obsidian vault | `false` |
 | `config.project.vision` | One line: what this codebase is and why (project-scoped) | none |
 
 Budget and skip behavior are not config keys; they're flags you pass to a run, for example `/fno:target --budget 25 "..."` or `/fno:target --no-external "..."`. See [the target guide](guides/target.md) for the full flag list.
