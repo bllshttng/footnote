@@ -637,11 +637,8 @@ def _replace_item_line(text: str, fu_id: str, new_line: str) -> str:
 
 
 def _item_source_ref(text: str, fu_id: str) -> Optional[str]:
-    """The item's ``source:`` sub-line value (x-1005 origin evidence).
-
-    Capture records a substrate reference (PR#, commit, file, URL) when an
-    item is added; promotion carries it onto the node so the birth keeps the
-    producing reference. ``None`` when the item block has no source line."""
+    """The item's ``source:`` sub-line value (x-1005 birth evidence); None if
+    the item block has no source line."""
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         m = _ITEM_RE.match(line)
@@ -781,8 +778,6 @@ def promote_item(
 
         title, parsed_priority = _split_priority(m.group(3))
         node_priority = priority or parsed_priority or "p2"
-        # Origin evidence (x-1005): the capture itself is the producing event,
-        # and the item's source sub-line is where that event points.
         source_ref = _item_source_ref(text, fu_id)
         origin_ref = f"{fu_id} source: {source_ref}" if source_ref else fu_id
         # Node creation acquires the graph lock; we hold the inbox lock. The

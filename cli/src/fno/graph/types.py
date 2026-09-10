@@ -244,11 +244,7 @@ class Entry(BaseModel):
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
 
-    # Request origin (x-1005): stamped ONCE at birth by the native decision
-    # (crates/fno-agents/src/node_origin.rs, via the
-    # `fno-agents node-origin resolve` transport). Later edits, re-intakes and
-    # rulings never rewrite it; a node without one (every pre-x-1005 row)
-    # reads as unknown.
+    # Request origin (x-1005): stamped once at birth, never rewritten later.
     request_origin: Optional[str] = None
     origin_evidence: Optional[str] = None
 

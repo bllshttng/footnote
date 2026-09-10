@@ -26,6 +26,21 @@ from fno.graph._constants import (
     validate_source_kind,
 )
 
+ORIGIN_EVIDENCE_HELP = (
+    "Producing-event reference (mail id, event id, fu-id, path). With "
+    "--source-kind from_observation/from_supervisor this is what makes the "
+    "node an agent discovery; without it the origin stays unknown."
+)
+ENCOUNTER_EVIDENCE_HELP = "Record why the creator encountered this node. Optional."
+DESCRIPTION_HELP = (
+    "Alias for --details. Reads more naturally for an idea-stage row. "
+    "Mutually exclusive with --details."
+)
+SOURCE_KIND_HELP = (
+    "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+    "Mark an operator ask with operator_request."
+)
+
 def _scan_md_field(text: str, key: str) -> Optional[str]:
     """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
 
@@ -129,13 +144,11 @@ def _session_provenance(
 
 
 def resolve_birth_origins(records: list[dict]) -> list[dict]:
-    """Transport caller over the native origin decision (x-1005).
+    """Transport over the native origin decision (`fno-agents node-origin`).
 
-    Posts birth records to `fno-agents node-origin resolve` and returns one
-    ``{"origin", "evidence"}`` receipt per record, index-aligned. Fail-open to
-    ``unknown``: a missing binary, a spawn failure, a malformed receipt, or a
-    length mismatch must never invent an origin - unknown stays unknown, and
-    the caller stamps that. One subprocess per birth, never per read.
+    Returns one ``{"origin", "evidence"}`` receipt per record. Fail-open to
+    ``unknown``: a missing binary, spawn failure, or malformed receipt never
+    invents an origin.
     """
     fail_open = [{"origin": REQUEST_ORIGIN_DEFAULT, "evidence": None}] * len(records)
     try:
@@ -158,20 +171,39 @@ def resolve_birth_origins(records: list[dict]) -> list[dict]:
         results = (json.loads(proc.stdout) or {}).get("results")
         if not isinstance(results, list) or len(results) != len(records):
             return fail_open
-        receipts: list[dict] = []
-        for result in results:
-            origin = result.get("origin") if isinstance(result, dict) else None
-            receipts.append(
-                {
-                    "origin": origin
-                    if origin in REQUEST_ORIGINS
-                    else REQUEST_ORIGIN_DEFAULT,
-                    "evidence": result.get("evidence") if isinstance(result, dict) else None,
-                }
-            )
-        return receipts
+        return [
+            {
+                "origin": r.get("origin") if r.get("origin") in REQUEST_ORIGINS else REQUEST_ORIGIN_DEFAULT,
+                "evidence": r.get("evidence"),
+            }
+            if isinstance(r, dict)
+            else {"origin": REQUEST_ORIGIN_DEFAULT, "evidence": None}
+            for r in results
+        ]
     except Exception:  # noqa: BLE001 - fail open; birth never invents origin
         return fail_open
+
+
+def stamp_request_origin(
+    *, source_kind: str | None, birth_channel: str, origin_evidence: str | None
+) -> "tuple[str | None, str | None]":
+    """One birth record through the native owner; returns (origin, evidence).
+
+    The evidence reference is the caller's own birth fact: normalized here and
+    stamped regardless of the transport, since preserving it is the caller's
+    job. Only the category fail-opens to unknown.
+    """
+    ref = (origin_evidence or "").strip() or None
+    origin = resolve_birth_origins(
+        [
+            {
+                "source_kind": source_kind,
+                "birth_channel": birth_channel,
+                "origin_evidence": ref,
+            }
+        ]
+    )[0]["origin"]
+    return origin, ref
 
 
 def _build_backlog_node(
@@ -228,22 +260,9 @@ def _build_backlog_node(
     # written, so a new writer cannot mint an out-of-vocabulary value even if
     # it skips its own CLI-level check.
     validate_source_kind(source_kind)
-
-    # Request origin (x-1005): the native decision, stamped once at birth and
-    # never rewritten by later updates. Fail-open stamps unknown; a recorder
-    # harness or an organic default never establishes origin. The evidence
-    # reference is the CALLER's own birth fact, so it is normalized and
-    # stamped here and never depends on the transport resolving.
-    origin_evidence_ref = (origin_evidence or "").strip() or None
-    origin = resolve_birth_origins(
-        [
-            {
-                "source_kind": source_kind,
-                "birth_channel": origin_channel,
-                "origin_evidence": origin_evidence_ref,
-            }
-        ]
-    )[0]["origin"]
+    origin, origin_evidence_ref = stamp_request_origin(
+        source_kind=source_kind, birth_channel=origin_channel, origin_evidence=origin_evidence
+    )
 
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
@@ -341,13 +360,7 @@ def cmd_new(
         None, "--source-inbox-msg", help="Source inbox message ID"
     ),
     origin_evidence: Optional[str] = typer.Option(
-        None,
-        "--origin-evidence",
-        help=(
-            "Producing-event reference (mail id, event id, fu-id, path). With "
-            "--source-kind from_observation/from_supervisor this is what makes "
-            "the node an agent discovery; without it the origin stays unknown."
-        ),
+        None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP
     ),
 ) -> None:
     """Create a new graph entry without a plan file.

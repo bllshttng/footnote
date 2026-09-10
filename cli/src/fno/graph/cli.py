@@ -30,6 +30,12 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
     _build_backlog_node,
     _session_provenance,
 )
+from fno.graph.node_builder import (
+    DESCRIPTION_HELP,
+    ENCOUNTER_EVIDENCE_HELP,
+    ORIGIN_EVIDENCE_HELP,
+    SOURCE_KIND_HELP,
+)
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
 
@@ -1298,27 +1304,13 @@ def cmd_add(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
     origin_evidence: Optional[str] = typer.Option(
-        None,
-        "--origin-evidence",
-        help=(
-            "Producing-event reference (mail id, event id, path). With "
-            "--source-kind from_observation/from_supervisor this is what makes "
-            "the node an agent discovery; without it the origin stays unknown."
-        ),
+        None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP
     ),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
@@ -1334,12 +1326,7 @@ def cmd_add(
         ),
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
         None,
@@ -1503,27 +1490,13 @@ def cmd_idea(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
     origin_evidence: Optional[str] = typer.Option(
-        None,
-        "--origin-evidence",
-        help=(
-            "Producing-event reference (mail id, event id, path). With "
-            "--source-kind from_observation/from_supervisor this is what makes "
-            "the node an agent discovery; without it the origin stays unknown."
-        ),
+        None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP
     ),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
@@ -1539,12 +1512,7 @@ def cmd_idea(
         ),
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
         None,

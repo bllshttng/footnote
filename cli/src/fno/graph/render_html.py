@@ -574,6 +574,7 @@ body[data-local="false"] .detail { padding-left:15px }
   display:inline-flex; align-items:center; gap:5px; text-decoration:none }
 .pbtn:hover { border-color:var(--accent); color:var(--accent) }
 .pbtn.primary { border-color:var(--accent); color:var(--accent); background:var(--accent-soft) }
+.pill.origin { border-style:dashed }
 .pbtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .none, .empty { padding:26px 15px; color:var(--muted); text-align:center; font-size:14px }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px;
@@ -607,7 +608,11 @@ _DASHBOARD_JS = """\
   var label = function (s) { return String(s).replace(/_/g, ' ').replace(/\\b\\w/g, function (c) { return c.toUpperCase(); }); };
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
-  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false };
+  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false, origin:'' };
+  // Request-origin bucket names (x-1005). Unknown rows carry no pill; the
+  // detail panel still names the origin so absence reads as unknown, never
+  // as missing data.
+  var ORIGIN_LABELS = { operator_request:'your request', agent_discovery:'agent discovery', automated_followup:'automated', unknown:'unknown' };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
     try {
@@ -688,6 +693,8 @@ _DASHBOARD_JS = """\
   fill(document.getElementById('prioSel'), 'p', 'Priority'); fill(document.getElementById('sizeSel'), 'sz', 'Size');
   document.getElementById('prioSel').addEventListener('change', function (e) { state.prio = e.target.value; render(); });
   document.getElementById('sizeSel').addEventListener('change', function (e) { state.size = e.target.value; render(); });
+  var originSel = document.getElementById('originSel');
+  if (originSel) originSel.addEventListener('change', function (e) { state.origin = e.target.value; render(); });
   var fromEl = document.getElementById('fromDate'); var stamps = NODES.map(function (n) { return n.u || n.c || ''; }).filter(Boolean).sort();
   if (stamps.length) { fromEl.min = stamps[0]; fromEl.max = stamps[stamps.length - 1]; }
   fromEl.addEventListener('change', function () { state.from = fromEl.value || '';
@@ -704,6 +711,7 @@ _DASHBOARD_JS = """\
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
     if (state.size && state.size !== n.sz) return false;
+    if (state.origin && (n.ro || 'unknown') !== state.origin) return false;
     if (state.ty && state.ty !== n.ty) return false; if (state.from && (n.s === 'done' || n.s === 'superseded') && (n.u || n.c || '') < state.from) return false;
     if (state.planOnly && !(n.pl && n.s !== 'done' && n.s !== 'superseded')) return false; if (state.prOnly && !n.pr) return false;
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
@@ -821,6 +829,9 @@ _DASHBOARD_JS = """\
     // the same copy is this button, reached by expanding the row.
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
+    if (LOCAL) { var ro = n.ro || 'unknown';
+      h += '<div class="kv"><span><b>origin</b> ' + esc(ORIGIN_LABELS[ro] || ro) + '</span>'
+        + (n.oe ? '<span><b>evidence</b> ' + esc(n.oe) + '</span>' : '') + '</div>'; }
     if (LOCAL) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
@@ -867,7 +878,8 @@ _DASHBOARD_JS = """\
         // Click order matters: the pill's handler stops propagation, which also
         // keeps the .rid copy-id handler beneath it from firing, so one click
         // copies the command and nothing else.
-        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        var originPill = LOCAL && n.ro && n.ro !== 'unknown' ? '<span class="pill origin">' + esc(ORIGIN_LABELS[n.ro] || n.ro) + '</span>' : '';
+        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + originPill + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
@@ -1109,6 +1121,9 @@ def _dashboard_rows(
                         for bid in entry.get("blocked_by") or []
                         if isinstance(bid, str)
                     ],
+                    # Request origin (x-1005); local-only, evidence can be private.
+                    "ro": str(entry.get("request_origin") or "unknown"),
+                    "oe": str(entry.get("origin_evidence") or ""),
                 }
             )
             # Emitted on EVERY local row, zero included. A vote surface
@@ -1349,7 +1364,16 @@ def _dashboard_html(
         '<label class="datef" id="datef">from <input type="date" id="fromDate" aria-label="Show work touched on or after this date"></label>'
         '<select id="prioSel" aria-label="Filter by priority"><option value="">Any priority</option></select>'
         '<select id="sizeSel" aria-label="Filter by size"><option value="">Any size</option></select>'
-        '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
+        + (
+            '<select id="originSel" aria-label="Filter by request origin"><option value="">All origins</option>'
+            '<option value="operator_request">Your requests</option>'
+            '<option value="agent_discovery">Agent discoveries</option>'
+            '<option value="automated_followup">Automated follow-ups</option>'
+            '<option value="unknown">Unknown</option></select>'
+            if local
+            else ""
+        )
+        + '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
         + (
             '<button class="chip" id="demandOnly" type="button" aria-pressed="false">Demand</button>'

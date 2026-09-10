@@ -145,10 +145,7 @@ SOURCE_KINDS = frozenset(
 )
 SOURCE_KIND_DEFAULT = "organic"
 
-# Request-origin vocabulary (x-1005): the four board buckets. The DECISION is
-# owned by crates/fno-agents/src/node_origin.rs and reached through the
-# `fno-agents node-origin resolve` transport; this set only names the values
-# Python may stamp and test, and what fail-open reads (the default).
+# Request-origin buckets (x-1005); the decision lives in node_origin.rs.
 REQUEST_ORIGINS = frozenset(
     {"operator_request", "agent_discovery", "automated_followup", "unknown"}
 )

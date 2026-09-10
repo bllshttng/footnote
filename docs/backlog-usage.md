@@ -289,6 +289,14 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from a missed one. Coverage counts only origins that still resolve to a live node, because an origin naming a deleted node joins nothing and would otherwise inflate coverage while contributing no growth; any such danglers are reported separately. Realized node and PR counts print either way, so a withheld figure explains itself.
 
+### Request origin: who asked for this
+
+`request_origin` names who requested the work, decided once at birth by the native decision in `crates/fno-agents/src/node_origin.rs` and never rewritten by later edits, re-intakes, or rulings. It is one of four buckets: `operator_request` (a human asked, via `--source-kind operator_request`), `agent_discovery` (an agent found it, declared with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`), `automated_followup` (a machine follow-up: retro landings, decomposed children), and `unknown`. A node carries `origin_evidence`, the producing-event reference the birth had (a capture fu-id and its substrate ref, a plan's sources, a causal node id).
+
+Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin, and every node born before this field existed reads unknown.
+
+The local board carries the four buckets as a filter (`All origins` select), a dashed pill on rows with a known origin, and an origin plus evidence line in each row's detail panel. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
+
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
 `in_review` and closes on the actual merge via `reconcile` / merge-triggered
