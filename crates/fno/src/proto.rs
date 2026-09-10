@@ -2987,6 +2987,14 @@ pub(crate) fn legacy_mux_root() -> PathBuf {
     legacy_state_root().join("mux")
 }
 
+/// The pre-config-chain global agents home (`<legacy_state_root>/agents`):
+/// where `mux doctor` looks for a historical squads store that no code
+/// reads (see `mux_cli::agents_squads_orphan_check`).
+#[cfg(not(test))]
+pub(crate) fn legacy_agents_home() -> PathBuf {
+    legacy_state_root().join("agents")
+}
+
 /// The pre-state-root sidecar path (squads.json, mux-view.json): a SIBLING of
 /// the legacy mux dir. The view and squad stores share this spelling so their
 /// fallback locations cannot drift apart.
