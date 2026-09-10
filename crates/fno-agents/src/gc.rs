@@ -953,7 +953,12 @@ mod tests {
 
     #[test]
     fn state_reap_event_reports_counts() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = tempfile::tempdir().unwrap();
+        let prior_claims = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
         let home = AgentsHome::at(root.path().join("agents"));
         home.ensure_root().unwrap();
         let cwd = root.path().join("repo");
@@ -967,7 +972,7 @@ mod tests {
              pr_status_cache_retain_days = 1\n",
         )
         .unwrap();
-        let claim = root.path().join("claims/.expired/old-claim");
+        let claim = root.path().join(".fno/claims/.expired/old-claim");
         std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
         std::fs::write(&claim, b"claim").unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
@@ -1056,6 +1061,10 @@ mod tests {
             payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES,
             "live-sized state_reap payload is {payload_len}B: {payload}"
         );
+        match prior_claims {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     #[test]
