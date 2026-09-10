@@ -296,12 +296,12 @@ def done_cmd(
     # moved to a successor mid-call is refused here instead of disarming the
     # successor's manifest below (same order as the succession path).
     vacated = holder_name is None
-    vacated_row = None
+    vacated_rows: list = []
     if holder_name is not None:
         attended_named = holder_name == ""
 
         def _vacate(rows: list) -> list:
-            nonlocal vacated, vacated_row
+            nonlocal vacated, vacated_rows
             for index, row in enumerate(rows):
                 if attended_named:
                     # Attended + named scope: vacate whatever live row holds
@@ -310,7 +310,7 @@ def done_cmd(
                         row.crown_scope == scope
                         and row.status not in _TERMINAL_ROW_STATUSES
                     ):
-                        vacated_row = row
+                        vacated_rows.append(row)
                         rows[index] = _replace(
                             row,
                             crown_level=None,
@@ -319,7 +319,7 @@ def done_cmd(
                         )
                         vacated = True
                 elif row.name == holder_name and row.crown_scope == scope:
-                    vacated_row = row
+                    vacated_rows.append(row)
                     rows[index] = _replace(
                         row, crown_level=None, crown_scope=None, crown_grantor=None
                     )
@@ -341,15 +341,12 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(1)
-        if vacated_row is not None:
-            # The row write is the authority: a vacated row gets its event even
-            # if the manifest removal below then exits 1. Emitted before it, and
-            # never on the refusal above, so the journal only ever records a
-            # vacate that committed.
+        for vacated_row in vacated_rows:
+            # The row write is the authority: this fires even if the manifest
+            # removal below then fails, and never on the refusal above. One
+            # event per vacated row, so a split crown records every holder.
             emit_crown_vacated(
-                scope=scope,
-                level=vacated_row.crown_level,
-                holder=vacated_row.name,
+                scope=scope, level=vacated_row.crown_level, holder=vacated_row.name,
                 holder_session=vacated_row.harness_session_id,
                 grantor=vacated_row.crown_grantor,
                 cause="expired" if attended_named else "abdicated",
@@ -370,15 +367,11 @@ def done_cmd(
         )
         raise typer.Exit(1)
     if not vacated:
-        # No live holder held the row: the manifest clear itself is the whole
-        # vacate, so the event names the manifest's session, not a row.
+        # No live holder: the manifest clear is the whole vacate.
         emit_crown_vacated(
-            scope=scope,
-            level=None,
-            holder=None,
+            scope=scope, level=None, holder=None,
             holder_session=expired_manifest_session,
-            grantor=None,
-            cause="orphan_manifest",
+            grantor=None, cause="orphan_manifest",
         )
     typer.echo(f"king: crown expired: {scope}")
     typer.echo(

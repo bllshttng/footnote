@@ -623,26 +623,82 @@ def emit_crown_vacated(
     cause: str,
     successor: Optional[str] = None,
 ) -> None:
-    """Journal one crown leaving its holder.
+    """Journal one crown leaving its holder, after the registry write commits.
 
-    The court can only answer "where did this crown go" from the record, never
-    from testimony: an abdication and a crown lost to a bug are indistinguishable
-    from outside until one of these lines lands. Callers emit AFTER the registry
-    write commits, so the row stays the authority and a refused vacate stays
-    silent.
+    An abdication and a crown lost to a bug are indistinguishable from outside
+    until one of these lines lands, so the court answers from the record, never
+    from testimony.
     """
     from fno.agents import events
 
     events.emit(
-        "agent_crown_vacated",
-        scope=scope,
-        level=level,
-        holder=holder,
-        holder_session=holder_session,
-        grantor=grantor,
-        cause=cause,
+        "agent_crown_vacated", scope=scope, level=level, holder=holder,
+        holder_session=holder_session, grantor=grantor, cause=cause,
         successor=successor,
     )
+
+
+def settle_spawn_crown(
+    rows: list,
+    *,
+    scope: str,
+    succession: bool,
+    succession_caller_name: Optional[str],
+    exclude_name: Optional[str] = None,
+) -> "tuple[list, str, list]":
+    """The one-live-crown guard a crowned spawn runs, as a pure function over rows.
+
+    One behavior the bg and pane spawn paths each hand-wrote, order kept: clear
+    terminal holders of ``scope``, collect live holders (skipping the row a
+    revive replaces), succession before refusal. Returns ``(rows, outcome,
+    vacated)``: outcome is ``granted`` | ``succeeded`` | ``declined`` (the
+    caller stamps its own row, dropping the crown fields when declined), and
+    ``vacated`` lists ``(row_before_clear, cause)`` to journal once the
+    registry write commits.
+    """
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    vacated: list = []
+    for index, row in enumerate(rows):
+        if row.crown_scope == scope and row.status in TERMINAL_STATUSES:
+            vacated.append((row, "holder_terminal"))
+            rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
+    holders = [
+        row for row in rows
+        if row.name != exclude_name
+        and row.crown_scope == scope
+        and row.status not in TERMINAL_STATUSES
+    ]
+    outcome = "granted"
+    if succession and succession_caller_name and holders and all(
+        h.name == succession_caller_name for h in holders
+    ):
+        for index, row in enumerate(rows):
+            if row.crown_scope == scope and row.name == succession_caller_name:
+                vacated.append((row, "succession"))
+                rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
+        outcome = "succeeded"
+    elif holders:
+        outcome = "declined"
+    return rows, outcome, vacated
+
+
+def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
+    """Journal one committed spawn write: a vacate line per cleared holder plus
+    the grant line. A declined launch moved no crown and writes nothing."""
+    for row, cause in vacated:
+        emit_crown_vacated(
+            scope=scope, level=row.crown_level, holder=row.name,
+            holder_session=row.harness_session_id, grantor=row.crown_grantor,
+            cause=cause, successor=name if cause == "succession" else None,
+        )
+    if outcome in ("granted", "succeeded"):
+        from fno.agents import events
+
+        events.emit(
+            "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
+            vacated_scope=None, vacated_level=None, stranded_subordinates=[],
+        )
 
 
 def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:

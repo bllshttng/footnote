@@ -74,13 +74,18 @@ from fno.agents.registry import (
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
-    TERMINAL_STATUSES,
     load_registry,
     mint_agent_entry,
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
+from fno.agents.crown import (
+    calling_agent_row,
+    crown_validation_error,
+    grant_error,
+    journal_spawn_crown,
+    settle_spawn_crown,
+)
 from fno.harness_identity import (
     canonical_handle,
     session_identity_key,
@@ -1796,6 +1801,8 @@ def _claude_create_path(
 
     crown_declined = False
     crown_succeeded = False
+    crown_outcome: Optional[str] = None
+    crown_cleared: list = []
     king_loop_armed: Optional[bool] = None
     king_unarmed_reason = ""
 
@@ -1804,7 +1811,9 @@ def _claude_create_path(
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
+        nonlocal crown_declined, crown_succeeded
+        nonlocal crown_outcome, crown_cleared
+        nonlocal king_loop_armed, king_unarmed_reason
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
@@ -1823,37 +1832,16 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
-            # Reclaiming an abandoned scope also clears the terminal holder's
-            # stale crown in this same write. Terminal rows are excluded from
-            # `holders`, but their crown fields still make them appear crowned
-            # to readers and can create a double-rule after re-registration.
-            entries = [
-                replace(
-                    e,
-                    crown_level=None,
-                    crown_scope=None,
-                    crown_grantor=None,
-                )
-                if e.crown_scope == crown_scope and e.status in TERMINAL_STATUSES
-                else e
-                for e in entries
-            ]
-            contenders = [e for e in entries if not (revive and e.name == name)]
-            holders = [
-                e
-                for e in contenders
-                if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
-            ]
-
-            if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
-                entries = [
-                    replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and e.name == succession_caller_name
-                    else e
-                    for e in entries
-                ]
+            entries, crown_outcome, crown_cleared = settle_spawn_crown(
+                entries,
+                scope=crown_scope,
+                succession=succession,
+                succession_caller_name=succession_caller_name,
+                exclude_name=name if revive else None,
+            )
+            if crown_outcome == "succeeded":
                 crown_succeeded = True
-            elif holders:
+            elif crown_outcome == "declined":
                 entry = replace(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
@@ -1890,6 +1878,15 @@ def _claude_create_path(
 
     try:
         update_registry(_write)
+        if crown_scope:
+            journal_spawn_crown(
+                crown_outcome,
+                crown_cleared,
+                name=name,
+                level=crown_level,
+                scope=crown_scope,
+                grantor=crown_grantor_val,
+            )
         if crown_declined:
             print(
                 f"spawn: crown declined (scope {crown_scope!r} already held by a "
