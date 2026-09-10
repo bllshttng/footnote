@@ -2361,3 +2361,31 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
     let _ = daemon.wait();
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// status --json carries the drift verdict as a field (x-f188 change 4,
+/// AC4-HP): the census reads it from JSON instead of regex-parsing the
+/// stderr sentence.
+#[tokio::test]
+async fn status_json_carries_the_drift_label() {
+    const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let _daemon = start_daemon(&home);
+    let out = Command::new(CLIENT_BIN)
+        .args(["status", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client runs");
+    assert!(
+        out.status.success(),
+        "status exits 0 against a live daemon: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
+    let label = v["drift"].as_str().unwrap_or("MISSING");
+    assert!(
+        matches!(label, "fresh" | "drifted" | "unknown"),
+        "a drift label rides status --json, got {label}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

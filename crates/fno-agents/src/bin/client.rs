@@ -2063,6 +2063,13 @@ async fn run_status(json_out: bool) -> i32 {
                         "arms".into(),
                         serde_json::to_value(&arms).unwrap_or(Value::Null),
                     );
+                    // x-f188 change 4: the drift verdict as a field, so the
+                    // census reads it from JSON instead of regex-parsing the
+                    // stderr sentence.
+                    obj.insert(
+                        "drift".into(),
+                        json!(fno_agents::drift::drift_label(&drift)),
+                    );
                 }
                 if json_out {
                     println!(
