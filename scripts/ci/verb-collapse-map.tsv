@@ -115,6 +115,7 @@ agents worker reconcile	T1	agents worker reconcile	0
 agents worker review	T1	agents worker review	0
 agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
+agents workspace reap	T1	agents workspace reap	0
 agents workspace worktree archive	T1	agents workspace worktree archive	4
 agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
