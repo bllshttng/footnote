@@ -1151,11 +1151,7 @@ pub(crate) fn run(
         let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
         // x-2774: the session-shaped release that let an OPEN-work row
         // retire. The obligation re-checks (stage and commit) yield to it.
-        let released = row.session_terminal.is_some()
-            || row.superseded_by_live_peer.is_some()
-            || matches!(&row.work, WorkState::Open { status, .. }
-                if crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str()))
-            || row.node_merged;
+        let released = row.session_released();
         if let Err(refusal) = stage_session_retirement(
             home,
             e,

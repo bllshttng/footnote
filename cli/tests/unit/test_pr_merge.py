@@ -2934,12 +2934,48 @@ def test_a_merged_additional_pr_is_stamped_merged(monkeypatch, tmp_path):
     }]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: "o/r"
+    )
 
     _merge._sync_graph_merge_status("merged", 1522)
 
     saved = json.loads(graph.read_text())["entries"][0]
     assert saved["additional_prs"][0]["merge_status"] == "merged"
     assert saved["merge_status"] == "merged", "the primary status is untouched"
+
+
+def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tmp_path):
+    """The graph is cross-project and a bare number collides: an entry whose
+    url resolves to a different repo is never stamped, and neither is one
+    whose slug cannot be resolved at all - unrecorded stays open."""
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [{
+        "id": "x-other",
+        "status": "done",
+        "merge_status": "merged",
+        "pr_number": 1500,
+        "additional_prs": [
+            {"number": 1522, "url": "https://github.com/other/repo/pull/1522"},
+        ],
+    }]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: "o/r"
+    )
+
+    _merge._sync_graph_merge_status("merged", 1522)
+
+    saved = json.loads(graph.read_text())["entries"][0]
+    assert "merge_status" not in saved["additional_prs"][0]
+
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: None
+    )
+    _merge._sync_graph_merge_status("merged", 1522)
+    saved = json.loads(graph.read_text())["entries"][0]
+    assert "merge_status" not in saved["additional_prs"][0]
 
 
 def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path):

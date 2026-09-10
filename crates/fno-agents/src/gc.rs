@@ -98,6 +98,20 @@ pub struct GcRow {
     pub pid_gone: bool,
 }
 
+impl GcRow {
+    /// The session-shaped release (x-2774): the ONE predicate the policy
+    /// arm and the sweep's obligation yields both read, so they cannot
+    /// drift. A released row's own open do row is the stale record of work
+    /// that moved on, never a live assignment.
+    pub fn session_released(&self) -> bool {
+        self.session_terminal.is_some()
+            || self.superseded_by_live_peer.is_some()
+            || matches!(&self.work, WorkState::Open { status, .. }
+                if INACTIVE_NODE_STATUSES.contains(&status.as_str()))
+            || self.node_merged
+    }
+}
+
 /// The statuses that complete a PLANNING assignment: the plan was written
 /// and the node moved on (dispatched, in flight, or shipped). `idea` is the
 /// loud exception - an idea node never received the plan, so the planning
@@ -293,11 +307,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // - the node is parked (deferred) or never started (idea);
             // - the node's recorded merge_status already reads merged.
             // Dead pid is change 8 and rides the grace gate itself.
-            if row.session_terminal.is_some()
-                || row.superseded_by_live_peer.is_some()
-                || INACTIVE_NODE_STATUSES.contains(&status.as_str())
-                || row.node_merged
-            {
+            if row.session_released() {
                 return grace_gate(row, grace_secs);
             }
             (
