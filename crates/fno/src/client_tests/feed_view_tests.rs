@@ -476,7 +476,10 @@ fn a_pan_moves_the_title_by_display_columns() {
 }
 
 // (AC5-HP) A removal reads as a normal outcome carrying its recovery line,
-// never as a bare attach the server refuses.
+// never as a bare attach the server refuses. (x-1b90) Its pane field is a
+// measurement question, not an applicability question: NOT RECORDED names
+// that the removal did not measure the pane, and a recovery line that IS a
+// stop measurement (the pid read gone) prints as the pane's value.
 #[test]
 fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
     use crate::client::feed_detail;
@@ -488,11 +491,24 @@ fn a_reaped_row_reads_as_a_good_outcome_with_its_resume_line() {
     let fields = feed_detail::detail_fields(&item, &d);
     let pane = fields.iter().find(|(l, _)| *l == "pane").unwrap();
     assert!(
-        pane.1.starts_with(feed_detail::NOT_APPLICABLE),
-        "pane read {}",
+        pane.1.starts_with(feed_detail::NOT_RECORDED),
+        "a resume line says nothing about the pane: {}",
         pane.1
     );
-    assert!(pane.1.contains("removed"));
+    assert!(pane.1.contains("did not measure the pane"));
+    // A recovery line that carries change 1's native-stop detail prints as
+    // the pane's value: the removal MEASURED this death.
+    let stopped = reaped_item(
+        "00847995-e0db-47c2-ab5b-24468ba1a4f5",
+        "pane main:2034 (child 22287) killed; pid 22287 gone",
+    );
+    let fields = feed_detail::detail_fields(&stopped, &destination(&[], &stopped));
+    let pane = fields.iter().find(|(l, _)| *l == "pane").unwrap();
+    assert!(
+        pane.1.contains("pid 22287 gone"),
+        "a stop detail is the pane's measurement: {}",
+        pane.1
+    );
     let lines = feed_detail::detail_lines(&item, &d);
     assert!(lines.iter().any(|l| l == "resume: claude --resume x"));
     assert!(feed_detail::detail_footer(&d).contains("resume line"));

@@ -111,13 +111,25 @@ fn seat(a: &AgentRow) -> String {
     }
 }
 
+/// True when a recovery line IS a stop measurement: change 1's native-stop
+/// detail ends with the pid read gone. Anything else (a resume line) says
+/// nothing about the pane, and the field must not pretend otherwise.
+fn recovery_names_the_stop(detail: &str) -> bool {
+    detail.contains("pid ") && detail.contains(" gone")
+}
+
 /// What the pane field can honestly say. Most of these are good outcomes
 /// rather than errors.
 fn pane_value(item: &FeedItem, dest: &Destination<'_>) -> String {
     match dest {
-        // A removal is a normal end, not a failure. The recovery line is the
-        // footer's job; this field only says the seat is gone on purpose.
-        Destination::Recovery(_) => format!("{NOT_APPLICABLE} - the session was removed"),
+        // A removal is a normal end, not a failure - but NOT APPLICABLE is
+        // positive evidence the pane concept cannot apply, and a removed
+        // session's pane can outlive its row for a day (x-1b90). Until a
+        // removal record names the stop, the field reads not recorded.
+        Destination::Recovery(detail) if recovery_names_the_stop(detail) => (*detail).to_string(),
+        Destination::Recovery(_) => {
+            format!("{NOT_RECORDED} - the removal did not measure the pane")
+        }
         Destination::Exact(a) => seat(a),
         Destination::NameOnly(a) => format!("{} · the node's current worker", seat(a)),
         Destination::SessionOnly(_) => "not in the live roster".to_string(),
