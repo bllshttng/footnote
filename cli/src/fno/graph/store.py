@@ -36,6 +36,7 @@ import base64 as _base64
 import hashlib
 import json
 import os
+import random
 import shutil
 import socket
 import struct
@@ -56,6 +57,13 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
 # keeper's lock, so a conflict means an interleaved writer landed and the
 # retry sees fresh data. Five is generous for human-rate contention.
 _TX_ATTEMPTS = 5
+
+# Full-jitter backoff between retries. An immediate `continue` made N
+# concurrent writers re-ship the whole graph in lockstep and collide again
+# (the 2026-09-09 write livelock). Full jitter, not a shared floor: a common
+# floor is its own herd.
+_TX_BACKOFF_BASE_S = 0.05
+_TX_BACKOFF_CAP_S = 2.0
 
 # Bounded lock deadline handed to the keeper (its own default is 10s when
 # the spawn omits the flag).
@@ -1085,6 +1093,23 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
     return entries
 
 
+def _emit_graph_tx_event(**data: Any) -> None:
+    """Envelope-journal event from the tx loop; never raises.
+
+    The 2026-09-09 write livelock burned 179 CPU-minutes while the journal
+    stayed silent: `except _Conflict: continue` emitted nothing, so readers
+    chased load instead of the retry storm. Rides the fno.events envelope
+    (layer 0, ephemeral retention) because the store is L1 core and may not
+    import the agents runtime journal.
+    """
+    try:
+        from fno.events import _build, append_event
+
+        append_event(_build("graph_tx_conflict", "python", data))
+    except Exception:  # noqa: BLE001 - telemetry never changes a store outcome
+        pass
+
+
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     """Locked read-modify-write via the store keeper. Recomputes statuses
     after mutation; retries on an interleaved writer; surfaces a wedged
@@ -1120,10 +1145,20 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             )
             break
         except _Conflict:
+            _emit_graph_tx_event(
+                attempt=attempt + 1,
+                attempts_max=_TX_ATTEMPTS,
+                entries=len(entries),
+                exhausted=attempt == _TX_ATTEMPTS - 1,
+                graph_path=str(path),
+            )
             if attempt == _TX_ATTEMPTS - 1:
                 raise RuntimeError(
                     f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
                 ) from None
+            time.sleep(
+                random.uniform(0, min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt))
+            )
             continue
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")

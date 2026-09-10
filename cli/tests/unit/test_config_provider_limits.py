@@ -88,16 +88,20 @@ def test_gate_reads_provider_limits_not_the_legacy_leaf(monkeypatch, capsys):
 
     monkeypatch.setattr("fno.config.load_settings", fake_run_gate_settings)
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
-    # A census that cannot answer forces the provider-cap arm to refuse
-    # immediately - the arm that read provider_limits on the way in.
-    def broken_census():
-        raise spawn_gate.ProviderCountUnavailable("count unavailable")
-
-    monkeypatch.setattr(spawn_gate, "census", broken_census)
+    # A measured count at the cap forces the provider-cap refusal - the arm
+    # that read provider_limits (cap 5 for zai) on the way in. The mutex is
+    # patched held-and-released so the refusal measures the cap, never a
+    # contended gate.
+    monkeypatch.setattr(
+        spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+    )
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _provider: 5)
     with pytest.raises(SystemExit) as exc:
         spawn_gate.run_gate("w", "bg", route_provider="zai")
     assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-    assert "provider zai, cap 5" in capsys.readouterr().err
+    refused = capsys.readouterr().err
+    assert "provider zai, cap 5" in refused
+    assert "current count 5" in refused
 
 
 def test_no_second_agents_leaf_named_max_lanes():

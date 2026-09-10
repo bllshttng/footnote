@@ -1229,6 +1229,30 @@ event_types:
         note:
           type: string
           description: "Present only when the latch could not function: no claims root, or an unreadable claim."
+  - name: graph_tx_conflict
+    retention: ephemeral
+    description: "One conflicted graph transaction retry in locked_mutate_graph. Emitted on every conflict, including the exhausted one: a retry loop that speaks only when it gives up cannot be told apart from a loop that never conflicted, and the 2026-09-09 write livelock burned 179 CPU-minutes while the journal stayed silent."
+    sources: [python]
+    data:
+      required: [attempt, attempts_max, graph_path]
+      properties:
+        attempt:
+          type: integer
+          description: "1-based index of the attempt that conflicted."
+        attempts_max:
+          type: integer
+          description: "The retry budget the loop is working against."
+        entries:
+          type: integer
+          description: "Entry count in the mutated payload that failed to commit; a storm of big payloads is the load feeding the livelock."
+        exhausted:
+          type: boolean
+          description: "True on the final attempt, which raises instead of retrying."
+        graph_path:
+          type: string
+          description: "The graph file whose transaction conflicted."
+    consumers: [operator]
+
   - name: orphan_reap_sweep
     retention: ephemeral
     description: "The daemon swept for fno children that init inherited. Emitted on EVERY run, including the runs that reap nothing: a reaper that speaks only when it kills cannot be told apart from a reaper that never ran."

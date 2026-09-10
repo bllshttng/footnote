@@ -698,7 +698,8 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate,
             "_footprint_cause_evidence",
-            lambda: mutex_held_when_probed.append("spawn-gate" in released) or None,
+            lambda: mutex_held_when_probed.append(spawn_gate.GATE_CLAIM_KEY in released)
+            or None,
             raising=False,
         )
 
@@ -881,6 +882,12 @@ class TestRunGate:
         )
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+        # The mutex is held and released every pass here: this pins the
+        # SLOT-cap timeout receipt, not mutex contention (that one refuses
+        # as gate_mutex_busy).
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
 
         runner = CliRunner()
         res = runner.invoke(
@@ -971,6 +978,87 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
         assert "proceeding unserialized" not in capsys.readouterr().err
 
+    def test_capped_arm_steals_a_dead_gate_and_reacquires(self, monkeypatch, capsys):
+        """AC: a capped provider facing a CORPSE steals it and re-acquires.
+
+        The capped arm used to refuse on the first contended read
+        (reason: provider_cap) while the uncapped arm queued - so every
+        target spawn was refused and every blueprint spawn succeeded, same
+        machine, same minute. Contention is a peer or a corpse, never a cap.
+        """
+        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
+        acquire_calls: list[bool] = []
+
+        def _acquire(_holder, *, fail_closed=False):
+            acquire_calls.append(fail_closed)
+            return len(acquire_calls) > 1  # contended once, then the steal lands
+
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "stale"},
+        )
+        steals: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append((key, reason)),
+        )
+        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
+
+        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
+
+        assert steals == [
+            (
+                spawn_gate.GATE_CLAIM_KEY,
+                "spawn-gate held past the wait budget by a dead holder",
+            )
+        ]
+        assert acquire_calls == [True, True], "capped arm stays fail_closed"
+        err = capsys.readouterr().err
+        assert "provider_cap" not in err
+        guard.release()
+
+    def test_capped_arm_steals_a_corrupted_gate_claim(
+        self, monkeypatch, capsys
+    ):
+        """A corrupted lockfile serializes nobody: claims are written
+        atomically, so corruption means the file is damaged, not held."""
+        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
+        calls: list[bool] = []
+
+        def _acquire(_holder, *, fail_closed=False):
+            calls.append(fail_closed)
+            return len(calls) > 1  # contended once, then the steal lands
+
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "corrupted"},
+        )
+        steals: list[str] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append(key),
+        )
+        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
+
+        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
+
+        assert steals == [spawn_gate.GATE_CLAIM_KEY]
+        guard.release()
+
     def test_dequeue_ram_recheck_refuses(self, monkeypatch):
         """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
         _settings(monkeypatch, max_live=1, min_free_gb=4.0)
@@ -1050,8 +1138,10 @@ class TestRunGate:
             spawn_gate.run_gate("zai-1", "pane", route_provider="zai")
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
         refused = capsys.readouterr().err
-        assert "provider zai" in refused and "cap 2" in refused
-        assert "current count unavailable" in refused
+        assert "provider zai" in refused
+        assert "gate mutex unavailable" in refused
+        assert "registry denied" in refused
+        assert "provider_cap" not in refused
 
     def test_partial_forward_registry_refuses_instead_of_undercounting(
         self, monkeypatch
@@ -1273,16 +1363,31 @@ class TestRunGate:
             )
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
 
-    def test_provider_cap_never_queues_on_a_busy_mutex(self, monkeypatch, capsys):
+    def test_capped_arm_queues_behind_a_live_holder_and_never_says_provider_cap(
+        self, monkeypatch, capsys
+    ):
+        """AC: a LIVE holder is a live peer; queue to the timeout, and the
+        refusal must never name the cap the gate never read. The old
+        behavior refused on the FIRST contended read with
+        reason: provider_cap, count: null - a cause it never measured."""
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: False
+            spawn_gate, "_acquire_gate_mutex", lambda _h, **_k: False
         )
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, *, root=None: {"state": "live"},
+        )
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.15)
+
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("zai-now", "pane", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        refused = capsys.readouterr().err
-        assert "current count unavailable" in refused and "queued" not in refused
+
+        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
+        assert exc.value.receipt is not None
+        assert exc.value.receipt["reason"] == "gate_mutex_busy"
 
     def test_provider_count_requires_positive_liveness_and_skips_exited(
         self, monkeypatch
@@ -1381,7 +1486,7 @@ class TestRunGate:
             "fno.claims.core.acquire_claim",
             lambda *args, **kwargs: (
                 True
-                if args[0] == "spawn-gate"
+                if args[0] == spawn_gate.GATE_CLAIM_KEY
                 else (_ for _ in ()).throw(OSError("claim store denied"))
             ),
         )
@@ -1390,8 +1495,10 @@ class TestRunGate:
             spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
         refused = capsys.readouterr().err
-        assert "provider zai" in refused and "cap 2" in refused
-        assert "current count unavailable" in refused
+        assert "provider zai" in refused
+        assert "lane reservation unavailable" in refused
+        assert "claim store denied" in refused
+        assert "provider_cap" not in refused
 
     def test_release_failures_are_loud_and_retain_retry_state(
         self, monkeypatch, capsys
@@ -1431,7 +1538,7 @@ class TestRunGate:
 
         guard.release()
 
-        assert attempts == {"spawn-gate": 3, "worker:peer": 3}
+        assert attempts == {spawn_gate.GATE_CLAIM_KEY: 3, "worker:peer": 3}
         assert guard._gate_holder is None
         assert guard._worker_key is None
 

@@ -252,8 +252,11 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     "dispatch",
     "reconcile",
     "session",
+    "groom",
+    "update",
     "config-optout",
     "flight",
+    "gate",
 ];
 
 /// Dotted configuration keys whose opt-out values are backed by global claims.

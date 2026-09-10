@@ -125,6 +125,11 @@ def global_claims_dir() -> Path:
 #                  worktrees), so a cwd-local root would dedupe nothing. Rust
 #                  owns the latch; this entry keeps `fno agents claim status`
 #                  reading the same lockfile.
+# - gate:<side>    the machine-wide spawn-gate mutex (spawn_gate.py and the
+#                  Rust twin serialize EVERY spawner on the machine against
+#                  one lock). A cwd-local root would let two checkouts
+#                  serialize against different files and admit double the
+#                  capped-lane load.
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
 _GLOBAL_ID_PREFIXES = frozenset(
@@ -137,6 +142,7 @@ _GLOBAL_ID_PREFIXES = frozenset(
         "update",
         "config-optout",
         "flight",
+        "gate",
     }
 )
 
