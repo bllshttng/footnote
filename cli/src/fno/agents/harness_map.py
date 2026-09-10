@@ -1352,16 +1352,16 @@ def resolve_dispatch(
     # 3. command template. Precedence: explicit --command > lifecycle > node
     # verb (allowlist-checked; a graph field is a trust boundary) > config
     # template > per-harness builtin. A derived /target renders through the
-    # SAME builtin rungs so a low-difficulty planless node dispatches
-    # byte-identically to the pre-x-ebd2 shape (suppress the raw verb and fall
-    # through); a derived /blueprint renders its own verb - the operator's
-    # target template is a target-phase contract and does not apply.
+    # SAME builtin rungs, byte-identical to the pre-x-ebd2 shape (suppress the
+    # raw verb and fall through); a derived /blueprint renders its own verb:
+    # the operator's target template is a target-phase contract.
+    derived_blueprint = lifecycle_verb == "/blueprint"
     if lifecycle_verb == "/target":
         verb = None
     if command is not None and command.strip():
         template = command.strip()
         decision.append("command=explicit")
-    elif lifecycle_verb is not None:
+    elif derived_blueprint:
         template = f"{lifecycle_verb} {{id}}"
         decision.append(f"command=derived({lifecycle_verb})")
     elif verb is not None:
