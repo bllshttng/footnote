@@ -303,7 +303,7 @@ def live_worked_node_ids(
     roster is a loud degradation rather than an empty-work answer.
     """
     try:
-        from fno.claims.cli import _finished_row_states, _transcript_activity, read_roster
+        from fno.claims.roster import _really_finished, read_roster
         from fno.graph.store import read_graph_strict
         from fno.paths import graph_json
 
@@ -313,7 +313,6 @@ def live_worked_node_ids(
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
 
-        finished_states = _finished_row_states()
         worked: dict[str, list[str]] = {}
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("status") in TERMINAL_RUNGS:
@@ -326,10 +325,7 @@ def live_worked_node_ids(
                 if not isinstance(phase, str) or not is_open_phase_row(row, phase):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])
-                finished = roster_row and roster_row.get("state") in finished_states
-                if roster_row and not (finished and _transcript_activity(
-                    roster_row.get("row_id") or "", roster_row.get("cwd") or ""
-                ) is not False):
+                if roster_row and not _really_finished(roster_row):
                     worker = roster_row.get("name")
                     if isinstance(worker, str) and worker:
                         worked.setdefault(node_id, []).append(worker)

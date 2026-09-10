@@ -56,7 +56,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from types import MappingProxyType
 from typing import Callable, List, Mapping, NamedTuple, Optional
 
 import typer
@@ -71,6 +70,7 @@ import typer
 # suite patches functions, not classes.
 from . import core as _claims_core
 from . import io as _claims_io
+from . import roster as _roster
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
@@ -84,6 +84,12 @@ from .core import (
     HolderMismatch,
 )
 from fno.tombstones import tombstone_group_cls
+
+RosterReading = _roster.RosterReading
+_finished_row_states = _roster._finished_row_states
+_really_finished = _roster._really_finished
+_transcript_activity = _roster._transcript_activity
+read_roster = _roster.read_roster
 
 
 cli = typer.Typer(
@@ -836,112 +842,6 @@ def refresh(
 _UNHELD_STATES = frozenset({"free", "stale"})
 
 
-class RosterReading(NamedTuple):
-    """One reading of the fleet roster, reusable across many claims.
-
-    ``consulted`` is the honest instrument flag: False means the join could not
-    run, and ``reason`` says why. ``rows_scanned`` is the positive marker - a
-    scan of forty rows finding nobody is a different answer from a read that
-    failed, and rendering both the same way is how this defect would survive its
-    own fix. ``workers_by_node`` maps a resolved node id to the rows on it, and
-    ``rows_by_session`` maps a session id to its own row.
-
-    Taken ONCE and passed down. The read shells out to the harness, so a sweep
-    over sixty claims that took its own reading each time would pay sixty
-    subprocesses to answer one question.
-
-    WHAT THIS READING CANNOT SEE, and it decides how the probe below is allowed
-    to use it. ``fleet_rows`` enumerates ``claude agents --json --all`` and drops
-    ``kind == "interactive"``. So a codex or opencode worker, and any
-    hand-started session, has NO row here by construction. An empty
-    ``workers_on`` therefore means "not in this reading", never "nobody is
-    working that node".
-    """
-
-    consulted: bool
-    rows_scanned: int
-    workers_by_node: dict
-    reason: str = ""
-    # An immutable default, not a bare `{}`. A NamedTuple's default is built
-    # once and shared by every instance that omits it, so a plain dict here is
-    # one caller's `setdefault` away from leaking rows between readings.
-    rows_by_session: Mapping = MappingProxyType({})
-    rows_unresolved: int = 0
-    unresolved_rows: tuple = ()
-
-    def workers_on(self, node_id: str) -> list:
-        return self.workers_by_node.get(node_id, [])
-
-    def row_for_session(self, session_id: str):
-        return self.rows_by_session.get(session_id)
-
-
-def read_roster(timeout: float = 10.0) -> RosterReading:
-    """Read the fleet once and index it by resolved node id.
-
-    The join is :func:`fno.agents.watchdog.fleet_rows`, which resolves a row's
-    node from the worktree manifest and then the session-keyed ledger - both
-    machine-written. Never a name regex: eight auto-named workers read as
-    nobody-on-this-node on 2026-08-15 and were nearly double-dispatched, which
-    is recorded in that module's header.
-
-    Distinguishing "scanned and found nothing" from "could not scan" is the
-    whole point, so the degrade signal is explicit rather than inferred from an
-    empty index. ``fleet_rows`` returns ``([], warnings)`` for every failure
-    mode, so no rows PLUS a warning is an instrument that did not run, while no
-    rows and no warning is an honestly empty fleet.
-
-    A row whose node did not resolve carries ``node=None`` and is invisible
-    here - exactly the shape of a worker that never ran ``target init``. The
-    scanned count is the honest ceiling on what was checked, which is why every
-    caller prints it rather than just the hits.
-    """
-    try:
-        from fno.agents.watchdog import fleet_rows
-
-        rows, warnings = fleet_rows(timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
-        return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
-    # A warning degrades this reading UNLESS it marks itself advisory. The
-    # default has to be "do not trust", because a warning nobody anticipated is
-    # exactly the one that must not be waved through - and an instrument failure
-    # ("claude not on PATH") arrives as a plain warning with zero rows.
-    #
-    # Naming the harmless ones instead got this wrong twice. First only the
-    # latency notice was excused, so the two `unmapped row state` notices still
-    # threw away a listing whose rows were all present: one status spelling
-    # claude had not shipped before printed "roster not consulted" forever and
-    # answered None for every SUSPECT claim, and nothing was ever reaped again.
-    # Then the inverse blanket excused the instrument failure too.
-    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
-
-    blocking = [w for w in warnings if not w.startswith(ADVISORY_WARNING_PREFIX)]
-    if blocking:
-        # Still the absence-as-evidence rule: a truncated scan is never
-        # authoritative, and reporting it as one is the move this cross-check
-        # exists to delete, one layer up.
-        return RosterReading(False, 0, {}, blocking[0])
-    index: dict = {}
-    by_session: dict = {}
-    unresolved: list[dict] = []
-    for r in rows:
-        entry = {
-            "name": r.name,
-            "state": r.state,
-            "cwd": r.cwd,
-            # The session id travels with the row so a reader can ask the
-            # TRANSCRIPT whether a finished-looking row really finished.
-            "row_id": str(r.row_id or ""),
-        }
-        if r.node:
-            index.setdefault(r.node, []).append(entry)
-        else:
-            unresolved.append(entry)
-        if r.row_id:
-            by_session[str(r.row_id)] = entry
-    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved))
-
-
 def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
     """The additive ``roster_*`` fields for one node key.
 
@@ -970,29 +870,6 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     }
 
 
-def _finished_row_states() -> frozenset:
-    """Roster row states that mean the session is no longer driving the node.
-
-    ONE authority, the watchdog's own terminal set, because this file carried
-    two hand-written copies that both read ``{"done"}``. A ``killed`` row then
-    counted as an engaged worker: the cross-check called the node worked, and
-    the abandonment probe answered "the holder is still working", so the claim
-    was never reaped and the operator was told a live worker held it.
-
-    ``done`` is not terminal for the SESSION (it is resumable), but it is the
-    positive marker that this worker stopped working, which is the only thing
-    either caller needs to know.
-    """
-    from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-
-    # DERIVED from both authorities, never hand-listed. `_TERMINAL_STATES`
-    # holds `stopped`, and `_WAKE_STATES` holds it too: the watchdog will WAKE a
-    # stopped worker, so its claim is not abandoned and reaping it hands a
-    # returnable session's node to somebody else. The difference is the set that
-    # means gone for good, and it cannot drift from either source.
-    return _TERMINAL_STATES - _WAKE_STATES
-
-
 def _roster_verdict_line(info: dict) -> str:
     """One line naming what was consulted and what it found.
 
@@ -1013,24 +890,6 @@ def _roster_verdict_line(info: dict) -> str:
     if not info.get("roster_consulted"):
         return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
-    finished = _finished_row_states()
-
-    def _really_finished(w: dict) -> bool:
-        # The row narrows, and the transcript may OVERRULE it - one direction
-        # only. The roster called a WORKING session done on 2026-08-15, which is
-        # why `_TERMINAL_STATES` carries its own warning, so a transcript that
-        # is positively still moving beats a row that says done.
-        #
-        # An UNREADABLE transcript leaves the row's answer standing, which is
-        # the opposite of what the reap probe does with the same reading. The
-        # asymmetry is deliberate and it follows the cost: a wrong reap archives
-        # a live worker's claim, while a wrong line here is an alarm on a node
-        # nobody is on - and an alarm that fires on every finished session whose
-        # transcript has aged out is the permanent noise that teaches operators
-        # to ignore the alarm entirely.
-        if w.get("state") not in finished:
-            return False
-        return _transcript_activity(w.get("row_id") or "", w.get("cwd") or "") is not False
 
     engaged = [w for w in workers if not _really_finished(w)]
     if engaged:
@@ -1100,6 +959,11 @@ def status(
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
+        workers = info.get("roster_workers") or []
+        engaged = [worker for worker in workers if not _really_finished(worker)]
+        if engaged:
+            info["worked_by"] = [worker["name"] for worker in engaged]
+            info["basis"] = "live-worker"
         unresolved = info.get("roster_rows_unresolved", 0)
         if info.get("roster_unresolved_candidates"):
             # An unresolved row whose worktree names THIS node is an
@@ -1455,32 +1319,6 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         return True if holder_node != node_id else None
 
     return _probe
-
-
-def _transcript_activity(session_id: str, cwd: str):
-    """Tri-state: True finished, False still moving, None unreadable.
-
-    ``_transcript_says_finished`` folds "unreadable" into False because its
-    caller reaps, and there the safe answer is "still working". A reader that
-    only wants to OVERRULE a row needs the third value, or an aged-out
-    transcript reads as a live worker forever.
-    """
-    try:
-        import time
-
-        from fno.agents.watchdog import (
-            QUIET_AFTER_S,
-            finished_with_the_tree,
-            harness_for_session,
-            tail_facts,
-        )
-
-        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
-        if facts is None:
-            return None
-        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
-    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
-        return None
 
 
 def _transcript_says_finished(session_id: str, cwd: str) -> bool:
