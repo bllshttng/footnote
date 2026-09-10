@@ -2069,7 +2069,6 @@ def _clear_lock_mirror_for_reaped(
     """
     import sys
 
-    from fno.claims.io import claims_root_for
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
