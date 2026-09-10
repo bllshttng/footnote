@@ -4759,8 +4759,9 @@ def cmd_rm(
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
     the orphan in the receipt. A live row is refused until the row is
-    provably gone: a pane worker is told to kill its pane and re-run rm,
-    and a claude row names what its roster read showed. Terminal rows need
+    provably gone: a non-claude pane worker is told to kill its pane and
+    re-run rm, and a claude row names what its roster read showed.
+    Terminal rows need
     no separate stop first. Do not tear a session down by hand: the
     harness session record IS the resume handle, and dropping it directly
     spends that handle for nothing this command has not already done. If one
