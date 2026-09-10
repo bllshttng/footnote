@@ -19,10 +19,9 @@ projects, sleeping between drains. Config-gated, default-off, fail-safe.
 > ones (Why, circuit breaker, nudge) are unaffected.
 
 > **Worker names (x-84b2).** Daemon-dispatched workers are named
-> `ab-<verb>-<node>-<slug>` - the `ab` source says the active-backlog drain
-> launched them. The canonical vocabulary (every source and verb code, the
-> typed non-node identities, the legacy-read window) is documented in
-> [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md);
+> `ab-<verb>-<node>-<slug>`. The `ab` source says the active-backlog drain
+> launched them. The full vocabulary lives in
+> [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md).
 > `fno agents autonomy provenance` prints the ratcheted inventory.
 
 ## Why
