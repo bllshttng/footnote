@@ -74,6 +74,10 @@ prefix = "fno"
 # Override path to the per-repo spaces root.
 # spaces_dir = <unset>   # optional; no default
 
+[graph]
+# Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).
+commit_mode = "rows"
+
 [obsidian]
 # Whether this project uses an Obsidian vault for plans/docs.
 enabled = false

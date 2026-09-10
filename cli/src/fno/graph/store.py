@@ -33,6 +33,7 @@ path), :class:`GraphUnreadableError` / :class:`GraphMalformedRootError`
 from __future__ import annotations
 
 import base64 as _base64
+import copy
 import hashlib
 import json
 import os
@@ -572,7 +573,7 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "empty_field_update":
         raise ValueError(message)
     if kind == "conflict":
-        raise _Conflict()
+        raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
     raise RuntimeError(f"store error ({kind}): {message}")
@@ -580,6 +581,79 @@ def _raise_store_error(kind: str, message: str) -> None:
 
 class _Conflict(Exception):
     """Internal: the commit's snapshot is stale; the tx loop retries."""
+
+
+_ROWS_FALLBACK_WARNED = False
+
+
+def _warn_rows_fallback(reason: str) -> None:
+    global _ROWS_FALLBACK_WARNED
+    if _ROWS_FALLBACK_WARNED:
+        return
+    _ROWS_FALLBACK_WARNED = True
+    print(f"Warning: commit_rows unavailable; using whole commit ({reason})", file=sys.stderr)
+
+
+def _row_index(entries: list[dict]) -> dict[str, dict] | None:
+    indexed: dict[str, dict] = {}
+    for row in entries:
+        if not isinstance(row, dict):
+            return None
+        node_id = row.get("id")
+        if not isinstance(node_id, str) or not node_id or node_id in indexed:
+            return None
+        indexed[node_id] = row
+    return indexed
+
+
+def _row_diff(before: list[dict], after: list[dict]) -> tuple[list[dict], list[str]] | None:
+    before_by_id = _row_index(before)
+    after_by_id = _row_index(after)
+    if before_by_id is None or after_by_id is None:
+        return None
+    changed = [row for row in after if before_by_id.get(row["id"]) != row]
+    removed = [node_id for node_id in before_by_id if node_id not in after_by_id]
+    return changed, removed
+
+
+def _graph_commit_mode() -> str:
+    try:
+        from fno.config import load_settings
+
+        return load_settings().graph.commit_mode
+    except Exception:
+        return "rows"
+
+
+def _commit_snapshot(
+    client, snap: dict, base_entries: list[dict], entries: list[dict], plan_rungs: dict
+) -> dict:
+    if _graph_commit_mode() == "rows":
+        diff = _row_diff(base_entries, entries)
+        digests = snap.get("base_digests")
+        if diff is not None and isinstance(digests, dict):
+            changed, removed = diff
+            try:
+                return client.request("commit_rows", {
+                    "base_version": snap["version"],
+                    "base_digests": digests,
+                    "base_plan_rungs": _plan_rung_map(base_entries),
+                    "changed": changed,
+                    "removed": removed,
+                    "plan_rungs": plan_rungs,
+                })
+            except RuntimeError as exc:
+                marker = 'store error (invalid): unknown store method "commit_rows"'
+                if str(exc) != marker:
+                    raise
+                _warn_rows_fallback("running keeper predates commit_rows")
+        else:
+            _warn_rows_fallback("snapshot cannot be represented as row diff")
+    return client.request("commit", {
+        "version": snap["version"],
+        "entries": entries,
+        "plan_rungs": plan_rungs,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1132,19 +1206,14 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
 
     for attempt in range(_TX_ATTEMPTS):
         snap = client.request("begin", {})
+        base_entries = copy.deepcopy(snap["entries"])
         entries = mutator(snap["entries"])
         _validate_company_work(entries)
+        plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = client.request(
-                "commit",
-                {
-                    "version": snap["version"],
-                    "entries": entries,
-                    "plan_rungs": _plan_rung_map(entries),
-                },
-            )
+            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs)
             break
-        except _Conflict:
+        except _Conflict as conflict:
             _emit_graph_tx_event(
                 attempt=attempt + 1,
                 attempts_max=_TX_ATTEMPTS,
@@ -1153,6 +1222,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 graph_path=str(path),
             )
             if attempt == _TX_ATTEMPTS - 1:
+                detail = str(conflict)
+                if detail.startswith("graph conflict on "):
+                    raise RuntimeError(
+                        f"{detail} after {_TX_ATTEMPTS} attempts at {path}"
+                    ) from None
                 raise RuntimeError(
                     f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
                 ) from None

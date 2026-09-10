@@ -11,7 +11,7 @@
 //! Keeper -> client: `Response(json)`, `IdentifyReply(json)`.
 //!
 //! Requests are one-shot JSON: `{"id": n, "method": ..., "params": {...}}`.
-//! Methods: `read`, `read_strict`, `begin`, `commit`, `op`, `read_archive`.
+//! Methods: `read`, `read_strict`, `begin`, `commit`, `commit_rows`, `op`, `read_archive`.
 //! Responses: `{"id": n, "ok": true, "result": ...}` or
 //! `{"id": n, "ok": false, "error": {"kind": ..., "message": ...}}`.
 //!
@@ -201,6 +201,7 @@ struct StoreState {
     lock_timeout: Duration,
     /// Serializes the read-modify-write cycles across client threads.
     write_gate: Mutex<()>,
+    snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
 }
 
 /// Run the store keeper to completion. Returns only on a startup failure;
@@ -231,6 +232,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         canonical: cfg.canonical,
         lock_timeout: cfg.lock_timeout,
         write_gate: Mutex::new(()),
+        snapshots: Mutex::new(std::collections::VecDeque::new()),
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -405,6 +407,9 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
+    if method == "commit_rows" {
+        return handle_commit_rows_reply(id, state, &params);
+    }
     let result = match method {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
@@ -634,10 +639,36 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
     let version = file_version(&state.graph);
     let entries = graph_store::read_defaulted(&state.graph, false)?;
+    remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
+        "base_digests": canonical_row_digests(&entries),
         "entries": entries,
     }))
+}
+
+fn remember_snapshot(state: &StoreState, version: &str, entries: &[Value]) {
+    let mut snapshots = state
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if snapshots.iter().any(|(stored, _)| stored == version) {
+        return;
+    }
+    snapshots.push_back((version.to_string(), entries.to_vec()));
+    while snapshots.len() > 2 {
+        snapshots.pop_front();
+    }
+}
+
+fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
+    state
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .find(|(stored, _)| stored == version)
+        .map(|(_, entries)| entries.clone())
 }
 
 fn file_version(path: &std::path::Path) -> String {
@@ -668,12 +699,188 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
     Ok(outcome_json(&outcome))
 }
 
+#[derive(Debug)]
+enum CommitRowsError {
+    Store(StoreError),
+    Conflict(Vec<String>),
+}
+
+impl From<StoreError> for CommitRowsError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+fn handle_commit_rows_reply(id: u64, state: &StoreState, params: &Value) -> Value {
+    match handle_commit_rows(state, params) {
+        Ok(result) => json!({"id": id, "ok": true, "result": result}),
+        Err(CommitRowsError::Conflict(ids)) => err_reply(
+            id,
+            "conflict",
+            format!("graph conflict on {}", ids.join(", ")),
+        ),
+        Err(CommitRowsError::Store(error)) => {
+            err_reply(id, store_err_kind(&error), error.to_string())
+        }
+    }
+}
+
+fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
+    canonical_row_digests_with_rungs(entries, None)
+}
+
+fn canonical_row_digests_with_rungs(
+    entries: &[Value],
+    plan_rungs: Option<&std::collections::BTreeMap<String, String>>,
+) -> std::collections::BTreeMap<String, String> {
+    use sha2::Digest as _;
+
+    let mut canonical = entries.to_vec();
+    graph_store::ensure_slugs(&mut canonical);
+    graph_store::recompute_statuses_with_plan_rungs(&mut canonical, plan_rungs);
+    graph_store::canonicalize_entries(&mut canonical);
+    canonical
+        .iter()
+        .filter_map(|row| {
+            let id = graph_store::entry_id(row)?.to_string();
+            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
+            Some((id, format!("{digest:x}")[..16].to_string()))
+        })
+        .collect()
+}
+
+fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, CommitRowsError> {
+    let base_version = params
+        .get("base_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs base_version".into()))?;
+    let _base_digests: std::collections::BTreeMap<String, String> = params
+        .get("base_digests")
+        .and_then(Value::as_object)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs base_digests".into()))?
+        .iter()
+        .map(|(id, digest)| {
+            digest
+                .as_str()
+                .map(|value| (id.clone(), value.to_string()))
+                .ok_or_else(|| StoreError::Invalid("commit_rows digest must be a string".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    let changed_values = params
+        .get("changed")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs changed rows".into()))?;
+    let mut changed = Vec::with_capacity(changed_values.len());
+    let mut touched = std::collections::BTreeSet::new();
+    for row in changed_values {
+        let id = graph_store::entry_id(row)
+            .ok_or_else(|| StoreError::Invalid("commit_rows changed row needs an id".into()))?
+            .to_string();
+        if !touched.insert(id.clone()) {
+            return Err(StoreError::Invalid(format!(
+                "commit_rows changed id {id:?} appears twice"
+            ))
+            .into());
+        }
+        changed.push((id, row.clone()));
+    }
+    let removed: std::collections::BTreeSet<String> = params
+        .get("removed")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("commit_rows needs removed ids".into()))?
+        .iter()
+        .map(|id| {
+            id.as_str().map(str::to_string).ok_or_else(|| {
+                StoreError::Invalid("commit_rows removed id must be a string".into())
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    if let Some(id) = removed.iter().find(|id| touched.contains(*id)) {
+        return Err(StoreError::Invalid(format!(
+            "commit_rows id {id:?} is both changed and removed"
+        ))
+        .into());
+    }
+    touched.extend(removed.iter().cloned());
+
+    let _gate = state
+        .write_gate
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current_version = file_version(&state.graph);
+    let current = graph_store::read_defaulted(&state.graph, false)?;
+    if current_version != base_version {
+        let Some(base_entries) = stored_snapshot(state, base_version) else {
+            return Err(CommitRowsError::Conflict(touched.into_iter().collect()));
+        };
+        let base_rungs = plan_rung_map_field(params, "base_plan_rungs");
+        let normalized_base = canonical_row_digests_with_rungs(&base_entries, base_rungs.as_ref());
+        let current_digests = canonical_row_digests_with_rungs(&current, base_rungs.as_ref());
+        let ids: std::collections::BTreeSet<String> = normalized_base
+            .keys()
+            .chain(current_digests.keys())
+            .cloned()
+            .collect();
+        let conflicts: Vec<String> = ids
+            .into_iter()
+            .filter(|id| normalized_base.get(id) != current_digests.get(id) && touched.contains(id))
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(CommitRowsError::Conflict(conflicts));
+        }
+    }
+
+    let changed_by_id: std::collections::BTreeMap<String, Value> =
+        changed.iter().cloned().collect();
+    let mut replaced = std::collections::BTreeSet::new();
+    let mut merged = Vec::with_capacity(current.len() + changed.len());
+    for row in current {
+        let Some(id) = graph_store::entry_id(&row).map(str::to_string) else {
+            merged.push(row);
+            continue;
+        };
+        if removed.contains(&id) {
+            continue;
+        }
+        if let Some(replacement) = changed_by_id.get(&id) {
+            merged.push(replacement.clone());
+            replaced.insert(id);
+        } else {
+            merged.push(row);
+        }
+    }
+    for (id, row) in changed {
+        if !replaced.contains(&id) && !removed.contains(&id) {
+            merged.push(row);
+        }
+    }
+
+    let outcome = graph_store::locked_mutate(
+        &state.graph,
+        MutateInput {
+            entries: merged,
+            canonical_path: state.canonical.then(|| state.graph.clone()),
+            base_version: Some(current_version),
+            plan_rungs: plan_rung_map(params),
+        },
+        state.lock_timeout,
+    )?;
+    Ok(outcome_json(&outcome))
+}
+
 /// The client-supplied node id -> plan rung map (see
 /// `graph_store::supplied_plan_rung`): repo law keeps plan-document reading
 /// on the Python side, so the map crosses as data. Absent key = the caller
 /// is not re-deriving from plans, and stored statuses stay.
 fn plan_rung_map(params: &Value) -> Option<std::collections::BTreeMap<String, String>> {
-    let obj = params.get("plan_rungs")?.as_object()?;
+    plan_rung_map_field(params, "plan_rungs")
+}
+
+fn plan_rung_map_field(
+    params: &Value,
+    field: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let obj = params.get(field)?.as_object()?;
     Some(
         obj.iter()
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
@@ -1692,6 +1899,70 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn row_commit_state(graph: PathBuf) -> StoreState {
+        StoreState {
+            graph,
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            write_gate: Mutex::new(()),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    fn row_commit_params(begin: &Value, row: Value) -> Value {
+        json!({
+            "base_version": begin["version"],
+            "base_digests": begin["base_digests"],
+            "base_plan_rungs": {},
+            "changed": [row],
+            "removed": [],
+            "plan_rungs": {},
+        })
+    }
+
+    #[test]
+    fn commit_rows_disjoint_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-left","title":"left"},{"id":"x-right","title":"right"}]}"#,
+        )
+        .unwrap();
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let mut left = begin["entries"][0].clone();
+        left["title"] = json!("left changed");
+        let mut right = begin["entries"][1].clone();
+        right["title"] = json!("right changed");
+
+        handle_commit_rows(&state, &row_commit_params(&begin, left)).unwrap();
+        handle_commit_rows(&state, &row_commit_params(&begin, right)).unwrap();
+
+        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        assert_eq!(rows[0]["title"], json!("left changed"));
+        assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn commit_rows_same_row_conflicts_and_names_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[{"id":"x-left","title":"left"}]}"#).unwrap();
+        let state = row_commit_state(graph);
+        let begin = handle_begin(&state).unwrap();
+        let mut first = begin["entries"][0].clone();
+        first["title"] = json!("first");
+        let mut second = begin["entries"][0].clone();
+        second["title"] = json!("second");
+
+        handle_commit_rows(&state, &row_commit_params(&begin, first)).unwrap();
+        match handle_commit_rows(&state, &row_commit_params(&begin, second)) {
+            Err(CommitRowsError::Conflict(ids)) => assert_eq!(ids, vec!["x-left"]),
+            _ => panic!("same-row commit must conflict"),
+        }
+    }
+
     #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
         let dir = tempfile::tempdir().unwrap();
@@ -1737,6 +2008,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             write_gate: Mutex::new(()),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         };
         let stale = json!({
             "name": "update_fields",
