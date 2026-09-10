@@ -49,8 +49,9 @@ def claude_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     install_fake_claude(tmp_path / "bin")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    config = tmp_path / "claude-config"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    # A spawn with no account reads ~/.claude, like the Rust reader.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".claude"
     # The suite stubs the check to verified; these tests run the real reader.
     monkeypatch.setattr(
         registry, "seed_unverified_reason", functools.partial(seed_unverified_reason, timeout_s=0)

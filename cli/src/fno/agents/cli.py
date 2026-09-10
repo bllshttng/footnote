@@ -1518,7 +1518,7 @@ def cmd_spawn(
     # claude+once+not-headless and die on the "persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    # x-1caa AC7: passthrough rides only the PANE argv; the seam covers explicit flags.
+    # Passthrough rides only the PANE argv; the seam covers explicit flags.
     if passthrough and (substrate != "pane" or once):
         from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
 

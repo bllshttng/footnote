@@ -343,9 +343,9 @@ def seed_unverified_reason(
     short_id: str, env: Optional[Mapping[str, str]] = None, timeout_s: float = SEED_WAIT_S
 ) -> Optional[str]:
     """``None`` once job state holds the ``intent`` claude writes before ``--bg``
-    returns, else why not. The root follows ``CLAUDE_CONFIG_DIR`` as claude does."""
-    cfg = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
-    jobs_dir = (Path(cfg) if cfg else Path.home() / ".claude") / "jobs" / short_id
+    returns, else why not. Only an account overlay's CLAUDE_CONFIG_DIR moves the root."""
+    cfg = (env or {}).get("CLAUDE_CONFIG_DIR")
+    jobs_dir = Path(cfg) / "jobs" / short_id if cfg else _jobs_dir_for(short_id)
     deadline = time.monotonic() + timeout_s
     while True:
         try:
