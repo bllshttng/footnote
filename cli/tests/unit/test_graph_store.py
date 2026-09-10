@@ -1073,6 +1073,68 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
 
+def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, monkeypatch):
+    """x-8a09 site one: the typed op derives its plan-rung map from the light
+    read_plan_refs read. A call that needs one derived map must not pay the
+    most expensive read in the system (a full begin) for it."""
+    from fno.graph import store as store_mod
+
+    plan = tmp_path / "p.md"
+    plan.write_text("---\nstatus: design\n---\n# plan\n")
+    methods: list[str] = []
+    seen: dict = {}
+
+    def fake_request(self, method, params):
+        methods.append(method)
+        if method == "read_plan_refs":
+            return {"entries": [
+                {"id": "ab-1"},
+                {"id": "ab-2", "plan_path": str(plan), "cwd": str(tmp_path)},
+            ]}
+        if method == "op":
+            seen.update(params["params"]["plan_rungs"])
+            return {"outcome": {"version": "v2"}, "op": {"found": True, "plan_path": "p.md"}}
+        raise AssertionError(f"unexpected keeper method {method}")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", fake_request)
+    monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
+    result = store_mod._run_op(
+        tmp_path / "graph.json", "append_progress_note",
+        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+    )
+    assert result == {"found": True, "plan_path": "p.md"}
+    assert methods == ["read_plan_refs", "op"], "a full begin never fires"
+    assert seen == {"ab-1": "none", "ab-2": "design"}
+
+
+def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, monkeypatch):
+    """An installed worker behind the source answers `unknown store method`;
+    the op then derives the same map over a begin snapshot instead of
+    breaking, the same degrade the read_ids fast path takes."""
+    from fno.graph import store as store_mod
+
+    methods: list[str] = []
+
+    def stale_request(self, method, params):
+        methods.append(method)
+        if method == "read_plan_refs":
+            raise RuntimeError("store error (invalid): unknown store method \"read_plan_refs\"")
+        if method == "begin":
+            return {"entries": [{"id": "ab-1"}]}
+        if method == "op":
+            return {"outcome": {"version": "v2"}, "op": {"found": True, "plan_path": None}}
+        raise AssertionError(f"unexpected keeper method {method}")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
+    result = store_mod._run_op(
+        tmp_path / "graph.json", "append_progress_note",
+        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+    )
+    assert result == {"found": True, "plan_path": None}
+    assert methods == ["read_plan_refs", "begin", "op"]
+
+
 def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
     """Change 4's resolve site: exact id and exact slug through one row,
     no whole-graph begin."""

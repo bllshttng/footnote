@@ -1418,14 +1418,21 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     nudge): the targeted helpers replaced locked_mutate_graph calls, so they
     carry the same visible effects.
 
-    The plan-rung map rides in the op params, computed over the begin
-    snapshot: a session op that opens or closes a do row re-derives
-    in_progress the way any full write would. No Python op mutates
-    plan_path, so a snapshot-derived map is exact."""
+    The plan-rung map rides in the op params, computed over a light
+    read_plan_refs read (id, plan_path, cwd per node) instead of a full
+    begin, which ships the whole graph for one derived value. A session op
+    that opens or closes a do row re-derives in_progress the way any full
+    write would. No Python op mutates plan_path, so the map is exact. The
+    begin fallback keeps a keeper predating the verb working."""
     path = Path(path)
     client = _client_for(path)
-    snap = client.request("begin", {})
-    params = {**params, "plan_rungs": _plan_rung_map(snap["entries"])}
+    try:
+        rung_entries = client.request("read_plan_refs", {})["entries"]
+    except RuntimeError as exc:
+        if str(exc) != 'store error (invalid): unknown store method "read_plan_refs"':
+            raise
+        rung_entries = client.request("begin", {})["entries"]
+    params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}
     result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
     return result["op"]
