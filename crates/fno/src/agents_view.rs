@@ -1175,6 +1175,19 @@ fn report_is_live(received_at: &str, ttl_ms: Option<u64>, now_secs: u64) -> bool
     }
 }
 
+/// (x-1b90) Parse an events-journal `ts` to epoch seconds. The emitter
+/// stamps `YYYY-MM-DDThh:mm:ss.mmmZ`; the registry writes `...ssZ`. A stamp
+/// that parses neither shape is `None` - an unparseable reap time proves
+/// nothing, and the release tier holds the pane.
+pub(crate) fn ts_to_secs(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() >= 21 && b[19] == b'.' {
+        rfc3339_like_to_secs(&format!("{}Z", &s[..19]))
+    } else {
+        rfc3339_like_to_secs(s)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fno-truth badge source (x-4a48): the JUNIOR rung under inside_leg + screen_state.
 //

@@ -18,6 +18,20 @@ pub(crate) struct HeldWorker {
     pub(crate) cwd: String,
 }
 
+/// (x-1b90) What a resumable `agent_row_reaped` event recorded: the identity
+/// the receipt is read back through, the reap instant, and the work-done
+/// verdict. Keyed by worker NAME in `JournalEvents::reaped`, recency-guarded
+/// against the name's last spawn - a reap newer than the spawn is the newer
+/// fact about the name, and the held receipt stays the resume path after the
+/// pane closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReapedMarker {
+    pub(crate) harness: String,
+    pub(crate) harness_session_id: String,
+    pub(crate) ts: String,
+    pub(crate) basis: String,
+}
+
 /// A worker pane removed from every visible tree but still backed by a live
 /// PTY. Keeper-hosted panes can outlive this server, so the row identity is
 /// retained separately from the in-process pane map and persisted on its
@@ -232,6 +246,10 @@ pub(crate) fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldW
 pub(crate) struct JournalEvents {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
+    /// (x-1b90) Worker names whose newest journal fact is a resumable reap.
+    /// The receipt stays held (the worker must stay resumable); this map is
+    /// the newer-fact read that lets a prune release the pane.
+    pub(crate) reaped: HashMap<String, ReapedMarker>,
     /// (x-688b) Every name an `agent_spawned` event ever recorded - the
     /// population a registry read is checked against for reaped rows.
     pub(crate) spawned_names: std::collections::HashSet<String>,
@@ -243,6 +261,9 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     // a dead name that came back to life.
     let mut last_spawn: HashMap<String, usize> = HashMap::new();
     let mut removals: HashMap<String, (usize, String)> = HashMap::new();
+    // (x-1b90) Resumable reap markers, recency-guarded after the walk like
+    // the never-bound markers: a spawn line AFTER the reap revives the name.
+    let mut reaped_raw: HashMap<String, (usize, ReapedMarker)> = HashMap::new();
     for (idx, line) in raw.lines().enumerate() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -254,6 +275,34 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
             Some("agent_row_reaped")
                 if data.get("resumable").and_then(|v| v.as_bool()) == Some(true) =>
             {
+                // Leave the receipt retention exactly as it is - the worker
+                // must stay resumable - and record the reap as the newer
+                // fact about the name.
+                if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                    let marker = ReapedMarker {
+                        harness: data
+                            .get("harness")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        harness_session_id: data
+                            .get("harness_session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        ts: value
+                            .get("ts")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        basis: data
+                            .get("basis")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    };
+                    reaped_raw.insert(name.to_string(), (idx, marker));
+                }
                 continue;
             }
             Some("agent_removed") | Some("agent_row_reaped") => {
@@ -362,9 +411,17 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
         .filter(|(name, (idx, _))| last_spawn.get(name).is_none_or(|spawn| idx > spawn))
         .map(|(name, (_, reason))| (name, reason))
         .collect();
+    let reaped = reaped_raw
+        .into_iter()
+        // The same never-bound recency guard: a name spawned again after its
+        // reap is live again, and the marker must not fire.
+        .filter(|(name, (idx, _))| last_spawn.get(name).is_none_or(|spawn| idx > spawn))
+        .map(|(name, (_, marker))| (name, marker))
+        .collect();
     JournalEvents {
         receipts,
         never_bound,
+        reaped,
         spawned_names: last_spawn.into_keys().collect(),
     }
 }
@@ -411,9 +468,11 @@ fn spawn_receipt_segments(dir: &std::path::Path, stem: &str) -> Vec<std::path::P
 /// `parse_spawn_receipts` revokes in file order - a revocation in the live
 /// file must land on a receipt from `.1`, and reading newest-first would
 /// resurrect reaped sessions.
+#[derive(Default)]
 pub(crate) struct SpawnJournal {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
+    pub(crate) reaped: HashMap<String, ReapedMarker>,
     pub(crate) spawned_names: std::collections::HashSet<String>,
     pub(crate) error: Option<String>,
 }
@@ -431,6 +490,7 @@ pub(crate) fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
     SpawnJournal {
         receipts: events.receipts,
         never_bound: events.never_bound,
+        reaped: events.reaped,
         spawned_names: events.spawned_names,
         error,
     }
