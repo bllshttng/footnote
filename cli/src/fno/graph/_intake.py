@@ -1543,13 +1543,12 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from fno.graph.node_builder import stamp_request_origin
 
     plan_sources = fm.get("sources") or []
-    origin_evidence = (
-        "; ".join(str(item) for item in plan_sources)
-        if plan_sources
-        else f"plan:{spec['plan_path']}"
-    )[:300]
     origin, origin_evidence = stamp_request_origin(
-        source_kind=None, birth_channel="intake", origin_evidence=origin_evidence
+        source_kind=None,
+        birth_channel="intake",
+        origin_evidence=(
+            "; ".join(str(item) for item in plan_sources) if plan_sources else f"plan:{spec['plan_path']}"
+        )[:300],
     )
 
     node = {

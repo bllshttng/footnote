@@ -646,10 +646,9 @@ def _item_source_ref(text: str, fu_id: str) -> Optional[str]:
             continue
         for sub in lines[idx + 1 :]:
             if _ITEM_RE.match(sub) or (sub and not sub[0].isspace()):
-                break
-            stripped = sub.strip()
-            if stripped.startswith("source:"):
-                return stripped[len("source:") :].strip() or None
+                return None
+            if sub.strip().startswith("source:"):
+                return sub.strip()[len("source:") :].strip() or None
         return None
     return None
 

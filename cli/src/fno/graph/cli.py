@@ -34,7 +34,10 @@ from fno.graph.node_builder import (
     DESCRIPTION_HELP,
     ENCOUNTER_EVIDENCE_HELP,
     ORIGIN_EVIDENCE_HELP,
+    RELATED_HELP,
     SOURCE_KIND_HELP,
+    SOURCE_NODE_HELP,
+    TAG_HELP,
 )
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
@@ -1314,27 +1317,15 @@ def cmd_add(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
         SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
 ) -> None:
     _create_node_impl(
@@ -1500,27 +1491,15 @@ def cmd_idea(
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
         SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:

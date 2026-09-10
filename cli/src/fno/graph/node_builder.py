@@ -40,6 +40,16 @@ SOURCE_KIND_HELP = (
     "organic|from_inbox|from_observation|from_supervisor|operator_request. "
     "Mark an operator ask with operator_request."
 )
+SOURCE_NODE_HELP = (
+    "Origin node this filing came out of (id, slug, or bare hex). Overrides "
+    "ambient capture. Refuses if it does not resolve."
+)
+RELATED_HELP = (
+    "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
+    "comma-separate. Refuses an id that does not resolve."
+)
+TAG_HELP = "Tag (repeatable, lowercase-kebab)."
+
 
 def _scan_md_field(text: str, key: str) -> Optional[str]:
     """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
@@ -143,66 +153,37 @@ def _session_provenance(
     }
 
 
-def resolve_birth_origins(records: list[dict]) -> list[dict]:
-    """Transport over the native origin decision (`fno-agents node-origin`).
+def stamp_request_origin(
+    *, source_kind: str | None, birth_channel: str, origin_evidence: str | None
+) -> "tuple[str | None, str | None]":
+    """One birth record through the native owner (`fno-agents node-origin`).
 
-    Returns one ``{"origin", "evidence"}`` receipt per record. Fail-open to
-    ``unknown``: a missing binary, spawn failure, or malformed receipt never
-    invents an origin.
+    Returns (origin, evidence). The evidence is the caller's own birth fact,
+    stamped regardless of the transport; the category fail-opens to unknown.
     """
-    fail_open = [{"origin": REQUEST_ORIGIN_DEFAULT, "evidence": None}] * len(records)
+    import subprocess
+
+    ref = (origin_evidence or "").strip() or None
+    origin = REQUEST_ORIGIN_DEFAULT
     try:
         from fno.rust_binary import resolve_binary
 
         binary = resolve_binary()
-        if binary is None:
-            return fail_open
-        import subprocess
-
-        proc = subprocess.run(
-            [str(binary), "node-origin", "resolve", "--payload", "-"],
-            input=json.dumps(records),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if proc.returncode != 0:
-            return fail_open
-        results = (json.loads(proc.stdout) or {}).get("results")
-        if not isinstance(results, list) or len(results) != len(records):
-            return fail_open
-        return [
-            {
-                "origin": r.get("origin") if r.get("origin") in REQUEST_ORIGINS else REQUEST_ORIGIN_DEFAULT,
-                "evidence": r.get("evidence"),
-            }
-            if isinstance(r, dict)
-            else {"origin": REQUEST_ORIGIN_DEFAULT, "evidence": None}
-            for r in results
-        ]
+        if binary is not None:
+            record = [{"source_kind": source_kind, "birth_channel": birth_channel, "origin_evidence": ref}]
+            proc = subprocess.run(
+                [str(binary), "node-origin", "resolve", "--payload", "-"],
+                input=json.dumps(record),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            rows = (json.loads(proc.stdout) if proc.returncode == 0 else None) or {}
+            rows = rows.get("results")
+            if isinstance(rows, list) and len(rows) == 1 and rows[0].get("origin") in REQUEST_ORIGINS:
+                origin = rows[0]["origin"]
     except Exception:  # noqa: BLE001 - fail open; birth never invents origin
-        return fail_open
-
-
-def stamp_request_origin(
-    *, source_kind: str | None, birth_channel: str, origin_evidence: str | None
-) -> "tuple[str | None, str | None]":
-    """One birth record through the native owner; returns (origin, evidence).
-
-    The evidence reference is the caller's own birth fact: normalized here and
-    stamped regardless of the transport, since preserving it is the caller's
-    job. Only the category fail-opens to unknown.
-    """
-    ref = (origin_evidence or "").strip() or None
-    origin = resolve_birth_origins(
-        [
-            {
-                "source_kind": source_kind,
-                "birth_channel": birth_channel,
-                "origin_evidence": ref,
-            }
-        ]
-    )[0]["origin"]
+        pass
     return origin, ref
 
 

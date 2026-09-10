@@ -830,8 +830,7 @@ _DASHBOARD_JS = """\
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (LOCAL) { var ro = n.ro || 'unknown';
-      h += '<div class="kv"><span><b>origin</b> ' + esc(ORIGIN_LABELS[ro] || ro) + '</span>'
-        + (n.oe ? '<span><b>evidence</b> ' + esc(n.oe) + '</span>' : '') + '</div>'; }
+      h += '<div class="kv"><span><b>origin</b> ' + esc(ORIGIN_LABELS[ro] || ro) + '</span>' + (n.oe ? '<span><b>evidence</b> ' + esc(n.oe) + '</span>' : '') + '</div>'; }
     if (LOCAL) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
@@ -1366,10 +1365,8 @@ def _dashboard_html(
         '<select id="sizeSel" aria-label="Filter by size"><option value="">Any size</option></select>'
         + (
             '<select id="originSel" aria-label="Filter by request origin"><option value="">All origins</option>'
-            '<option value="operator_request">Your requests</option>'
-            '<option value="agent_discovery">Agent discoveries</option>'
-            '<option value="automated_followup">Automated follow-ups</option>'
-            '<option value="unknown">Unknown</option></select>'
+            '<option value="operator_request">Your requests</option><option value="agent_discovery">Agent discoveries</option>'
+            '<option value="automated_followup">Automated follow-ups</option><option value="unknown">Unknown</option></select>'
             if local
             else ""
         )

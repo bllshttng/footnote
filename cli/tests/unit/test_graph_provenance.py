@@ -2478,12 +2478,12 @@ def test_origin_hp_build_stamps_native_receipt(monkeypatch):
     caller's evidence reference, once, at birth."""
     import fno.graph.node_builder as nb
 
-    def fake_transport(records):
-        assert records[0]["source_kind"] == "operator_request"
-        assert records[0]["birth_channel"] == "new"
-        return [{"origin": "operator_request", "evidence": "brief:20260905.md"}]
+    def fake_transport(*, source_kind, birth_channel, origin_evidence):
+        assert source_kind == "operator_request"
+        assert birth_channel == "new"
+        return "operator_request", origin_evidence
 
-    monkeypatch.setattr(nb, "resolve_birth_origins", fake_transport)
+    monkeypatch.setattr(nb, "stamp_request_origin", fake_transport)
     node = nb._build_backlog_node(
         title="Operator asked",
         difficulty="medium",
@@ -2526,11 +2526,11 @@ def test_origin_decompose_child_record_carries_parent_evidence(monkeypatch):
 
     captured: list[dict] = []
 
-    def fake_transport(records):
-        captured.extend(records)
-        return [{"origin": "unknown", "evidence": records[0]["origin_evidence"]}]
+    def fake_transport(**kwargs):
+        captured.append(kwargs)
+        return "unknown", kwargs["origin_evidence"]
 
-    monkeypatch.setattr(nb, "resolve_birth_origins", fake_transport)
+    monkeypatch.setattr(nb, "stamp_request_origin", fake_transport)
     nb._build_backlog_node(
         title="Child",
         difficulty="medium",
