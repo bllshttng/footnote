@@ -107,6 +107,16 @@ def record_command(
     supersedes: str | None = typer.Option(None, "--supersedes"),
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
+    read: list[str] = typer.Option(
+        [],
+        "--read",
+        help=(
+            "The command that produced a code fact in this ruling. It is RUN "
+            "at record time and its output stored on the row. Repeatable; "
+            "pair a zero with a control: a second read aimed at something "
+            "known to be present."
+        ),
+    ),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (
@@ -141,6 +151,7 @@ def record_command(
             supersedes=supersedes,
             authority_source=authority,
             graduation=graduation_data,
+            reads=list(read) or None,
         )
     except (InvalidGraduationError, ValueError) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no

@@ -165,6 +165,16 @@ def legacy_record(
             "Follow-up: node:<id>."
         ),
     ),
+    read: List[str] = typer.Option(
+        [],
+        "--read",
+        help=(
+            "The command that produced a code fact in this ruling. It is RUN "
+            "at record time and its output stored on the row. Repeatable; "
+            "pair a zero with a control: a second read aimed at something "
+            "known to be present."
+        ),
+    ),
 ) -> None:
     """Warn once, then delegate the old spelling to the backlog leaf."""
     typer.echo(_DEPRECATION_NOTICE, err=True)
@@ -182,6 +192,7 @@ def legacy_record(
         origin=None,
         graduation=graduation,
         graduation_ref=graduation_ref,
+        read=read,
     )
 
 
@@ -198,6 +209,7 @@ def _record(
     origin: Optional[str],
     graduation: Optional[str],
     graduation_ref: Optional[str],
+    read: List[str],
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
@@ -214,6 +226,10 @@ def _record(
         UnattributedAuthorityError,
         WaiverAuthorityRefusedError,
         record_decision,
+    )
+    from fno.decide.evidence import (
+        UnmeasuredClaimError,
+        UnresolvableCitationError,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
 
@@ -248,7 +264,13 @@ def _record(
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
+            reads=list(read) or None,
         )
+    except (UnmeasuredClaimError, UnresolvableCitationError) as exc:
+        # Same ladder as the law door: the ruling was refused before any
+        # write, so the caller must not re-run it expecting a different id.
+        typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
+        raise typer.Exit(3)
     except UnknownOriginError as exc:
         typer.echo(f"decide: refused. {exc}", err=True)
         raise typer.Exit(3)
@@ -381,6 +403,16 @@ def backlog_decide(
             "Follow-up: node:<id>."
         ),
     ),
+    read: List[str] = typer.Option(
+        [],
+        "--read",
+        help=(
+            "The command that produced a code fact in this ruling. It is RUN "
+            "at record time and its output stored on the row. Repeatable; "
+            "pair a zero with a control: a second read aimed at something "
+            "known to be present."
+        ),
+    ),
     origin: Optional[str] = typer.Option(
         None,
         "--origin",
@@ -423,6 +455,7 @@ def backlog_decide(
         origin=origin,
         graduation=graduation,
         graduation_ref=graduation_ref,
+        read=read,
     )
 
 
@@ -943,6 +976,12 @@ def _list_decisions(
             )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
+        for read_row in d.get("reads") or []:
+            head = str(read_row.get("out_head") or "")
+            first = head.splitlines()[0] if head else "(no output)"
+            typer.echo(
+                f"    read: {read_row.get('cmd')} -> exit {read_row.get('exit')} | {first}"
+            )
         if d.get("question"):
             typer.echo(f"    question: {d['question']}")
         if d.get("options"):

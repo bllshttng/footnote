@@ -117,6 +117,7 @@ PROJECTION_FIELDS = (
     "graduation",
     "rationale",
     "supersedes",
+    "reads",
     "question_id",
 )
 
@@ -376,6 +377,7 @@ def record_decision(
     asked_by: str | None = None,
     asked_at: str | None = None,
     expiry_ref: dict[str, Any] | None = None,
+    reads: "list[str] | None" = None,
     events_root: Any = None,
     source: str = "target",
 ) -> dict[str, Any]:
@@ -418,6 +420,18 @@ def record_decision(
     # close.
     origin = enforce_origin_floor(origin)
     provenance = _resolve_decider(decided_by, authority_source, origin=origin)
+
+    # The evidence gate lives HERE, not in the command bodies, for the same
+    # reason validate_durable_law does: the library is importable, and a check
+    # only the CLI enforces is a check anything using the library walks
+    # around. The exemption keys on the RESOLVED authority: an attended
+    # operator terminal is exempt, and a waiver verb whose authority is
+    # hardcoded operator inherits the exemption by construction.
+    read_rows = None
+    if provenance.authority_source != "operator":
+        from fno.decide.evidence import check_ruling_evidence
+
+        read_rows = check_ruling_evidence(decision, rationale, reads)
 
     # A waiver subject is operator-evidence-only (see WAIVER_SUBJECT_PREFIX).
     # The family is the exact standing subject and the colon-delimited scoped
@@ -493,6 +507,7 @@ def record_decision(
         graduation=graduation,
         rationale=rationale,
         supersedes=supersedes,
+        reads=read_rows,
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
