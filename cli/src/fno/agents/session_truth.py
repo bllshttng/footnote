@@ -389,8 +389,7 @@ def resolve_session_truth(
 
     # The age comes from the tail ALREADY read above: its newest parseable
     # Record.timestamp. The stat is only the labelled fallback for a tail
-    # with no timestamped record at all; whichever instrument answered is
-    # served as ``last_activity_basis``.
+    # with no timestamped record; ``last_activity_basis`` names the winner.
     epoch: Optional[float] = None
     basis: Optional[str] = None
     if agent in {"claude", "codex"}:
