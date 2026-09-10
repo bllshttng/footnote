@@ -2054,51 +2054,36 @@ def run_validity_sweep(
 
 
 # ---------------------------------------------------------------------------
-# Leg 9: abandoned do rows (deterministic, --apply only) (x-f714)
+# Leg 9: abandoned do rows (x-f714). An open do row wedges its node
+# in_progress, and in_progress hides the row from the Rust settle's
+# done+merged gate, so the stranded population had no observer. Contract:
+# docs/backlog-usage.md "Abandoned do rows".
 # ---------------------------------------------------------------------------
 
-# The harnesses resolve_transcript_path can find a transcript FILE for
-# (cli/src/fno/provenance/observed.py). An opencode do row can never be proven
-# gone here, so it is always held and named in the report.
 _FILE_BACKED_HARNESSES = frozenset({"claude", "codex"})
 
 
-def do_row_session_gone(
-    harness: object,
-    session_id: object,
-    cwd: object,
-    *,
-    quiet_after_s: float,
-    now_s: float,
-) -> "tuple[bool, str]":
-    """Transcript-truth proof that an open do row's session is gone.
-
-    The Rust settle's done+merged gate can never see an open do row (the row
-    is what holds its node in_progress), so this prover is the observer that
-    population was missing. True only on positive evidence: a resolved
-    transcript file whose last event is older than ``quiet_after_s`` and
-    whose tail classifies as not engaged. Every other answer is ``False``
-    with the reason NAMED, so an operator can still run
-    ``fno backlog session reap-open`` by hand - a missing transcript is a
-    hold, never a death certificate. Never raises.
+def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
+    """Transcript-truth proof of session death: True only on a resolved,
+    quiet-past-the-bar, non-engaged transcript. Every other answer is False
+    with the reason named (a hold, never a guess); never raises.
     """
     try:
         if harness not in _FILE_BACKED_HARNESSES:
             return False, "harness not file-backed"
         from fno.provenance.observed import resolve_transcript_path
 
-        path = resolve_transcript_path(harness, session_id, cwd)
-        if path is None:
+        if resolve_transcript_path(harness, session_id, cwd) is None:
             return False, "transcript unresolved"
         from fno.agents.watchdog import finished_with_the_tree, tail_facts
 
         facts = tail_facts(session_id, cwd, agent=harness)
         if facts is None:
             return False, "transcript unreadable"
-        if finished_with_the_tree(facts, now_s, quiet_after_s):
-            quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
-            return True, f"transcript quiet {quiet_m}m, tail not engaged"
-        return False, "transcript active"
+        if not finished_with_the_tree(facts, now_s, quiet_after_s):
+            return False, "transcript active"
+        quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
+        return True, f"transcript quiet {quiet_m}m, tail not engaged"
     except Exception:  # noqa: BLE001 - a proof must never break the sweep
         return False, "transcript unreadable"
 
@@ -2115,20 +2100,17 @@ class AbandonedDoRow:
 def detect_abandoned_do_rows(
     entries: list[dict],
     *,
-    live_claimed: "set[str]",
-    live_worked: "dict[str, list[str]]",
+    live_claimed: set,
+    live_worked: dict,
     prover: Callable,
     now_s: float,
     quiet_after_s: float,
-) -> "list[AbandonedDoRow]":
-    """Non-terminal, unclaimed nodes carrying an open do row, each stamped.
+) -> list[AbandonedDoRow]:
+    """Stamp every non-terminal, unclaimed open-do-row node gone or held.
 
-    Pure over its arguments (the claims and roster readers are injected), the
-    way ``detect_failure_defers`` takes ``events``. Two vetoes outrank the
-    transcript proof - a live claim or a live roster worker holds the row no
-    matter what the transcript says. Every candidate appears in the returned
-    list, held ones included: a hold is a named fact for the operator, not a
-    silent skip.
+    Pure over its arguments (readers injected). The vetoes - live claim, live
+    roster worker - outrank the prover; held candidates are returned and
+    named, never silently skipped.
     """
     from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
 
@@ -2137,34 +2119,141 @@ def detect_abandoned_do_rows(
         if not isinstance(e, dict):
             continue
         nid = e.get("id")
-        if not isinstance(nid, str) or not nid:
+        if not isinstance(nid, str) or not nid or e.get("locked_by"):
             continue
         if e.get("status") in TERMINAL_RUNGS or e.get("superseded_by"):
-            continue
-        if e.get("locked_by"):
             continue
         for row in e.get("sessions") or []:
             if not is_open_do_row(row):
                 continue
-            harness = row.get("harness")
-            sid = row.get("session_id")
+            harness, sid = row.get("harness"), row.get("session_id")
             if nid in live_claimed:
                 out.append(AbandonedDoRow(nid, harness, sid, "held", "live claim"))
-                continue
-            workers = live_worked.get(nid)
-            if workers:
-                out.append(
-                    AbandonedDoRow(
-                        nid, harness, sid, "held",
-                        f"live roster worker {', '.join(workers)}",
-                    )
-                )
-                continue
-            gone, reason = prover(
-                harness, sid, e.get("cwd"),
-                quiet_after_s=quiet_after_s, now_s=now_s,
+            elif live_worked.get(nid):
+                names = ", ".join(live_worked[nid])
+                out.append(AbandonedDoRow(
+                    nid, harness, sid, "held", f"live roster worker {names}"))
+            else:
+                gone, reason = prover(harness, sid, e.get("cwd"),
+                                      quiet_after_s=quiet_after_s, now_s=now_s)
+                verdict = "gone" if gone else "held"
+                out.append(AbandonedDoRow(nid, harness, sid, verdict, reason))
+    return out
+
+
+def detect_abandoned_leg(entries: list[dict], claimed: set) -> "tuple[list[AbandonedDoRow], Optional[str]]":
+    """Read-side seam for cmd_maintain: config bar, strict roster veto,
+    detection. Returns ``(rows, warning)``; a roster read that fails closed
+    refuses this leg with a warning instead of killing the sweep.
+    """
+    try:
+        from fno.config import load_settings
+
+        hours = load_settings().backlog.maintain.abandoned_do_row_hours
+    except Exception:
+        hours = 24
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+
+        rows = detect_abandoned_do_rows(
+            entries, live_claimed=claimed,
+            live_worked=live_worked_node_ids(strict=True, entries=entries),
+            prover=do_row_session_gone,
+            now_s=datetime.now(timezone.utc).timestamp(),
+            quiet_after_s=hours * 3600,
+        )
+        return rows, None
+    except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
+        return [], f"abandoned-do-row leg skipped: {exc}"
+
+
+def apply_abandoned_reaps(
+    rows: list[AbandonedDoRow], graph_path, apply: bool, cap: int = AUTO_DEFER_BLAST_CAP
+) -> "tuple[list[dict], int, list[str]]":
+    """Reap proven-gone do rows under ``--apply``; each reap is its own
+    locked store op keyed on the exact row identity, so a row that raced
+    reports ``row_removed: false``. Returns ``(applied, truncated, warnings)``.
+    """
+    if not apply:
+        return [], 0, []
+    gone = [r for r in rows if r.verdict == "gone"]
+    truncated = max(0, len(gone) - cap)
+    from fno.graph.store import reap_open_session_record
+
+    applied: list[dict] = []
+    warnings: list[str] = []
+    for cand in gone[:cap]:
+        try:
+            rep = reap_open_session_record(
+                graph_path, cand.node, phase="do",
+                harness=cand.harness, session_id=cand.session_id,
             )
+            applied.append({
+                "node_id": cand.node,
+                "row_removed": bool(rep.get("row_removed")),
+                "status_after": rep.get("status_after"),
+                "reason": cand.reason,
+            })
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+            warnings.append(f"do-row reap of {cand.node} failed: {exc}")
+    return applied, truncated, warnings
+
+
+def abandoned_report(
+    rows: list[AbandonedDoRow], applied: list[dict], truncated: int, apply: bool
+) -> dict:
+    """Flat keys for the health-history report fragment."""
+    return {
+        "abandoned_do_rows": len(applied) if apply else len(rows),
+        "abandoned_do_row_nodes": applied if apply else [
+            {"node_id": r.node, "verdict": r.verdict, "reason": r.reason}
+            for r in rows
+        ],
+        "abandoned_do_row_truncated": truncated,
+    }
+
+
+def abandoned_payload(
+    rows: list[AbandonedDoRow], applied: list[dict], truncated: int, apply: bool
+) -> dict:
+    """The ``abandoned_do_rows`` block of the maintain ``--json`` payload."""
+    return {
+        "applied": applied,
+        "candidates": [] if apply else [
+            {"node_id": r.node, "harness": r.harness, "session_id": r.session_id,
+             "verdict": r.verdict, "reason": r.reason}
+            for r in rows
+        ],
+        "truncated": truncated,
+    }
+
+
+def abandoned_lines(
+    rows: list[AbandonedDoRow], applied: list[dict], truncated: int, apply: bool
+) -> list[str]:
+    """Human-report lines: a total, every candidate with verdict + reason,
+    and a named truncation note. Held rows are facts for the operator."""
+    reap_by_node = {r["node_id"]: r for r in applied}
+    if apply:
+        out = [f"abandoned-do-rows reaped {len(applied)} of {len(rows)} candidate(s)"]
+    else:
+        out = [f"abandoned-do-row candidates {len(rows)}"]
+    for r in rows:
+        tag = f"{r.harness} {str(r.session_id)[:8]}"
+        rep = reap_by_node.get(r.node)
+        if rep:
             out.append(
-                AbandonedDoRow(nid, harness, sid, "gone" if gone else "held", reason)
+                f"  reaped do row {r.node} ({tag}): row_removed "
+                f"{str(rep['row_removed']).lower()}, status_after "
+                f"{rep['status_after']} ({r.reason})"
             )
+        elif r.verdict == "gone":
+            out.append(f"  would reap do row {r.node} ({tag}): {r.reason}")
+        else:
+            out.append(f"  held do row {r.node} ({tag}): {r.reason}")
+    if truncated:
+        out.append(
+            f"  NOTE: abandoned-do-row blast cap hit - {truncated} further gone "
+            f"row(s) NOT reaped this run (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue"
+        )
     return out
