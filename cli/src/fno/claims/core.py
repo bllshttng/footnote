@@ -2069,7 +2069,6 @@ def _clear_lock_mirror_for_reaped(
     """
     import sys
 
-    from fno.claims.io import claims_root_for
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
@@ -2080,7 +2079,7 @@ def _clear_lock_mirror_for_reaped(
         return 0
 
     wanted = set(node_ids)
-    cleared: list[str] = []
+    cleared: list[tuple[str, Optional[str]]] = []
 
     # Read first, mutate only if a reaped node is actually in the graph: a
     # sweep whose reaped ids match no graph row (tests, foreign repos) must
@@ -2098,28 +2097,38 @@ def _clear_lock_mirror_for_reaped(
         return 0
 
     def _clear(entries: list[dict]) -> list[dict]:
-        from fno.claims.core import claim_path
-        from fno.claims.io import dedup_claims_roots
+        from fno.claims.io import node_has_live_claim
 
+        # locked_mutate_graph re-runs the mutator on a version conflict;
+        # rebuilt per attempt so retries never double-count.
+        cleared.clear()
         for e in entries:
             if not (isinstance(e, dict) and e.get("id") in wanted):
                 continue
             key = f"node:{e['id']}"
-            roots = claim_roots
-            if roots is None:
-                roots = [claims_root_for(key), None]
-            if any(claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots)):
+            if node_has_live_claim(key, claim_roots):
                 continue  # re-acquired between archive and this clear
+            cleared.append((str(e.get("id")), e.get("locked_by")))
             e["locked_by"] = None
             e["locked_at"] = None
             e.pop("claimed_at", None)
-            cleared.append(str(e.get("id")))
         return entries
 
     try:
         locked_mutate_graph(graph_json(), _clear)
     except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
         print(f"claim reap: lock-mirror clear failed: {exc}", file=sys.stderr)
+        return 0
+    # A lock silently removed is the same defect class as a lock silently not
+    # written: name each cleared node and its prior owner, and the verb that
+    # re-claims it. Only a committed clear may speak.
+    for cleared_id, prior_owner in cleared:
+        print(
+            f"claim reap: cleared locked_by={prior_owner!r} on {cleared_id} "
+            f"(no live claim lockfile; hold the node with: "
+            f"fno agents claim acquire node:{cleared_id})",
+            file=sys.stderr,
+        )
     return len(cleared)
 
 

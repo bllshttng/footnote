@@ -4019,6 +4019,10 @@ def cmd_update(
     from fno.graph.load import load_graph
 
     stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    if locked_by is not None:
+        from fno.backlog.requeue import verify_lock_stamp_receipt
+
+        verify_lock_stamp_receipt(stored_node, locked_by, task_id)
     if add_pr is not None and stored_node.get("status") == "ready":
         typer.echo(
             f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
@@ -4038,19 +4042,6 @@ def cmd_update(
             f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
             f"{ready_effect}"
         )
-    # Earned-success rule, same as unclaim: an open do row holds in_progress
-    # on its own, so a lock clear that did not transition the node refuses
-    # the Updated receipt and names the verb that settles the row.
-    if locked_by == "null" and stored_node.get("status") == "in_progress":
-        from fno.backlog.requeue import _wedge_refusal
-        from fno.graph.statuses import is_open_do_row
-
-        _wedge_refusal(
-            "update",
-            stored_node.get("id", task_id),
-            sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
-        )
-
     typer.echo(f"Updated {task_id}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row

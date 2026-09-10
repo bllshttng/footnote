@@ -129,6 +129,53 @@ def _wedge_refusal(verb: str, node_id: str, open_do: int) -> None:
     raise typer.Exit(code=3)
 
 
+def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: str = "") -> None:
+    """The post-commit read-back for ``update --locked-by``: the Updated
+    receipt answers "was the command accepted", never "is the value there",
+    and only the committed row can answer the second. Refuses the receipt
+    when the stored owner differs; a non-null stamp with no backing claim
+    lockfile warns (mirror-only state claim hygiene clears); a null release
+    that leaves an open do row wedged refuses, naming the settling verb.
+    """
+    from fno.claims.io import node_has_live_claim
+
+    node_id = stored_node.get("id") or fallback_id
+    expected_owner = None if locked_by == "null" else locked_by
+    stored_owner = stored_node.get("locked_by")
+    if stored_owner != expected_owner:
+        typer.echo(
+            f"error: {node_id} read back locked_by={stored_owner!r}, not "
+            f"{expected_owner!r}: the write did not persist. A concurrent "
+            "claim transition may have cleared it; re-check before trusting.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if expected_owner is None:
+        # Earned-success rule, same as unclaim: a lock clear that left the
+        # node in_progress on its own open do rows did not return it to the
+        # queue, so the receipt refuses and names the verb that settles it.
+        if stored_node.get("status") == "in_progress":
+            from fno.graph.statuses import is_open_do_row
+
+            _wedge_refusal(
+                "update",
+                node_id,
+                sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
+            )
+        return
+    try:
+        has_claim = node_has_live_claim(f"node:{node_id}")
+    except Exception:  # noqa: BLE001 - the probe must not fail a write that landed
+        return
+    if not has_claim:
+        typer.echo(
+            f"warning: no live claim lockfile backs node:{node_id}; claim "
+            "hygiene (fno agents claim reap) clears locked_by without one. "
+            f"To hold the node: fno agents claim acquire node:{node_id}",
+            err=True,
+        )
+
+
 def _unclaim_node(task_id: str) -> None:
     """Free a claimed node in one call: clear the graph claim (always) and best-effort-release the lockfile (stale or owned)."""
     from fno.graph._constants import has_node_id_prefix

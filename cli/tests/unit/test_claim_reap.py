@@ -404,6 +404,43 @@ class TestReapDeadClaims:
         finally:
             assert release_claim(claim.key, holder, root=tmp_path) is not None
 
+    def test_mirror_clear_names_the_node_and_prior_owner(self, tmp_path, monkeypatch, capsys):
+        """A lock silently removed is the defect class this file exists
+        against. The clear must name the node, the owner it dropped, and the
+        verb that re-claims the node."""
+        node_id = "x-named-clear"
+        holder = "target-session:named-clear"
+        graph_path = tmp_path / "configured-graph.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "id": node_id,
+                            "title": "Named clear",
+                            "plan_path": "plans/named-clear.md",
+                            "locked_by": holder,
+                            "session_id": holder,
+                            "locked_at": "2026-01-01T00:00:00+00:00",
+                            "status": "in_progress",
+                        }
+                    ]
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+
+        cleared = _clear_lock_mirror_for_reaped([node_id], claim_roots=[tmp_path])
+
+        assert cleared == 1
+        err = capsys.readouterr().err
+        assert f"cleared locked_by='{holder}' on {node_id}" in err
+        assert f"fno agents claim acquire node:{node_id}" in err
+        row = json.loads(graph_path.read_text())["entries"][0]
+        assert row["locked_by"] is None
+
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
         root_a = tmp_path / "a"
         root_b = tmp_path / "b"
