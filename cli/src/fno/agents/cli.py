@@ -1303,16 +1303,6 @@ def cmd_spawn(
             "a stable tab with room, and enforce at most four panes per tab."
         ),
     ),
-    portal: int | None = typer.Option(
-        None,
-        "--portal",
-        help=(
-            "Open a portal on the spawned THREAD after the receipt (index "
-            "0-255): the view into the worker. Thread-only. A spawn from "
-            "inside a mux that takes the built-in thread default opens "
-            "portal 0 unless you name another index."
-        ),
-    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -1506,8 +1496,8 @@ def cmd_spawn(
     if not substrate:
         # Empty = unset. A pane-only capability (the fence, placement, a
         # monitor) implies the pane; otherwise the harness decides: thread
-        # where it seats one, else the closable pane. Inside a mux the default
-        # thread also requests the default view (portal 0).
+        # where it seats one, else the closable pane (the portal view on that
+        # lane is placed Rust-side, portal 0 inside a mux).
         from fno.agents.harness_map import thread_seatable
 
         pane_implied = bool(
@@ -1518,8 +1508,6 @@ def cmd_spawn(
             substrate = "pane"
         else:
             substrate = "thread"
-            if portal is None and os.environ.get("FNO_PANE"):
-                portal = 0
     # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
     # --substrate headless; the spawn gate counts it as headless) but Python leaves
     # it on the pane default. That only bites the routed lane, where the substrate
@@ -1540,9 +1528,7 @@ def cmd_spawn(
 
     from fno.agents.spawn_defaults import resolve_spawn_gates
 
-    substrate = resolve_spawn_gates(
-        substrate, portal, monitor, once=once, harness=harness
-    )
+    substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
 
     if output_format is not None and (
         harness != "claude" or substrate != "headless" or output_format != "json"
@@ -2535,11 +2521,6 @@ def cmd_spawn(
     )
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
-    if portal is not None and substrate == "bg" and spawn_succeeded:
-        # Post-receipt placement; a failure never recolors the spawn verdict.
-        from fno.agents.spawn_defaults import place_thread_portal
-
-        place_thread_portal(result.name, portal)
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.

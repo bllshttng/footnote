@@ -1768,19 +1768,17 @@ def routing_enforcement_state(settings: object = None) -> str:
         return "unenforced"
 
 # --------------------------------------------------------------------------- #
-# The CLI's substrate/portal posture gates, moved here from cmd_spawn (file
-# budget): the value gate + bg alias, the monitor gate, and the post-receipt
-# portal placement (best-effort: the receipt is the truth, a placement failure
-# never fails the spawn).
+# The CLI's substrate posture gates, moved here from cmd_spawn (file budget):
+# the value gate + bg alias, and the monitor gate.
 
 
-def resolve_spawn_gates(substrate, portal, monitor, *, once, harness):
-    """Validate the substrate/portal/monitor posture; canonicalize thread->bg.
+def resolve_spawn_gates(substrate, monitor, *, once, harness):
+    """Validate the substrate/monitor posture; canonicalize ``thread``->``bg``.
 
-    Exit 2 on a value outside the closed set, a portal that cannot open (a
-    portal is the pane a THREAD hosts: a pane hosts its own view, a one-shot
-    exits before it can be viewed), or a monitor combination without support
-    (exactly claude+zai on a pane). The deprecated ``bg`` spelling warns.
+    Exit 2 on a value outside the closed set or a monitor combination without
+    support (exactly claude+zai on a pane). The deprecated ``bg`` spelling
+    warns and still works. Portal gates live on the Rust lane only: the
+    Python parser must not advertise a flag whose placement it cannot run.
     """
     if substrate not in ("pane", "thread", "bg", "headless"):
         print(
@@ -1796,17 +1794,6 @@ def resolve_spawn_gates(substrate, portal, monitor, *, once, harness):
         )
     if substrate == "thread":
         substrate = "bg"
-    if portal is not None:
-        if not 0 <= portal <= 255:
-            print(f"--portal takes an index 0-255 (got {portal})", file=sys.stderr)
-            raise SystemExit(2)
-        if substrate != "bg":
-            print(
-                "--portal applies only to the thread substrate; a pane hosts "
-                "its own view and a one-shot exits before it can be viewed",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
     if monitor is not None and monitor != "happy":
         print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
         raise SystemExit(2)
@@ -1824,33 +1811,3 @@ def resolve_spawn_gates(substrate, portal, monitor, *, once, harness):
         )
         raise SystemExit(2)
     return substrate
-
-
-def place_thread_portal(name: str, portal: int) -> None:
-    """Open a portal on a spawned thread (the two-call seam's second call).
-
-    Best-effort by contract: the receipt is the truth, so a failure is a named
-    stderr line, never a failed spawn - a retry must not duplicate the worker.
-    """
-    import subprocess
-
-    detail = ""
-    try:
-        fno_bin = os.environ.get("FNO_BIN") or "fno"
-        proc = subprocess.run(
-            [fno_bin, "mux", "thread", name, "--portal", str(portal)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if proc.returncode == 0:
-            return
-        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-        detail = lines[-1] if lines else f"exit {proc.returncode}"
-    except (OSError, subprocess.SubprocessError) as exc:
-        detail = str(exc)
-    print(
-        f"portal placement failed: {detail}; the worker is live: reach it "
-        f"with `fno mux thread {name} --portal {portal}`",
-        file=sys.stderr,
-    )
