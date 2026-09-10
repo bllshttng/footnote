@@ -49,6 +49,7 @@ from fno._subprocess_util import fno_py_cmd
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
+    pr_node_ids,
     rows_for_cleanup,
 )
 from fno.config import load_settings_for_repo
@@ -177,30 +178,6 @@ def _parse_origin_slug(url: str) -> Optional[str]:
         return None
     owner, repo = rest.split("/")
     return rest if owner and repo else None
-
-
-def _scan_nodes(entries, pr: int, slug: Optional[str]) -> list[str]:
-    """Graph-derived node ids whose pr_url matches this PR's repo.
-
-    Repo-scoped because pr_number is unique only within a repo (cross-project
-    graph): a foreign repo sharing the number is excluded. A url-less or
-    non-string pr_url is skipped, never fatal (a corrupt entry cannot drop the
-    legitimate nodes after it). Pure so the harness ACs test it directly.
-    """
-    if not slug:
-        return []
-    needle = f"/{slug.lower()}/pull/"
-    out: list[str] = []
-    for e in entries or []:
-        if not isinstance(e, dict) or e.get("pr_number") != pr:
-            continue
-        url = e.get("pr_url")
-        if not isinstance(url, str) or needle not in url.lower():
-            continue
-        nid = e.get("id")
-        if nid and nid not in out:
-            out.append(nid)
-    return out
 
 
 def _session_holder() -> str:
@@ -732,9 +709,7 @@ class Ritual:
             )
             return
         if r.ok:
-            request_id = merge_cleanup_request_id(
-                self.ctx.project, self.ctx.pr, branch, wt, self.ctx.node_ids
-            )
+            request_id = merge_cleanup_request_id(self.ctx.project, self.ctx.pr, branch)
             rows_removed = self._remove_rows_after_archive(wt, request_id, worktree_bytes)
             if rows_removed:
                 from fno.agents.events import _emit_daemon_envelope
@@ -954,25 +929,12 @@ class Ritual:
         """Sidecar-derived node id(s) for this PR when reconcile closed nothing.
 
         The dominant path closes + stamps the node at the ship gate, so
-        ``backlog reconcile`` no-ops and ``.closed[]`` is empty. Recover the
-        PR's node from the sidecar store (repo-scoped; PR links are
-        footnote-owned ship evidence, so the scan works on any tracker
-        backend) so the row reap still finds it - the replaced bash Step 2 did
-        this scan inline (codex P2).
+        ``backlog reconcile`` no-ops and ``.closed[]`` is empty. The shared
+        helper (the merge mint recovers through it too) scans the sidecar
+        store repo-scoped; PR links are footnote-owned ship evidence, so the
+        scan works on any tracker backend.
         """
-        slug = self._resolve_origin_slug()
-        if not slug:
-            return []
-        try:
-            from fno.tracker import sidecar as sidecar_store
-
-            rows = [
-                {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url}
-                for nid, sc in sidecar_store.load_all().items()
-            ]
-        except Exception:  # noqa: BLE001 - unreadable store degrades to no recovery
-            return []
-        return _scan_nodes(rows, self.ctx.pr, slug)
+        return pr_node_ids(self.ctx.pr, self._resolve_origin_slug())
 
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""
