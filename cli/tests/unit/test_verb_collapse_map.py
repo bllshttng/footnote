@@ -134,7 +134,8 @@ def test_map_covers_current_surface_once():
     # `agents test-run`, the native test-suite process-group owner, and
     # `backlog worked`, the one-read live-worker surface the ready gate and
     # king board consume (hidden verbs): counted from the merged file, 587 -> 589.
-    assert len(mapped) == 589, (
+    # This branch adds `doctor graph export`: 589 -> 590.
+    assert len(mapped) == 590, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

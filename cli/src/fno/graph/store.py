@@ -278,8 +278,13 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         f"store-{os.getpid()}",
         "--lock-timeout-secs",
         str(_LOCK_TIMEOUT_SECS),
+        "--read-source",
+        _graph_read_source(),
     ]
     if _is_canonical(path):
+        from fno import paths as _paths
+
+        argv.extend(["--events", str(_paths.project_events_json())])
         argv.append("--canonical")
     proc = subprocess.Popen(
         argv,
@@ -301,14 +306,7 @@ _SPAWNED_KEEPERS: "dict[int, tuple[subprocess.Popen, Path]]" = {}
 
 
 def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
-    """SIGTERM every keeper this process spawned and wait for each to die.
-
-    The store client spawns detached keepers on demand; a test session that
-    touches many fixture graphs would otherwise leak one immortal keeper per
-    graph (measured at 6,855 live keepers after one pytest pass on 2026-09-03,
-    load 117). Returns the pids that refused to die inside `timeout` - an
-    honest non-empty answer, never a silent pass.
-    """
+    """Stop this process's detached keepers; return survivors after timeout."""
     import signal
     import time as _time
 
@@ -332,16 +330,7 @@ def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
 
 
 def drain_exited_keepers() -> int:
-    """poll() every keeper in the spawn ledger and drop the ones that exited.
-
-    An exited child stays in the process table as a zombie until someone
-    collects its status, and the only collector used to be the session-scoped
-    teardown: measured 2026-09-03 at ~52 zombie keepers per minute under four
-    xdist workers (549 zombies, 31% of the process table). This reaps
-    continuously instead. It is exactly what reap_spawned_keepers() does to an
-    already-dead keeper, only sooner and more often, so live keepers still
-    reach the session teardown untouched. Returns how many were reaped.
-    """
+    """Collect exited keeper children and return how many were reaped."""
     reaped = 0
     for pid in list(_SPAWNED_KEEPERS):
         proc, _sock = _SPAWNED_KEEPERS[pid]
@@ -465,12 +454,7 @@ class _Keeper:
             frame = bytes([_TAG_REQUEST]) + struct.pack("<I", len(payload)) + payload
             stream.settimeout(self.read_timeout)
             stream.sendall(frame)
-            header = b""
-            while len(header) < 5:
-                chunk = stream.recv(5 - len(header))
-                if not chunk:
-                    raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-frame")
-                header += chunk
+            header = _recv_exact(stream, 5)
             if header[0] != _TAG_RESPONSE:
                 raise StoreUnavailable(
                     STATE_SILENT, f"unexpected frame tag {header[0]} from keeper"
@@ -478,12 +462,7 @@ class _Keeper:
             (length,) = struct.unpack_from("<I", header, 1)
             if length > _MAX_FRAME_BYTES:
                 raise StoreUnavailable(STATE_SILENT, f"oversized reply frame ({length} bytes)")
-            data = b""
-            while len(data) < length:
-                chunk = stream.recv(length - len(data))
-                if not chunk:
-                    raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-reply")
-                data += chunk
+            data = _recv_exact(stream, length)
             reply = json.loads(data.decode("utf-8"))
         except (OSError, ValueError) as exc:
             raise StoreUnavailable(STATE_UNREACHABLE, str(exc)) from None
@@ -528,15 +507,37 @@ class _Keeper:
         the verb raises through ``request`` and every caller falls back."""
         return self.request("read_ids", {"ids": list(ids)})
 
+    def _control(self, tag: int, expected: int) -> bytes:
+        stream = self._connect()
+        try:
+            stream.settimeout(self.read_timeout)
+            stream.sendall(bytes([tag]) + struct.pack("<I", 0))
+            header = _recv_exact(stream, 5)
+            if header[0] != expected:
+                raise StoreUnavailable(STATE_SILENT, f"unexpected frame tag {header[0]}")
+            return _recv_exact(stream, struct.unpack_from("<I", header, 1)[0])
+        finally:
+            stream.close()
+
+    def identify(self) -> dict:
+        return json.loads(self._control(_TAG_IDENTIFY, _TAG_IDENTIFY_REPLY))
+
+    def shutdown(self) -> None:
+        self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
+
+
+def _recv_exact(stream: socket.socket, length: int) -> bytes:
+    data = b""
+    while len(data) < length:
+        chunk = stream.recv(length - len(data))
+        if not chunk:
+            raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-frame")
+        data += chunk
+    return data
+
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
-    """A keeper connection for `path`, spawning the keeper when absent.
-
-    Probes with a real connect: `_Keeper` is lazy, so only a connect can
-    tell a live listener from a stale socket file. A positively dead socket
-    (absent / refused) gets a spawn and a bounded re-probe loop; anything
-    else is raised as the state that applies.
-    """
+    """Connect to `path`'s keeper, spawning only for a positively dead socket."""
     path = Path(path)
     sock = store_socket_for(path)
     keeper = _Keeper(sock)
@@ -577,6 +578,37 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
             last = exc
             time.sleep(0.05)
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
+
+
+def identify_spawned_keepers() -> list[dict]:
+    """Identify keepers spawned here plus the canonical seat."""
+    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
+    socks.add(store_socket_for(Path(GRAPH_JSON)))
+    rows: list[dict] = []
+    for sock in sorted(socks):
+        try:
+            rows.append(_Keeper(sock).identify())
+        except StoreUnavailable:
+            continue
+    return rows
+
+
+def restart_spawned_keepers() -> list[dict]:
+    """Restart identified keepers so a backend config flip takes effect."""
+    rows = identify_spawned_keepers()
+    for row in rows:
+        try:
+            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
+        except (KeyError, StoreUnavailable):
+            continue
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and any(
+        store_socket_for(Path(row["graph"])).exists() for row in rows
+    ):
+        time.sleep(0.05)
+    for row in rows:
+        _client_for(Path(row["graph"]))
+    return identify_spawned_keepers()
 
 
 def _raise_store_error(kind: str, message: str) -> None:
@@ -634,18 +666,25 @@ def _row_diff(before: list[dict], after: list[dict]) -> tuple[list[dict], list[s
     return changed, removed
 
 
-def _graph_commit_mode() -> str:
+def _graph_setting(name: str, default: str) -> str:
     try:
         from fno.config import load_settings
 
-        return load_settings().graph.commit_mode
+        return str(getattr(load_settings().graph, name))
     except Exception:
-        return "rows"
+        return default
 
 
-def _commit_snapshot(
-    client, snap: dict, base_entries: list[dict], entries: list[dict], plan_rungs: dict
-) -> dict:
+def _graph_commit_mode() -> str:
+    return _graph_setting("commit_mode", "rows")
+
+
+def _graph_read_source() -> str:
+    return _graph_setting("read_source", "json")
+
+
+def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],
+                     plan_rungs: dict, attempt: int) -> dict:
     if _graph_commit_mode() == "rows":
         diff = _row_diff(base_entries, entries)
         digests = snap.get("base_digests")
@@ -659,6 +698,7 @@ def _commit_snapshot(
                     "changed": changed,
                     "removed": removed,
                     "plan_rungs": plan_rungs,
+                    "attempt": attempt,
                 })
             except RuntimeError as exc:
                 marker = 'store error (invalid): unknown store method "commit_rows"'
@@ -671,6 +711,7 @@ def _commit_snapshot(
         "version": snap["version"],
         "entries": entries,
         "plan_rungs": plan_rungs,
+        "attempt": attempt,
     })
 
 
@@ -1104,6 +1145,8 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     path = Path(path)
     dropped = outcome["dropped"]
     backup = outcome["backup"]
+    if warning := outcome.get("shadow_warning"):
+        print(f"Warning: {warning}", file=sys.stderr)
     if dropped > 0:
         where = (
             f"prior content is preserved in {Path(backup).name}"
@@ -1259,7 +1302,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         _validate_company_work(entries)
         plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs)
+            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs, attempt + 1)
             break
         except _Conflict as conflict:
             _emit_graph_tx_event(

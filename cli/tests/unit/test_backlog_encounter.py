@@ -558,14 +558,11 @@ def test_a_non_claude_harness_does_not_inherit_the_claude_model_env(probe):
     assert "effort" not in record
 
 
-def test_encounters_live_only_on_the_node_in_graph_json(probe):
+def test_encounters_live_only_in_the_graph_store_and_export(probe):
     """The single-store rule.
 
-    A sidecar index or a denormalized count cached elsewhere is a second store
-    to keep true, and two stores drift. After a vote, the evidence string may
-    exist in exactly one file in the state dir: the graph itself. This walks
-    every byte the verb's render fanout wrote and fails the moment a parallel
-    vote store appears.
+    SQLite is the store and graph.json its serialized export. This walks every
+    byte the verb wrote and fails if evidence escapes those two declared legs.
     """
     _seed(probe, _node())
     evidence = "cost one full rebase and a wrong diagnosis."
@@ -580,7 +577,7 @@ def test_encounters_live_only_on_the_node_in_graph_json(probe):
         for path in probe.state.rglob("*")
         if path.is_file() and evidence.encode() in path.read_bytes()
     ]
-    assert carriers == ["graph.json"]
+    assert carriers == ["graph.json", "graph.db"]
 
 
 

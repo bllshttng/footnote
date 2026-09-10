@@ -190,6 +190,8 @@ pub enum StoreError {
     Invalid(String),
     #[error("{0}")]
     ClaimsUnavailable(String),
+    #[error("sqlite: {0}")]
+    Sqlite(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -2014,6 +2016,8 @@ pub struct MutateOutcome {
     /// that preserves them named.
     pub dropped: usize,
     pub backup: Option<String>,
+    /// Best-effort shadow failures are visible without failing the JSON publish.
+    pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
@@ -2052,6 +2056,8 @@ pub struct MutateInput {
     /// plan-based statuses ONLY from this map; `None` keeps stored statuses
     /// (a caller that is not re-deriving from plans).
     pub plan_rungs: Option<BTreeMap<String, String>>,
+    /// True after the read cutover is proven and SQLite owns durable writes.
+    pub sqlite_authoritative: bool,
 }
 
 /// The content digest a begin/commit pair compares (the wire "version").
@@ -2084,12 +2090,21 @@ pub fn locked_mutate(
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
     if let Some(expected) = &input.base_version {
-        let current = file_content_version(path);
+        let current = if input.sqlite_authoritative {
+            crate::graph_sqlite::version(path).map_err(StoreError::Sqlite)?
+        } else {
+            file_content_version(path)
+        };
         if current != *expected {
             return Err(StoreError::Conflict);
         }
     }
-    let raw = match read_raw(path)? {
+    let raw_read = if input.sqlite_authoritative {
+        RawRead::Entries(crate::graph_sqlite::read_entries(path).map_err(StoreError::Sqlite)?)
+    } else {
+        read_raw(path)?
+    };
+    let raw = match raw_read {
         RawRead::Entries(v) => v,
         RawRead::Empty => vec![],
         RawRead::MalformedRoot => {
@@ -2104,6 +2119,8 @@ pub fn locked_mutate(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
+    let mut shadow_before = pre_normalized.clone();
+    canonicalize_entries(&mut shadow_before);
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2223,21 +2240,29 @@ pub fn locked_mutate(
 
     canonicalize_entries(&mut entries);
 
-    let backup = create_backup(path);
-    let body = serialize_graph_file(&entries);
-    write_atomic(path, &body)?;
-    // The published bytes' own digest: identical in shape to
-    // file_content_version, but computed from the bytes we wrote rather than
-    // re-read, so it cannot describe a file someone else replaced after us.
-    let version = {
-        use sha2::Digest as _;
-        format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
+    let (backup, shadow_warning, version) = if input.sqlite_authoritative {
+        let version = crate::graph_sqlite::authoritative_sync(path, &shadow_before, &entries)
+            .map_err(StoreError::Sqlite)?;
+        (None, None, version)
+    } else {
+        let backup = create_backup(path);
+        let body = serialize_graph_file(&entries);
+        write_atomic(path, &body)?;
+        let version = {
+            use sha2::Digest as _;
+            format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
+        };
+        let warning = crate::graph_sqlite::shadow_sync(path, &shadow_before, &entries, &version)
+            .err()
+            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
+        (backup, warning, version)
     };
 
     Ok(MutateOutcome {
         entries,
         dropped,
         backup: backup.map(|p| p.display().to_string()),
+        shadow_warning,
         closure_releases,
         is_canonical,
         version,
@@ -2566,6 +2591,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2579,6 +2605,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2592,6 +2619,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2694,6 +2722,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )

@@ -41,6 +41,31 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    Json,
+    Sqlite,
+}
+
+impl ReadSource {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "json" => Ok(Self::Json),
+            "sqlite" => Ok(Self::Sqlite),
+            _ => Err(format!(
+                "--read-source must be json or sqlite, got {value:?}"
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
 pub(crate) const TAG_SHUTDOWN: u8 = 2;
@@ -55,7 +80,7 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
-/// [--canonical] [--lock-timeout-secs N]`.
+/// [--canonical] [--lock-timeout-secs N] [--read-source json|sqlite]`.
 pub struct KeeperConfig {
     pub sock: PathBuf,
     pub graph: PathBuf,
@@ -64,6 +89,9 @@ pub struct KeeperConfig {
     /// closure-release hook and canonical-board effects.
     pub canonical: bool,
     pub lock_timeout: Duration,
+    /// Project journal receiving bounded write-gate aggregates.
+    pub events: Option<PathBuf>,
+    pub read_source: ReadSource,
     /// Idle self-exit bound. A keeper is long-lived by design in production,
     /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
     /// a killed pytest worker above all - and one orphan per fixture graph
@@ -85,6 +113,8 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
     let mut session = String::new();
     let mut canonical = false;
     let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
+    let mut events = None;
+    let mut read_source = ReadSource::Json;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -100,6 +130,10 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                     .parse()
                     .map_err(|_| "--lock-timeout-secs needs a number")?;
                 lock_timeout = Duration::from_secs(v);
+            }
+            "--events" => events = Some(PathBuf::from(it.next().ok_or("--events needs a value")?)),
+            "--read-source" => {
+                read_source = ReadSource::parse(it.next().ok_or("--read-source needs a value")?)?
             }
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -123,6 +157,8 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         session,
         canonical,
         lock_timeout,
+        events,
+        read_source,
         idle_limit,
     })
 }
@@ -253,6 +289,104 @@ struct StoreState {
     /// after evidence).
     file_opens: AtomicU64,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
+    gate_metrics: Mutex<GateMetrics>,
+    events: Option<PathBuf>,
+    read_source: ReadSource,
+}
+
+const GATE_WINDOW: Duration = Duration::from_secs(300);
+const WAIT_BOUNDS_MS: [u64; 12] = [
+    1,
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    u64::MAX,
+];
+
+struct GateMetrics {
+    started: std::time::Instant,
+    started_epoch_ms: u128,
+    counts: [u64; WAIT_BOUNDS_MS.len()],
+    mutations: u64,
+    bytes_written: u64,
+    retries: u64,
+}
+
+impl GateMetrics {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_epoch_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or(0),
+            counts: [0; WAIT_BOUNDS_MS.len()],
+            mutations: 0,
+            bytes_written: 0,
+            retries: 0,
+        }
+    }
+}
+
+fn record_gate(state: &StoreState, wait: Duration, bytes_written: u64, attempt: u64) {
+    let mut metrics = state
+        .gate_metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let wait_ms = wait.as_millis().min(u64::MAX as u128) as u64;
+    let bucket = WAIT_BOUNDS_MS
+        .iter()
+        .position(|bound| wait_ms <= *bound)
+        .unwrap_or(WAIT_BOUNDS_MS.len() - 1);
+    metrics.counts[bucket] += 1;
+    metrics.mutations += 1;
+    metrics.bytes_written = metrics.bytes_written.saturating_add(bytes_written);
+    metrics.retries = metrics.retries.saturating_add(u64::from(attempt > 1));
+}
+
+fn flush_gate_metrics(state: &StoreState) {
+    let Some(path) = &state.events else { return };
+    let mut metrics = state
+        .gate_metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let elapsed = metrics.started.elapsed();
+    let replacement = GateMetrics::new();
+    let finished_epoch_ms = replacement.started_epoch_ms;
+    let completed = std::mem::replace(&mut *metrics, replacement);
+    drop(metrics);
+    let bounds: Vec<Value> = WAIT_BOUNDS_MS
+        .iter()
+        .map(|bound| {
+            if *bound == u64::MAX {
+                Value::String("inf".into())
+            } else {
+                json!(bound)
+            }
+        })
+        .collect();
+    let emitter = crate::events::EventEmitter::new(path, "daemon");
+    let _ = emitter.emit(
+        "graph_write_gate",
+        &json!({
+            "keeper_pid": std::process::id(),
+            "window_started_ms": completed.started_epoch_ms,
+            "window_finished_ms": finished_epoch_ms,
+            "completed_window_seconds": elapsed.as_secs_f64(),
+            "wait_ms_bounds": bounds,
+            "wait_ms_counts": completed.counts,
+            "mutation_count": completed.mutations,
+            "bytes_written": completed.bytes_written,
+            "retry_count": completed.retries,
+        }),
+    );
 }
 
 /// Run the store keeper to completion. Returns only on a startup failure;
@@ -286,6 +420,9 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         cache: RwLock::new(None),
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
+        gate_metrics: Mutex::new(GateMetrics::new()),
+        events: cfg.events.clone(),
+        read_source: cfg.read_source,
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -297,11 +434,56 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         "graph": cfg.graph.display().to_string(),
         "session": cfg.session,
         "started_at": started_at,
+        "store_backend": cfg.read_source.name(),
     })
     .to_string()
     .into_bytes();
 
     let shutdown = Arc::new(AtomicU64::new(0));
+    if state.events.is_some() {
+        let metrics_state = Arc::clone(&state);
+        let metrics_shutdown = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("fno-store-metrics".into())
+            .spawn(move || loop {
+                std::thread::sleep(GATE_WINDOW);
+                if metrics_shutdown.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                flush_gate_metrics(&metrics_state);
+            });
+    }
+    if state.read_source == ReadSource::Sqlite {
+        let export_state = Arc::clone(&state);
+        let export_shutdown = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("fno-store-export".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if export_shutdown.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                let gate = export_state
+                    .gate
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner());
+                let result = crate::graph_sqlite::export_if_due(
+                    &export_state.graph,
+                    Duration::from_secs(60),
+                );
+                drop(gate);
+                if let (Err(error), Some(path)) = (result, &export_state.events) {
+                    let emitter = crate::events::EventEmitter::new(path, "daemon");
+                    let _ = emitter.emit(
+                        "graph_export_failed",
+                        &json!({
+                            "graph": export_state.graph.display().to_string(),
+                            "error": error,
+                        }),
+                    );
+                }
+            });
+    }
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
@@ -400,7 +582,7 @@ fn cached_entries_gated(
         // No identity, no trust: a stat failure invalidates and the read
         // answers fresh, exactly as an unreadable stat read today.
         *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
-        let version = file_version(&state.graph);
+        let version = graph_store::file_content_version(&state.graph);
         let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
         return Ok((Arc::new(entries), version));
     };
@@ -417,7 +599,7 @@ fn cached_entries_gated(
     // Digest first, parse second: with the gate held, a keeper-side write
     // cannot interleave, and a FOREIGN one (gc_sweep on the file) moves the
     // post-parse identity, which the fill check below refuses.
-    let version = file_version(&state.graph);
+    let version = graph_store::file_content_version(&state.graph);
     state.file_opens.fetch_add(1, Ordering::SeqCst);
     let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
     let entries = Arc::new(entries);
@@ -475,7 +657,8 @@ fn cached_snapshot(state: &StoreState) -> Result<(String, Arc<Vec<Value>>), Stor
 /// directly) landing between the publish and this check fails the digest
 /// match and caches nothing, so a mispaired identity/entries row can never
 /// enter the cache.
-fn seed_cache(state: &StoreState, entries: Vec<Value>, published_version: &str) {
+fn seed_cache(state: &StoreState, mut entries: Vec<Value>, published_version: &str) {
+    graph_store::apply_defaults(&mut entries, false);
     let mut cache = state.cache.write().unwrap_or_else(|e| e.into_inner());
     let ident = FileIdent::of(&state.graph);
     let verified =
@@ -563,6 +746,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::EmptyFieldUpdate(_) => "empty_field_update",
         StoreError::Invalid(_) => "invalid",
         StoreError::ClaimsUnavailable(_) => "claims_unavailable",
+        StoreError::Sqlite(_) => "sqlite",
         StoreError::Io(_) => "io",
     }
 }
@@ -584,6 +768,8 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read_ids" => handle_read_ids(state, &params),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
+        "export_now" => handle_export_now(state),
+        "export_status" => handle_export_status(state),
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
@@ -712,12 +898,19 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
     // Borrowed in both arms: a deep clone of the owned graph per ready call
     // would re-spend most of what the cache just saved.
     let cached;
+    let sqlite;
     let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
         Some(a) => a,
-        None => {
-            cached = cached_entries(state, false, false)?;
-            &cached
-        }
+        None => match state.read_source {
+            ReadSource::Json => {
+                cached = cached_entries(state, false, false)?;
+                &cached
+            }
+            ReadSource::Sqlite => {
+                sqlite = read_state(state, false, true)?;
+                &sqlite
+            }
+        },
     };
     match select(entries, &opts) {
         Ok(reply) => Ok(json!({
@@ -749,8 +942,17 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    let entries = cached_entries(state, keep_malformed, strict)?;
-    Ok(json!({ "entries": entries }))
+    match state.read_source {
+        ReadSource::Json => {
+            let entries = cached_entries(state, keep_malformed, strict)?;
+            Ok(json!({ "entries": entries }))
+        }
+        ReadSource::Sqlite => {
+            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+            let entries = read_state(state, keep_malformed, !strict)?;
+            Ok(json!({ "entries": entries }))
+        }
+    }
 }
 
 /// The by-id read: exact id-then-slug rows from the cache, in argument order,
@@ -772,8 +974,10 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let entries = cached_entries(state, false, false)?;
-    let mut overlaid = (*entries).clone();
+    let mut overlaid = match state.read_source {
+        ReadSource::Json => (*cached_entries(state, false, false)?).clone(),
+        ReadSource::Sqlite => read_state(state, false, true)?,
+    };
     graph_store::apply_readiness_overlay(&mut overlaid);
     let mut out = Vec::with_capacity(tokens.len());
     let mut missing = Vec::new();
@@ -784,6 +988,40 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
         }
     }
     Ok(json!({"entries": out, "missing": missing}))
+}
+
+fn read_state(
+    state: &StoreState,
+    keep_malformed: bool,
+    backup_on_corrupt: bool,
+) -> Result<Vec<Value>, StoreError> {
+    match state.read_source {
+        ReadSource::Json => {
+            graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
+        }
+        ReadSource::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
+            StoreError::Unreadable(
+                crate::graph_sqlite::database_path(&state.graph)
+                    .display()
+                    .to_string(),
+                error,
+            )
+        }),
+    }
+}
+
+fn state_version(state: &StoreState) -> Result<String, StoreError> {
+    match state.read_source {
+        ReadSource::Json => Ok(graph_store::file_content_version(&state.graph)),
+        ReadSource::Sqlite => crate::graph_sqlite::version(&state.graph).map_err(|error| {
+            StoreError::Unreadable(
+                crate::graph_sqlite::database_path(&state.graph)
+                    .display()
+                    .to_string(),
+                error,
+            )
+        }),
+    }
 }
 
 /// Pure transforms over client-shipped rows: the migration seam and the
@@ -823,15 +1061,18 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
 /// the bytes, and the keeper's serialized publish guarantees the reads never
 /// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
-    use std::io::Read as _;
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-    let mut file = std::fs::File::open(&state.graph)
-        .map_err(|e| StoreError::Unreadable(state.graph.display().to_string(), format!("{e}")))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let bytes = match state.read_source {
+        ReadSource::Json => std::fs::read(&state.graph).map_err(|error| {
+            StoreError::Unreadable(state.graph.display().to_string(), error.to_string())
+        })?,
+        ReadSource::Sqlite => {
+            graph_store::serialize_graph_file(&read_state(state, true, false)?).into_bytes()
+        }
+    };
     Ok(json!({
         "bytes_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
-        "sha256": file_version(&state.graph),
+        "sha256": state_version(state)?,
     }))
 }
 
@@ -839,7 +1080,16 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     // One gate-held window for entries and digest both (cached_snapshot): a
     // commit publishing mid-begin waits, so a retrying writer's version never
     // names a file its entries did not come from.
-    let (version, entries) = cached_snapshot(state)?;
+    let (version, entries) = match state.read_source {
+        ReadSource::Json => cached_snapshot(state)?,
+        ReadSource::Sqlite => {
+            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+            (
+                state_version(state)?,
+                Arc::new(read_state(state, false, true)?),
+            )
+        }
+    };
     remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
@@ -872,8 +1122,35 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
         .map(|(_, entries)| entries.clone())
 }
 
-fn file_version(path: &std::path::Path) -> String {
-    graph_store::file_content_version(path)
+fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
+    if state.read_source != ReadSource::Sqlite {
+        return Err(StoreError::Invalid(
+            "graph export requires graph.read_source=sqlite".into(),
+        ));
+    }
+    let _gate = state
+        .gate
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    let version = crate::graph_sqlite::export_now(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "version": version,
+        "path": state.graph.display().to_string(),
+    }))
+}
+
+fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
+    if state.read_source != ReadSource::Sqlite {
+        return Ok(json!({"backend": "json", "stale": false}));
+    }
+    let (current, exported) =
+        crate::graph_sqlite::export_status(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "backend": "sqlite",
+        "stale": exported.as_deref() != Some(current.as_str()),
+        "version": current,
+        "exported_version": exported,
+    }))
 }
 
 fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
@@ -886,7 +1163,9 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         .and_then(Value::as_array)
         .ok_or_else(|| StoreError::Invalid("commit needs entries".into()))?
         .clone();
-    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    let waiting = std::time::Instant::now();
+    let gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    let waited = waiting.elapsed();
     let outcome = graph_store::locked_mutate(
         &state.graph,
         MutateInput {
@@ -894,10 +1173,24 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
             plan_rungs: plan_rung_map(params),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
-    )?;
-    seed_cache(state, outcome.entries.clone(), &outcome.version);
+    );
+    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    if state.read_source == ReadSource::Json {
+        if let Ok(value) = &outcome {
+            seed_cache(state, value.entries.clone(), &value.version);
+        }
+    }
+    drop(gate);
+    record_gate(
+        state,
+        waited,
+        bytes,
+        params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+    );
+    let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
 
@@ -1005,12 +1298,14 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     }
     touched.extend(removed.iter().cloned());
 
-    let _gate = state
+    let waiting = std::time::Instant::now();
+    let gate = state
         .gate
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    let current_version = file_version(&state.graph);
-    let current = graph_store::read_defaulted(&state.graph, false)?;
+    let waited = waiting.elapsed();
+    let current_version = state_version(state)?;
+    let current = read_state(state, false, true)?;
     if current_version != base_version {
         let Some(base_entries) = stored_snapshot(state, base_version) else {
             return Err(CommitRowsError::Conflict(touched.into_iter().collect()));
@@ -1028,6 +1323,13 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             .filter(|id| normalized_base.get(id) != current_digests.get(id) && touched.contains(id))
             .collect();
         if !conflicts.is_empty() {
+            drop(gate);
+            record_gate(
+                state,
+                waited,
+                0,
+                params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+            );
             return Err(CommitRowsError::Conflict(conflicts));
         }
     }
@@ -1064,10 +1366,36 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(current_version),
             plan_rungs: plan_rung_map(params),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
-    )?;
+    );
+    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    if state.read_source == ReadSource::Json {
+        if let Ok(value) = &outcome {
+            seed_cache(state, value.entries.clone(), &value.version);
+        }
+    }
+    drop(gate);
+    record_gate(
+        state,
+        waited,
+        bytes,
+        params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+    );
+    let outcome = outcome?;
     Ok(outcome_json(&outcome))
+}
+
+fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
+    let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
+    let backup = outcome
+        .backup
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    graph.saturating_add(backup)
 }
 
 /// The client-supplied node id -> plan rung map (see
@@ -1095,6 +1423,7 @@ fn outcome_json(outcome: &graph_store::MutateOutcome) -> Value {
         "entries": outcome.entries,
         "dropped": outcome.dropped,
         "backup": outcome.backup,
+        "shadow_warning": outcome.shadow_warning,
         "closure_releases": outcome
             .closure_releases
             .iter()
@@ -2017,13 +2346,13 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let p = params.get("params").cloned().unwrap_or(Value::Null);
     let client_base = params.get("base_version").and_then(Value::as_str);
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    let base = graph_store::file_content_version(&state.graph);
+    let base = state_version(state)?;
     if let Some(expected) = client_base {
         if base != expected {
             return Err(StoreError::Conflict);
         }
     }
-    let mut entries = graph_store::read_defaulted(&state.graph, false)?;
+    let mut entries = read_state(state, false, true)?;
     let op_result = apply_op(&mut entries, name, &p)?;
     let outcome = graph_store::locked_mutate(
         &state.graph,
@@ -2036,10 +2365,13 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             // in_progress like any full write); a caller that sends none
             // keeps stored statuses.
             plan_rungs: plan_rung_map(&p),
+            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     )?;
-    seed_cache(state, outcome.entries.clone(), &outcome.version);
+    if state.read_source == ReadSource::Json {
+        seed_cache(state, outcome.entries.clone(), &outcome.version);
+    }
     Ok(json!({
         "op": op_result,
         "outcome": outcome_json(&outcome),
@@ -2114,6 +2446,9 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            events: None,
+            read_source: ReadSource::Json,
         }
     }
 
@@ -2180,6 +2515,9 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            events: None,
+            read_source: ReadSource::Json,
         }
     }
 
@@ -2495,6 +2833,8 @@ mod tests {
             session: "test-idle".into(),
             canonical: false,
             lock_timeout: Duration::from_secs(2),
+            events: None,
+            read_source: ReadSource::Json,
             idle_limit: Some(Duration::from_millis(700)),
         };
         let handle = std::thread::spawn(move || run(cfg));
@@ -2533,6 +2873,9 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            events: None,
+            read_source: ReadSource::Json,
         };
         let stale = json!({
             "name": "update_fields",
