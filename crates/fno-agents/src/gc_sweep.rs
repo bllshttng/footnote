@@ -1534,15 +1534,31 @@ pub(crate) fn stage_session_retirement(
             "receipt did not persist: {err}"
         )));
     }
-    // Effect 1: the confirmed stop of the held process.
-    let stopped = stop_confirmed(e);
-    receipt
-        .effects
-        .push(crate::gc_native::stop_outcome_effect(stopped));
+    // Effect 1: the confirmed stop of the held process. Pane-substrate rows
+    // stop through the pid-proving helper (x-1b90 change 1): the roster and
+    // the worker socket never held the pane, so both today's arms confirm a
+    // stop that never happened. The detail is the receipt's measurement, so
+    // the routing decision lives here where the effect is built - never in
+    // the seam closure, whose bool answer cannot carry it.
+    let pane_stop = if e.substrate.as_deref() == Some("pane") {
+        Some(crate::pane_stop::stop_pane_process_confirmed(e))
+    } else {
+        None
+    };
+    let stopped = pane_stop
+        .as_ref()
+        .map(|s| s.confirmed)
+        .unwrap_or_else(|| stop_confirmed(e));
+    receipt.effects.push(crate::gc_native::stop_outcome_effect(
+        stopped,
+        pane_stop.as_ref().map(|s| s.detail.clone()),
+    ));
     if !stopped {
         let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
-            "the stop did not confirm; row kept for retry".into(),
+            pane_stop
+                .map(|s| s.detail)
+                .unwrap_or_else(|| "the stop did not confirm; row kept for retry".into()),
         ));
     }
     // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent

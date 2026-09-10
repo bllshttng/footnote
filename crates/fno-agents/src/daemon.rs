@@ -862,11 +862,14 @@ pub fn worktree_sweep(
 }
 
 pub(crate) use crate::gc_inventory::{index_tree, HarnessStoreIndex};
+// x-1b90: the pane kill and its absence vocabulary moved to pane_stop.rs
+// with the stop helper that now shares them.
+pub(crate) use crate::pane_stop::{mux_pane_is_absent, run_mux_pane_kill};
 
 /// Wall-clock bound for one harness removal subprocess (`run_claude_rm`). A
 /// hung removal must never wedge its caller (the operator measured a 300s+
 /// hang on a stuck row; the removal cannot inherit it).
-const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Remove a reaped row's session from its OWN harness's store (AC6). Returns
 /// `Some((row_id, reason))` when harness removal refused or failed; `None` on
@@ -6517,52 +6520,6 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     }
 }
 
-fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
-    let pane_id = pane_id.to_string();
-    let mut child = std::process::Command::new("fno")
-        .args(["mux", "pane", "kill", "--session", session, &pane_id])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("mux pane kill failed to start: {error}"))?;
-    let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(true),
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(-1);
-                let output = child.wait_with_output().ok();
-                let detail = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stderr).to_ascii_lowercase())
-                    .unwrap_or_default();
-                if mux_pane_is_absent(&detail) {
-                    return Ok(false);
-                }
-                return Err(format!("mux pane kill exited {code}: {}", detail.trim()));
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("mux pane kill timed out".into());
-            }
-            Err(error) => return Err(format!("mux pane kill wait failed: {error}")),
-        }
-    }
-}
-
-fn mux_pane_is_absent(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("no such pane")
-        || detail.contains("no live pane owns")
-        || (detail.contains("cannot reach session")
-            && (detail.contains("no such file or directory")
-                || detail.contains("connection refused")))
-}
-
 /// What a read-only look at the pane referent proved. `Unknown` is the
 /// fail-closed posture: a probe that cannot prove absence changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6803,14 +6760,27 @@ async fn handle_rm_with(
             );
         }
     }
-    let pane_outcome = if let Some(mux) = entry.mux.as_ref() {
-        match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
+    let pane_outcome;
+    let mut pane_stop_detail: Option<String> = None;
+    if entry.substrate.as_deref() == Some("pane") {
+        // x-1b90: a pane row's ONE live ref is the pane process, and a
+        // successful or absent pane kill is not a death - the stored pane id
+        // is not an address for a process a keeper re-adopt. rm proves the
+        // stop the same way the reap does: verified pid, pane found by child
+        // pid, ESRCH only.
+        let e_for_stop = entry.clone();
+        let stop = off_executor(move || crate::pane_stop::stop_pane_process_confirmed(&e_for_stop));
+        let (outcome, detail) = crate::pane_stop::rm_pane_outcome(&stop);
+        pane_outcome = outcome;
+        pane_stop_detail = detail;
+    } else if let Some(mux) = entry.mux.as_ref() {
+        pane_outcome = match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
             Ok(true) => CascadeOutcome::Removed,
             Ok(false) => CascadeOutcome::AlreadyAbsent("mux pane already absent".into()),
             Err(reason) => CascadeOutcome::Failed(reason),
-        }
+        };
     } else {
-        CascadeOutcome::NotApplicable
+        pane_outcome = CascadeOutcome::NotApplicable;
     };
     if let CascadeOutcome::Failed(reason) = &pane_outcome {
         if !force {
@@ -6823,6 +6793,17 @@ async fn handle_rm_with(
                 CascadeOutcome::AlreadyAbsent(_) => "harness row already absent; ".into(),
                 _ => String::new(),
             };
+            if pane_stop_detail.is_some() {
+                // The pane arm's reason IS the stop measurement; there may be
+                // no mux ref at all to name.
+                return Response::err(
+                    req.id,
+                    ErrorCode::Internal,
+                    format!(
+                        "agent {name}: {harness_note}registry retained; the pane stop did not confirm: {reason}"
+                    ),
+                );
+            }
             let mux = entry.mux.as_ref().expect("pane outcome requires a mux ref");
             return Response::err(
                 req.id,
@@ -7002,7 +6983,9 @@ async fn handle_rm_with(
         "pane_session": pane_session,
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        "pane_reason": pane_outcome.reason(),
+        // x-1b90: a confirmed pane stop's detail (pane killed, pid gone)
+        // rides here because `Removed` carries no reason of its own.
+        "pane_reason": pane_stop_detail.as_deref().or(pane_outcome.reason()),
         "worktree_receipt": worktree_receipt,
         "actor": audit.actor,
         "reason": audit.reason,
