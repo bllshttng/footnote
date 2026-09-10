@@ -2041,8 +2041,10 @@ fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
 
 struct StateReapRoots {
     claims_root: PathBuf,
+    claims_dir: PathBuf,
     locks_root: PathBuf,
     agents_root: PathBuf,
+    agents_dir: PathBuf,
     state_root: PathBuf,
 }
 
@@ -2062,7 +2064,7 @@ fn reap_state_files_with_roots(
     }
     reap_mtime_family(
         &roots.claims_root,
-        &roots.claims_root.join("claims/.expired"),
+        &roots.claims_dir.join(".expired"),
         config.expired_claims_retain_days,
         None,
         apply,
@@ -2078,7 +2080,7 @@ fn reap_state_files_with_roots(
     );
     reap_lock_family(
         &roots.agents_root,
-        &roots.agents_root.join("locks"),
+        &roots.agents_dir.join("locks"),
         config.locks_retain_days,
         apply,
         &mut summary.agent_locks,
@@ -2119,8 +2121,10 @@ pub fn reap_state_files(
     reap_state_files_with_roots(
         StateReapRoots {
             claims_root: root.to_path_buf(),
+            claims_dir: root.join("claims"),
             locks_root: root.to_path_buf(),
-            agents_root: root.join("agents"),
+            agents_root: root.to_path_buf(),
+            agents_dir: root.join("agents"),
             state_root: root.to_path_buf(),
         },
         config,
@@ -2139,6 +2143,9 @@ pub fn reap_state_files_for_cwd(
     let Some(claims_root) = crate::claims::global_claims_root() else {
         return unavailable_state_reap("claims root unavailable");
     };
+    let Some(claims_dir) = crate::claims::claims_dir_for(None) else {
+        return unavailable_state_reap("claims root unavailable");
+    };
     let Some(locks_dir) = crate::agents_config::machine_locks_dir() else {
         return unavailable_state_reap("machine locks root unavailable");
     };
@@ -2151,8 +2158,10 @@ pub fn reap_state_files_for_cwd(
     reap_state_files_with_roots(
         StateReapRoots {
             claims_root,
+            claims_dir,
             locks_root,
-            agents_root: home.root().to_path_buf(),
+            agents_root: home.root().parent().unwrap_or(home.root()).to_path_buf(),
+            agents_dir: home.root().to_path_buf(),
             state_root,
         },
         config,
