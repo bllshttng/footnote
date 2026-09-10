@@ -28,11 +28,8 @@ DEFAULT_DISPATCH_VERBS = ("/target", "/think", "/blueprint")
 
 def canonical_verb_key(key: str) -> str:
     """Leading `/`, `/fno:x` -> `/x`: the resolver's canonical spelling."""
-    k = key.strip()
-    if k[:1] == "/":
-        k = k[1:]
-    if k[:4] == "fno:":
-        k = k[4:]
+    k = key.strip().removeprefix("/")
+    k = k.removeprefix("fno:")
     return "/" + k if k else k
 
 
