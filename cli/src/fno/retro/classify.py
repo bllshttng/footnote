@@ -237,11 +237,9 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
     reason = item.subkind or ""
     if reason.lower() not in _PM_STUCK_REASONS and _PM_ONEOFF_RE.search(reason):
         return DISPOSITION_ARCHIVE, None
-    # A success terminal (DonePRGreen and every other Done*) is the receipt of a
-    # healthy session, not open work: consume it. The postmortem file stays on
-    # disk as the monthly review's input; the wedge regex below cannot be
-    # trusted on these gists (the pasted assistant prose matches it constantly),
-    # so a Done* reason never reaches it.
+    # A success terminal is a healthy session's receipt, not open work: consume
+    # it. The wedge regex matches pasted assistant prose constantly, so a Done*
+    # reason never reaches it.
     if reason.lower().startswith("done"):
         return DISPOSITION_ARCHIVE, None
 
