@@ -167,7 +167,7 @@ struct ManifestFields {
     /// auto-merge at a green terminal. `None` = the key was absent.
     auto_merge_approved: Option<bool>,
     /// Which input set the posture (x-9d11): config | flag-no-merge |
-    /// env-target-auto-merge | default-off. `None` = a pre-provenance manifest;
+    /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
     /// surfaced as `unknown`, never guessed. No longer advisory (x-01b9):
     /// `env-target-auto-merge` on an approved run satisfies the standing
     /// config arm on its own, exactly as init folded it and the docs promise.
@@ -2400,7 +2400,9 @@ fn cancel_settle_claims(cwd: &Path, m: &ManifestFields) {
         m.target_claim_key.as_deref(),
         m.target_claim_holder.as_deref(),
     ) else {
-        eprintln!("finalize: cancel settle skipped: manifest names no target_claim_key");
+        eprintln!(
+            "finalize: cancel settle skipped: manifest names no target_claim_key/target_claim_holder"
+        );
         return;
     };
     if !key.starts_with("node:") {
