@@ -573,7 +573,9 @@ def execute_retask(
         return {**refusal, "cleared": True, "reason": "successor_row_count_invalid"}
     if transition.get("lineage_recorded") is not True:
         return {**refusal, "cleared": True, "reason": "successor_lineage_unrecorded"}
-    renamed = rename(f"{target.verb}-{node}")
+    from fno.agents.naming import dispatch_agent_name, verb_code_for
+
+    renamed = rename(dispatch_agent_name(None, verb_code_for(target.verb), node))
     if not renamed:
         return {
             **refusal,

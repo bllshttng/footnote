@@ -607,10 +607,10 @@ class Ritual:
             session_id=None,
             harness=None,
             merged_at=self._merged_state()[2],
-            candidate_row_names=(
-                rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
-                if worktree
-                else []
+            # x-84b2: always emit the exact candidates - a PR whose worktree
+            # path is gone still carries name-matched rows for the reaper.
+            candidate_row_names=rows_for_cleanup(
+                worktree, self.ctx.node_ids, runner=self._sh
             ),
         )
         # Minting makes the next idle tick the request's first payment window.
@@ -998,7 +998,11 @@ class Ritual:
         self._emit("reap-rows", _OK, f"reaped {removed}/{len(rows)}")
 
     def _dead_target_rows(self) -> list[str]:
-        ids = {str(n) for n in self.ctx.node_ids}
+        """Non-live rows for the nodes this ritual closed, by canonical parse
+        (x-84b2) with the legacy ``target-<node>-`` fallback. Delegates to
+        rows_for_cleanup, then keeps only non-live rows."""
+        ids = [str(n) for n in self.ctx.node_ids]
+        candidates = set(rows_for_cleanup(None, ids, runner=self._sh))
         try:
             r = self._sh(["agents", "list", "--json"])
         except (ToolMissing, subprocess.SubprocessError):
@@ -1014,12 +1018,9 @@ class Ritual:
             if not isinstance(a, dict):
                 continue
             name = a.get("name") or ""
-            if not name.startswith("target-"):
+            if name not in candidates:
                 continue
             if a.get("status") == "live":
-                continue
-            # target-<node>-<slug>: reap only rows for nodes this ritual closed.
-            if not any(name.startswith(f"target-{nid}-") for nid in ids):
                 continue
             out.append(name)
         return out

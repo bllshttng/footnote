@@ -1524,9 +1524,9 @@ fn derived_short_id(session_id: &str) -> String {
 
 /// Derivable, stable row name for a synthesized entry so re-adopting upserts one
 /// row (the upsert keys on `harness_session_id`; the name is for display + name
-/// addressing). `target-` tags the synthesis source (a /target orphan).
+/// addressing). `t-` is the bridge's manual form (x-84b2): no provenance.
 fn synthesized_name(short: &str) -> String {
-    format!("target-{short}")
+    format!("t-{short}")
 }
 
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
@@ -5496,7 +5496,7 @@ mod tests {
             Some("c7dc6218-493a-4299-916a-330ec0b0b055")
         );
         assert_eq!(e.short_id, "c7dc6218");
-        assert_eq!(e.name, "target-c7dc6218");
+        assert_eq!(e.name, "t-c7dc6218");
 
         // Codex-alias-only manifest with no `harness` must not default to claude.
         let codex = ManifestIdentity {
@@ -5545,7 +5545,7 @@ mod tests {
         assert_eq!(e.claude_session_uuid, None);
         assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
         assert!(!e.short_id.is_empty());
-        assert_eq!(e.name, format!("target-{}", e.short_id));
+        assert_eq!(e.name, format!("t-{}", e.short_id));
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }

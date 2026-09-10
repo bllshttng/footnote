@@ -1025,7 +1025,15 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
             # predate the worker and prove nothing about THIS invocation. Claiming
             # completion from them would re-open the very suppression this fixes,
             # so they read unverifiable until an ownership lease can date them.
-            tail = (candidate.name or "")[len(f"think-{node_id}-"):]
+            name_str = candidate.name or ""
+            if name_str.startswith(f"think-{node_id}-"):
+                tail = name_str[len(f"think-{node_id}-"):]
+            else:
+                # x-84b2 canonical shape: the reason opens the parsed tail.
+                from fno.agents.naming import parse_dispatch_agent_name
+
+                parsed = parse_dispatch_agent_name(name_str)
+                tail = parsed.tail if parsed and parsed.node == node_id else ""
             if any(tail == r or tail.startswith(f"{r}-")
                    for r in _NON_BIRTH_THINK_REASONS):
                 return None

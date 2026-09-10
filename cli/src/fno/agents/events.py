@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from fno import paths
+from fno.agents.naming import parse_dispatch_agent_name
 
 if TYPE_CHECKING:
     from fno.agents.context import EventContext
@@ -444,13 +445,17 @@ def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
     except json.JSONDecodeError:
         return []
     rows = payload if isinstance(payload, list) else payload.get("agents") or []
-    ids = [str(node) for node in node_ids]
+    ids = {str(node) for node in node_ids}
     out = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "")
-        if row.get("cwd") == worktree or any(
+        if worktree is not None and row.get("cwd") == worktree:
+            out.append(name)
+            continue
+        parsed = parse_dispatch_agent_name(name)
+        if (parsed is not None and parsed.node in ids) or any(
             name.startswith(f"target-{node}-") for node in ids
         ):
             out.append(name)

@@ -54,6 +54,12 @@ pub(crate) struct MergeCleanupRequest {
     branch: Option<String>,
     worktree: Option<String>,
     node_ids: Vec<String>,
+    /// The exact registered row names the merge producer proposed (x-84b2).
+    /// Non-empty: rows are selected by exact membership (plus worktree
+    /// equality) and the reaper never re-derives names. Empty: an event older
+    /// than the field, and the ONLY case where the narrow legacy
+    /// `target-<node>-` prefix fallback runs.
+    candidate_row_names: Vec<String>,
     /// Unix seconds: when the merge landed (the grace anchor). A request
     /// without one (an older ritual mint) falls back to the envelope `ts`.
     merged_at: Option<i64>,
@@ -171,6 +177,7 @@ fn scan_merge_cleanup_events(
                         branch: string_field("branch"),
                         worktree: string_field("worktree"),
                         node_ids: strings("node_ids"),
+                        candidate_row_names: strings("candidate_row_names"),
                         merged_at,
                         ts_unix,
                         session_id: string_field("session_id"),
@@ -235,12 +242,15 @@ pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
 }
 
 /// The rows this request may remove: registry rows whose cwd IS the merged
-/// worktree or whose name resolves to one of the closed nodes. Sorted by
-/// name. A request-named row the registry no longer carries is ALREADY gone,
-/// so it is not a candidate: a re-pass after a held tree must read the row set
-/// as settled, not wedged. The name leg reads the shared `name_route`
-/// vocabulary, so the operator's `t-`/`bp-`/`king-`/`target-` worker names
-/// all join; a `target-{node}-` literal would see 5 of 29 rows.
+/// worktree, whose name is an exact candidate the merge producer proposed
+/// (x-84b2 `candidate_row_names` - the reaper never re-derives a name the
+/// producer did not propose, so a prefix can never widen the removal), or
+/// whose name resolves to one of the closed nodes through the shared
+/// `name_route` vocabulary, so the operator's `t-`/`bp-`/`king-`/`target-`
+/// worker names all join (a `target-{node}-` literal would see 5 of 29
+/// rows). Sorted by name. A request-named row the registry no longer
+/// carries is ALREADY gone, so it is not a candidate: a re-pass after a
+/// held tree must read the row set as settled, not wedged.
 fn merge_cleanup_rows(
     home: &AgentsHome,
     request: &MergeCleanupRequest,
@@ -249,6 +259,7 @@ fn merge_cleanup_rows(
         return Vec::new();
     };
     let ids: HashSet<String> = request.node_ids.iter().cloned().collect();
+    let candidates: HashSet<String> = request.candidate_row_names.iter().cloned().collect();
     let mut rows: Vec<state::RegistryEntry> = registry
         .entries
         .into_iter()
@@ -257,6 +268,7 @@ fn merge_cleanup_rows(
                 .worktree
                 .as_deref()
                 .is_some_and(|worktree| entry.cwd == worktree)
+                || candidates.contains(&entry.name)
                 || crate::node_route::name_route(&entry.name, &ids).is_some()
         })
         .collect();
@@ -1209,6 +1221,7 @@ mod tests {
             branch: Some("feature/x".to_string()),
             worktree: Some(worktree.to_string()),
             node_ids: vec!["x-1".to_string()],
+            candidate_row_names: Vec::new(),
             merged_at: None,
             ts_unix: 0,
             session_id: None,
@@ -1803,6 +1816,95 @@ mod tests {
             events.contains("\"rows\":\"none-present\""),
             "the completion names the zero honestly: {events}"
         );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn exact_candidates_select_the_registered_row() {
+        // x-84b2 AC4-HP: a request carrying candidate_row_names retires the
+        // EXACT registered row - ab-bp- spelling included - via membership,
+        // never prefix reconstruction.
+        let home = temp_home("exact-candidates");
+        write_registry(&home, &[claude_row("ab-bp-x-1-cargo", false)]);
+        let mut request = settled_request("/repo/other-wt");
+        request.candidate_row_names = vec!["ab-bp-x-1-cargo".to_string()];
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 1, "the exact candidate row is selected: {acted}");
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_row_absent_from_candidates_is_never_removed() {
+        // x-84b2 AC4-EDGE: another node's row is outside the envelope; a
+        // prefix that would have matched the legacy fallback must not widen
+        // the removal.
+        let home = temp_home("absent-candidate");
+        write_registry(&home, &[claude_row("ab-bp-x-1-cargo", false)]);
+        let mut request = settled_request("/repo/other-wt");
+        request.candidate_row_names = vec!["ab-bp-x-2-cargo".to_string()];
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0, "an absent row is never removed: {acted}");
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn legacy_events_without_candidates_keep_the_narrow_prefix_fallback() {
+        // An event minted before the candidate field exists: the legacy
+        // target-<node>- prefix fallback still selects the row.
+        let home = temp_home("legacy-candidates");
+        write_registry(&home, &[claude_row("target-x-1-worker", false)]);
+        let mut request = settled_request("/repo/other-wt");
+        request.worktree = None; // force the name path only
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seams = RequestSeams {
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 1, "the legacy fallback still selects: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 }
