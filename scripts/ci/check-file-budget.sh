@@ -247,6 +247,14 @@ if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
     fails=1
 fi
 
+# A worker runs this locally mid-change to learn its number before CI does.
+# Every diff above reads commits, so uncommitted work would print as no growth.
+# It never changes the exit code.
+if ! git diff --quiet HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
+        || [[ -n "$(git ls-files --others --exclude-standard -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')" ]]; then
+    echo "check-file-budget: WARN uncommitted changes to gated files are not counted. The numbers here measure commits only. Commit, then re-run." >&2
+fi
+
 if [[ -s "$findings" ]]; then
     cat "$findings" >&2
 fi

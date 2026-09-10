@@ -95,5 +95,25 @@ check 'the push alarm names the owed shrink' 1 \
 fresh; git rm -q scripts/big.sh; commit
 check 'a deleted over-budget file passes' 0 'check-file-budget: ok (no over-budget file grew' FILE_BUDGET_LINES=20
 
+# --- uncommitted work ---------------------------------------------------------
+# The diffs read commits, so a worker measuring mid-change would read +0 for
+# work it has not committed. The gate must name that, never print a clean zero.
+fresh; lines 150 grow >> cli/src/fno/keep.py
+check 'an uncommitted edit is named, not read as no growth' 0 \
+  'uncommitted changes to gated files are not counted'
+
+fresh; lines 5 new > cli/src/fno/new.py
+check 'an untracked module is named, not read as no growth' 0 \
+  'uncommitted changes to gated files are not counted'
+
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+out="$(bash "$GATE" 2>&1)"
+if [[ "$out" == *'net +150'* && "$out" != *'not counted'* ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: a clean tree prints no uncommitted warning\n%s\n' "$out"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
