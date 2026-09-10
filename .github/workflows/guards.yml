@@ -81,14 +81,7 @@ jobs:
 
       - name: Ruff + MyPy (repo-wide)
         if: ${{ !cancelled() }}
-        working-directory: cli
-        run: |
-          set -euo pipefail
-          python_files="$(find src -type f -name '*.py' -print | wc -l | tr -d '[:space:]')"
-          test "$python_files" -gt 0
-          uv run ruff check --no-respect-gitignore src/
-          uv run mypy src/
-          echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
+        run: bash scripts/ci/check-python-static.sh
 
       # The verb x harness doc is a projection of the capability table and
       # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because

@@ -467,6 +467,21 @@ def base_lineage_check(
 
 
 @pr_app.command(
+    "merge-result-check",
+    hidden=True,
+    help=(
+        "Compile the merge result of <pr_number> against its base: git merge-tree plus the"
+        " repo-wide ruff + mypy step on that tree. Exit 0 ok, 3 red (rebase, fix, push,"
+        " retry), 4 unknown (a probe failed)."
+    ),
+)
+def merge_result_check(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:
+    from fno.pr import _merge_result
+
+    raise typer.Exit(code=_merge_result.run_merge_result_check(pr_number))
+
+
+@pr_app.command(
     "coverage-check",
     hidden=True,
     help=(

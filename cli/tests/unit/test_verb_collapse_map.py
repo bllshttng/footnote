@@ -136,10 +136,10 @@ def test_map_covers_current_surface_once():
     # king board consume (hidden verbs): counted from the merged file, 587 -> 589.
     # Upstream adds `doctor graph export`: 589 -> 590. Counted from the
     # merged file, not taken from either side: this branch independently
-    # allocates `agents distress-scan`, the pre-manifest <help> tag read
-    # the stop hooks call directly (hidden verb, no external callers yet):
-    # 590 -> 591.
-    assert len(mapped) == 591, (
+    # allocates `do pr merge-result-check` + its `pr` view, the merge-result
+    # probe the authorized-merge arm calls (hidden guard verb, no external
+    # callers yet): 591 -> 593.
+    assert len(mapped) == 593, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
