@@ -1504,24 +1504,26 @@ def cmd_spawn(
 
     # The substrate axis (x-2c27): headless is the ergonomic shortcut and wins
     # over an explicit --substrate (x-c772); an empty value resolves through
-    # spawn_portal (the built-in default: thread where seated, else pane).
+    # built-in default: thread where seated, else pane.
     if headless:
         substrate = "headless"
     if not substrate:
-        from fno.agents.spawn_portal import resolve_body_substrate
+        # Empty = unset. A pane-only capability (the fence, placement, a
+        # monitor) implies the pane; otherwise the harness decides: thread
+        # where it seats one, else the closable pane. Inside a mux the default
+        # thread also requests the default view (portal 0).
+        from fno.agents.harness_map import thread_seatable
 
-        substrate, default_portal = resolve_body_substrate(
-            harness,
-            passthrough=bool(passthrough),
-            split=split,
-            at=at,
-            tab=tab,
-            bounded_placement=bounded_placement,
-            squad=squad,
-            monitor=monitor,
+        pane_implied = bool(
+            passthrough or split or at or tab or bounded_placement or squad
+            or monitor is not None
         )
-        if portal is None:
-            portal = default_portal
+        if pane_implied or not thread_seatable(harness):
+            substrate = "pane"
+        else:
+            substrate = "thread"
+            if portal is None and os.environ.get("FNO_PANE"):
+                portal = 0
     # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
     # --substrate headless; the spawn gate counts it as headless) but Python leaves
     # it on the pane default. That only bites the routed lane, where the substrate
@@ -1530,7 +1532,7 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    from fno.agents.spawn_portal import resolve_substrate_or_exit, validate_portal_or_exit
+    from fno.agents.spawn_defaults import resolve_substrate_or_exit, validate_portal_or_exit
 
     substrate = resolve_substrate_or_exit(substrate)
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
@@ -1544,7 +1546,7 @@ def cmd_spawn(
         raise typer.Exit(code=2)
 
     validate_portal_or_exit(portal, substrate)
-    from fno.agents.spawn_portal import validate_monitor_or_exit
+    from fno.agents.spawn_defaults import validate_monitor_or_exit
 
     validate_monitor_or_exit(monitor, substrate, once=once, harness=harness)
 
@@ -2542,7 +2544,7 @@ def cmd_spawn(
     if portal is not None and substrate == "bg" and spawn_succeeded:
         # Post-receipt placement: the receipt is the truth, so a placement
         # failure never recolors the spawn verdict.
-        from fno.agents.spawn_portal import place_thread_portal
+        from fno.agents.spawn_defaults import place_thread_portal
 
         place_thread_portal(result.name, portal)
 
