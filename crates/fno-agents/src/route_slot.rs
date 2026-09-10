@@ -3164,6 +3164,44 @@ mod tests {
     }
 
     #[test]
+    fn strict_planless_low_target_picks_its_zai_lane() {
+        // Acceptance specimen: a lawful planless low target used to refuse
+        // twice - rewritten to the blueprint slot, then refused because the
+        // blueprint lanes carried no zai route. The derived verb is the slot
+        // verb now, so the zai lane on the TARGET slot is simply picked.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "node": {"difficulty": "low", "priority": "p1", "plan_path": ""},
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x"],
+                },
+            },
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "glm");
+        assert_eq!(out["candidate"]["policy"]["work_kind"], "target");
+        let chain = chain_of(&out);
+        assert!(!chain.iter().any(|l| l.contains("blueprint eligibility")));
+        assert!(!chain.iter().any(|l| l.contains("blueprint lanes")));
+    }
+
+    #[test]
     fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
