@@ -54,6 +54,12 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // intercept would print a one-line usage and shadow the verb's own
     // --help, which states the load-bearing contract (no way to assert
     // coverage without the reads, and the strict manifest-less defaults).
+    //
+    // `distress-scan` deliberately has NO entry here either, same reason:
+    // it intercepts its own --help (DISTRESS_SCAN_USAGE in distress.rs)
+    // with the fuller best-effort-always-exits-0 contract a one-liner would
+    // shadow, and it is a hidden verb with no external callers to discover
+    // it from a top-level list.
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`

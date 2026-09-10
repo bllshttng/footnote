@@ -355,18 +355,20 @@ pub fn run_distress_scan(args: &[String]) -> i32 {
     let project_events = events_path.unwrap_or_else(|| crate::paths::events_path(&cwd));
     let global_events =
         global_events_path.unwrap_or_else(crate::loopcheck::default_global_events_path);
-    let wrote = scan_and_emit(
+    // Already parsed above (line ~351): call the emitter directly instead of
+    // scan_and_emit, which would parse the same text for a <help> tag again.
+    let reason = distress.reason.clone();
+    let wrote = emit_help_distress_blocked(
         &project_events,
         &global_events,
         &cwd,
         &run,
         node.as_deref(),
         harness.as_deref(),
-        &transcript,
-        text.as_deref(),
+        &distress,
     );
     if wrote {
-        println!("distress: emitted {}", distress.reason);
+        println!("distress: emitted {reason}");
     } else {
         println!("distress: none");
     }
