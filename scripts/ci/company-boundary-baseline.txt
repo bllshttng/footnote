@@ -24,9 +24,9 @@
 # See docs/architecture/company-boundaries.md.
 cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/claims/cli.py:1066: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
-cli/src/fno/claims/cli.py:1334: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1357: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:1087: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
+cli/src/fno/claims/cli.py:1355: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1378: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 #
 # Added 2026-09-03 (x-1182). `fno agents claim list --silent-after` reads a
 # claim's own transcript tail to answer "has this worker gone quiet", the
