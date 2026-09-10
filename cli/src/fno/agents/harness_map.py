@@ -1383,9 +1383,8 @@ def resolve_dispatch(
     # template > per-harness builtin. A derived /target renders through the
     # SAME builtin rungs (suppress the raw verb and fall through); a derived
     # /blueprint renders its own verb: the target template is target-phase.
-    # A registry verb sets skip_normalize: its descriptor carries the native
-    # per-harness spelling already. takes_node_id=false is the same posture on
-    # the substitution seam: the template is complete, the id is declared unused.
+    # A registry verb sets skip_normalize (its descriptor carries the native
+    # spelling) and, with takes_node_id=false, verb_declares_no_id.
     skip_normalize = False
     verb_declares_no_id = False
     derived_blueprint = lifecycle_verb == "/blueprint"
@@ -1412,8 +1411,6 @@ def resolve_dispatch(
             chosen_verb = "/" + chosen_verb[len("/fno:"):]
         _av = cfg.get("allowed_verbs")
         allowed = list(_av) if isinstance(_av, list) else list(_DEFAULT_ALLOWED_VERBS)
-        # Lazy like every fno.config read here: keeps this module import-light
-        # for its non-dispatch importers.
         from fno.config import resolvable_verbs
         from fno.review_capability import resolve_skill_presence
 
@@ -1427,18 +1424,13 @@ def resolve_dispatch(
                 f"({', '.join(sorted(registry)) or 'empty'}); extend one of them"
             )
         if descriptor is not None:
-            # Registry verb: the descriptor carries the native spelling, the
-            # capability, and the completion claim - a bare string carries none.
+            # Registry verb: descriptor carries spelling, capability, claim.
             if descriptor.requires == "skill":
                 skill_name = descriptor.invocation.lstrip("/").split(":")[-1]
                 status, reason = resolve_skill_presence(
-                    skill_name,
-                    chosen_harness,
-                    context="config.dispatch.verb_registry",
+                    skill_name, chosen_harness, context="config.dispatch.verb_registry"
                 )
                 if status == "unavailable":
-                    # The reason already names the roots searched and the
-                    # config surface; the reviewer probe's wording, verbatim.
                     raise DispatchResolveError(reason)
             if descriptor.invocations and chosen_harness not in descriptor.invocations:
                 raise DispatchResolveError(
@@ -1453,9 +1445,8 @@ def resolve_dispatch(
                 template = f"{template} {{id}}"
             else:
                 verb_declares_no_id = True
-            # The descriptor already spells the verb natively for this harness;
-            # the fno-namespace normalizer below would mint a phantom
-            # `$fno:sec:audit`-shaped skill from it. Skip, never re-normalize.
+            # The descriptor already spells the verb natively; the fno-namespace
+            # normalizer would mint a phantom `$fno:` skill from it.
             skip_normalize = True
             decision.append(
                 f"command=registry-verb({chosen_verb}, asserts={descriptor.asserts})"
@@ -1510,9 +1501,8 @@ def resolve_dispatch(
     # capability is required.
     check_loop_participation(chosen_harness, template)
     # `{id}` must appear at least once; a template may reference it more than
-    # once (str.replace substitutes every occurrence). A registry verb that
-    # declares takes_node_id=false is exempt: ignoring the id is declared,
-    # not a dropped substitution.
+    # once. A registry verb declaring takes_node_id=false is exempt: ignoring
+    # the id is declared, not a dropped substitution.
     if node_id and "{id}" in template:
         resolved_command = template.replace("{id}", node_id.strip())
         decision.append(f"command=substituted({resolved_command})")

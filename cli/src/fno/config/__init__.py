@@ -39,7 +39,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, Sequence, cast
+from typing import Any, Literal, Mapping, Optional, cast
 
 import tomli_w
 import yaml
@@ -59,6 +59,13 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
+from fno.config._dispatch_verbs import (
+    DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPATCH_VERBS,
+)
+from fno.config._dispatch_verbs import (
+    DispatchVerbDescriptor as DispatchVerbDescriptor,
+)
+from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
 from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
 from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
@@ -742,42 +749,6 @@ class ReviewerDescriptor:
     invocations: Optional[Mapping[str, str]] = None
 
 
-@dataclass(frozen=True)
-class DispatchVerbDescriptor:
-    """What a `config.dispatch.verb_registry` entry declares, so an outside
-    skill can be a dispatch verb.
-
-    A bare string in `allowed_verbs` carries none of this: no check that the
-    verb resolves on the target harness, no declared invocation form, no
-    statement of what a completion proves. Field for field this mirrors
-    `ReviewerDescriptor`, so a reader who knows one knows the other.
-    """
-
-    # The unknown-harness default spelling, exactly as the worker must receive
-    # it (e.g. `/sec:audit`). The resolver renders it verbatim - it is NEVER
-    # run through the fno-namespace normalizer, which would mint a phantom
-    # `$fno:sec:audit` skill on codex.
-    invocation: str
-    # Per-harness overrides. Present means this verb exists ONLY on these
-    # harnesses; a dispatch to any other refuses. Absent means `invocation`
-    # is correct everywhere. Same field, same meaning, as ReviewerDescriptor.
-    invocations: Optional[Mapping[str, str]] = None
-    # The capability the target session needs. `skill` is probed against the
-    # harness's skill roots at resolve time, refusing with the roots searched.
-    requires: Literal["none", "skill"] = "none"
-    # Whether the resolver appends the node id.
-    takes_node_id: bool = True
-    # What a completion means, weakest last. `invocation` asserts only that
-    # the named thing ran.
-    asserts: Literal["pr", "doc", "invocation"] = "invocation"
-
-
-# The built-in dispatch verbs. The single home in this module; harness_map
-# carries its own copy (`_DEFAULT_ALLOWED_VERBS`) because it imports this
-# module lazily and must stay import-cycle-free.
-_DEFAULT_DISPATCH_VERBS = ("/target", "/think", "/blueprint")
-
-
 # Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
 # config.review.reviewers must resolve to one of these keys ('/' stripped).
 # Kept in sync with the emit surfaces and the Rust-side invocation table by
@@ -932,50 +903,6 @@ def resolvable_reviewers(
     if not registry:
         return dict(_RESOLVABLE_REVIEWERS)
     return {**registry, **_RESOLVABLE_REVIEWERS}
-
-
-def _canonical_verb_key(key: str) -> str:
-    """The resolver's canonical verb spelling: leading `/`, `/fno:x` -> `/x`.
-
-    Mirrors what resolve_dispatch does to an incoming verb before the
-    allowlist check, so a registry key is looked up under the same shape the
-    dispatcher will present. Slice compares, not startswith: the local
-    interpreter has lied on startswith before (chr-composed targets).
-    """
-    k = key.strip()
-    if k[:1] == "/":
-        k = k[1:]
-    if k[:4] == "fno:":
-        k = k[4:]
-    return "/" + k if k else k
-
-
-def resolvable_verbs(
-    registry: Optional[Mapping[str, DispatchVerbDescriptor]] = None,
-    allowed: Optional[Sequence[str]] = None,
-) -> dict[str, DispatchVerbDescriptor]:
-    """The lookup every dispatch-verb consumer uses: the registry, minus the
-    shipped spellings.
-
-    THE INVARIANT, same shape as `resolvable_reviewers`: a registry entry is
-    never written back into the built-in set. A key that canonicalizes to a
-    built-in verb (`/target`, `/think`, `/blueprint`) or to anything in the
-    operator's own `allowed_verbs` is DROPPED - a project must not be able to
-    redefine a shipped verb into a weaker descriptor (no skill check, no
-    harness scoping) by registry entry.
-    """
-    allowed_canon = {
-        _canonical_verb_key(v)
-        for v in (
-            tuple(allowed) if allowed is not None else _DEFAULT_DISPATCH_VERBS
-        )
-        if isinstance(v, str) and v.strip()
-    }
-    return {
-        canon: desc
-        for key, desc in (registry or {}).items()
-        if (canon := _canonical_verb_key(str(key))) not in allowed_canon
-    }
 
 
 # ── review.posture ──────────────────────────────────────────────────
@@ -2164,9 +2091,7 @@ class DispatchBlock(BaseModel):
     # `allowed_verbs` so the two extension surfaces read together.
     verb_registry: dict[str, DispatchVerbDescriptor] = Field(default_factory=dict)
     # US3 verb allowlist: a node dispatch_verb must match or the resolver refuses.
-    allowed_verbs: list[str] = Field(
-        default_factory=lambda: list(_DEFAULT_DISPATCH_VERBS)
-    )
+    allowed_verbs: list[str] = Field(default_factory=lambda: list(_DEFAULT_DISPATCH_VERBS))
     # DEPRECATED (x-4391/x-4be1): the per-project merge posture for AUTONOMOUS
     # dispatch, formerly read by every dispatch path. Reads as
     # `auto_merge.grant` ("dispatch" when true): the alias folds it per layer,
