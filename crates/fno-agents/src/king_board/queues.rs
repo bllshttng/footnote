@@ -1072,6 +1072,70 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 mod tests {
     use super::*;
 
+    /// A minimal board: every source reads empty except the two PR streams.
+    /// Scope narrowed to `x-in` so the cross-territory PR exercises AC8.
+    fn pr_board_inputs(prs: Value, pr_nodes: Value) -> BoardInputs {
+        let empty = SourceRead::ok(json!([]));
+        BoardInputs {
+            ready: empty.clone(),
+            claims: empty.clone(),
+            claimed_nodes: empty.clone(),
+            holder_activity: HashMap::new(),
+            prs: SourceRead::ok(prs),
+            pr_nodes: SourceRead::ok(pr_nodes),
+            outstanding: empty.clone(),
+            needs: empty.clone(),
+            lane: empty.clone(),
+            undispatched: SourceRead::ok(json!([])),
+            blocked_child: empty.clone(),
+            worked: empty,
+            entries: None,
+            warnings: Vec::new(),
+            autonomous_merge: true,
+            scope_ids: Some(HashSet::from(["x-in".to_string()])),
+            crown_scope: Some("x-in".to_string()),
+        }
+    }
+
+    fn queue_rows(board: &Value, name: &str) -> Vec<Value> {
+        board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == name)
+            .map(|q| q["rows"].as_array().unwrap().clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_cross_territory_mergeable_pr_stays_visible_as_out_of_scope() {
+        let inputs = pr_board_inputs(
+            json!([
+                {"number": 101, "title": "in-scope PR"},
+                {"number": 202, "title": "cross-territory review nomination"},
+            ]),
+            json!([
+                {"id": "x-in", "pr_number": 101},
+                {"id": "x-out", "pr_number": 202},
+            ]),
+        );
+
+        let board = build_board(&inputs);
+
+        // AC7: the scoped king's actionable mergeable queue holds only its own PR.
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(mergeable.len(), 1);
+        assert_eq!(mergeable[0]["number"], 101);
+        // AC8: the nomination is demoted, never hidden - the row stays
+        // visible with its queue and id, so the review lane can reach it.
+        let out = queue_rows(&board, "out_of_scope");
+        assert!(
+            out.iter()
+                .any(|r| r["id"] == "x-out" && r["queue"] == "mergeable_pr"),
+            "cross-territory nomination vanished from the board: {out:?}"
+        );
+    }
+
     #[test]
     fn a_budget_kill_reads_over_budget_not_unreadable() {
         let read = SourceRead::over_budget(

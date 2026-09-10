@@ -4075,7 +4075,9 @@ class AdvanceEpicResult:
     child_results: tuple = ()  # AdvanceResult per attempted child
 
     def receipt(self) -> dict:
-        """The epic-advance --json receipt; detail names what actually broke."""
+        """The epic/loose-advance --json receipt; detail names what actually
+        broke. `substrate` is load-bearing: the Rust drain sync-resolves a
+        headless child from this key (x-7f1f)."""
         return {
             "epic_id": self.epic_id,
             "error": self.error,
@@ -4422,6 +4424,110 @@ def advance_epic(
     )
 
 
+def _ready_loose_nodes(project: str) -> list[dict]:
+    """Ready PARENTLESS (loose) nodes of one project, in board order.
+
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    """
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    rows = store_ready(project=project, all=True, repo_root=repo_root())["rows"]
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("id")
+        and not row.get("parent")
+        and row.get("type") != "epic"
+    ]
+
+
+def advance_project_loose(
+    project: str,
+    *,
+    max_dispatch: Optional[int] = None,
+    project_root: Optional[Path] = None,
+    events_path: Optional[Path] = None,
+    verbose: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    territory_label: Optional[str] = None,
+) -> AdvanceEpicResult:
+    """Drain one project territory's loose nodes (x-e221 rung-1 path).
+
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    """
+    ev_path = events_path if events_path is not None else _events_path(project_root)
+    label = territory_label or project
+
+    armed, rank = _auto_continue_resolve(project_root)
+    if not armed:
+        _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": label, "rank": rank}, ev_path)
+        return AdvanceEpicResult(project, error="disabled")
+    if _claim_is_live(_walker_key()):
+        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": label, "rank": rank}, ev_path)
+        return AdvanceEpicResult(project, error="walker-live")
+
+    from fno.graph._intake import project_root_from_settings
+
+    root = project_root_from_settings(project)
+    if not root:
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "unmapped-project", "mission": label,
+             "detail": f"{project} (add config.work.workspaces.<ws>.projects[].path)",
+             "rank": rank},
+            ev_path,
+        )
+        return AdvanceEpicResult(project, error="unmapped-project")
+
+    try:
+        children = _ready_loose_nodes(project)
+    except Exception as exc:  # noqa: BLE001 - never guess on a read error
+        _emit(
+            EVENT_SKIPPED,
+            {"reason": "children-error", "mission": label, "detail": str(exc)[:200], "rank": rank},
+            ev_path,
+        )
+        return AdvanceEpicResult(
+            project,
+            child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
+        )
+
+    max_lanes = _spawn_headroom(provider)
+
+    results: list[AdvanceResult] = []
+    dispatched: list[str] = []
+    total = 0
+    for child in children:
+        if max_dispatch is not None and total >= max_dispatch:
+            break
+        if total >= max_lanes:
+            _emit(
+                EVENT_SKIPPED,
+                {"reason": "lane-cap", "node_id": child["id"], "mission": label,
+                 "detail": f"{project}: headroom={max_lanes} (spawn gate)", "rank": rank},
+                ev_path,
+            )
+            results.append(
+                AdvanceResult("skipped", EVENT_SKIPPED, reason="lane-cap", node_id=child["id"])
+            )
+            continue
+        res = _converge_one(
+            child, root, ev_path, verbose,
+            cross_project=False, mission=label, model=model, provider=provider, rank=rank,
+        )
+        results.append(res)
+        if res.decision == "dispatched":
+            dispatched.append(res.node_id or child["id"])
+            total += 1
+
+    return AdvanceEpicResult(
+        project, dispatched=tuple(dispatched), child_results=tuple(results),
+    )
+
+
 def _converge_skip_unmapped(
     child: dict, project: str, mission: str, ev_path: Path, *, rank: Optional[str] = None
 ) -> AdvanceResult:
@@ -4436,3 +4542,30 @@ def _converge_skip_unmapped(
         "skipped", EVENT_SKIPPED, reason="unmapped-project",
         node_id=child["id"], detail=detail,
     )
+
+
+def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool) -> None:
+    """Render one advance receipt (epic or loose) the way the CLI echoes it.
+
+    Both CLI runners share this so the JSON shape cannot drift between the two
+    drains - the Rust supervisor parses both with one struct.
+    """
+    import typer
+
+    if json_out:
+        typer.echo(json.dumps(result.receipt(), indent=2))
+        return
+    if result.error:
+        typer.echo(f"{kind} {result.epic_id}: {result.error}", err=True)
+    elif kind == "epic" and result.deactivated:
+        reason = "complete" if result.all_done else "stopped"
+        typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+    else:
+        n = len(result.dispatched)
+        skips = [r for r in result.child_results if r.decision == "skipped"]
+        fails = [r for r in result.child_results if r.decision == "failed"]
+        typer.echo(
+            f"{kind} {result.epic_id}: dispatched {n}"
+            + (f", skipped {len(skips)}" if skips else "")
+            + (f", failed {len(fails)}" if fails else "")
+        )

@@ -23,11 +23,13 @@ use std::io::IsTerminal;
 
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
+    "active-backlog-receipt",
     "adopt",
     "ask",
     "attach",
     "authorized-merge",
     "bash-census",
+    "blueprint-feed",
     "board",
     "claim",
     "codex-assign-project",
@@ -87,6 +89,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "status",
     "stop",
     "subscribe",
+    "territory-rows",
+    "territory-verdict",
     "trace",
     "verify-evidence",
     "version",
@@ -391,6 +395,23 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
+    }
+
+    // `territory-rows`/`blueprint-feed` (x-e221): the territory fact set's
+    // daemon-free reads and the standing blueprinter's feed actions. Direct
+    // dispatch like graph-get: the Python `fno config active-backlog-*`
+    // passthroughs and the supervisor's tick invoke the binary directly.
+    if verb == "territory-rows" {
+        return fno_agents::territory::run_territory_rows(&args[1..]);
+    }
+    if verb == "blueprint-feed" {
+        return fno_agents::territory::run_blueprint_feed(&args[1..]);
+    }
+    if verb == "active-backlog-receipt" {
+        return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
+    }
+    if verb == "territory-verdict" {
+        return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
 
     // `board` (x-25b8): the king board collector, read-only, daemon-free. Not a

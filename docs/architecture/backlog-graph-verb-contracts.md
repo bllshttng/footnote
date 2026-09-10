@@ -878,6 +878,28 @@ runs this so pre-existing stranded all-done epics heal on the next reconcile
 pass - going forward the cascade prevents new ones, so this is a no-op once
 migrated.
 
+## _ready_loose_nodes
+
+Ready PARENTLESS (loose) nodes of one project, in board order.
+
+The rung-1 territory's selection surface, widened to parentless rows: the shipped
+``fno backlog ready -p <project>`` read (claim-filtered, PR-filtered,
+rank-sorted like the epic selection) filtered to rows with no parent and no
+epic box. A loose node is exactly what an epic-territory drain can never
+see, which is why the project territory exists. Raises on a garbled
+response so the caller skips rather than guessing.
+
+## advance_project_loose
+
+Drain one project territory's loose nodes (the rung-1 path).
+
+The project-rung counterpart of ``advance_epic``: same gates (auto-continue
+opt-in, walker-live), same shared ``_converge_one`` core and lane math, but
+NO mission lifecycle - there is no activation record to keep in step and no
+completion to retire on, so the receipt never reports ``deactivated`` and
+the territory keeps draining while its workspace exists. ``mission`` on
+every receipt is the territory label (scope), falling back to the project.
+
 ## Reopen holds against automatic closes
 
 A deliberate reopen (``fno backlog reopen --reason``) is human judgment; a

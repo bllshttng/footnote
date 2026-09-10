@@ -37,6 +37,8 @@ from fno.harness_identity import claude_transport_short_id
 # and byte-parity with the Rust gate.
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
+#: docs/architecture/coordination.md#per-territory-team-cap
+EXIT_TERRITORY_CAP = 82
 EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
@@ -408,6 +410,9 @@ def census() -> LiveCensus:
             claim_alive = True
         else:
             claim_alive = False
+        # The row's own name dedups its slot claim below (a revived row does
+        # not pay twice for the claim that spawned it).
+        live_registry_names.add(row.name)
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
@@ -415,7 +420,6 @@ def census() -> LiveCensus:
         # x-5283: a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
-        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             # Already shown as its roster row in the display union. That roster
@@ -1617,6 +1621,51 @@ def _check_king_share(
         )
 
 
+def _territory_verdict(node: str) -> dict:
+    """The per-territory cap verdict for `node`. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
+    """
+    from fno.rust_binary import call_binary_json
+
+    error, receipt = call_binary_json("territory-verdict", ["--node", node])
+    if (
+        error is not None
+        or not isinstance(receipt, dict)
+        or not receipt.get("verdict")
+    ):
+        return {
+            "verdict": "territory_unknown",
+            "reason": error or "unreadable verdict",
+            "node": node,
+        }
+    return receipt
+
+
+def _check_territory_cap(node: Optional[str]) -> None:
+    """Refuse (never queue) at the team cap. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
+    """
+    if not node:
+        return
+    receipt = _territory_verdict(node)
+    verdict = receipt.get("verdict")
+    if verdict == "ok":
+        return
+    cap = receipt.get("max_live_per_territory", "?")
+    if verdict == "territory_cap":
+        _warn(
+            f"spawn-gate: territory {receipt.get('territory')} holds "
+            f"{receipt.get('current_count')} live workers >= max_live_per_territory "
+            f"{cap}; refusing -- other territories are not affected"
+        )
+    else:
+        _warn(
+            f"spawn-gate: territory attribution for node {node} is unreadable; "
+            "refusing (the per-territory cap never counts an unknown as headroom)"
+        )
+    _refuse(EXIT_TERRITORY_CAP, receipt)
+
+
 def _acquire_worker_slot(
     guard: GateGuard,
     name: str,
@@ -1662,6 +1711,7 @@ def run_gate(
     force: bool = False,
     no_wait: bool = False,
     route_provider: Optional[str] = None,
+    node: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
@@ -1751,7 +1801,10 @@ def run_gate(
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also
         # bypasses the king share here, which _check_king_share's own refusal
-        # names where it matters.
+        # names where it matters. Territory cap survives --force:
+        # docs/architecture/coordination.md#per-territory-team-cap
+        if node:
+            _check_territory_cap(node)
         _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
@@ -1901,6 +1954,11 @@ def run_gate(
                     raise
                 try:
                     _check_king_share(c, cap, caller_session=caller_session)
+                except GateRefused:
+                    guard.release()
+                    raise
+                try:
+                    _check_territory_cap(node)
                 except GateRefused:
                     guard.release()
                     raise

@@ -22,7 +22,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 BINARY_NAME = "fno-agents.exe" if os.name == "nt" else "fno-agents"
 
@@ -124,6 +124,34 @@ def resolve_binary() -> Optional[Path]:
         if found is not None:
             return found
     return None
+
+
+def call_binary_json(verb: str, args: Sequence[str] = ()) -> tuple[Optional[str], Any]:
+    """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
+
+    Returns ``(error, parsed)``: ``error`` is None on success; a missing
+    binary, non-zero exit, or unparseable stdout yields a short error text and
+    a None payload. Callers keep the failure shape theirs (refuse closed,
+    raise, or exit) - this seam only standardizes the door.
+    """
+    import json
+    import subprocess
+
+    binary = resolve_binary()
+    if binary is None:
+        return ("fno-agents binary not found", None)
+    try:
+        proc = subprocess.run(
+            [str(binary), verb, *args], capture_output=True, text=True, timeout=60
+        )
+    except OSError as exc:
+        return (str(exc)[:200], None)
+    if proc.returncode != 0:
+        return ((proc.stderr or "verb failed").strip()[:200], None)
+    try:
+        return (None, json.loads(proc.stdout or "null"))
+    except ValueError:
+        return ("unreadable JSON receipt", None)
 
 
 def resolve_installed_binary() -> Optional[Path]:

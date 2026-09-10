@@ -68,6 +68,7 @@ use crate::loop_runtime::{
 };
 use crate::loopcheck::TerminationReason;
 use crate::run_outcome::classify;
+use crate::territory;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
 ///
@@ -134,6 +135,16 @@ pub struct DrainConfig {
     pub fno_bin: String,
     /// The active mission's epic id - the `advance --epic <mission>` argument.
     pub mission: String,
+    /// The territory key (x-e221): the canonical crown scope this loop drains.
+    /// Empty on a legacy receipt; the loop then keys by `mission`.
+    pub scope: String,
+    /// No live crown holds this territory; the readout names it kingless while
+    /// the drain continues (machinery does not need a king to dispatch).
+    pub kingless: bool,
+    /// What one tick converges: epic members shell `advance --epic`, project
+    /// members shell `advance --loose --project`. Empty falls back to a single
+    /// epic member = `mission` (the legacy single-mission receipt).
+    pub members: Vec<DrainMember>,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
     /// The mission's poll interval, for the control-plane tick row's staleness.
@@ -146,6 +157,16 @@ pub struct DrainConfig {
     /// with no workspace path drains nowhere but still renders - and two bare `of
     /// N` suffixes with different N read as a contradiction.
     pub rotation: Option<(usize, usize)>,
+}
+
+/// One member a territory tick converges (x-e221).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainMember {
+    /// The epic id (rung 2) or project name (rungs 0/1) to converge.
+    pub id: String,
+    /// True: shell `advance --epic <id> --continuation`; false: shell
+    /// `advance --loose --project <id>`.
+    pub epic: bool,
 }
 
 /// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
@@ -793,32 +814,43 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
     }
 }
 
-/// Dispatch the mission by shelling K1's converge core, recording each dispatched
-/// child in `pending` for later reconcile. Returns [`MissionDispatch::Retire`]
-/// when `advance --epic` reports the mission deactivated / all children done.
+/// Dispatch ONE territory member by shelling K1's converge core, recording each
+/// dispatched child in `pending` for later reconcile. Epic members run
+/// `advance --epic <id> --continuation` (Retire on deactivated/all-done);
+/// project members run `advance --loose --project <id>` (never retire - a
+/// loose territory has no mission lifecycle, x-e221).
 ///
 /// The converge core owns ALL dispatch policy (cross-project fan-out, per-root
 /// `walker:` respect, `max_lanes` cap, claim dedup), so this never forks it. A
 /// non-zero exit or unparseable receipt is a transient skip (Continue) - a truly
 /// gone mission is caught by the loop's re-resolve, not guessed at here.
-fn dispatch_mission(
+fn dispatch_member(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
+    member: &DrainMember,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
+    let (mode, extra): (&str, &[&str]) = if member.epic {
+        // --continuation: never reactivate the mission and retire an inactive
+        // one, so an operator `--stop` between drain ticks is not undone.
+        ("--epic", &["--continuation"])
+    } else {
+        ("--loose", &[])
+    };
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
-            // --continuation: never reactivate the mission and retire an inactive
-            // one, so an operator `--stop` between drain ticks is not undone.
             .args([
+                // The `backlog advance` argv literal at this indentation is the
+                // seam marker the autonomous-dispatch census greps. Keep the
+                // elements multi-line; `--json` stays last.
                 "backlog",
                 "advance",
-                "--epic",
-                &cfg.mission,
-                "--continuation",
-                "--json",
+                mode,
+                member.id.as_str(),
             ])
+            .args(extra)
+            .arg("--json")
             .current_dir(&cfg.cwd)
             .output()
     }) {
@@ -850,7 +882,7 @@ fn dispatch_mission(
         }
     };
     let mut facts = facts_from_receipt(&receipt);
-    if receipt.deactivated || receipt.all_done {
+    if member.epic && (receipt.deactivated || receipt.all_done) {
         return (MissionDispatch::Retire, facts);
     }
     let mut new_ids = Vec::new();
@@ -929,6 +961,219 @@ fn dispatch_mission(
     (MissionDispatch::Continue, facts)
 }
 
+/// Dispatch the territory by converging EVERY member, recording each dispatched
+/// child in `pending` for later reconcile. Retires only when the territory has
+/// epic members and EVERY one reports deactivated / all children done - a
+/// project member never retires its territory (x-e221: a loose territory has
+/// no mission lifecycle; it drains while the workspace exists).
+fn dispatch_mission(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) -> (MissionDispatch, DispatchFacts) {
+    let members: Vec<DrainMember> = if cfg.members.is_empty() {
+        // Legacy single-mission receipt: one epic member = the mission itself.
+        vec![DrainMember {
+            id: cfg.mission.clone(),
+            epic: true,
+        }]
+    } else {
+        cfg.members.clone()
+    };
+    let mut merged = DispatchFacts::default();
+    let mut epic_members = 0usize;
+    let mut retired = 0usize;
+    for member in &members {
+        let (outcome, facts) = dispatch_member(cfg, breaker, member, pending, journal);
+        merged.ready += facts.ready;
+        merged.sync_resolved += facts.sync_resolved;
+        if merged.error.is_none() {
+            merged.error = facts.error.clone();
+        }
+        if merged.reason.is_none() {
+            merged.reason = facts.reason.clone();
+        }
+        if member.epic {
+            epic_members += 1;
+            if outcome == MissionDispatch::Retire {
+                retired += 1;
+            }
+        }
+    }
+    let outcome = if epic_members > 0 && retired == epic_members {
+        MissionDispatch::Retire
+    } else {
+        MissionDispatch::Continue
+    };
+    (outcome, merged)
+}
+
+/// The seed prompt for a machinery-spawned territory blueprinter (x-e221): a
+/// worker holds no crown, dispatches nothing, and self-reports nothing - it
+/// designs the mailed idea nodes and waits for the next one.
+fn blueprinter_prompt(scope: &str) -> String {
+    format!(
+        "You are the territory blueprinter for scope {scope}. \
+When mail arrives carrying /fno:blueprint <node-id>, run the fno:blueprint \
+skill for that node. You hold no crown, dispatch nothing, and report \
+nothing: finish each blueprint and wait."
+    )
+}
+
+/// The `blueprint-feed --json` status receipt (x-e221). `ideas` stays raw
+/// JSON: the tick only journals ids, it never interprets rungs.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterStatus {
+    #[serde(default)]
+    worker: Option<BlueprinterWorker>,
+    #[serde(default)]
+    worker_name_next: String,
+    #[serde(default)]
+    ideas: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterWorker {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    live: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterDelivery {
+    #[serde(default)]
+    delivered: Vec<String>,
+    #[serde(default)]
+    failed: Vec<serde_json::Value>,
+}
+
+/// One `agents blueprint-feed` call: the binary's territory fact set owns the
+/// policy (membership, feed windows, the record store, mail transport); the
+/// supervisor only decides when to spawn and when to deliver.
+fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json::Value> {
+    let mut args = vec![
+        "agents".to_string(),
+        "blueprint-feed".to_string(),
+        "--scope".to_string(),
+        cfg.scope.clone(),
+        "--json".to_string(),
+    ];
+    args.extend(extra.iter().cloned());
+    let out = retry_etxtbsy(|| {
+        fno_cmd(&cfg.fno_bin)
+            .args(&args)
+            .current_dir(&cfg.cwd)
+            .output()
+    })
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// One territory's blueprinter tick (x-e221 AC5/AC6): with unfed triaged
+/// ideas and no live standing worker, spawn AT MOST ONE replacement through
+/// the standard `fno agents spawn` gates; then deliver. A refused spawn is
+/// recorded as a repair and the ideas stay preserved for the next tick.
+fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
+    if cfg.scope.is_empty() {
+        return; // legacy receipt: no territory, no blueprinter
+    }
+    let Some(raw) = run_blueprint_feed(cfg, &[]) else {
+        let _ = journal.append(
+            "blueprinter_status_skip",
+            json!({"scope": cfg.scope, "reason": "feed verb failed or unparseable"}),
+        );
+        return;
+    };
+    let status: BlueprinterStatus = serde_json::from_value(raw).unwrap_or_default();
+    if status.ideas.is_empty() {
+        return; // nothing to feed: never spawn a worker without work
+    }
+    let needs_worker = status.worker.as_ref().map(|w| !w.live).unwrap_or(true);
+    if needs_worker {
+        if status.worker_name_next.is_empty() {
+            let _ = journal.append(
+                "blueprinter_spawn_refused",
+                json!({"scope": cfg.scope, "reason": "receipt named no worker to spawn"}),
+            );
+            return;
+        }
+        let prompt = blueprinter_prompt(&cfg.scope);
+        let args = vec![
+            "agents".to_string(),
+            "spawn".to_string(),
+            "--substrate".to_string(),
+            "thread".to_string(),
+            "--name".to_string(),
+            status.worker_name_next.clone(),
+            prompt,
+        ];
+        let spawn = retry_etxtbsy(|| {
+            fno_cmd(&cfg.fno_bin)
+                .args(&args)
+                .current_dir(&cfg.cwd)
+                .output()
+        });
+        match spawn {
+            Ok(o) if o.status.success() => {
+                let _ = journal.append(
+                    "blueprinter_spawned",
+                    json!({"scope": cfg.scope, "worker": status.worker_name_next}),
+                );
+            }
+            Ok(o) => {
+                let detail = String::from_utf8_lossy(&o.stderr);
+                let reason = format!("spawn refused: {}", detail.lines().next().unwrap_or(""));
+                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
+                let _ = journal.append(
+                    "blueprinter_spawn_refused",
+                    json!({"scope": cfg.scope, "reason": reason}),
+                );
+                return;
+            }
+            Err(e) => {
+                let reason = format!("spawn failed: {e}");
+                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
+                let _ = journal.append(
+                    "blueprinter_spawn_refused",
+                    json!({"scope": cfg.scope, "reason": reason}),
+                );
+                return;
+            }
+        }
+    }
+    let Some(raw) = run_blueprint_feed(cfg, &["--deliver".to_string()]) else {
+        let _ = journal.append(
+            "blueprinter_deliver_skip",
+            json!({"scope": cfg.scope, "reason": "deliver verb failed or unparseable"}),
+        );
+        return;
+    };
+    let delivery: BlueprinterDelivery = serde_json::from_value(raw).unwrap_or_default();
+    if delivery.delivered.is_empty() && delivery.failed.is_empty() {
+        return; // blocked receipt or nothing due: the verb recorded its own state
+    }
+    let worker_name = status
+        .worker
+        .as_ref()
+        .map(|w| w.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| status.worker_name_next.clone());
+    let _ = journal.append(
+        "blueprinter_delivered",
+        json!({
+            "scope": cfg.scope,
+            "worker": worker_name,
+            "delivered": delivery.delivered,
+            "failed": delivery.failed.len(),
+        }),
+    );
+}
+
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
 /// dispatch the mission's currently-ready children. Reconcile runs FIRST so a
 /// child that just auto-deferred is excluded from this tick's `advance --epic`
@@ -974,9 +1219,22 @@ pub fn mission_drain_tick(
         .rotation
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
+    let (label, kingless_mark) = if cfg.scope.is_empty() {
+        (format!("mission={}", cfg.mission), String::new())
+    } else {
+        (
+            format!("territory={}", cfg.scope),
+            if cfg.kingless {
+                " kingless".to_string()
+            } else {
+                String::new()
+            },
+        )
+    };
     let detail = format!(
-        "mission={}{} ready={} closed={} dispatched={} sync={} pending={}{}",
-        cfg.mission,
+        "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}",
+        label,
+        kingless_mark,
         rotation,
         facts.ready,
         closed,
@@ -1023,6 +1281,19 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
+    /// The territory key (x-e221): the canonical crown scope, empty on a
+    /// legacy receipt (the loop then keys by `mission`).
+    #[serde(default)]
+    pub scope: String,
+    /// The crown rung of the scope; 0 on a legacy receipt.
+    #[serde(default)]
+    pub rung: u8,
+    /// No live crown holds the scope; the drain continues regardless.
+    #[serde(default)]
+    pub kingless: bool,
+    /// What one tick converges: epic ids at rung 2, project names at rungs 0/1.
+    #[serde(default)]
+    pub members: Vec<String>,
     /// GLOBAL ceiling on concurrent converge runs across every mission, from
     /// `config.active_backlog.max_concurrent`. Every target carries the same
     /// value; the target list is just the daemon's one config channel. An
@@ -1033,6 +1304,16 @@ pub struct ResolvedTarget {
 
 fn default_max_concurrent() -> u32 {
     1
+}
+
+/// The drain loop's key: the territory scope when the receipt carries one,
+/// else the legacy mission id (an older Python resolver still in the field).
+fn territory_key(target: &ResolvedTarget) -> String {
+    if target.scope.is_empty() {
+        target.mission.clone().unwrap_or_default()
+    } else {
+        target.scope.clone()
+    }
 }
 
 /// The drain's ONE converge gate: `max_concurrent` permits shared by every
@@ -1092,40 +1373,93 @@ impl ConvergeGate {
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
-pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
-    resolve_targets_report(fno_bin).0
+pub fn resolve_targets(config_cwd: &Path, registry_path: &Path) -> Vec<ResolvedTarget> {
+    resolve_targets_report(config_cwd, registry_path).0
+}
+
+/// The drain-target receipt, computed natively from the territory fact set
+/// (`territory::resolve_territories` + the `active_backlog` config block) -
+/// the same JSON shape the Python `fno config active-backlog --json` verb
+/// prints, so the supervisor and the passthroughs read one contract. An
+/// unreadable source is the Err naming it; never an empty list read as
+/// "nothing enabled".
+pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Value>, String> {
+    let facts = territory::active_backlog_facts(config_cwd);
+    if !facts.any_enabled() {
+        return Ok(Vec::new());
+    }
+    let interval = match facts.interval_seconds {
+        Some(s) => s as u64,
+        None => return Ok(Vec::new()),
+    };
+    let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
+    let mut targets = Vec::new();
+    for territory in territories {
+        // `Territory::project` already carries the right root for both cases
+        // (the first member epic's own project at rung 2, the project itself
+        // at rungs 0/1 - see `resolve_territories`), so there is one path.
+        let root_project = territory.project.clone();
+        if root_project.is_empty() || territory.cwd.is_empty() {
+            continue; // unrootable: skipped, never guessed
+        }
+        if !facts.is_enabled_for(Some(&root_project)) {
+            continue;
+        }
+        let mission = if territory.rung == 2 {
+            territory.members.first().cloned()
+        } else {
+            None
+        };
+        targets.push(json!({
+            "project": territory.project,
+            "cwd": territory.cwd,
+            "interval_seconds": interval,
+            "failure_limit": facts.failure_limit,
+            "mission": mission,
+            "scope": territory.key,
+            "rung": territory.rung,
+            "kingless": territory.kingless,
+            "members": territory.members,
+            "max_concurrent": facts.max_concurrent,
+        }));
+    }
+    // The drain iterates in canonical scope order (the Python resolver's
+    // `sorted(_territories(), key=scope)`).
+    targets.sort_by(|a, b| {
+        a["scope"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["scope"].as_str().unwrap_or(""))
+    });
+    Ok(targets)
 }
 
 /// [`resolve_targets`] plus the failure detail the supervisor reports in its
 /// tick row: an empty target list from a broken resolver (`env_broken`, the
 /// missing-click class) is a different arm state from an empty list because
 /// nothing is enabled (`no_missions`).
-pub fn resolve_targets_report(fno_bin: &str) -> (Vec<ResolvedTarget>, Option<String>) {
-    match fno_cmd(fno_bin)
-        .args(["config", "active-backlog", "--json"])
-        .output()
-    {
-        Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+pub fn resolve_targets_report(
+    config_cwd: &Path,
+    registry_path: &Path,
+) -> (Vec<ResolvedTarget>, Option<String>) {
+    // The crossing is gone: the receipt is computed natively from the
+    // territory fact set in this crate (seam-crossings-baseline lost the
+    // active-backlog line in the same change).
+    match native_receipt(config_cwd, registry_path) {
+        Ok(targets) => match targets
+            .into_iter()
+            .map(|t| serde_json::from_value::<ResolvedTarget>(t))
+            .collect::<Result<Vec<_>, _>>()
+        {
             Ok(targets) => (targets, None),
             Err(e) => (
                 Vec::new(),
-                Some(format!("active-backlog receipt unparseable: {e}")),
+                Some(format!("active-backlog receipt unrepresentable: {e}")),
             ),
         },
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            (
-                Vec::new(),
-                Some(format!(
-                    "active-backlog resolve exited {}: {}",
-                    o.status,
-                    stderr.chars().take(120).collect::<String>()
-                )),
-            )
-        }
-        Err(e) => (
+        Err(reason) => (
             Vec::new(),
-            Some(format!("active-backlog resolve failed: {e}")),
+            Some(reason.chars().take(200).collect::<String>()),
         ),
     }
 }
@@ -1232,11 +1566,26 @@ fn drain_config_for(
     fno_bin: &str,
     rotation: Option<(usize, usize)>,
 ) -> Option<DrainConfig> {
-    let mission = target.mission.clone()?;
+    let key = territory_key(target);
+    if key.is_empty() {
+        // A malformed receipt (no scope and no mission) keys an unnamed loop.
+        return None;
+    }
+    let members: Vec<DrainMember> = target
+        .members
+        .iter()
+        .map(|id| DrainMember {
+            id: id.clone(),
+            epic: target.rung == 2,
+        })
+        .collect();
     Some(DrainConfig {
         cwd: PathBuf::from(&target.cwd),
         fno_bin: fno_bin.to_string(),
-        mission,
+        mission: target.mission.clone().unwrap_or_else(|| key.clone()),
+        scope: target.scope.clone(),
+        kingless: target.kingless,
+        members,
         failure_limit: target.failure_limit,
         interval_seconds: target.interval_seconds,
         rotation,
@@ -1331,7 +1680,10 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
+        let (targets, resolve_failure) = resolve_targets_report(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            &crate::paths::AgentsHome::from_env().registry_json(),
+        );
         // Re-sync the cap every recheck so `fno config set` lands without a
         // daemon restart. With no targets there is nothing to gate.
         if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
@@ -1375,14 +1727,16 @@ pub async fn run_supervisor(
         }
 
         for target in targets {
-            // Key by mission (epic id). A target with no mission is a malformed
-            // receipt; skip it rather than key an unnamed loop.
-            let Some(mission) = target.mission.clone() else {
+            // Key by territory (x-e221): the canonical crown scope; a legacy
+            // receipt without one still keys by mission. An empty key is a
+            // malformed receipt; skip it rather than key an unnamed loop.
+            let key = territory_key(&target);
+            if key.is_empty() {
                 continue;
-            };
-            // Entry API (single lookup): only spawn when this mission has no live
-            // loop yet, mirroring the fanout family below.
-            if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(mission) {
+            }
+            // Entry API (single lookup): only spawn when this territory has no
+            // live loop yet, mirroring the fanout family below.
+            if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(key) {
                 slot.insert(tokio::spawn(mission_drain_loop(
                     target,
                     fno_bin.clone(),
@@ -1446,10 +1800,10 @@ async fn mission_drain_loop(
     shutdown: Arc<AtomicBool>,
     gate: Arc<ConvergeGate>,
 ) {
-    // A malformed target with no mission is filtered by the supervisor before
+    // A malformed target with no key is filtered by the supervisor before
     // spawn; default to empty so this never panics if one slips through (the
     // re-resolve below then finds no match and exits).
-    let mission = target.mission.clone().unwrap_or_default();
+    let key = territory_key(&target);
     let mut breaker = CircuitBreaker::new(target.failure_limit);
     // In-flight fire-and-forget dispatches, reconciled from events across ticks
     // (x-0ad6). Resident like the breaker so a worker dispatched one tick is
@@ -1463,16 +1817,16 @@ async fn mission_drain_loop(
             break;
         }
 
-        // Re-resolve this mission's liveness. If its epic dropped out of the
-        // target set (mission_active cleared externally), exit the loop (the
+        // Re-resolve this territory's liveness. If its scope dropped out of the
+        // target set (crown revoked / workspace gone), exit the loop (the
         // supervisor will not respawn it). The position in this list (already
-        // epic-id ordered) names the rotation in the tick's detail row; a lone
-        // mission prints no `(1 of 1)` - that reads as a fault, not a count.
-        let all = resolve_targets(&fno_bin);
-        let Some(pos) = all
-            .iter()
-            .position(|t| t.mission.as_deref() == Some(mission.as_str()))
-        else {
+        // scope-ordered) names the rotation in the tick's detail row; a lone
+        // territory prints no `(1 of 1)` - that reads as a fault, not a count.
+        let all = resolve_targets(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            &crate::paths::AgentsHome::from_env().registry_json(),
+        );
+        let Some(pos) = all.iter().position(|t| territory_key(t) == key) else {
             break;
         };
         let t = &all[pos];
@@ -1514,10 +1868,13 @@ async fn mission_drain_loop(
 
         // The tick is synchronous; offload so the async runtime is never stalled.
         // Move the breaker AND pending set in and hand them back so the streak
-        // and in-flight tracking survive the tick.
+        // and in-flight tracking survive the tick. The blueprinter tick rides
+        // the same blocking task, BEFORE the drain: a plan designed this tick
+        // can dispatch on it the same tick.
         let taken_b = std::mem::take(&mut breaker);
         let taken_p = std::mem::take(&mut pending);
         let handle = tokio::task::spawn_blocking(move || {
+            blueprinter_tick(&cfg, &journal);
             let mut b = taken_b;
             let mut p = taken_p;
             let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
@@ -1532,17 +1889,15 @@ async fn mission_drain_loop(
                 pending = p;
                 backoff = Duration::from_secs(1);
                 if outcome == MissionDispatch::Retire {
-                    let _ = emitter.emit(
-                        "active_backlog_mission_retired",
-                        &json!({"mission": mission}),
-                    );
+                    let _ =
+                        emitter.emit("active_backlog_mission_retired", &json!({"mission": key}));
                     break;
                 }
             }
             Err(join_err) => {
                 let _ = emitter.emit(
                     "active_backlog_task_crashed",
-                    &json!({"mission": mission, "error": join_err.to_string()}),
+                    &json!({"mission": key, "error": join_err.to_string()}),
                 );
                 // The panicked breaker's streak is lost (rare); a fresh one is
                 // safe (a crash-looping node re-accrues failures and re-defers).
@@ -1738,6 +2093,9 @@ mod tests {
             cwd: tmp.to_path_buf(),
             fno_bin,
             mission: "x-epic".to_string(),
+            scope: String::new(),
+            kingless: false,
+            members: Vec::new(),
             failure_limit,
             interval_seconds: 300,
             rotation: None,
@@ -3051,24 +3409,58 @@ mod tests {
         assert!(!record.exists(), "no defer on a skipped child");
     }
 
-    /// A stub `fno` for the converge-cap tests: it answers `config
-    /// active-backlog --json` with `targets_json`, and every `backlog advance
-    /// --epic` writes `S`, holds the slot for 300ms, writes `E`, then prints a
-    /// benign receipt. The S/E log is the positive marker: overlap in it is
-    /// concurrent converge runs measured directly, never a config read.
-    fn stub_fno_converge(
+    /// A stub `fno` that records every argv, answers `agents blueprint-feed`
+    /// with `status_json`, and (optionally) fails `agents spawn` so the repair
+    /// path is reachable.
+    fn stub_fno_blueprint_feed(
         dir: &std::path::Path,
-        log: &std::path::Path,
-        targets_json: &str,
+        record: &std::path::Path,
+        status_json: &str,
+        spawn_fails: bool,
     ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        let spawn_arm = if spawn_fails {
+            "if [ \"$2\" = \"spawn\" ]; then echo 'gate: refused' >&2; exit 1; fi\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"$@\" >> \"{}\"\n\
+                 if [ \"$2\" = \"blueprint-feed\" ]; then\n\
+                 case \"$*\" in\n\
+                 *--deliver*) printf '%s' '{{\"action\":\"deliver\",\"delivered\":[\"x-1\",\"x-2\"],\"failed\":[]}}';;\n\
+                 *) printf '%s' '{}';;\n\
+                 esac\n\
+                 exit 0\n\
+                 fi\n\
+                 {}\
+                 exit 0\n",
+                record.display(),
+                status_json,
+                spawn_arm
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    /// A stub `fno` for the converge-cap tests: every `backlog advance`
+    /// (epic or loose) writes `S`, holds the slot for 300ms, writes `E`, then
+    /// prints a benign receipt. The S/E log is the positive marker: overlap in
+    /// it is concurrent converge runs measured directly, never a config read.
+    /// The receipt itself is native now, so the fixture files carry it.
+    fn stub_fno_converge(dir: &std::path::Path, log: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
         let p = dir.join("fno");
         std::fs::write(
             &p,
             format!(
                 "#!/usr/bin/env bash\n\
-                 if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
-                 cat <<'JSON'\n{targets_json}\nJSON\nexit 0; fi\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
                  printf '%s' '{{\"epic_id\":\"x-e\",\"deactivated\":false,\"all_done\":false,\"children\":[]}}'\nexit 0; fi\n\
@@ -3081,12 +3473,141 @@ mod tests {
         p.display().to_string()
     }
 
-    /// One drain target line for the stub's `config active-backlog` receipt.
-    fn converge_target(index: usize, cwd: &std::path::Path, cap: u32) -> String {
-        format!(
-            r#"{{"project":"p{index}","cwd":"{cwd}","interval_seconds":1,"failure_limit":3,"mission":"x-m{index}","max_concurrent":{cap}}}"#,
-            cwd = cwd.display()
-        )
+    fn territory_cfg(tmp: &std::path::Path, fno_bin: String) -> DrainConfig {
+        let mut cfg = test_cfg(tmp, fno_bin, 3);
+        cfg.scope = "x-a792".to_string();
+        cfg
+    }
+
+    fn journal_rows(p: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
+        journal_lines(p)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == event)
+            .collect()
+    }
+
+    #[test]
+    fn blueprinter_tick_spawns_one_worker_then_delivers() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792","worker":null,
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"},{"id":"x-2","rung":"design"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(argv.matches("agents spawn").count(), 1);
+        assert!(argv.contains("--substrate thread"));
+        assert!(argv.contains("--name blueprinter-x-a792-abc123"));
+        assert!(argv.contains("territory blueprinter for scope x-a792"));
+        assert_eq!(argv.matches("--deliver").count(), 1);
+        eprintln!(
+            "JOURNAL RAW: {:?}",
+            std::fs::read_to_string(&project_journal).unwrap_or_default()
+        );
+        eprintln!(
+            "JOURNAL ROWS: {:?}",
+            journal_rows(&project_journal, "blueprinter_spawned")
+        );
+        eprintln!("JOURNAL LINES: {:?}", journal_lines(&project_journal));
+        assert_eq!(
+            journal_rows(&project_journal, "blueprinter_spawned").len(),
+            1
+        );
+        let delivered = journal_rows(&project_journal, "blueprinter_delivered");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0]["data"]["worker"], "blueprinter-x-a792-abc123");
+    }
+
+    #[test]
+    fn blueprinter_tick_reuses_a_live_worker() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792",
+            "worker":{"name":"blueprinter-x-a792-abc123","live":true},
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert!(!argv.contains(" agents spawn "));
+        assert_eq!(argv.matches("--deliver").count(), 1);
+        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
+    }
+
+    #[test]
+    fn blueprinter_tick_records_repair_when_spawn_refused() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792","worker":null,
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, true);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(argv.matches("agents spawn").count(), 1);
+        assert!(argv.contains("--repair"));
+        assert!(!argv.contains("--deliver"));
+        let repairs = journal_rows(&project_journal, "blueprinter_spawn_refused");
+        assert_eq!(repairs.len(), 1);
+        assert!(repairs[0]["data"]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("spawn refused"));
+    }
+
+    #[test]
+    fn blueprinter_tick_idles_without_ideas_or_scope() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let fno = stub_fno_blueprint_feed(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"action":"status","ideas":[]}"#,
+            false,
+        );
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+        blueprinter_tick(&cfg, &journal);
+        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
+
+        // A legacy receipt (empty scope) never calls the feed verb at all.
+        let record2 = tmp.path().join("argv2.log");
+        let fno2 = stub_fno_blueprint_feed(
+            &tmp.path().join("bin2"),
+            &record2,
+            r#"{"action":"status","ideas":[{"id":"x-1"}]}"#,
+            false,
+        );
+        let mut legacy = test_cfg(tmp.path(), fno2, 3);
+        legacy.scope = String::new();
+        blueprinter_tick(&legacy, &journal);
+        assert!(journal_lines(&record2).is_empty());
+    }
+
+    #[test]
+    fn blueprinter_status_defaults_on_partial_json() {
+        let status: BlueprinterStatus = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(status.worker.is_none());
+        assert!(status.worker_name_next.is_empty());
+        assert!(status.ideas.is_empty());
     }
 
     /// The greatest number of converge runs that overlapped, replayed from the
@@ -3120,17 +3641,46 @@ mod tests {
         run_ms: u64,
     ) -> String {
         std::env::set_var("HOME", tmp);
+        std::env::set_var("FNO_HOME", tmp);
+        std::env::set_var("FNO_AGENTS_HOME", tmp.join("agents-home"));
+        std::env::set_var("FNO_CONFIG", tmp.join("config.toml"));
         let log = tmp.join("converges.log");
-        let targets: Vec<String> = (0..missions)
-            .map(|i| converge_target(i, tmp, cap))
-            .collect();
-        let fno = stub_fno_converge(&tmp.join("bin"), &log, &format!("[{}]", targets.join(",")));
+        // The receipt is native: N workspace projects with no crowns resolve
+        // to N kingless rung-1 territories rooted at the fixture dir.
+        let mut projects = String::new();
+        for i in 0..missions {
+            projects.push_str(&format!(
+                "[[work.workspaces.main.projects]]\nname = \"p{i}\"\npath = \"{}\"\n",
+                tmp.display()
+            ));
+        }
+        std::fs::write(
+            tmp.join("config.toml"),
+            format!(
+                "[active_backlog]\nenabled = true\ninterval = \"1s\"\nfailure_limit = 3\nmax_concurrent = {cap}\n[work.workspaces.main]\n{projects}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(tmp.join("graph.json"), "{\"entries\": []}").unwrap();
+        let registry = crate::paths::AgentsHome::from_env().registry_json();
+        if let Some(parent) = registry.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &registry,
+            format!(
+                "{{\"schema_version\": {}, \"agents\": []}}",
+                crate::state::REGISTRY_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let fno = stub_fno_converge(&tmp.join("bin"), &log);
 
-        let resolved = resolve_targets(&fno);
+        let resolved = resolve_targets(&std::env::current_dir().unwrap(), &registry);
         assert_eq!(
             resolved.len(),
             missions,
-            "the stub must resolve every mission"
+            "the fixture must resolve every mission"
         );
         let gate = Arc::new(ConvergeGate::new(cap));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -3210,7 +3760,7 @@ mod tests {
             queued[0]
         );
         assert!(
-            queued[0].contains("mission=x-m"),
+            queued[0].contains("mission=p"),
             "the row must name the mission: {}",
             queued[0]
         );

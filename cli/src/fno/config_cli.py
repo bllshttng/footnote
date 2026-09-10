@@ -6,6 +6,7 @@ lives in setup/doctor.py.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 import os
 from pathlib import Path
 from importlib import import_module
@@ -957,29 +958,62 @@ def active_backlog_cmd(
         False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
     ),
 ) -> None:
-    """Resolve which projects the active-backlog daemon should drain.
-
-    Reads config.active_backlog + the workspace project->path map and prints the
-    enabled drain targets (project, cwd, interval, failure_limit, mission). The
-    daemon shells this on entering Serving to discover its targets. Read-only and
-    best-effort: a malformed config yields an empty list, never an error.
+    """Print the active-backlog drain targets. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
     """
-    import json as _json
+    from fno.rust_binary import call_binary_json
 
-    from fno.active_backlog import drain_targets_as_dicts
-
-    targets = drain_targets_as_dicts()
+    error, targets = call_binary_json("active-backlog-receipt")
+    if error is not None:
+        typer.echo(f"active-backlog: {error}", err=True)
+        raise typer.Exit(code=1)
     if json_out:
-        typer.echo(_json.dumps(targets))
+        typer.echo(json.dumps(targets))
         return
     if not targets:
-        typer.echo("active-backlog: no active missions to drain")
+        typer.echo("active-backlog: no territories to drain")
         return
-    for t in targets:
-        mission = f" mission={t['mission']}" if t["mission"] else ""
+    for tg in targets:
+        mission = f" mission={tg['mission']}" if tg.get("mission") else ""
         typer.echo(
-            f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s\t"
-            f"failure_limit={t['failure_limit']}{mission}"
+            f"{tg['scope']}\t{tg['cwd']}\tinterval={tg['interval_seconds']}s\t"
+            f"failure_limit={tg['failure_limit']}{mission}"
+        )
+
+
+@app.command("active-backlog-territories", hidden=True)
+def active_backlog_territories_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON list of territory rows."
+    ),
+) -> None:
+    """The territory readout: one row per scope. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
+    """
+    from fno.rust_binary import call_binary_json
+
+    error, rows = call_binary_json("territory-rows")
+    if error is not None:
+        typer.echo(f"territories: {error}", err=True)
+        raise typer.Exit(code=1)
+    if json_out:
+        typer.echo(json.dumps(rows))
+        return
+    if not isinstance(rows, list):
+        rows = []
+    if not rows:
+        typer.echo("territories: none")
+        return
+    for r in rows:
+        worker = r.get("blueprinter")
+        worker_txt = (
+            f" blueprinter={worker['name']}{'!' if worker['live'] else '?'}"
+            if worker
+            else ""
+        )
+        holder = f" king={r['holder']}" if r.get("holder") else " kingless"
+        typer.echo(
+            f"{r['scope']}\trung={r['rung']}{holder}\tlive={r['live']}/{r['cap']}{worker_txt}"
         )
 
 

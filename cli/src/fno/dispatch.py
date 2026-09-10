@@ -734,6 +734,7 @@ def _dispatch_one(
             _worker_agent_name(node_id, slug),
             "pane",
             no_wait=True,
+            node=node_id,
         )
         # Everything from here to the spawn runs with the gate HELD (pane
         # substrate keeps the mutex until the registry row exists), so every

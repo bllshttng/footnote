@@ -7,10 +7,24 @@ from typing import Optional
 import typer
 
 
+def _drain_receipt() -> list[dict]:
+    """The Rust drain receipt (active-backlog-receipt), parsed.
+
+    Raises on an unreadable source so the caller can answer `unknown` instead
+    of pretending no dispatcher is live. Test seam: monkeypatch this, not a
+    subprocess.
+    """
+    from fno.rust_binary import call_binary_json
+
+    error, receipt = call_binary_json("active-backlog-receipt")
+    if error is not None or not isinstance(receipt, list):
+        raise RuntimeError(error or "non-list drain receipt")
+    return receipt
+
+
 def _dispatch_note(task_id: str, graph_path) -> str | None:
     """Return a truthful dispatcher note for a successfully ranked node."""
     try:
-        from fno.active_backlog import resolve_drain_targets
         from fno.graph._intake import descendants_of
         from fno.graph.store import read_graph
 
@@ -18,8 +32,8 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("graph read returned an unreadable shape")
         missions: list[str] = []
-        for target in resolve_drain_targets(strict=True):
-            mission = getattr(target, "mission", None)
+        for target in _drain_receipt():
+            mission = target.get("mission") if isinstance(target, dict) else None
             if mission is None:
                 continue
             if not isinstance(mission, str) or not mission:

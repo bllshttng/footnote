@@ -112,30 +112,36 @@ def test_map_covers_current_surface_once():
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
     # This branch also allocates `backlog requeue` its row: 573 -> 574.
-    # Upstream's cargo-offload rows (`agents workspace worktree cargo-offload`
-    # and the legacy `worktree cargo-offload`) took 574 -> 576 and the
-    # two-lane discovery branch allocated `backlog discover`: 576 -> 577. The
-    # routing branch allocates `agents route-slot`, the delivery-slot resolver
-    # the spawn seam's client invokes directly (hidden verb): 577 -> 578. The
+    # x-e221 allocates the hidden territory readout
+    # `config active-backlog-territories`: 574 -> 575, then retires its
+    # `agents worker blueprint-feed` (+ `worker` mirror) rows when the feed
+    # ported native to the binary: net -2 from 577. Upstream's cargo-offload
+    # rows (`agents workspace worktree cargo-offload` and the legacy
+    # `worktree cargo-offload`) took 574 -> 576, the two-lane discovery
+    # branch allocated `backlog discover`: 576 -> 577, and the routing
+    # branch allocates `agents route-slot`, the delivery-slot resolver the
+    # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
-    # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
-    # allocates `agents authorized-merge`, the merge/arm decision every merge
-    # path asks through the single Python door (hidden verb): 580 -> 581.
-    # x-9e1e allocates `agents king faq add` and `agents king faq list`, the
-    # king FAQ recipe-becomes-verb: 581 -> 583. Counted from the merged file,
-    # not taken from either side: this branch independently allocates
-    # `agents distress-verdicts`, the king board's watchdog-verdict lookup
-    # (hidden verb): 583 -> 584. The court scope fold allocates
-    # `agents court-fold`, the native read `fno agents court -n` relays to
-    # (hidden verb): 584 -> 585. Upstream allocates `agents spawn-axes`, the
-    # spawn seam's axes round-trip (hidden verb): 585 -> 586, then allocates
-    # `agents workspace reap`: 586 -> 587. This branch also allocates
-    # `agents test-run`, the native test-suite process-group owner, and
-    # `backlog worked`, the one-read live-worker surface the ready gate and
-    # king board consume (hidden verbs): counted from the merged file, 587 -> 589.
-    # This branch adds `doctor graph export`: 589 -> 590.
-    assert len(mapped) == 590, (
+    # open around (hidden verbs): 578 -> 580. This branch reallocated the
+    # retired `agents worker blueprint-feed` pair onto the direct binary
+    # verb `agents blueprint-feed`, and the one-authorized-merge branch
+    # allocates `agents authorized-merge`, the merge/arm decision every
+    # merge path asks through the single Python door (hidden verb):
+    # 580 -> 583. x-9e1e allocates `agents king faq add` and `agents king
+    # faq list`, the king FAQ recipe-becomes-verb: 583 -> 585. Main
+    # independently allocates `agents distress-verdicts`, the king board's
+    # watchdog-verdict lookup (hidden verb): 585 -> 586. The court scope
+    # fold allocates `agents court-fold`, the native read `fno agents
+    # court -n` relays to (hidden verb): 586 -> 587. Upstream allocates
+    # `agents spawn-axes`, the spawn seam's axes round-trip (hidden verb):
+    # 587 -> 588, then allocates `agents workspace reap`: 588 -> 589. This
+    # branch also allocates `agents test-run`, the native test-suite
+    # process-group owner, and `backlog worked`, the one-read live-worker
+    # surface the ready gate and king board consume (hidden verbs): 589 ->
+    # 591. Upstream adds `doctor graph export`: 591 -> 592. Counted from
+    # the merged file, never taken from either side: 592.
+    assert len(mapped) == 592, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

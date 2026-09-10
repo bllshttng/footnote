@@ -694,10 +694,25 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # adding it to RUST_CLIENT_VERBS would mint a second surface for it.
     # `notify-watch` is the same shape: the pr-watch tick phase and the arms
     # readout are its only callers, both through resolve_binary.
+    # The three territory doors are the same shape: `active-backlog-receipt`
+    # and `territory-rows` are reached through the config passthroughs, and
+    # `territory-verdict` through the spawn gate's delegate - every caller
+    # uses resolve_binary directly, never `fno agents <verb>` routing.
     # `node-route` is shelled by the squad prune's cascade fold for a verdict
     # per unknown member; `roster-reap` is the roster sweep's own door. Both
     # are binary-first surfaces, never `fno` auto-routes.
-    routable = arms | (specials - {"board", "notify-watch", "node-route", "roster-reap"})
+    routable = arms | (
+        specials
+        - {
+            "board",
+            "notify-watch",
+            "active-backlog-receipt",
+            "territory-rows",
+            "territory-verdict",
+            "node-route",
+            "roster-reap",
+        }
+    )
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"

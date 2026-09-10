@@ -125,6 +125,26 @@ def test_max_concurrent_bad_scalar_dropped_to_default():
 
 def test_mission_optional():
     assert ActiveBacklogConfig(mission="fno-mission-1").mission == "fno-mission-1"
+
+
+def test_max_live_per_territory_default_is_four():
+    # x-e221: the per-territory team cap defaults to 4, beside agents.max_live
+    # (the machine ceiling, unchanged).
+    from fno.config import AgentsBlock
+
+    assert AgentsBlock().max_live_per_territory == 4
+
+
+def test_max_live_per_territory_bad_scalar_dropped_to_default():
+    from fno.config import AgentsBlock
+
+    assert AgentsBlock(max_live_per_territory=0).max_live_per_territory == 4
+    assert AgentsBlock(max_live_per_territory=-2).max_live_per_territory == 4
+    assert AgentsBlock(max_live_per_territory="banana").max_live_per_territory == 4
+    assert AgentsBlock(max_live_per_territory=True).max_live_per_territory == 4
+    # valid values pass through (incl. numeric strings)
+    assert AgentsBlock(max_live_per_territory=2).max_live_per_territory == 2
+    assert AgentsBlock(max_live_per_territory="6").max_live_per_territory == 6
     assert ActiveBacklogConfig().mission is None
 
 
@@ -197,7 +217,7 @@ def test_doctor_silent_when_mission_unset_or_empty(monkeypatch, tmp_path):
 
 def test_mission_key_stays_parseable_but_is_documented_ignored():
     # The key parses for one release (an old config never fails the load) and
-    # nothing in the drain branches on it: resolve_drain_targets derives its
+    # nothing in the drain branches on it: the native receipt derives its
     # missions from the graph's mission_active field, not this field.
     b = ActiveBacklogConfig(enabled=True, mission="x-5317")
     assert b.any_enabled() is True

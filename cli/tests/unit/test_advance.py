@@ -1767,6 +1767,24 @@ def test_advance_result_rejects_invalid_pair():
 
 
 @requires_rust
+def test_ready_loose_nodes_filters_parented_and_epic_rows(monkeypatch):
+    """`_ready_loose_nodes` calls the native store.ready leg directly (no
+    subprocess) and keeps only parentless, non-epic rows for the rung-1
+    territory drain."""
+    rows = [
+        {"id": "x-loose1", "parent": None, "type": "feature"},
+        {"id": "x-child1", "parent": "x-epic1", "type": "feature"},
+        {"id": "x-epic1", "parent": None, "type": "epic"},
+    ]
+    monkeypatch.setattr(
+        "fno.graph.store.ready",
+        lambda **kwargs: {"rows": rows},
+    )
+    result = adv._ready_loose_nodes("fno")
+    assert [row["id"] for row in result] == ["x-loose1"]
+
+
+@requires_rust
 def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
     tmp_path, monkeypatch
 ):

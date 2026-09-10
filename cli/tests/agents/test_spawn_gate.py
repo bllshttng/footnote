@@ -1691,3 +1691,72 @@ class TestReignTyped:
 
         assert _reign_typed_message("brief", None, None, False) == ("brief", False)
         assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
+
+
+# --- the per-territory team cap (x-e221) --------------------------------------
+
+
+def test_territory_cap_refuses_at_the_cap(monkeypatch):
+    # The verdict (and every count in it) is the binary's; the gate only maps
+    # it to a refusal and passes the receipt through.
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_verdict",
+        lambda node: {
+            "verdict": "territory_cap",
+            "reason": "territory_cap",
+            "territory": "x-epic",
+            "current_count": 4,
+            "max_live_per_territory": 4,
+        },
+    )
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        spawn_gate._check_territory_cap("x-new")
+    receipt = err.value.receipt or {}
+    assert receipt.get("reason") == "territory_cap"
+    assert receipt.get("territory") == "x-epic"
+    assert receipt.get("current_count") == 4
+
+
+def test_headroom_verdict_passes(monkeypatch):
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_verdict",
+        lambda node: {
+            "verdict": "ok",
+            "territory": "x-epic",
+            "current_count": 1,
+            "max_live_per_territory": 4,
+        },
+    )
+    spawn_gate._check_territory_cap("x-new")  # no raise
+
+
+def test_territory_unknown_refuses_closed(monkeypatch):
+    # An unreadable graph / absent node is an explicit refusal: an unknown
+    # attribution must never silently disappear from the count.
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_verdict",
+        lambda node: {
+            "verdict": "territory_unknown",
+            "reason": "territory_unknown",
+            "node": node,
+        },
+    )
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        spawn_gate._check_territory_cap("x-ghost")
+    receipt = err.value.receipt or {}
+    assert receipt.get("reason") == "territory_unknown"
+    assert receipt.get("node") == "x-ghost"
+
+
+def test_nodeless_spawn_skips_the_team_cap(monkeypatch):
+    # Machinery (kings, blueprinters, ad-hoc panes) works no node: the team
+    # cap is out of scope for it, not unknown.
+    called = []
+    monkeypatch.setattr(spawn_gate, "_territory_verdict", lambda n: called.append(n))
+    spawn_gate._check_territory_cap(None)
+    assert called == []
+
+

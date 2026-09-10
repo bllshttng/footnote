@@ -20,6 +20,7 @@ def _entry(
     sid="uuid-full",
     provider=None,
     route_settings_path=None,
+    node=None,
 ):
     return SimpleNamespace(
         status=status,
@@ -28,6 +29,7 @@ def _entry(
         harness_session_id=sid,
         provider=provider,
         route_settings_path=route_settings_path,
+        node=node,
     )
 
 
@@ -59,6 +61,40 @@ def test_roster_exited_revives_in_place(monkeypatch):
     assert detail == "abc12345"  # revived short_id, not a fork id
     assert spawned == []  # never forked - one roster row, same uuid
     assert stamped == ["wk-abc12345"]
+
+
+def test_routed_respawn_gates_with_the_rows_node(monkeypatch):
+    # The revival re-occupies a live slot in its territory: run_gate must get
+    # the row's node so the per-territory cap leg sees the revival.
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry(
+            "exited", provider="zai", route_settings_path="/route.json", node="x-1"
+        ),
+    )
+    seen = {}
+
+    def _fake_gate(*args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            retain_revived_worker=lambda *a, **k: None,
+            release_gate_mutex=lambda: None,
+            release=lambda: None,
+        )
+
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", _fake_gate)
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda short: 0)
+    monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **k: True)
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("forked after revive")),
+    )
+    assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
+    assert seen.get("node") == "x-1"
 
 
 def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
@@ -418,7 +454,7 @@ def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
 
     assert ok is True and detail == "FORK"
     assert events[0][0] == "gate"
-    assert events[0][2:] == ("bg", {"route_provider": "zai"})
+    assert events[0][2:] == ("bg", {"route_provider": "zai", "node": None})
     assert events[1][0] == "dispatch"
     assert events[1][1]["route_provider"] == "zai"
     assert events[2] == "release"

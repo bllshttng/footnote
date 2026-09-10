@@ -16,6 +16,7 @@ agents court	T1	agents court	3
 agents court-orphans	T1	agents court-orphans	0
 agents court-fold	T1	agents court-fold	0
 agents route-slot	T1	agents route-slot	0
+agents blueprint-feed	T1	agents blueprint-feed	0
 agents spawn-overlay	T1	agents spawn-overlay	0
 agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
@@ -257,6 +258,7 @@ claim status	T1	claim status	32
 codemap	KEEP	codemap	18	single-leaf group
 config accounts	KEEP	config accounts	71	deliberate readability slack for a high-traffic distinct operation
 config active-backlog	T1	config active-backlog	5
+config active-backlog-territories	T1	config active-backlog-territories	0
 config assert-subagent-budget	T1	config assert-subagent-budget	6	
 config doctor	T1	config doctor	20
 config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation

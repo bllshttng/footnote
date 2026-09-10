@@ -7456,7 +7456,7 @@ def wake_and_deliver(
     revived_reservation = False
     if route_provider is not None:
         try:
-            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
+            gate = run_gate(spawn_name, "bg", route_provider=route_provider, node=getattr(entry, "node", None))
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 

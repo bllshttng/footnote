@@ -208,6 +208,32 @@ a session whose gates are all false (it just started).
 
 Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its width from those same counters. It reads them through the same functions that `fno agents top` and `advance --explain` use. No two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second authority beside the real one. When the key is set, fno prints one deprecation line and ignores it. The key stays parseable for one release. Delete it from config.
 
+## Per-territory team cap
+
+`_territory_verdict` (`cli/src/fno/agents/spawn_gate.py`) asks the Rust gate
+for one node's territory verdict and recomputes nothing: Python passes the
+node through the binary door. A binary or payload fault reads as
+`territory_unknown`, never as headroom, since an unreadable verdict must
+never count as free capacity.
+
+`_check_territory_cap` refuses (never queues) when that verdict is
+`territory_cap`. The cap stays enforced under `--force`: force speaks for
+the machine being busy, never for one territory overrunning its team.
+Waiting cannot help, since the team is full where the caller is standing,
+so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP`
+(82) separates this from the machine-wide cap so a caller can tell "the
+fleet is full" (queueable) from "this territory's team is over the line"
+(the other territories keep their headroom).
+
+Two CLI verbs read the same Rust territory projection so no two surfaces
+disagree. `fno config active-backlog` (`config_cli.py`) passes through the
+`active-backlog-receipt` binary call: territories resolved from the graph,
+the crown registry, the workspace map, and `config.active_backlog`. Read-only;
+exit 1 names the unreadable source. `fno config active-backlog-territories`
+(hidden) passes through `territory-rows`: one row per scope, with its
+missions, king or kingless state, live count against the cap, and the
+standing blueprinter's handle. Both are read-only.
+
 ## A dispatch outcome is dispatched, skipped, or failed
 
 Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, king share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.

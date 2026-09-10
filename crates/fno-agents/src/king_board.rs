@@ -42,7 +42,7 @@ mod claims;
 mod classify;
 mod prs;
 mod queues;
-mod scope;
+pub(crate) mod scope;
 
 pub(crate) use queues::not_read_status;
 
@@ -51,6 +51,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub(crate) use crate::territory::compile_scope_ids;
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
 pub(crate) use classify::read_claimed_nodes;
@@ -59,8 +60,8 @@ pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
 };
 pub(crate) use scope::{
-    autonomous_merge_enabled, blocked_child_grace_minutes, compile_scope_ids, graph_json_path,
-    operator_lane_path, parse_manifest, project_map,
+    autonomous_merge_enabled, blocked_child_grace_minutes, expand_home, graph_json_path,
+    home_dot_fno, operator_lane_path, parse_manifest, project_map,
 };
 
 /// Priorities a king treats as its own work. Lower bands are the operator's.

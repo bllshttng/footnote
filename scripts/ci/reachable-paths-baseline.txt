@@ -34,7 +34,7 @@ A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
-A	a crown needs a scope: name an epic or a project	py=cli/src/fno/agents/crown.py;rs=crates/fno-agents/src/court_fold.rs|crates/fno-agents/src/king_board/scope.rs	# msg-twin: the Rust scope reader refuses an unnamed crown in the same words the Python verb does; court_fold.rs is the fold consumer of the same compiler
+A	a crown needs a scope: name an epic or a project	py=cli/src/fno/agents/crown.py;rs=crates/fno-agents/src/court_fold.rs|crates/fno-agents/src/territory.rs	# msg-twin: the Rust scope reader refuses an unnamed crown in the same words the Python verb does; court_fold.rs is the fold consumer of the same compiler
 A	a model vendor is only routable at spawn	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
 A	accepted forms: name, canonical handle, transport short id, or full session id	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# msg-twin
