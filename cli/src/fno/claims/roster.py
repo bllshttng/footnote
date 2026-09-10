@@ -1,5 +1,3 @@
-"""Shared fleet-roster reading and liveness helpers for claim consumers."""
-
 from __future__ import annotations
 
 from types import MappingProxyType
@@ -7,8 +5,6 @@ from typing import Mapping, NamedTuple
 
 
 class RosterReading(NamedTuple):
-    """One reading of the fleet roster, reusable across many claims."""
-
     consulted: bool
     rows_scanned: int
     workers_by_node: dict
@@ -59,14 +55,12 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
 
 
 def _finished_row_states() -> frozenset:
-    """Return the watchdog-derived states that mean a worker stopped."""
     from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
 
     return _TERMINAL_STATES - _WAKE_STATES
 
 
 def _transcript_activity(session_id: str, cwd: str):
-    """Return True for finished, False for moving, and None if unreadable."""
     try:
         import time
 
@@ -86,7 +80,6 @@ def _transcript_activity(session_id: str, cwd: str):
 
 
 def _really_finished(worker: dict) -> bool:
-    """Whether a terminal roster row is confirmed by its transcript."""
     if worker.get("state") not in _finished_row_states():
         return False
     return _transcript_activity(worker.get("row_id") or "", worker.get("cwd") or "") is not False
