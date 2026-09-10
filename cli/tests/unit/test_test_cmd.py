@@ -492,13 +492,13 @@ def test_estimate_prices_an_injected_build_from_harness_content(tmp_path: Path) 
 def test_estimate_puts_tonights_failing_packet_well_above_the_old_cap(tmp_path: Path) -> None:
     """The measured packet (93 pytest files, 14 shell harnesses, the build and
     two registry steps) could not finish inside a fixed 15-minute cap. The
-    estimate must land far above that cap and inside the 45 ceiling CI clamps
+    estimate must land far above that cap and inside the 75 ceiling CI clamps
     to, or the sizing would repeat the starvation it exists to remove."""
     from fno.test_cmd import _estimate_changed_minutes
     sels = _selections({"pytest": 93, "shell": 14, "step": 2}, with_build=True)
     est = _estimate_changed_minutes(tmp_path, sels)
     assert est > 15, est
-    assert est <= 45, est
+    assert est <= 75, est
 
 
 def test_changed_estimate_line_is_printed_for_the_sizer_to_read(tmp_path: Path) -> None:
