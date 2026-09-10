@@ -22,8 +22,7 @@ from typer.testing import CliRunner
 
 from fno.backlog import advance as adv
 from fno.backlog.single_flight import (
-    FlightGate,
-    FlightHeld,
+    Flight,
     acquire_flight,
     advance_flight_key,
     reconcile_flight_key,
@@ -187,7 +186,7 @@ def test_a_dead_holder_does_not_wedge_the_scope(iso):
     acquire_claim(key, "dead-run", ttl_ms=600_000, pid=child.pid)
 
     gate = acquire_flight(key, scope="advance")
-    assert isinstance(gate, FlightGate), "a dead holder must never read as held"
+    assert gate is not None and not gate.held, "a dead holder must never read as held"
     gate.release()
 
 
@@ -201,9 +200,9 @@ def test_distinct_epics_hold_distinct_gates(iso):
     first = acquire_flight(advance_flight_key("x-epic-a"), scope="advance --epic a")
     other = acquire_flight(advance_flight_key("x-epic-b"), scope="advance --epic b")
     same = acquire_flight(advance_flight_key("x-epic-a"), scope="advance --epic a")
-    assert isinstance(first, FlightGate)
-    assert isinstance(other, FlightGate)
-    assert isinstance(same, FlightHeld)
+    assert first is not None and not first.held
+    assert other is not None and not other.held
+    assert same is not None and same.held
     first.release()
     other.release()
 
@@ -220,9 +219,9 @@ def test_pr_scoped_reconcile_does_not_queue_behind_a_full_sweep(iso):
     same = acquire_flight(
         reconcile_flight_key(node=None, pr_number=None), scope="reconcile"
     )
-    assert isinstance(full, FlightGate)
-    assert isinstance(pr, FlightGate)
-    assert isinstance(same, FlightHeld)
+    assert full is not None and not full.held
+    assert pr is not None and not pr.held
+    assert same is not None and same.held
     full.release()
     pr.release()
 

@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# A child in one of these statuses is resolved for closure purposes.
-_RESOLVED_STATUSES = frozenset({"done", "superseded"})
 # Epic statuses that are themselves terminal - a superseded epic is not stuck.
 _EPIC_TERMINAL_STATUSES = frozenset({"done", "superseded"})
 

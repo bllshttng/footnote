@@ -63,7 +63,6 @@ _LOCK_TIMEOUT_SECS = 10
 
 # Frame tags; mirrored by crates/fno-agents/src/graph_keeper.rs.
 _TAG_REQUEST = 1
-_TAG_SHUTDOWN = 2
 _TAG_IDENTIFY = 3
 _TAG_RESPONSE = 4
 _TAG_IDENTIFY_REPLY = 5

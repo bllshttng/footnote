@@ -745,13 +745,6 @@ def cmd_epic_status(
 cli.add_typer(_epic_cli, name="epic", hidden=True)
 
 
-# -- shared node construction --
-
-_NodeFields = dict
-
-
-
-
 def _stamp_ship_on_pr_link(node_id: str) -> None:
     """Stamp the ship lifecycle row when a node is first PR-linked.
 
