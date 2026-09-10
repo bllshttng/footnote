@@ -890,10 +890,12 @@ pub fn maybe_retirement_sweep(
             }
             other => format!("mux={}", other.state()),
         };
-        // A zero-acted tick says which zero it was: nothing classified, or
-        // work judged and held.
+        // A zero-acted tick says which zero it was: a sweep that could not
+        // read its registry, nothing classified, or work judged and held.
         let skip_reason = if summary.retired.is_empty() {
-            Some(if summary.kept_total() == 0 {
+            Some(if summary.registry_unreadable {
+                "registry_unreadable"
+            } else if summary.kept_total() == 0 {
                 "no_rows"
             } else {
                 "held"
@@ -1248,6 +1250,21 @@ mod tests {
             "the daemon stub skips the mux: {:?}",
             row["data"]["detail"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_registry_renders_a_failure_not_no_rows() {
+        // A registry read that fails is not a census of zero: the tick names
+        // registry_unreadable, a FAILURE_SKIPS token, so the arms readout
+        // renders FAIL instead of a quiet ok.
+        let (dir, home) = retirement_sweep_tmp_home("registry-unreadable");
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(home.registry_json(), "{not json").unwrap();
+        let row =
+            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        assert_eq!(row["data"]["acted"], 0);
+        assert_eq!(row["data"]["skip_reason"], "registry_unreadable");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

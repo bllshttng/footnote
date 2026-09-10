@@ -128,6 +128,9 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
+    /// The registry file could not be read this pass. Never a retirement on
+    /// a failed read; the tick names this instead of a quiet no_rows.
+    pub registry_unreadable: bool,
 }
 
 impl GcSummary {
@@ -961,7 +964,15 @@ pub(crate) fn run(
     if !dry_run {
         expire_reap_receipts(home, retain_days, &mut summary);
     }
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let (registry, registry_read) = match state::load_registry(&home.registry_json()) {
+        Ok(r) => (r, true),
+        Err(_) => (Default::default(), false),
+    };
+    if !registry_read {
+        // A read that failed is not a census of zero: the tick must render a
+        // failed sweep, not a quiet no_rows.
+        summary.registry_unreadable = true;
+    }
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }
