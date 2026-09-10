@@ -1093,18 +1093,19 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
     return entries
 
 
-def _emit_graph_tx_event(kind: str, **data: Any) -> None:
-    """Best-effort agents-log event from the tx loop; never raises.
+def _emit_graph_tx_event(**data: Any) -> None:
+    """Envelope-journal event from the tx loop; never raises.
 
     The 2026-09-09 write livelock burned 179 CPU-minutes while the journal
     stayed silent: `except _Conflict: continue` emitted nothing, so readers
-    chased load instead of the retry storm. This makes a storm visible the
-    moment it starts.
+    chased load instead of the retry storm. Rides the fno.events envelope
+    (layer 0, ephemeral retention) because the store is L1 core and may not
+    import the agents runtime journal.
     """
     try:
-        from fno.agents import events
+        from fno.events import _build, append_event
 
-        events.emit(kind, **data)
+        append_event(_build("graph_tx_conflict", "python", data))
     except Exception:  # noqa: BLE001 - telemetry never changes a store outcome
         pass
 
@@ -1145,12 +1146,10 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             break
         except _Conflict:
             _emit_graph_tx_event(
-                "graph_tx_conflict",
                 attempt=attempt + 1,
                 attempts_max=_TX_ATTEMPTS,
                 entries=len(entries),
                 exhausted=attempt == _TX_ATTEMPTS - 1,
-                # Not `path`: that name is emit's own file-destination kwarg.
                 graph_path=str(path),
             )
             if attempt == _TX_ATTEMPTS - 1:

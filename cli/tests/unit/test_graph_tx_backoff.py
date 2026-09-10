@@ -4,31 +4,17 @@ Measured 2026-09-09: 1156 journal events during the write livelock and not
 one named a graph write, a transaction, a conflict or a retry. The
 `except _Conflict: continue` path was invisible while it re-shipped the whole
 graph in lockstep. Every assertion here is on a positive marker: a parsed
-JSON line whose `kind` is `graph_tx_conflict`.
+envelope event whose `type` is `graph_tx_conflict`.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from fno.agents import events as agent_events
+from fno.events import validate as validate_event
 from fno.graph import store
-
-
-@pytest.fixture
-def journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    target = tmp_path / "events.jsonl"
-    monkeypatch.setenv("FNO_EVENTS_PATH", str(target))
-    real_emit = agent_events.emit
-    monkeypatch.setattr(
-        agent_events,
-        "emit",
-        lambda kind, **data: real_emit(kind, path=target, **data),
-    )
-    return target
 
 
 class _FakeClient:
@@ -56,6 +42,26 @@ class _FakeClient:
 
 
 @pytest.fixture
+def journal(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture envelope events, running the REAL schema validator on each.
+
+    The real append_event is bypassed (hermetic: no journal file), but its
+    validate() step runs, so a schema-drifted row fails here and not only in
+    the parity corpus CI check.
+    """
+    rows: list[dict[str, Any]] = []
+
+    def _capture(event: dict[str, Any], events_path: Any = None) -> None:
+        validate_event(event)
+        rows.append(event)
+
+    import fno.events
+
+    monkeypatch.setattr(fno.events, "append_event", _capture)
+    return rows
+
+
+@pytest.fixture
 def tx(monkeypatch: pytest.MonkeyPatch):
     """Wire a scratch graph to a fake client and record the backoff sleeps."""
     sleeps: list[float] = []
@@ -70,9 +76,8 @@ def tx(monkeypatch: pytest.MonkeyPatch):
     return sleeps, _install
 
 
-def _conflicts(journal: Path) -> list[dict[str, Any]]:
-    rows = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
-    return [r for r in rows if r.get("kind") == "graph_tx_conflict"]
+def _conflicts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in rows if r.get("type") == "graph_tx_conflict"]
 
 
 def _graph(tmp_path: Path) -> Path:
@@ -82,7 +87,7 @@ def _graph(tmp_path: Path) -> Path:
 
 
 def test_two_conflicts_emit_two_events_then_commit(
-    tmp_path: Path, journal: Path, tx
+    tmp_path: Path, journal: list, tx
 ) -> None:
     sleeps, install = tx
     g = _graph(tmp_path)
@@ -93,14 +98,16 @@ def test_two_conflicts_emit_two_events_then_commit(
     assert committed == []
     rows = _conflicts(journal)
     assert len(rows) == 2, rows
-    assert [r["attempt"] for r in rows] == [1, 2]
-    assert all(r["exhausted"] is False for r in rows)
-    assert [r["attempts_max"] for r in rows] == [5, 5]
+    assert [r["data"]["attempt"] for r in rows] == [1, 2]
+    assert all(r["data"]["exhausted"] is False for r in rows)
+    assert [r["data"]["attempts_max"] for r in rows] == [5, 5]
+    assert all(r["data"]["graph_path"] == str(g) for r in rows)
+    assert all(r["source"] == "python" for r in rows)
     assert len(sleeps) == 2
 
 
 def test_exhaustion_emits_exhausted_then_raises(
-    tmp_path: Path, journal: Path, tx
+    tmp_path: Path, journal: list, tx
 ) -> None:
     sleeps, install = tx
     g = _graph(tmp_path)
@@ -111,8 +118,8 @@ def test_exhaustion_emits_exhausted_then_raises(
 
     rows = _conflicts(journal)
     assert len(rows) == 5, rows
-    assert rows[-1]["exhausted"] is True
-    assert [r["attempt"] for r in rows] == [1, 2, 3, 4, 5]
+    assert rows[-1]["data"]["exhausted"] is True
+    assert [r["data"]["attempt"] for r in rows] == [1, 2, 3, 4, 5]
     # Backoff ran before every retry: four sleeps, each within its
     # full-jitter bound, so wall time is at least their sum.
     assert len(sleeps) == 4
@@ -124,10 +131,12 @@ def test_exhaustion_emits_exhausted_then_raises(
 def test_an_unwritable_journal_never_changes_the_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _boom(kind: str, **data: Any) -> None:
+    def _boom(event: dict[str, Any], events_path: Any = None) -> None:
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(agent_events, "emit", _boom)
+    import fno.events
+
+    monkeypatch.setattr(fno.events, "append_event", _boom)
     monkeypatch.setattr(store.time, "sleep", lambda _s: None)
     g = _graph(tmp_path)
     monkeypatch.setattr(
