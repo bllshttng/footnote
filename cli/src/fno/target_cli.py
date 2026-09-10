@@ -1779,15 +1779,11 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
-    # First-bind the graph pointer (x-f8b1 change 2): the reverse leg of the
-    # x-39c0 backfill above. Both target-side writes - this init and
-    # `fno do state set --field plan_path` - write the session manifest only,
-    # so a plan handed straight to `init --plan-path` (x-7649) never told the
-    # graph and the node stayed dispatchable-planless. Sits AFTER every
-    # refusal so a refused init binds nothing, and OUTSIDE any claim gate:
-    # whether a plan is bound is a fact about the node, never about who holds
-    # the claim (x-7649's init was claim-refused and a bind placed behind the
-    # shell hook's _NODE_OWNED guard would have missed it).
+    # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the
+    # x-39c0 backfill above: init --plan-path wrote only the manifest, so the
+    # graph never learned the plan exists (x-7649). Sits after every refusal
+    # and outside every claim gate - a fact about the node, not about who
+    # holds the claim.
     if plan_path and isinstance(_dispatch_node, dict):
         _bind_node_plan_path(_dispatch_node, plan_path)
 
@@ -1866,18 +1862,11 @@ def init(
 def _bind_node_plan_path(node: dict, plan_path: str) -> None:
     """First-bind the graph node's ``plan_path`` at init (x-f8b1 change 2).
 
-    ``plan_path`` reaches the graph through exactly one first-binding writer
-    (blueprint's ``mutate_doc.py``), so a plan handed straight to this verb
-    never told the graph. Shells out to ``fno backlog update`` for the same
-    reason ``fno.research.deliverable._bind_plan_path`` does: ``backlog
-    update`` is the one choke point every write to ``plan_path`` goes through,
-    and duplicating its locking/validation here would be a second
-    implementation to diverge from.
-
-    Never overwrites a non-empty stored value (a group child shares one plan
-    with its siblings); a stored pointer naming a different plan says so and
-    init continues. Non-fatal by posture, matching the shell hook's graph lock
-    stamp: a lock-contended graph must not abort init.
+    Shells to ``fno backlog update`` because that verb is the one choke point
+    every plan_path write already goes through (same posture as
+    ``fno.research.deliverable._bind_plan_path``). Never overwrites a
+    non-empty stored value (a group child shares one plan); non-fatal on
+    failure, matching the shell hook's lock-stamp posture.
     """
     node_id = str(node.get("id") or "").strip()
     if not node_id:
