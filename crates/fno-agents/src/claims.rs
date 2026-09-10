@@ -260,7 +260,7 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     // `test:suite` (test_run.rs): a caller with no explicit `--claims-root`
     // and no FNO_CLAIMS_ROOT/HOME in its environment must not hard-fail the
     // claim lookup - it degrades to the machine-wide root like every other
-    // global key, never to "cannot resolve a root at all".
+    // global key, never to a refusal that no root can be found.
     "test",
 ];
 
