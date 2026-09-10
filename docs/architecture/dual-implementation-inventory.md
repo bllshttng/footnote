@@ -88,6 +88,8 @@ Five live duals below, plus one retirement recorded where it landed (the watchdo
 
 No parity guard is being written for it, deliberately. Writing one is the trigger to port instead. A guard here buys the second leg tenure it has not earned. The row is the record until the port lands.
 
+**The active-tail vocabulary.** Dual, disposition shared-vocabulary, port owed, not in this PR. The canonical leg is `_ACTIVE_STATES` in `cli/src/fno/agents/reachability.py:156`, read by `classify_reachability`. Eight sites spell the same three words by hand, across eleven lines. `discover.py:1100` is an addressing filter by design. `dispatch.py:8745`, `post_merge_route.py:144`, and `watchdog.py:1445` are state-only consumers. `relay/registry.py:231` and `:290` add `unknown` to the set, so they ask a different question. `client_verbs.rs:2042` and `:2132` read the lowered state word. `king_board/classify.rs:16` is a copy already pinned to the Python text by a parity test at `classify.rs:402`. `truth_probe.rs:237` and `:281` are monotone lowering, which cannot raise a state to live. After 2026-09-09 all eight inherit the expiry that `classify_tail` applies to the word itself, so none of them can read a week-old tail as active. The residual is the band between `TRANSCRIPT_EVIDENCE_S` and `stalled_after_s`: no unported site holds an age, so the tighter bound needs new plumbing. A port moves each site onto `classify_reachability` with the age it already had to fetch.
+
 Nothing else in the tree is a confirmed dual implementation today.
 
 ## The eight CI parity scripts
