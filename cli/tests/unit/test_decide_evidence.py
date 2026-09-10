@@ -1,8 +1,8 @@
 """The evidence a ruling body must carry: claim detector, citations, reads.
 
-AC1-AC10 of x-90fa. The load-bearing test is AC7-EDGE: a false positive on
-ordinary prose is the failure mode that gets this gate disabled, so the
-no-claim case is asserted as positively as the claim cases.
+The load-bearing test is AC7-EDGE: a false positive on ordinary prose is the
+failure mode that gets this gate disabled, so the no-claim case is asserted
+as positively as the claim cases.
 """
 
 from __future__ import annotations
@@ -143,6 +143,16 @@ def test_timeout_refuses_and_names_the_command(tmp_path: Path):
 
     with pytest.raises(UnmeasuredClaimError, match="sleep 999"):
         run_reads(["sleep 999"], root=tmp_path, timeout=20, run=slow)
+
+
+def test_command_not_found_refuses_instead_of_storing_a_row(tmp_path: Path):
+    """exit 127 is a broken read, not a measurement: it refuses like a timeout."""
+
+    def not_found(cmd, *, cwd, timeout):
+        return subprocess.CompletedProcess(cmd, 127, "", "")
+
+    with pytest.raises(UnmeasuredClaimError, match="did not run"):
+        run_reads(["nosuchcmd -x"], root=tmp_path, run=not_found)
 
 
 def test_cap_on_read_count(tmp_path: Path):

@@ -2992,7 +2992,7 @@ def cmd_note(
         typer.echo(f"Error: note refused: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    note: "dict[str, Any]" = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
     if read_rows:
         note["reads"] = read_rows
     try:

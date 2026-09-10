@@ -47,7 +47,12 @@ def find_code_claims(text: str) -> "list[str]":
     """Claim spans in a ruling body, empty when it asserts none."""
     matches = _CITATION_RE.findall(text) + _NEGATIVE_RE.findall(text) + _COUNTED_RE.findall(text)
     seen: "set[str]" = set()
-    return [m for m in matches if not (m in seen or seen.add(m))]
+    claims: "list[str]" = []
+    for match in matches:
+        if match not in seen:
+            seen.add(match)
+            claims.append(match)
+    return claims
 
 
 def _tracked_files(root: Path) -> "list[str]":
@@ -153,6 +158,14 @@ def run_reads(
                 f"read '{cmd}' did not run ({type(exc).__name__}) and stored "
                 "no row. A ruling whose own read does not run is not evidence."
             ) from exc
+        if done.returncode in (126, 127):
+            # The shell started but the command did not (not found, not
+            # executable). That is a broken read, not a measurement.
+            raise UnmeasuredClaimError(
+                f"read '{cmd}' did not run (exit {done.returncode}) and "
+                "stored no row. A ruling whose own read does not run is not "
+                "evidence."
+            )
         head = "\n".join((done.stdout or "").splitlines()[:OUT_HEAD_LINES])
         rows.append({
             "cmd": cmd,
