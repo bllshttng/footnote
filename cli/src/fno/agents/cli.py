@@ -1497,17 +1497,19 @@ def cmd_spawn(
     if not substrate and once:  # --once always means a one-shot
         substrate = "headless"
     if not substrate:
-        # Empty = unset: a pane-only capability implies the pane, else the
-        # harness decides (thread where seated). The view is placed after
-        # the receipt (place_default_view), via the two-call seam.
+        # Empty = unset: pane capability implies pane; else thread where seated.
         defaulted = True
-        from fno.agents.harness_map import thread_seatable
+        from fno.agents.harness_map import DispatchResolveError, thread_seatable
 
         pane_implied = bool(
             passthrough or split or at or tab or bounded_placement or squad
             or monitor is not None
         )
-        if pane_implied or not thread_seatable(harness):
+        try:
+            seatable = thread_seatable(harness)
+        except DispatchResolveError:  # an undeclared harness seats no thread
+            seatable = False
+        if pane_implied or not seatable:
             substrate = "pane"
         else:
             substrate = "thread"
@@ -2620,13 +2622,11 @@ def cmd_spawn(
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
 
-    if (
-        defaulted
-        and substrate == "bg"
-        and spawn_succeeded
-        and result.kind == "created"
-        and os.environ.get("FNO_PANE")
-    ):
+    pane_view = (
+        defaulted and substrate == "bg" and spawn_succeeded
+        and result.kind == "created" and os.environ.get("FNO_PANE")
+    )
+    if pane_view:
         # Post-receipt, best effort: a placement failure never recolors the verdict.
         from fno.agents.spawn_defaults import place_default_view
 
