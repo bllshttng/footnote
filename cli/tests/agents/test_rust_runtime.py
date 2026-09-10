@@ -310,6 +310,7 @@ def test_codex_code_payload_after_provider_fence_is_checked() -> None:
 
 def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
     """A resolved grant is the positive control and must not refuse."""
+    from fno.agents import sandbox_probe
     from fno.cli import app
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
@@ -321,6 +322,9 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(
+        sandbox_probe, "probe_codex_sandbox", lambda cwd, **kw: sandbox_probe.SandboxProbe("reachable")
+    )
     result = CliRunner().invoke(
         app,
         [
@@ -398,6 +402,87 @@ def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> No
 
     assert result.exit_code == 2
     assert "resolved git grant" in result.output
+
+
+@pytest.mark.parametrize(
+    "verdict,blocked,routed,marker",
+    [
+        ("blocked", [("gh", "error connecting to api.github.com")], False, "sandbox-probe: gh is unreachable"),
+        ("reachable", [], True, None),
+        ("unknown", [], True, "launching unprobed"),
+    ],
+)
+def test_bounded_codex_code_spawn_is_probed_before_it_routes(
+    monkeypatch, tmp_path, verdict, blocked, routed, marker
+) -> None:
+    from fno.agents import sandbox_probe
+    from fno.cli import app
+
+    called: list[list[str]] = []
+
+    def fake_route(args, **kw):
+        called.append(list(args))
+        raise SystemExit(0)
+
+    probed: list[Path] = []
+
+    def fake_probe(cwd, **kw):
+        probed.append(cwd)
+        return sandbox_probe.SandboxProbe(verdict, blocked, "codex: command not found")
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(sandbox_probe, "probe_codex_sandbox", fake_probe)
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(repo),
+        ],
+    )
+
+    assert probed == [repo]
+    assert bool(called) is routed
+    if routed:
+        assert result.exit_code == 0
+    else:
+        assert result.exit_code == sandbox_probe.EXIT_SANDBOX_UNREACHABLE
+        assert "remedy:" in result.output
+    if marker:
+        assert marker in result.output
+
+
+def test_sandbox_probe_runs_only_for_bounded_codex_code_spawns(monkeypatch, tmp_path) -> None:
+    from fno.agents import sandbox_probe
+
+    probed: list[Path] = []
+    monkeypatch.setattr(
+        sandbox_probe,
+        "probe_codex_sandbox",
+        lambda cwd, **kw: probed.append(cwd) or sandbox_probe.SandboxProbe("reachable"),
+    )
+    base = ["spawn", "$fno:target x-f370", "--harness", "codex", "--substrate", "thread", "--cwd", str(tmp_path)]
+    rr._refuse_codex_spawn_with_unreachable_tools(base)
+    assert probed == [tmp_path]
+
+    for argv in (
+        [*base, "--yolo"],
+        [*base, "--once"],
+        [*base, "--permission-mode", "danger-full-access:never"],
+        ["spawn", "hello", *base[2:]],
+        [*base[:3], "claude", *base[4:]],
+    ):
+        rr._refuse_codex_spawn_with_unreachable_tools(argv)
+    assert probed == [tmp_path]
 
 
 def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
