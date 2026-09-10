@@ -11193,9 +11193,7 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
-            "backfill url-less pr_url). "
-            "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
+            "Apply the deterministic legs; the judgment legs stay "
             "proposal-only regardless of this flag."
         ),
     ),
@@ -11219,10 +11217,8 @@ def cmd_maintain(
         False,
         "--suspect-reverts",
         help=(
-            "Read-only retro sweep: print drained nodes that carry evidence of "
-            "a human curation decision, then exit. Runs no other leg, mutates "
-            "nothing, and emits no undefer command - the operator rules on the "
-            "list themselves."
+            "Read-only retro sweep: print drained nodes carrying evidence of "
+            "a human curation decision, then exit; mutates nothing."
         ),
     ),
 ) -> None:
@@ -11340,11 +11336,13 @@ def cmd_maintain(
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
 
-    # Leg 9: abandoned do rows (x-f714). Detection, vetoes, and the warning
-    # contract live in maintain.detect_abandoned_leg.
-    abandoned_rows, abandoned_warn = _maintain.detect_abandoned_leg(entries, claimed)
-    if abandoned_warn:
-        typer.echo(f"warning: {abandoned_warn}", err=True)
+    # Leg 9: abandoned do rows (x-f714); detection, reaping, and rendering
+    # live in maintain.abandoned_leg.
+    ab_report, ab_lines, ab_warn = _maintain.abandoned_leg(
+        entries, claimed, _graph_path(), apply
+    )
+    if ab_warn:
+        typer.echo(f"warning: {ab_warn}", err=True)
 
     # --- apply (deterministic legs only) ---
     applied_rescope: list[str] = []
@@ -11493,13 +11491,6 @@ def cmd_maintain(
 
         locked_mutate_graph(_graph_path(), mutator)
 
-    # --- leg 9 apply: reap the proven-gone do rows (x-f714) ---
-    applied_reaps, reap_truncated, reap_warn = _maintain.apply_abandoned_reaps(
-        abandoned_rows, _graph_path(), apply
-    )
-    for _w in reap_warn:
-        typer.echo(f"warning: {_w}", err=True)
-
     # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
     # Runs even under --apply as proposal-only; a single analyzer call reviews the
     # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
@@ -11587,7 +11578,7 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
         "stale_ready_truncated": stale_ready_truncated,
-        **_maintain.abandoned_report(abandoned_rows, applied_reaps, reap_truncated, apply),
+        **ab_report,
     }
     try:
         from fno.health_monitor import append_history
@@ -11650,8 +11641,6 @@ def cmd_maintain(
             "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
             "session_harness_fixes": _maintain.shape_fix_payload(
                 shape_fixes, applied_shape_fixes, apply),
-            "abandoned_do_rows": _maintain.abandoned_payload(
-                abandoned_rows, applied_reaps, reap_truncated, apply),
         }
         if validity_result is not None:
             payload["validity"] = {
@@ -11762,7 +11751,7 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
-    for _al in _maintain.abandoned_lines(abandoned_rows, applied_reaps, reap_truncated, apply):
+    for _al in ab_lines:
         typer.echo(_al)
     for nid, epic_id, score in rollup_cands:
         typer.echo(
