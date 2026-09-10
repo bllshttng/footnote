@@ -1419,7 +1419,7 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     carry the same visible effects.
 
     The plan-rung map rides in the op params, computed over a light
-    read_plan_refs read (id, plan_path, cwd per node) instead of a full
+    plan_refs read (id, plan_path, cwd per node) instead of a full
     begin, which ships the whole graph for one derived value. A session op
     that opens or closes a do row re-derives in_progress the way any full
     write would. No Python op mutates plan_path, so the map is exact. The
@@ -1427,9 +1427,9 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     path = Path(path)
     client = _client_for(path)
     try:
-        rung_entries = client.request("read_plan_refs", {})["entries"]
+        rung_entries = client.request("plan_refs", {})["entries"]
     except RuntimeError as exc:
-        if str(exc) != 'store error (invalid): unknown store method "read_plan_refs"':
+        if str(exc) != 'store error (invalid): unknown store method "plan_refs"':
             raise
         rung_entries = client.request("begin", {})["entries"]
     params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}

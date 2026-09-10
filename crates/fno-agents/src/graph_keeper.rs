@@ -766,7 +766,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
         "read_ids" => handle_read_ids(state, &params),
-        "read_plan_refs" => handle_read_plan_refs(state),
+        "plan_refs" => handle_plan_refs(state),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
@@ -995,7 +995,7 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
 /// (`ladder.plan_rung`) reads on its side of the seam. The typed-op client
 /// derives the rung map from this light read instead of a full begin, which
 /// ships the whole graph for one derived value.
-fn handle_read_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
+fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
     let entries = match state.read_source {
         ReadSource::Json => cached_entries(state, false, false)?,
         ReadSource::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
@@ -2798,7 +2798,7 @@ mod tests {
     }
 
     #[test]
-    fn read_plan_refs_ships_only_the_rung_inputs() {
+    fn plan_refs_ships_only_the_rung_inputs() {
         // The typed-op client derives the plan-rung map from this read, so
         // each row carries id + plan_path + cwd and nothing else: one
         // derived value must not cost a full begin. Absent fields ride as
@@ -2818,7 +2818,7 @@ mod tests {
         .unwrap();
         std::fs::write(&graph, body).unwrap();
         let state = read_state(&graph);
-        let reply = handle_read_plan_refs(&state).unwrap();
+        let reply = handle_plan_refs(&state).unwrap();
         let entries = reply["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 3);
         for e in entries {
@@ -2836,11 +2836,11 @@ mod tests {
             "a plan-less node ships a null plan_path, not guessed fields"
         );
         // The cache leg: a second call parses nothing new.
-        let _ = handle_read_plan_refs(&state).unwrap();
+        let _ = handle_plan_refs(&state).unwrap();
         assert_eq!(
             state.file_opens.load(Ordering::SeqCst),
             1,
-            "read_plan_refs must ride the cache"
+            "plan_refs must ride the cache"
         );
     }
 

@@ -1075,7 +1075,7 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
 
 def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, monkeypatch):
     """x-8a09 site one: the typed op derives its plan-rung map from the light
-    read_plan_refs read. A call that needs one derived map must not pay the
+    plan_refs read. A call that needs one derived map must not pay the
     most expensive read in the system (a full begin) for it."""
     from fno.graph import store as store_mod
 
@@ -1086,7 +1086,7 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
 
     def fake_request(self, method, params):
         methods.append(method)
-        if method == "read_plan_refs":
+        if method == "plan_refs":
             return {"entries": [
                 {"id": "ab-1"},
                 {"id": "ab-2", "plan_path": str(plan), "cwd": str(tmp_path)},
@@ -1103,7 +1103,7 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
         {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
     )
     assert result == {"found": True, "plan_path": "p.md"}
-    assert methods == ["read_plan_refs", "op"], "a full begin never fires"
+    assert methods == ["plan_refs", "op"], "a full begin never fires"
     assert seen == {"ab-1": "none", "ab-2": "design"}
 
 
@@ -1117,8 +1117,8 @@ def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, 
 
     def stale_request(self, method, params):
         methods.append(method)
-        if method == "read_plan_refs":
-            raise RuntimeError("store error (invalid): unknown store method \"read_plan_refs\"")
+        if method == "plan_refs":
+            raise RuntimeError("store error (invalid): unknown store method \"plan_refs\"")
         if method == "begin":
             return {"entries": [{"id": "ab-1"}]}
         if method == "op":
@@ -1132,7 +1132,7 @@ def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, 
         {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
     )
     assert result == {"found": True, "plan_path": None}
-    assert methods == ["read_plan_refs", "begin", "op"]
+    assert methods == ["plan_refs", "begin", "op"]
 
 
 def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
