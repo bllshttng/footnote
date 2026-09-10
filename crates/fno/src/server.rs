@@ -10633,6 +10633,31 @@ impl Core {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
+        // Fail closed: a pane whose identity did not reconcile is never typed
+        // into blind - the number may name a different occupant than its label
+        // claims. A mis-delivered send is worse than a refused one. A pane with
+        // no label at all is an operator shell and is untouched.
+        if entry.unreconciled {
+            let host = entry.name.as_deref().unwrap_or("<no label>");
+            return ServerMsg::Err {
+                code: err_code::TARGET_IDENTITY_MISMATCH,
+                msg: format!(
+                    "pane {pane} carries label {host}; its birth pane id could not be reused, so it was adopted at a fresh id and its identity never reconciled; re-address by session id through `fno mux where`"
+                ),
+            };
+        }
+        if expected_identity.is_none() {
+            if let (Some(host), Ok(rows)) = (entry.name.as_deref(), agents.as_deref()) {
+                if self.fno_id_for_pane_with_agents(pane, rows).is_none() {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_IDENTITY_MISMATCH,
+                        msg: format!(
+                            "pane {pane} carries label {host} but no session id resolves for it; re-address by session id through `fno mux where`"
+                        ),
+                    };
+                }
+            }
+        }
         if let Some(expected) = expected_identity {
             let host = entry.name.as_deref().unwrap_or("<unknown>");
             let rows = match agents.as_deref() {
@@ -16840,6 +16865,52 @@ mod tests {
             core.pane_send(pane, b"payload", true, None, Ok(Vec::new())),
             ServerMsg::Ok
         ));
+    }
+
+    #[test]
+    fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
+        // Fail closed: a pane adopted at a fresh id is refused even unaddressed.
+        // The assertion is the refusal itself, never "the bytes did not land".
+        let (mut core, pane) = template_core();
+        {
+            let entry = core.panes.get_mut(&pane).unwrap();
+            entry.name = Some("bp-f8b1-unplanned".into());
+            entry.unreconciled = true;
+        }
+        match core.pane_send(pane, b"payload", false, None, Ok(Vec::new())) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+                assert!(
+                    msg.contains(&format!("pane {pane}")),
+                    "names the pane: {msg}"
+                );
+                assert!(
+                    msg.contains("bp-f8b1-unplanned"),
+                    "names the label it carries: {msg}"
+                );
+                assert!(msg.contains("fno mux where"), "names the way out: {msg}");
+            }
+            other => panic!("expected unreconciled refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_refuses_a_labelled_pane_whose_identity_resolves_nothing() {
+        // The measured incident shape: a worker label, a readable registry,
+        // and no session id joining the two. A plain send used to type
+        // straight into whatever the pty now held.
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("drifter".into());
+        let elsewhere = agent_in("sess", pane + 500, Some(AgentBadge::Done), false);
+        match core.pane_send(pane, b"payload", false, None, Ok(vec![elsewhere])) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+                assert!(msg.contains("drifter"), "names the label: {msg}");
+                assert!(msg.contains("fno mux where"), "names the way out: {msg}");
+            }
+            other => panic!("expected unresolved-identity refusal, got {other:?}"),
+        }
     }
 
     #[test]
@@ -24249,6 +24320,51 @@ mod tests {
     }
 
     #[test]
+    fn member_pane_reads_the_recorded_pane_id_first_and_falls_through_when_it_is_gone() {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let recorded = core.spawn_pane(24, 80, "/a").unwrap();
+        let joined = core.spawn_pane(24, 80, "/a").unwrap();
+        core.worker_session_pane
+            .insert(("codex".into(), "session-one".into()), joined);
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tombstone_reason: None,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-worker".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("session-one".into()),
+            pane_id: Some(recorded),
+        };
+        assert_eq!(
+            core.member_pane(&member),
+            Some(recorded),
+            "a recorded live pane id wins over the derived join"
+        );
+        let gone = crate::squad_store::StoredMember {
+            pane_id: Some(joined + 100),
+            ..member.clone()
+        };
+        assert_eq!(
+            core.member_pane(&gone),
+            Some(joined),
+            "a dead recorded id falls through to the member's own session join"
+        );
+        let stranger = crate::squad_store::StoredMember {
+            harness_session_id: Some("session-two".into()),
+            ..gone.clone()
+        };
+        assert_eq!(
+            core.member_pane(&stranger),
+            None,
+            "a dead recorded id never lands on another worker's pane"
+        );
+    }
+
+    #[test]
     fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
         // (x-b029) AC3-HP: a pane the daemon re-homed through the resume path
         // resolves its fno_id from the (harness, session) record the resume
@@ -26419,6 +26535,14 @@ mod tests {
             "the adoption is staged for restore"
         );
         let pane = core.keeper_adopted[0].pane;
+        assert_eq!(
+            pane, 3,
+            "the pane is adopted at the id its socket stem carries"
+        );
+        assert!(
+            !core.panes[&pane].unreconciled,
+            "a reused birth id is reconciled"
+        );
         let child_pid = core.keeper_adopted[0]
             .child_pid
             .expect("the adopt names the child pid");
@@ -26461,6 +26585,57 @@ mod tests {
             core.take_adopted_for_member(&member),
             None,
             "the binding is once-only"
+        );
+    }
+
+    #[test]
+    fn keeper_readopt_adopts_at_a_fresh_unreconciled_id_when_the_birth_id_is_taken() {
+        let Some(bin) = keeper_test_bin() else {
+            eprintln!(
+                "SKIPPING keeper_readopt_adopts_at_a_fresh_unreconciled_id_when_the_birth_id_is_taken: \
+                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
+            );
+            return;
+        };
+        let dir = crate::proto::mux_dir().join("panes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("ku-3.sock");
+        let _ = std::fs::remove_file(&sock);
+        let _keeper = spawn_keeper_for_test(
+            &bin,
+            &sock,
+            &["env", "FNO_AGENT_SELF=t-keeper-taken", "sleep", "300"],
+        );
+        let bound = Instant::now();
+        while !sock.exists() {
+            assert!(
+                bound.elapsed() < Duration::from_secs(10),
+                "keeper never bound its socket"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut core = empty_core();
+        core.session_name = "ku".to_string();
+        core.shells = vec!["/bin/cat".into()];
+        core.next_pane_id = 3;
+        let squatter = core.spawn_pane(24, 80, "/tmp").unwrap();
+        assert_eq!(squatter, 3, "the birth id is occupied before the sweep");
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.keeper_readopt();
+
+        assert_eq!(core.keeper_adopted.len(), 1, "the live keeper is adopted");
+        let pane = core.keeper_adopted[0].pane;
+        assert_ne!(pane, squatter, "an occupied birth id is never reused");
+        assert!(
+            core.panes[&pane].unreconciled,
+            "a fresh-id adoption is marked unreconciled"
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("ku-3.sock") && notices.contains("as unreconciled"),
+            "the fallback names the socket and the outcome: {notices}"
         );
     }
 
