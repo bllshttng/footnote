@@ -796,15 +796,36 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
     ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
     worktree, never the pane default that would STALL a fire-and-forget dispatch),
-    ``headless`` for codex/others. A node's ``dispatch_verb``/
-    ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
-    brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
+    ``headless`` for codex/others. The workflow verb is DERIVED, not read
+    (x-ebd2, law d-834b6ff1): ``harness_map.resolve_effective_verb`` runs one
+    conditional over the node's plan rung and difficulty. At INTAKE (plan rung
+    ``none``) difficulty decides - ``low`` dispatches straight to ``/target``
+    with no plan, ``medium``/``high`` blueprint on a frontier lane first and a
+    separate ``/target`` builds the resulting plan. At RE-DISPATCH the linked
+    plan's rung decides - ``idea``/``design`` keep ``/blueprint``,
+    ``ready``/``in_progress``/``in_review`` advance to ``/target``. The node's
+    stored ``dispatch_verb`` is audit input only: a target/blueprint-family
+    value reconciles through the same table and the decision trail names both
+    spellings, so correctness never depends on the blueprint session close
+    having rewritten the graph field. An out-of-family verb (``/think``) keeps
+    declared precedence; ``unreadable``/``done``/``superseded`` plan rungs and
+    a planless node without a valid difficulty REFUSE. ``verb_source`` keeps
+    the RAW declaration state (declared / none-declared) beside the resolved
+    verb, and a node dict missing the ``dispatch_verb`` key at all is a lossy
+    projection (x-0961): the spawn refuses before anything is spent. The stage
+    table reads the DERIVED verb, so ``agents.profiles.blueprint`` reaches
+    medium/high planless nodes and ``agents.profiles.target`` no longer
+    acquires planning eligibility from plan absence (the ``_grid_lane_for``
+    role floor and the ``spawn_defaults.grid_role`` split are gone).
 
     Merge posture stays a launcher decision, never baked into a node verb:
-    the default builtin bakes ``no-merge``; ``config.auto_merge.grant`` routes the
-    ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
-    ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
-    ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
+    a derived ``/target`` renders through the same rungs as the builtin (the
+    default bakes ``no-merge``; ``config.auto_merge.grant`` omits the flag);
+    reconcile stays an explicit
+    ``/target [--no-merge] --reconcile <manifest> {id}`` template and bypasses
+    the conditional. The agent is named
+    ``target-<full-node-id>-<slug>`` (a ``-blueprint`` qualifier states a
+    derived non-target phase; ``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
     ``dispatch_account`` is a quota cutover's destination provider RECORD id, and

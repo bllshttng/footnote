@@ -105,10 +105,14 @@ class Rung(Enum):
     """Where a node's plan sits, or why we cannot tell.
 
     ``NONE`` and ``IDEA`` stay distinct even though both derive to graph status
-    ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - ``/target``
-    authors the plan - while ``IDEA`` (a linked-but-undesigned decompose
+    ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - the workflow
+    verb derives from the node's difficulty (x-ebd2, law d-834b6ff1): low
+    dispatches ``/target``, which authors the plan; medium/high dispatch
+    ``/blueprint`` first - while ``IDEA`` (a linked-but-undesigned decompose
     scaffold) needs warm inline-fill, so it stays gated behind
-    ``--include-ideas``. See :func:`is_cold_dispatchable`.
+    ``--include-ideas``. See :func:`is_cold_dispatchable` and
+    ``harness_map.resolve_effective_verb`` for the full intake/re-dispatch
+    table.
     """
 
     NONE = "none"  # no usable plan_path - nothing on disk
@@ -399,8 +403,10 @@ def is_cold_dispatchable(entry: object) -> bool:
     not ``_DISPATCHABLE`` - is what the four drain selectors OR into their status
     gate. Requires ``status == "idea"`` (so blocked / in_progress / done
     plan-less nodes are excluded) AND ``plan_rung`` is ``NONE`` (so a linked
-    decompose stub, ``Rung.IDEA``, stays excluded). ``/target`` authors the plan
-    (think -> blueprint -> do), so a plan-less idea is dispatchable as-is.
+    decompose stub, ``Rung.IDEA``, stays excluded). The derived verb authors
+    the plan - low dispatches ``/target`` (think -> blueprint -> do);
+    medium/high blueprint first (x-ebd2) - so a plan-less idea is dispatchable
+    as-is either way.
 
     The status conjunct is load-bearing: ``plan_rung`` is ``NONE`` for any node
     without a plan_path, including one whose graph status is ``blocked``, so the

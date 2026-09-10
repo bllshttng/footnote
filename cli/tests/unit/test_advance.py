@@ -115,7 +115,16 @@ def _hold(key: str) -> None:
     acquire_claim(key, "test-holder", ttl_ms=60_000, root=adv._claims_root_for(key))
 
 
-NODE = {"id": "ab-2222aaaa", "title": "next", "project": "fno", "_resolved_cwd": "/tmp/x"}
+# A real selection projection row (x-0961/x-ebd2): the keys the node-aware
+# doors read. Planless low is the law's straight-to-target intake.
+NODE = {
+    "id": "ab-2222aaaa",
+    "title": "next",
+    "project": "fno",
+    "_resolved_cwd": "/tmp/x",
+    "difficulty": "low",
+    "dispatch_verb": "",
+}
 
 
 # ---------------------------------------------------------------------------

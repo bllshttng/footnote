@@ -2080,7 +2080,9 @@ class DispatchBlock(BaseModel):
     command: str = ""
     # US3 verb allowlist: a node-supplied dispatch verb must match one of these
     # or the resolver refuses (no worker). Empty = the built-in default set.
-    allowed_verbs: list[str] = Field(default_factory=lambda: ["/target", "/think"])
+    # /blueprint joined in x-ebd2: a node may declare it and the derived
+    # lifecycle verb renders it.
+    allowed_verbs: list[str] = Field(default_factory=lambda: ["/target", "/think", "/blueprint"])
     # DEPRECATED (x-4391/x-4be1): the per-project merge posture for AUTONOMOUS
     # dispatch, formerly read by every dispatch path. Reads as
     # `auto_merge.grant` ("dispatch" when true): the alias folds it per layer,
