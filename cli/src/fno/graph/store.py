@@ -287,7 +287,6 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         argv.extend(["--events", str(_paths.project_events_json())])
     except Exception:
         pass
-    argv.extend(["--read-source", _graph_read_source()])
     if _is_canonical(path):
         argv.append("--canonical")
     proc = subprocess.Popen(

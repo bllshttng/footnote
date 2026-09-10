@@ -13,13 +13,14 @@ def _canonical(row: dict[str, Any]) -> str:
     return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def _json_rows(path: Path) -> tuple[dict[str, str], list[str]]:
+def _json_rows(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
     value = json.loads(path.read_text(encoding="utf-8"))
     entries = value.get("entries") if isinstance(value, dict) else None
     if not isinstance(entries, list):
         raise ValueError("JSON graph root has no entries list")
     rows: dict[str, str] = {}
     malformed: list[str] = []
+    order: list[str] = []
     for index, row in enumerate(entries):
         node_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(node_id, str) or not node_id:
@@ -29,15 +30,19 @@ def _json_rows(path: Path) -> tuple[dict[str, str], list[str]]:
             malformed.append(f"json duplicate {node_id}")
             continue
         rows[node_id] = _canonical(row)
-    return rows, malformed
+        order.append(node_id)
+    return rows, malformed, order
 
 
-def _sqlite_rows(path: Path) -> tuple[dict[str, str], list[str]]:
+def _sqlite_rows(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
     rows: dict[str, str] = {}
     malformed: list[str] = []
+    order: list[str] = []
     with sqlite3.connect(path) as connection:
-        stored = connection.execute("SELECT id, row FROM entries").fetchall()
-    for key, body in stored:
+        stored = connection.execute(
+            "SELECT id, ordinal, row FROM entries ORDER BY ordinal, id"
+        ).fetchall()
+    for key, ordinal, body in stored:
         try:
             row = json.loads(body)
         except (TypeError, json.JSONDecodeError):
@@ -50,8 +55,11 @@ def _sqlite_rows(path: Path) -> tuple[dict[str, str], list[str]]:
         if key in rows:
             malformed.append(f"sqlite duplicate {key}")
             continue
+        if not isinstance(ordinal, int) or ordinal != len(order):
+            malformed.append(f"sqlite {key}: ordinal {ordinal!r}, expected {len(order)}")
         rows[key] = _canonical(row)
-    return rows, malformed
+        order.append(key)
+    return rows, malformed, order
 
 
 def compare(*, graph: Path | None = None, db: Path | None = None) -> int:
@@ -60,12 +68,14 @@ def compare(*, graph: Path | None = None, db: Path | None = None) -> int:
     graph = Path(graph or paths.graph_json())
     db = Path(db or graph.with_suffix(".db"))
     try:
-        json_rows, malformed = _json_rows(graph)
-        sqlite_rows, sqlite_malformed = _sqlite_rows(db)
+        json_rows, malformed, json_order = _json_rows(graph)
+        sqlite_rows, sqlite_malformed, sqlite_order = _sqlite_rows(db)
     except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as exc:
         print(f"graph-parity: UNMEASURED: {exc}")
         return 2
     failures = malformed + sqlite_malformed
+    if json_order != sqlite_order:
+        failures.append("row order diverged")
     failures.extend(f"missing from SQLite: {node_id}" for node_id in sorted(json_rows.keys() - sqlite_rows.keys()))
     failures.extend(f"extra in SQLite: {node_id}" for node_id in sorted(sqlite_rows.keys() - json_rows.keys()))
     failures.extend(

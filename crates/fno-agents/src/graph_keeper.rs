@@ -52,7 +52,9 @@ impl ReadSource {
         match value {
             "json" => Ok(Self::Json),
             "sqlite" => Ok(Self::Sqlite),
-            _ => Err(format!("--read-source must be json or sqlite, got {value:?}")),
+            _ => Err(format!(
+                "--read-source must be json or sqlite, got {value:?}"
+            )),
         }
     }
 
@@ -129,11 +131,7 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                     .map_err(|_| "--lock-timeout-secs needs a number")?;
                 lock_timeout = Duration::from_secs(v);
             }
-            "--events" => {
-                events = Some(PathBuf::from(
-                    it.next().ok_or("--events needs a value")?,
-                ))
-            }
+            "--events" => events = Some(PathBuf::from(it.next().ok_or("--events needs a value")?)),
             "--read-source" => {
                 read_source = ReadSource::parse(it.next().ok_or("--read-source needs a value")?)?
             }
@@ -298,7 +296,18 @@ struct StoreState {
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
 const WAIT_BOUNDS_MS: [u64; 12] = [
-    1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, u64::MAX,
+    1,
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    u64::MAX,
 ];
 
 struct GateMetrics {
@@ -339,7 +348,7 @@ fn record_gate(state: &StoreState, wait: Duration, bytes_written: u64, attempt: 
     metrics.counts[bucket] += 1;
     metrics.mutations += 1;
     metrics.bytes_written = metrics.bytes_written.saturating_add(bytes_written);
-    metrics.retries = metrics.retries.saturating_add(attempt.saturating_sub(1));
+    metrics.retries = metrics.retries.saturating_add(u64::from(attempt > 1));
 }
 
 fn flush_gate_metrics(state: &StoreState) {
@@ -364,17 +373,20 @@ fn flush_gate_metrics(state: &StoreState) {
         })
         .collect();
     let emitter = crate::events::EventEmitter::new(path, "daemon");
-    let _ = emitter.emit("graph_write_gate", &json!({
-        "keeper_pid": std::process::id(),
-        "window_started_ms": completed.started_epoch_ms,
-        "window_finished_ms": finished_epoch_ms,
-        "completed_window_seconds": elapsed.as_secs_f64(),
-        "wait_ms_bounds": bounds,
-        "wait_ms_counts": completed.counts,
-        "mutation_count": completed.mutations,
-        "bytes_written": completed.bytes_written,
-        "retry_count": completed.retries,
-    }));
+    let _ = emitter.emit(
+        "graph_write_gate",
+        &json!({
+            "keeper_pid": std::process::id(),
+            "window_started_ms": completed.started_epoch_ms,
+            "window_finished_ms": finished_epoch_ms,
+            "completed_window_seconds": elapsed.as_secs_f64(),
+            "wait_ms_bounds": bounds,
+            "wait_ms_counts": completed.counts,
+            "mutation_count": completed.mutations,
+            "bytes_written": completed.bytes_written,
+            "retry_count": completed.retries,
+        }),
+    );
 }
 
 /// Run the store keeper to completion. Returns only on a startup failure;
@@ -435,7 +447,9 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             .name("fno-store-metrics".into())
             .spawn(move || loop {
                 std::thread::sleep(GATE_WINDOW);
-                if metrics_shutdown.load(Ordering::SeqCst) == 1 { break; }
+                if metrics_shutdown.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
                 flush_gate_metrics(&metrics_state);
             });
     }
@@ -460,10 +474,13 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 drop(gate);
                 if let (Err(error), Some(path)) = (result, &export_state.events) {
                     let emitter = crate::events::EventEmitter::new(path, "daemon");
-                    let _ = emitter.emit("graph_export_failed", &json!({
-                        "graph": export_state.graph.display().to_string(),
-                        "error": error,
-                    }));
+                    let _ = emitter.emit(
+                        "graph_export_failed",
+                        &json!({
+                            "graph": export_state.graph.display().to_string(),
+                            "error": error,
+                        }),
+                    );
                 }
             });
     }
@@ -977,11 +994,9 @@ fn read_state(
     backup_on_corrupt: bool,
 ) -> Result<Vec<Value>, StoreError> {
     match state.read_source {
-        ReadSource::Json => graph_store::read_defaulted_opts(
-            &state.graph,
-            keep_malformed,
-            backup_on_corrupt,
-        ),
+        ReadSource::Json => {
+            graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
+        }
         ReadSource::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
             StoreError::Unreadable(
                 crate::graph_sqlite::database_path(&state.graph)
@@ -1049,8 +1064,9 @@ fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
         ReadSource::Json => std::fs::read(&state.graph).map_err(|error| {
             StoreError::Unreadable(state.graph.display().to_string(), error.to_string())
         })?,
-        ReadSource::Sqlite => graph_store::serialize_graph_file(&read_state(state, true, false)?)
-            .into_bytes(),
+        ReadSource::Sqlite => {
+            graph_store::serialize_graph_file(&read_state(state, true, false)?).into_bytes()
+        }
     };
     Ok(json!({
         "bytes_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
@@ -1102,6 +1118,11 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
+    if state.read_source != ReadSource::Sqlite {
+        return Err(StoreError::Invalid(
+            "graph export requires graph.read_source=sqlite".into(),
+        ));
+    }
     let _gate = state
         .gate
         .write()
@@ -1141,7 +1162,12 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         seed_cache(state, value.entries.clone(), &value.version);
     }
     drop(gate);
-    record_gate(state, waited, bytes, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
+    record_gate(
+        state,
+        waited,
+        bytes,
+        params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+    );
     let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
@@ -1276,7 +1302,12 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             .collect();
         if !conflicts.is_empty() {
             drop(gate);
-            record_gate(state, waited, 0, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
+            record_gate(
+                state,
+                waited,
+                0,
+                params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+            );
             return Err(CommitRowsError::Conflict(conflicts));
         }
     }
@@ -1322,14 +1353,24 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         seed_cache(state, value.entries.clone(), &value.version);
     }
     drop(gate);
-    record_gate(state, waited, bytes, params.get("attempt").and_then(Value::as_u64).unwrap_or(1));
+    record_gate(
+        state,
+        waited,
+        bytes,
+        params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+    );
     let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
 
 fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
     let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
-    let backup = outcome.backup.as_ref().and_then(|path| std::fs::metadata(path).ok()).map(|meta| meta.len()).unwrap_or(0);
+    let backup = outcome
+        .backup
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     graph.saturating_add(backup)
 }
 
