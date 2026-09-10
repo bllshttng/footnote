@@ -545,3 +545,68 @@ def test_a_broken_pane_probe_never_condemns(monkeypatch) -> None:
 
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", _boom)
     assert registry_falsifier(_pane_row()) is None
+
+
+# --------------------------------------------------------------------------
+# x-c1a3: transcript evidence is positive only while it is FRESH.
+# --------------------------------------------------------------------------
+
+
+def test_an_active_state_past_the_freshness_bound_demotes_to_unknown() -> None:
+    """The x-52d2 reading: truth_state working, transcript 83 minutes silent.
+
+    83 minutes sits inside the two-hour reap-safety window, so the verdict was
+    REACHABLE and the node stayed wedged behind a session dead by four
+    instruments. Past the bound the honest answer is UNKNOWN with basis
+    stale-transcript -- never UNREACHABLE, because an old transcript is absence
+    of evidence exactly as silence is.
+    """
+    from fno.agents.reachability import STALE_TRANSCRIPT, TRANSCRIPT_EVIDENCE_S
+
+    assert TRANSCRIPT_EVIDENCE_S == 20 * 60
+    got = classify_reachability(truth_state="working", age_s=4980, falsifier=None)
+    assert got.verdict == UNKNOWN
+    assert got.basis == STALE_TRANSCRIPT
+    assert got.age_s == 4980
+
+
+@pytest.mark.parametrize("truth_state", ("working", "watching", "your-move"))
+def test_every_active_state_expires_at_the_bound(truth_state: str) -> None:
+    """The bound keys on the ACTIVE set, not on one state's spelling."""
+    got = classify_reachability(
+        truth_state=truth_state, age_s=20 * 60 + 1, falsifier=None
+    )
+    assert got.verdict == UNKNOWN
+    assert got.basis == "stale-transcript"
+
+
+def test_an_active_state_inside_the_bound_stays_reachable() -> None:
+    got = classify_reachability(truth_state="working", age_s=60, falsifier=None)
+    assert got.verdict == REACHABLE
+    assert got.basis == "transcript"
+
+
+def test_an_unknowable_age_is_never_evidence_of_staleness() -> None:
+    """Only POSITIVE evidence of staleness demotes; a missing age is not
+    evidence, and the monotone rule in this module's header forbids lowering
+    on absence."""
+    got = classify_reachability(truth_state="working", age_s=None, falsifier=None)
+    assert got.verdict == REACHABLE
+    assert got.basis == "transcript"
+
+
+def test_a_freshness_override_widens_the_bound() -> None:
+    """The window is a tuning knob like STALLED_AFTER_S, overridable by the
+    caller that needs a different lane."""
+    got = classify_reachability(
+        truth_state="working", age_s=30 * 60, falsifier=None, fresh_s=3600
+    )
+    assert got.verdict == REACHABLE
+
+
+def test_the_freshness_bound_never_condemns() -> None:
+    """Expiry demotes to UNKNOWN and can never produce UNREACHABLE: the
+    reaping rule keys on falsifiers only, and an old transcript is not one."""
+    for state in ("working", "watching", "your-move"):
+        got = classify_reachability(truth_state=state, age_s=10**6, falsifier=None)
+        assert got.verdict != UNREACHABLE

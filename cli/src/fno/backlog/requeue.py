@@ -12,8 +12,6 @@ import typer
 
 # Allowlist, fail closed: suspect is still owned, corrupted is unreadable, and a state added later must refuse rather than pass a deny-list never updated.
 _REQUEUEABLE_CLAIM_STATES = ("free", "stale")
-# stalled/done/unknown proceed (an unread transcript on a node wedged for hours is the ordinary reaped case); the claim gate is what fails closed.
-_WARM_TRUTH_STATES = ("working", "your-move", "watching")
 
 _UNSET = object()
 
@@ -198,6 +196,7 @@ def _unclaim_node(task_id: str) -> None:
 
 def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     """Return a node wedged ``in_progress`` by a dead worker to the queue."""
+    from fno.agents.reachability import REACHABLE, classify_reachability
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
@@ -231,8 +230,19 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     open_rows = [r for r in (row.get("sessions") or []) if is_open_do_row(r)]
     pairs = [(r, resolve_session_truth(r.get("session_id") or "")) for r in open_rows]
     for r, truth in pairs:
-        if truth.get("state") in _WARM_TRUTH_STATES:
-            typer.echo(f"requeue: {r.get('harness')}:{r.get('session_id')} is {truth.get('state')} (last activity {truth.get('last_activity_age_s')}s ago); a warm worker still owns the do window.", err=True)
+        # falsifier=None: requeue holds no registry row, and a falsifier can
+        # only LOWER a verdict, so passing none can never invent a refusal.
+        reach = classify_reachability(
+            truth_state=truth.get("state"),
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=None,
+        )
+        if reach.verdict == REACHABLE:
+            typer.echo(
+                f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
+                "a reachable worker still owns the do window.",
+                err=True,
+            )
             raise typer.Exit(code=3)
 
     for r in open_rows:

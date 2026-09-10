@@ -1155,7 +1155,10 @@ def test_us2_codex_old_watching_rollout_is_not_bulk_enumerated(tmp_path):
         resolve=lambda _handle: (match, []),
         codex_sessions_dir=codex,
     )
-    assert truth["state"] == "watching"
+    # The <watching> tag is 10,000s old: expiry (x-c1a3) retires the news to
+    # stalled. Discovery still resolves it (require_alive=False), it is just
+    # no longer warm.
+    assert truth["state"] == "stalled"
 
 
 def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):

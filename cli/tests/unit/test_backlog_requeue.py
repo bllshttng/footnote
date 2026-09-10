@@ -85,13 +85,13 @@ def _wedged_node(**over) -> dict:
     return node
 
 
-def _dead_truth(monkeypatch, state="stalled") -> None:
+def _dead_truth(monkeypatch, state="stalled", age_s=18000) -> None:
     monkeypatch.setattr(
         "fno.agents.session_truth.resolve_session_truth",
         lambda handle, **kw: {
             "handle": handle,
             "state": state,
-            "last_activity_age_s": 18000,
+            "last_activity_age_s": age_s,
             "last_event_at": "2026-09-05T06:11:05Z",
         },
     )
@@ -174,14 +174,34 @@ def test_ac2_requeue_refuses_non_free_states(tmp_graph, claims_root, monkeypatch
 
 def test_ac3_requeue_refuses_warm_session(tmp_graph, claims_root, monkeypatch):
     _seed(tmp_graph, [_wedged_node()])
-    _dead_truth(monkeypatch, state="working")
+    _dead_truth(monkeypatch, state="working", age_s=60)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code != 0
     assert DEAD_SESSION in _out(result)
-    assert "working" in _out(result)
+    # The refusal names the evidence it refused on: the shared verdict's basis
+    # and the humanized age (x-c1a3), not a bare state word.
+    assert "reachable" in _out(result)
+    assert "transcript" in _out(result)
+    assert "1m" in _out(result)
     node = _read(tmp_graph)[0]
     assert node["status"] == "in_progress"
     assert node["sessions"][0].get("ended_at") is None
+
+
+def test_requeue_unwedges_a_warm_spelling_past_the_freshness_bound(
+    tmp_graph, claims_root, monkeypatch
+):
+    """The x-52d2 specimen: state working, transcript silent 83 minutes, the
+    session dead by four instruments. The old membership test refused at any
+    age and the node never returned to the queue; the shared verdict reads
+    stale-transcript and requeue proceeds."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch, state="working", age_s=4980)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 0, _out(result)
+    node = _read(tmp_graph)[0]
+    assert node["status"] == "ready"
+    assert node["sessions"] == []
 
 
 # -- AC4-HP / AC5-EDGE: unclaim earns its success line ------------------------
