@@ -41,6 +41,10 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `bin/client.rs:581` | conforming | process-replacement delegation of the spawn call, whose decision Python owns |
 | `bin/client.rs:602` | conforming | process-replacement delegation so account resolution stays one implementation |
 | `bin/client.rs:2889` | conforming | session discovery read through its Python owner, fail-open on a miss |
+| `bin/client.rs:1346 place_thread_portal_after_spawn` | conforming | post-spawn portal placement through the same mux thread door as `attach.rs:28`; the server owns the thread pane, the fno crate is dev-only here, and a native ThreadPane client would carry a second PROTO_VERSION pin |
+| `bin/client.rs:1399 exec_python_front` | conforming | process-replacement delegation of the spawn call to the Python front door, whose decision Python owns |
+| `bin/client.rs:2433 run_mux_sweep` | conforming | the reap sweep executes through the verb that owns the buckets and guards |
+| `bin/client.rs:3819 discovered-session read` | conforming | session discovery read through its Python owner, fail-open on a miss |
 | `claude_ask.rs:139` | conforming | transcript truth probe, single implementation kept in Python on purpose |
 | `claude_ask.rs:545` | conforming | batch spelling of the same probe, one interpreter for N handles |
 | `client_verbs.rs:1287` | conforming | ask-token mint through the Python resolver, one implementation |
