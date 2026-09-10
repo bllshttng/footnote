@@ -246,7 +246,7 @@ def test_failed_spawn_captures_the_refusal_tail(monkeypatch):
                 "1 live row(s) were minted without a provider stamp "
                 "(harness=claude, origin=operator)\n"
                 "fno agents spawn: applied slot=agents.profiles.blueprint.lanes[0] "
-                "claude-canonical-opus\n"
+                "claude-opus-5\n"
                 "spawn-gate: the fleet holds 96.20/12.00 cores (801.7% of capacity), "
                 "over the max_fleet_cpu_share ceiling 50.0%; refusing to spawn "
                 "(--force to bypass)\n"

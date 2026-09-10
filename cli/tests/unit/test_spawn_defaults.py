@@ -330,7 +330,7 @@ def test_grid_account_wins_over_the_config_default(monkeypatch):
 
 
 def test_grid_routeless_row_injects_no_route(monkeypatch):
-    """AC4-EDGE (x-b545): a routeless row (claude-canonical-*) produces argv
+    """AC4-EDGE (x-b545): a routeless row (one with no `route` key) produces argv
     unchanged from today - no lane selector."""
     _declare_inventory(monkeypatch, [
         {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},

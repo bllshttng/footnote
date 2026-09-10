@@ -685,7 +685,7 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         "[[routing.models]]\n"
-        'name = "claude-canonical-opus"\n'
+        'name = "claude-opus-5"\n'
         'harness = "claude"\n'
         'model = "claude-opus-5"\n'
         'band = "high"\n'
@@ -705,10 +705,10 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
     rows = rr._declared_rows(settings)
 
     assert len(rows) == 2  # CONFIG-declared exactly, never the built-in fallback
-    assert "claude-canonical-opus" in rows
-    assert rows["claude-canonical-opus"]["model"] == "claude-opus-5"
-    assert rows["claude-canonical-opus"]["harness"] == "claude"
-    assert rows["claude-canonical-opus"]["operator_view"] == "claude-native"
+    assert "claude-opus-5" in rows
+    assert rows["claude-opus-5"]["model"] == "claude-opus-5"
+    assert rows["claude-opus-5"]["harness"] == "claude"
+    assert rows["claude-opus-5"]["operator_view"] == "claude-native"
     assert rows["zai-flash"]["band"] == "low"
 
 
