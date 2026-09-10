@@ -767,6 +767,19 @@ fn pid_confirmed_dead(pid: u64) -> bool {
     rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+/// A recorded pid positively EXISTS: `kill(pid, 0)` succeeds, or fails with
+/// EPERM (the process is there, just not ours). Only ESRCH is an absence, and
+/// `pid_confirmed_dead` owns that answer.
+fn pid_confirmed_alive(pid: u64) -> bool {
+    if pid <= 1 || pid > i32::MAX as u64 {
+        return false;
+    }
+    // SAFETY: signal 0 performs no delivery, only an existence/permission
+    // check.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// A SERVED liveness measurement younger than two sweep budgets
 /// (2 x 5s `RECONCILE_SWEEP_BUDGET`; mirrored because the crates share the
 /// FILE, not types) is trusted over the status-string ladder.
@@ -794,11 +807,16 @@ fn served_liveness(
 
 /// Derive [`Liveness`] for one row. `status` is the raw registry string;
 /// `pid`/`short_id` are read the same tolerant way `derive_rows` reads every
-/// other field. Pure and syscall-free except the one `kill(pid, 0)` probe,
-/// gated behind a terminal status so a live-ish row never pays it.
+/// other field. Pure and syscall-free except the `kill(pid, 0)` probe, gated
+/// behind an orphaned, failed, or terminal status so a live-ish row never
+/// pays it.
 fn derive_liveness(status: &str, pid: Option<u64>, short_id: &str) -> Liveness {
     if matches!(status, "orphaned" | "failed") {
-        return Liveness::Unmeasured;
+        return match pid {
+            Some(pid) if pid_confirmed_alive(pid) => Liveness::Alive,
+            Some(pid) if pid_confirmed_dead(pid) => Liveness::Dead,
+            _ => Liveness::Unmeasured,
+        };
     }
     let terminal = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
     if !terminal {
@@ -3569,13 +3587,24 @@ unheard_of_field = true
         // Non-terminal status: Alive regardless of pid/short_id.
         assert_eq!(derive_liveness("live", None, ""), Liveness::Alive);
         assert_eq!(derive_liveness("busy", Some(999_999), ""), Liveness::Alive);
+        // Orphaned/failed: the recorded pid decides. A live pid is Alive, a
+        // pid confirmed gone is Dead, and no pid stays Unmeasured.
+        let this_process = std::process::id() as u64;
         assert_eq!(
-            derive_liveness("orphaned", Some(999_999), "sid"),
+            derive_liveness("orphaned", Some(this_process), "sid"),
+            Liveness::Alive
+        );
+        assert_eq!(
+            derive_liveness("orphaned", Some(0x7fff_fff0), "sid"),
+            Liveness::Dead
+        );
+        assert_eq!(
+            derive_liveness("orphaned", None, "sid"),
             Liveness::Unmeasured
         );
         assert_eq!(
-            derive_liveness("failed", Some(999_999), "sid"),
-            Liveness::Unmeasured
+            derive_liveness("failed", Some(this_process), "sid"),
+            Liveness::Alive
         );
         // Terminal + no identity surface at all: nothing to falsify -> Dead
         // (mirrors gc.rs's !liveness_surface corroboration).
