@@ -142,7 +142,7 @@ pub(crate) fn served_fresh_liveness<'a>(
     measured_at: Option<&str>,
 ) -> Option<&'a str> {
     let stamp = measured_at.and_then(crate::state::rfc3339_like_to_secs)? as u64;
-    fno::served_liveness::served_liveness_word(
+    crate::served_liveness::served_liveness_word(
         word,
         Some(stamp),
         crate::daemon::now_epoch_secs() as u64,
@@ -158,5 +158,5 @@ pub(crate) fn served_liveness_basis(word: Option<&str>, measured_at: Option<&str
     let stamp = measured_at
         .and_then(crate::state::rfc3339_like_to_secs)
         .map(|s| s as u64);
-    fno::served_liveness::served_liveness_basis(word, stamp, crate::daemon::now_epoch_secs() as u64)
+    crate::served_liveness::served_liveness_basis(word, stamp, crate::daemon::now_epoch_secs() as u64)
 }

@@ -5595,8 +5595,8 @@ where
                     "last_message_at": e.last_message_at,
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
-                    // The SERVED liveness triple: word, stamp, basis; the
-                    // freshness rule lives in crates/fno/src/served_liveness.rs.
+                    // The SERVED liveness triple: word, stamp, basis; the freshness
+                    // rule is served_liveness.rs, mirrored per crate, pinned by contract test.
                     "liveness": served_fresh_liveness(
                         e.liveness.as_deref(),
                         e.liveness_measured_at.as_deref(),

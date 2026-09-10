@@ -68,15 +68,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # fno-agents depends on the fno crate (the served-liveness rule), so fno
-      # must land on crates.io first at a version bump; serialize in that order.
+      # crates.io publishes are independent (fno does not depend on fno-agents
+      # as a cargo dep), so order is irrelevant; serialize for a clean log.
       max-parallel: 1
       matrix:
         include:
-          - crate: fno
-            dir: crates/fno
           - crate: fno-agents
             dir: crates/fno-agents
+          - crate: fno
+            dir: crates/fno
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -164,6 +164,7 @@ pub mod scrape;
 pub mod screen;
 pub mod session_names_fold;
 pub mod session_start_bytes;
+pub(crate) mod served_liveness;
 pub mod single_flight;
 pub mod spawn_axes;
 pub mod spawn_gate;

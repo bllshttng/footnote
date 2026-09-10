@@ -4,7 +4,7 @@
 //! Split from daemon.rs: the file is over the line budget and shrink-only,
 //! so new liveness code lands here and the code it touches moves with it.
 
-use fno::served_liveness::SERVED_LIVENESS_CADENCE;
+use crate::served_liveness::SERVED_LIVENESS_CADENCE;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
