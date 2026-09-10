@@ -5,12 +5,13 @@ unrelated function at the bottom. ``main`` adds a use of ``CONST`` between
 them; ``pr`` deletes the definition. Each branch is green alone, the merge
 tree is red with F821, and no git operation ever reports a conflict.
 """
+import os
 import subprocess
 from pathlib import Path
 
 from fno.pr import _merge_result
 
-SCRIPT = Path(__file__).parents[3] / "scripts" / "ci" / "check-python-static.sh"
+SCRIPT = Path(__file__).parents[3] / "scripts" / "ci" / "check-merge-result.sh"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -26,6 +27,18 @@ def _git(repo: Path, *args: str) -> str:
 def _commit(repo: Path, message: str) -> None:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", message)
+
+
+def _run_script(repo: Path, base: str, head: str) -> subprocess.CompletedProcess:
+    # The extracted tree has no venv, so the bare venv tools stand in for the
+    # caller's uv-run forms.
+    return subprocess.run(
+        ["bash", str(SCRIPT), str(repo), base, head],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "RUFF": "ruff", "MYPY": "mypy"},
+        check=False,
+    )
 
 
 MOD_USES_CONST = "CONST = 1\n\n\ndef use():\n    return CONST\n\n\ndef unrelated():\n    pass\n"
@@ -44,9 +57,11 @@ def _specimen_repo(tmp_path: Path) -> Path:
     (cli / "src" / "pkg" / "__init__.py").write_text("")
     mod = cli / "src" / "pkg" / "mod.py"
     mod.write_text("CONST = 1\n\n\ndef unrelated():\n    pass\n")
+    root = Path(__file__).parents[3]
     scripts = repo / "scripts" / "ci"
     scripts.mkdir(parents=True)
-    (scripts / "check-python-static.sh").write_text(SCRIPT.read_text())
+    for name in ("check-merge-result.sh", "check-python-static.sh"):
+        (scripts / name).write_text((root / "scripts" / "ci" / name).read_text())
     _commit(repo, "A: constant defined, used by nobody")
     mod.write_text(MOD_USES_CONST)
     _commit(repo, "main uses CONST")
@@ -65,19 +80,16 @@ def _bare_origin(repo: Path, tmp_path: Path) -> None:
 def test_both_parents_green_and_merge_red(tmp_path: Path) -> None:
     repo = _specimen_repo(tmp_path)
     for branch in ("main", "pr"):
-        tree = _git(repo, "rev-parse", f"{branch}^{{tree}}")
-        verdict, reason = _merge_result.static_verdict_for_tree(tree, str(repo))
-        assert verdict == "ok", f"{branch} must be green alone: {reason}"
-    tree, reason = _merge_result.merge_tree("main", "pr", str(repo))
-    assert tree, reason
-    verdict, red = _merge_result.static_verdict_for_tree(tree, str(repo))
-    assert verdict == "red"
-    assert "F821" in red
-    assert "CONST" in red
-    assert "cli/src/pkg/mod.py" in red
+        proc = _run_script(repo, "main~1", branch)
+        assert proc.returncode == 0, f"{branch} must be green alone: {proc.stdout}{proc.stderr}"
+    proc = _run_script(repo, "main", "pr")
+    assert proc.returncode == _merge_result.REFUSED_RED
+    assert "F821" in proc.stdout
+    assert "CONST" in proc.stdout
+    assert "cli/src/pkg/mod.py" in proc.stdout
 
 
-def test_head_already_contains_base_skips_static(tmp_path: Path, monkeypatch) -> None:
+def test_head_already_contains_base_skips_the_script(tmp_path: Path, monkeypatch) -> None:
     repo = _specimen_repo(tmp_path)
     _git(repo, "checkout", "-q", "pr")
     _git(repo, "merge", "-q", "--no-edit", "main")
@@ -85,14 +97,13 @@ def test_head_already_contains_base_skips_static(tmp_path: Path, monkeypatch) ->
     _git(repo, "push", "-q", "origin", "main")
     head = _git(repo, "rev-parse", "pr")
     monkeypatch.setattr(_merge_result, "_gh_pr_refs", lambda pr, cwd: ("main", head))
-    monkeypatch.setattr(_merge_result, "_fetch_pull_head", lambda pr, cwd: head)
-    calls: list[str] = []
+    calls: list[tuple] = []
 
-    def _spy(tree: str, cwd: str) -> tuple[str, str]:
-        calls.append(tree)
-        return ("ok", "static step should never run")
+    def _spy(top, base_rev, head_oid, cwd):
+        calls.append((top, base_rev, head_oid))
+        return ("ok", "the script should never run")
 
-    monkeypatch.setattr(_merge_result, "static_verdict_for_tree", _spy)
+    monkeypatch.setattr(_merge_result, "_run_script", _spy)
     verdict, reason = _merge_result.merge_result_verdict(1, str(repo))
     assert verdict == "ok"
     assert "already contains" in reason
@@ -115,12 +126,11 @@ def test_textual_conflict_refuses_with_exit_3(tmp_path: Path, monkeypatch, capsy
     head = _git(repo, "rev-parse", "pr")
     monkeypatch.setattr(_merge_result, "_gh_pr_refs", lambda pr, cwd: ("main", head))
     monkeypatch.setattr(_merge_result, "_fetch_pull_head", lambda pr, cwd: head)
-    tree, reason = _merge_result.merge_tree("origin/main", head, str(repo))
-    assert not tree
-    assert "cli/src/pkg/mod.py" in reason
     rc = _merge_result.run_merge_result_check(7, str(repo))
     assert rc == _merge_result.REFUSED_RED
-    assert "mod.py" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "cli/src/pkg/mod.py" in err
 
 
 def test_dead_probes_answer_unknown_exit_4(tmp_path: Path, monkeypatch, capsys) -> None:
