@@ -2494,14 +2494,12 @@ def _transcript_recently_active(session_id: str) -> bool:
 
     The transcript is the last truth that outlives a dead daemon (liveness
     probes and stored status fields have both lied). "Moved" is the newest
-    TIMESTAMPED entry, not the file mtime: trailing untimestamped records keep
-    the file young while the conversation is silent (x-54cf), and on that skew
-    a worker silent past the window still read active here. A transcript with
-    no timestamped entry falls back to the mtime (the same labelled fallback
-    truth uses); no transcript at all is activity-nothing; an unreadable glob
-    is activity-UNKNOWN and reads False
-    here, so the caller treats it as dead only when the harness store also
-    went quiet - the transcript is the second probe, never the only one.
+    TIMESTAMPED entry, not the mtime that untimestamped trailing records keep
+    young (x-54cf). No timestamped entry falls back to the mtime; no
+    transcript at all is activity-nothing; an unreadable glob is
+    activity-UNKNOWN and reads False, so the caller treats it as dead only
+    when the harness store also went quiet - the transcript is the second
+    probe, never the only one.
     """
     if not session_id:
         return False

@@ -443,12 +443,10 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     session; stamping that would be a plausible, near-always-wrong answer that
     nothing downstream could falsify. A null the receipt explains is better.
 
-    The stamp is the newest TIMESTAMPED entry, not the file mtime: trailing
-    untimestamped records keep the file young while the conversation is silent
-    (x-54cf), and ``row_contradiction`` cross-checks this stamp against truth's
-    ``last_event_at``, so both must be built from the same field. A transcript
-    with no timestamped entry falls back to the mtime - the same labelled
-    fallback truth uses - so the degenerate case cannot spawn a contradiction.
+    The stamp is the newest TIMESTAMPED entry over the whole file, not the
+    mtime (x-54cf): ``row_contradiction`` cross-checks it against truth's
+    ``last_event_at``, so both must come from the same field; no timestamped
+    entry falls back to the mtime, truth's own labelled fallback.
     """
     from fno.agents.session_truth import newest_entry_epoch
     from fno.provenance.resolver import resolve_transcript

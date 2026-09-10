@@ -194,35 +194,26 @@ def _transcript_age_s(
 
 
 def _record_stamp_epoch(ts: str) -> Optional[float]:
-    """ISO transcript stamp -> epoch seconds, or None.
-
-    Mirrors the positive control's parser (``watchdog._record_epoch``) so the
-    two readers cannot disagree about one stamp."""
+    """ISO transcript stamp -> epoch seconds, or None; mirrors the watchdog's
+    parser so the two readers cannot disagree about one stamp."""
     try:
         return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
 
 
-#: Tail depth for :func:`newest_entry_epoch`, same bound as the watchdog's
-#: tick read: the newest entry is always near the end.
+#: Tail depth for :func:`newest_entry_epoch`; the newest entry is near the end.
 _ENTRY_TAIL_BYTES = 256 * 1024
 
 
 def newest_entry_epoch(path: Path, tail_bytes: Optional[int] = _ENTRY_TAIL_BYTES) -> Optional[float]:
     """Newest top-level ``timestamp`` in a jsonl transcript, in epoch SECONDS.
 
-    The transcript-age primitive the file stat must not be: trailing records
-    (last-prompt, cost state) are appended with NO timestamp field, so mtime
-    keeps the file young while the conversation is silent - measured never
-    negative, median +20 minutes, maximum +240 hours over 311 claude
-    transcripts (x-54cf). Reads the same bounded tail
-    ``watchdog.tail_entries`` reads and takes the newest parseable stamp.
-    ``tail_bytes=None`` reads the WHOLE file: the adopt stamp passes it so its
-    window can never be narrower than the tail truth's own read covers, which
-    would split one transcript across two instruments. None when the file is
-    unreadable or carries no timestamped entry at all; the caller then falls
-    back (and names the fallback via ``last_activity_basis``)."""
+    The age primitive the file stat must not be: trailing untimestamped
+    records keep the file young while the conversation is silent (x-54cf).
+    ``tail_bytes=None`` reads the whole file (the adopt stamp), so its window
+    is never narrower than truth's own read. None when unreadable or
+    stamp-free; the caller falls back and names it."""
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
@@ -333,10 +324,8 @@ def resolve_session_truth(
     chars) - both None on every unknown path, because an unread transcript must
     render as unread, never as fresh; ``last_activity_basis`` names the
     instrument the age came from (``last-entry`` | ``mtime`` | ``opencode-db``);
-    ``observed_model`` is the five-variant
-    reading documented on :func:`observed_model` and is present on every path,
-    including the ``unknown`` ones (a row that cannot be classified still
-    renders)."""
+    ``observed_model`` is documented on :func:`observed_model` and is present
+    on every path (a row that cannot be classified still renders)."""
     from fno.agents.peek import recent_records
 
     resolver = resolve if resolve is not None else _default_resolve
@@ -399,12 +388,9 @@ def resolve_session_truth(
         return unknown("no-records", session_id=sid, observed=observed)
 
     # The age comes from the tail ALREADY read above: its newest parseable
-    # Record.timestamp. Trailing untimestamped records (last-prompt, cost
-    # state) keep touching the file without dating the conversation, so the
-    # file stat reports the session as more alive than it is - measured never
-    # negative, median +20 minutes, maximum +240 hours (x-54cf). The stat is
-    # only the labelled fallback for a tail with no timestamped record at all;
-    # whichever instrument answered is served as ``last_activity_basis``.
+    # Record.timestamp. The stat is only the labelled fallback for a tail
+    # with no timestamped record at all; whichever instrument answered is
+    # served as ``last_activity_basis``.
     epoch: Optional[float] = None
     basis: Optional[str] = None
     if agent in {"claude", "codex"}:
@@ -414,10 +400,8 @@ def resolve_session_truth(
             stamp_epoch = _record_stamp_epoch(rec.timestamp)
             if stamp_epoch is None:
                 continue
-            # The same representability guard _transcript_age_s applies: an
-            # epoch datetime cannot render degrades the WHOLE pair, so a stamp
-            # that cannot produce both an age and a stamp never becomes the
-            # epoch - the reading falls to the labelled fallback as one piece.
+            # A stamp that cannot render an age AND a stamp never becomes
+            # the epoch: the pair degrades to the fallback together.
             try:
                 datetime.fromtimestamp(stamp_epoch, tz=timezone.utc)
             except (ValueError, OverflowError, OSError):
