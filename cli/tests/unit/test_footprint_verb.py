@@ -312,7 +312,7 @@ def test_live_root_pids_names_a_gap_when_the_daemon_record_is_unreadable(
     assert roots == set()
     assert gap is not None
     assert "cx-thread" in str(gap.text)
-    assert "codex daemon record unreadable" in str(gap.text)
+    assert "codex daemon liveness unavailable" in str(gap.text)
 
 
 def test_live_root_pids_names_a_gap_when_the_serving_daemon_is_dead(
@@ -338,7 +338,7 @@ def test_live_root_pids_names_a_gap_when_the_serving_daemon_is_dead(
     assert roots == set()
     assert gap is not None
     assert "cx-thread" in str(gap.text)
-    assert "codex daemon serving identity is not alive" in str(gap.text)
+    assert "codex daemon liveness unavailable" in str(gap.text)
 
 
 >>>>>>> 9291710cb (refactor(spawn): read the mirror daemon record; slim the portal module)
