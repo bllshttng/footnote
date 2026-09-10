@@ -2569,7 +2569,9 @@ type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
 use crate::codex_thread::{InterruptOutcome, TurnReceipt};
 
+mod codex_thread_lane;
 mod thread_row_status;
+use codex_thread_lane::spawn_codex_thread_lane;
 use thread_row_status::{codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row};
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
@@ -3589,221 +3591,6 @@ async fn spawn_claude_stream_lane(
     Response::ok(
         req.id,
         json!({"short_id": short_id, "harness": "claude", "status": "live", "lane": "stream"}),
-    )
-}
-
-/// Start and register one Codex app-server thread. The seed turn is detached
-/// after registration so spawn returns a live row immediately while the held
-/// process remains available for later `ask` calls. Reached by the derived
-/// route in [`route_thread_spawn`]: the only attach-with-server destination
-/// built, which is why it keeps its honest codex name. That name is also the
-/// precondition: the body drives CodexThread, so a provider it cannot serve
-/// refuses here rather than silently starting a codex thread under the
-/// caller's name. The guard is the destination's own (the route stays
-/// name-free), and it is what a SECOND attach-with-server row meets until
-/// its destination is wired.
-async fn spawn_codex_thread_lane(
-    ctx: &Ctx,
-    req: &Request,
-    name: &str,
-    cwd: &Path,
-    provider: &str,
-) -> Response {
-    if provider != "codex" {
-        return thread_spawn_refusal(
-            ctx,
-            req,
-            name,
-            provider,
-            &format!(
-                "thread spawn refused: the only attach-with-server destination built drives \
-                 the codex app-server; harness {provider} needs its own thread destination \
-                 wired before its spawn can be served"
-            ),
-        );
-    }
-    let model = req.params.get("model").and_then(Value::as_str);
-    // Both spellings, resolved by one reader. Reading `yolo` alone dropped
-    // `permission_mode` silently and started bounded, which downgrades the very
-    // posture the caller was naming; an unrecognized value is refused here
-    // rather than degraded, for the same reason.
-    let yolo = match crate::codex_thread::resolve_thread_posture(
-        req.params.get("yolo").and_then(Value::as_bool),
-        req.params.get("permission_mode").and_then(Value::as_str),
-    ) {
-        Ok(yolo) => yolo,
-        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
-    };
-    let effort = req.params.get("effort").and_then(Value::as_str);
-    let node = req.params.get("node").and_then(Value::as_str);
-    // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
-    // never from this process's environment. This daemon is long-lived and
-    // shared across every thread on the machine, so its own env is not the
-    // spawning client's - a `state_dirs_from_env()` call here would read
-    // whatever shell started the daemon, which is the exact mistake the next
-    // reader of this function will be tempted to make.
-    //
-    // The same holds for RESOLVING a root rather than reading one. The plan
-    // content directory is not missing from this list and does not need
-    // `provider::plan_content_dir` called here: the Python spawn seam already
-    // computes it for every substrate and publishes it on the env var the
-    // client turns into these params. Adding a resolver here would be a second
-    // answer to one question, and it would shell out to `fno` per spawn from
-    // async code on the daemon every codex worker shares. Pinned by
-    // `test_thread_spawn_seam_publishes_the_plan_dir`.
-    let state_dirs: Vec<String> = req
-        .params
-        .get("state_dirs")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|dir| !dir.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let seed = req
-        .params
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let driver = match crate::codex_thread::CodexThread::start_with_state_dirs(
-        cwd.to_path_buf(),
-        model,
-        yolo,
-        effort,
-        &state_dirs,
-    )
-    .await
-    {
-        Ok(driver) => driver,
-        Err(error) => {
-            let _ = ctx.emitter.emit(
-                "agent_spawn_failed",
-                &json!({"name": name, "provider": "codex", "lane": "thread", "reason": error.to_string()}),
-            );
-            return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
-        }
-    };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
-    let session_id = entry.harness_session_id.clone().unwrap_or_default();
-    let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-        if registry
-            .entries
-            .iter()
-            .any(|existing| existing.name == entry.name)
-        {
-            return false;
-        }
-        if registry.entries.iter().any(|existing| {
-            existing.harness_name() == "codex"
-                && existing.harness_session_id.as_deref() == entry.harness_session_id.as_deref()
-                && is_non_terminal(existing.status)
-        }) {
-            return false;
-        }
-        registry.entries.push(entry);
-        true
-    })
-    .await;
-    match inserted {
-        Ok(true) => {}
-        Ok(false) => {
-            return Response::err(
-                req.id,
-                ErrorCode::AgentExists,
-                format!("agent {name} or Codex thread {session_id} already exists"),
-            )
-        }
-        Err(error) => {
-            return Response::err(
-                req.id,
-                state_error_code(&error),
-                format!("registry write: {error}"),
-            )
-        }
-    }
-    let handle = Arc::new(driver.into_actor(
-        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), name),
-        codex_thread_on_status(
-            &ctx.emitter,
-            ctx.home.registry_json(),
-            name,
-            &session_id,
-            1,
-            ctx.opts.notify_on_blocked,
-            ctx.opts.notify_on_done,
-        ),
-    ));
-    ctx.codex_threads
-        .lock()
-        .await
-        .insert(name.to_string(), Arc::clone(&handle));
-
-    // The seed turn is just the first Submit in the actor's queue: no
-    // dedicated task, no lock to steal. Its reply receiver is dropped on
-    // purpose (nobody waits); the on-done hook still emits the event, and a
-    // first follow-up ask STEERS into the seed turn instead of blocking
-    // behind it (the daemon.rs:4077 mutex shape this replaces).
-    //
-    // A seedless spawn takes WARMUP_SEED rather than no turn at all (x-296f).
-    // `thread/start` records a thread id but writes no rollout, and a harness
-    // resolves a session to attach BY that rollout, so a worker with no turn
-    // is a worker the operator cannot open: `codex resume` answers "no rollout
-    // found for thread id <id>" (measured 2026-08-28, codex-cli 0.149.1).
-    // One cheap turn buys attachability from the first second of a worker's
-    // life, which is the window in which someone is most likely to look.
-    let seed = if seed.trim().is_empty() {
-        WARMUP_SEED.to_string()
-    } else {
-        seed
-    };
-    {
-        let seed_name = name.to_string();
-        let submitted = handle.submit(seed).await;
-        if submitted.is_err() {
-            let _ = ctx.emitter.emit(
-                "daemon_recovery_error",
-                &json!({"op": "codex_thread_seed", "name": seed_name, "error": "actor gone at seed submit"}),
-            );
-        }
-    }
-    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
-    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
-    // event without both, which is how a thread worker could lose its only
-    // resume fallback before the row is reaped.
-    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
-    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
-    // event without both, which is how a thread worker could lose its only
-    // resume fallback before the row is reaped.
-    let _ = ctx.emitter.emit(
-        "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "codex",
-            "harness": "codex",
-            "harness_session_id": session_id,
-            "short_id": "",
-            "status": "live",
-            "lane": "thread",
-            "substrate": "thread",
-            "cwd": cwd.to_string_lossy(),
-            "node": node,
-        }),
-    );
-    Response::ok(
-        req.id,
-        json!({
-            "short_id": "",
-            "harness": "codex",
-            "harness_session_id": session_id,
-            "session_id": session_id,
-            "status": "live",
-            "lane": "thread",
-        }),
     )
 }
 
@@ -6930,20 +6717,6 @@ async fn handle_rm_with(
     } else {
         None
     };
-    if claude_agents
-        .as_ref()
-        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
-        .and_then(|row| row.state.as_deref())
-        == Some("blocked")
-    {
-        return Response::err(
-            req.id,
-            ErrorCode::Busy,
-            format!(
-                "agent {name} is blocked (model outage); rotate it to another model rather than reaping it."
-            ),
-        );
-    }
     // The stored enum is what fno last WROTE, not what is true: a session torn
     // down by hand never updates it. Two truths prove the row gone, each with
     // its own fail-closed posture. A claude row absent from the `claude agents
@@ -9127,8 +8900,9 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             if entry.model.as_deref() != Some(m.as_str()) {
                 axis_changes.push(("agent_model_changed", entry.model.clone(), m.clone()));
                 entry.model = Some(m.clone());
-                entry.model_basis = Some("verified".to_string());
             }
+            // Any report is an observation; a matching one is the success case.
+            entry.model_basis = Some("verified".to_string());
         }
         if let Some(eff) = &effort {
             if entry.effort.as_deref() != Some(eff.as_str()) {
@@ -10421,51 +10195,6 @@ mod tests {
 
         assert!(response.result().is_some());
         assert_eq!(called.into_inner().unwrap(), vec!["cccc3333"]);
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_refuses_blocked_claude_row_with_rotation_remedy() {
-        let home = short_home("rmblocked");
-        let mut row = claude_rm_row(
-            "blocked-worker",
-            "dddd4444",
-            "dddd4444-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(
-            1,
-            "agent.rm",
-            json!({"name": "blocked-worker", "force": true}),
-        );
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("blocked")),
-                ])
-            },
-            &|_| panic!("blocked row must not reach claude rm"),
-            &|_, _| panic!("blocked row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(message.contains("rotate"));
-        assert!(!message.contains("--force"));
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -16329,6 +16058,41 @@ done
         assert!(
             events.iter().any(|e| e["type"] == "inside_leg_report"),
             "inside_leg_report not emitted: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A model report is an observation whether it agrees with the request
+    /// or not: the normal case (the row already carries the requested model)
+    /// must flip `model_basis` to "verified" too, or a healthy worker reads
+    /// as unobserved forever - the audit's requested-vs-observed boundary
+    /// reads this field.
+    #[test]
+    fn handle_report_marks_a_matching_model_as_verified() {
+        let home = tmp_home("report-matching-model-verified");
+        seed_stream_row(&home, "worker-A", "repM");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].model = Some("glm-5.3-flash[1m]".into());
+            r.entries[0].model_basis = Some("requested".into());
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-repM", "seq": 1, "state": "working",
+                       "model": "glm-5.3-flash[1m]"}),
+            ),
+        );
+        assert_eq!(resp.result().unwrap()["stored"], true);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries[0].model_basis.as_deref(), Some("verified"));
+        let events = read_events(&home);
+        assert!(
+            !events.iter().any(|e| e["type"] == "agent_model_changed"),
+            "a matching report is not a change: {events:?}"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }

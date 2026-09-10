@@ -214,6 +214,12 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no daemon RPC); this entry keeps the client.rs<->router
         # parity test in sync.
         "probe-run",
+        # Native test-run process-group owner (x-d10f): admits under the
+        # `test:suite` claim, spawns the suite leader in its own session, and
+        # always cleans up the group. Internal dispatch only, matched the same
+        # way as `probe-run`; this entry keeps the client.rs<->router parity
+        # test in sync.
+        "test-run",
         # Registry-label rename: `agent.rename` over the daemon RPC, the same
         # transport as rm/stop. The old label rides home as a persisted alias.
         "rename",
@@ -283,6 +289,10 @@ RUST_CLIENT_VERBS = frozenset(
         # The harness-keyed spawn-defaults resolver (x-8975): payload JSON in,
         # the answer out; Python calls it via fno.agents.spawn_overlay_client.
         "spawn-overlay",
+        # The billing axes of the spawn seam (route/account/model): payload
+        # JSON in, the {inject, applied, suppressed, messages} plan out;
+        # Python calls it via fno.agents.spawn_axes_client.
+        "spawn-axes",
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
@@ -482,6 +492,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno do phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 only when every row is PASS - exit 0 with no output reads SKIP, not pass. Rows carry verdict (PASS FAIL BLOCKED SKIP), an optional ` # claim` comment from the declaration, and bounded captured output. Shelled by the close verbs for close_probes and by prove-it for runtime evidence.",
+    "test-run": "Native test-suite process-group owner: --timeout SECS [--claims-root PATH] -- ARGV...; admits under the machine-wide test:suite claim, spawns ARGV as the leader of a fresh session, and always kills the group after. Invoked directly by cli/src/fno/test_runner.py's run_suite_bounded, not `fno agents` routing.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
@@ -500,6 +511,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
+    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
 }
@@ -638,6 +650,43 @@ def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
+def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
+    """Refuse a fresh claude thread spawn with no message before any worker launches.
+
+    Judges an explicit substrate only: an absent one routes to the Python
+    ``cmd_spawn`` (see :func:`_is_pane_substrate_spawn`), which judges the
+    resolved substrate with the same helper.
+    """
+    from fno.agents.spawn_defaults import (
+        _has_explicit_substrate,
+        _seed_of,
+        seedless_thread_refusal,
+    )
+
+    toks = list(args[1:])
+    substrate = _has_explicit_substrate(toks)
+    if substrate is None:
+        return
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
+
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
+    refusal = seedless_thread_refusal(
+        harness,
+        substrate,
+        _seed_of(toks),
+        resume=_spawn_flag_value(toks, "--resume"),
+        crown=_has_flag(toks, "-k", ("--crown",)),
+        name=_spawn_flag_value(toks, "--name"),
+        node=_spawn_flag_value(toks, "--node"),
+    )
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -669,8 +718,10 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     ``fno mux pane run`` spawn (front-half reuse + registry mux ref), so a
     pane spawn must never route to the Rust client's daemon RPC (the daemon
     PTY host retires at G4; a silent fallback there is exactly what AC1-ERR
-    forbids). ``pane`` is the default, so an absent ``--substrate`` counts.
-    The scan stops at ``--argv`` like the other raw-args scans so a payload
+    forbids). An ABSENT ``--substrate`` still routes here: the pane back half
+    is Python-owned and its body resolves the built-in default (thread where
+    the harness seats one, else pane). The scan stops at ``--argv`` like the
+    other raw-args scans so a payload
     token can never masquerade as our flag, and at a bare ``--`` fence for the
     same reason (x-1caa: fenced tokens are provider passthrough - a fenced
     ``-p`` must not flip a pane-default spawn onto the binary route, past
@@ -705,10 +756,10 @@ def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
     cursor-agent, grok, agy) live only in the Python dispatch. Without this
     carve-out an installed binary answers a working lane with "fno has not
     built this harness's keeper lane spawn arm yet". The substrate scan
-    mirrors :func:`_is_pane_substrate_spawn` (absent = pane; the headless
-    spellings opt out; the scans stop at ``--argv`` and a bare ``--``), and
-    a headless spawn of these harnesses is NOT carved out: its honest
-    refusal is the stance check the Python seam runs.
+    mirrors :func:`_is_pane_substrate_spawn` (absent routes to Python, whose
+    body resolves the built-in default; the headless spellings opt out; the
+    scans stop at ``--argv`` and a bare ``--``), and a headless spawn of these
+    harnesses is NOT carved out: its honest refusal is the stance check.
     """
     if verb != "spawn":
         return False
@@ -931,6 +982,20 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     if verb != "spawn":
         return False
     return _has_flag(args, "-P", ("--route", "--provider"))
+
+
+def _with_seam_marker(args: "list[str]", verb: str) -> "list[str]":
+    """Assert the Python seam crossed, and carry its enforcement verdict:
+    ``--defaults-applied=<state>`` straight after the verb is the only record
+    the config-blind binary sees of the seam's decision. The token is
+    inserted, never appended: everything after ``--`` is the worker's seed.
+    Spawn-only: no other verb crosses this fork.
+    """
+    if verb != "spawn" or not args or args[0] != "spawn":
+        return args
+    from fno.agents.spawn_defaults import spawn_seam_marker
+
+    return [args[0], spawn_seam_marker(), *args[1:]]
 
 
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any
@@ -1453,6 +1518,7 @@ def make_agents_group_cls() -> type:
 
                         args = inject_spawn_defaults(args)
                         _refuse_codex_code_spawn_without_git_grant(args)
+                        _refuse_seedless_thread_spawn(args)
                     _export_worker_dirs_at_seam(args)
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
@@ -1478,13 +1544,13 @@ def make_agents_group_cls() -> type:
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(list(args))  # execs; does not return
+                    route_to_rust(_with_seam_marker(list(args), verb))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(list(args), binary=binary)  # execs
+                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)

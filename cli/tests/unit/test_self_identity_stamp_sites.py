@@ -28,7 +28,10 @@ ROOT = Path(__file__).resolve().parents[3]
 STAMP_SITES = (
     "cli/src/fno/claims/core.py",
     "cli/src/fno/agent/state.py",
-    "cli/src/fno/agents/dispatch.py",
+    # dispatch.py stamps from_session on every envelope but resolves through
+    # fno/agents/sender_provenance.py (moved there for the file-budget
+    # shrink-only rule), so the owned resolver is pinned where it is called.
+    "cli/src/fno/agents/sender_provenance.py",
     "cli/src/fno/outstanding/cli.py",
     "cli/src/fno/target_cli.py",
     "cli/src/fno/mail/cli.py",

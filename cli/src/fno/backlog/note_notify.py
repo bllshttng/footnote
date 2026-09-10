@@ -52,11 +52,19 @@ def own_session() -> Optional[str]:
 
 def send_pointer(address: str, body: str) -> str:
     """Mail one pointer. Short lock timeout: a contended recipient takes the
-    durable envelope now rather than blocking the writer."""
-    from fno.agents.dispatch import dispatch_send
+    durable envelope now rather than blocking the writer.
 
+    The sender is this session's own handle, not a literal: provenance is
+    looked up by from_name, so an unregistered literal ships harness=unknown
+    with no from_session. No ambient identity keeps the default; the
+    dispatch-side miss is loud."""
+    from fno.agents.dispatch import dispatch_send
+    from fno.harness_identity import canonical_handle
+
+    session = own_session()
+    from_name = canonical_handle(session) if session else "fno"
     result = dispatch_send(
-        address, body, None, cwd=Path.cwd(), from_name="fno", lock_timeout=5.0
+        address, body, None, cwd=Path.cwd(), from_name=from_name, lock_timeout=5.0
     )
     return f"{result.delivery} {result.msg_id}"
 

@@ -38,6 +38,11 @@ def no_worker_roots(monkeypatch):
         "_live_shared_serve_root_pids",
         lambda **_kwargs: (set(), None),
     )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
+    )
 
 
 def _fake_runner(
@@ -631,7 +636,9 @@ def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
 def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
     """x-a457: an unrouted row whose worker claim store positively reports no
     live holder is a corpse row. The 14 rows that kept this box's spawn gate
-    refusing were exactly this population - claims expired, rows still live."""
+    refusing were exactly this population - claims expired, rows still live.
+    The harness is one with no shared daemon, so the row rides the per-row
+    witness path (x-cb2b moved pidless codex rows to the daemon verdict)."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -639,7 +646,7 @@ def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> No
         status="live",
         pid=None,
         pid_start_time=None,
-        harness="codex",
+        harness="luna",
         short_id="",
         name="t-stale-lane",
     )
@@ -709,10 +716,177 @@ def test_live_root_pids_keeps_unrouted_row_on_unreadable_claim_store(monkeypatch
     assert isinstance(error, doctor_footprint.AttributionGap)
 
 
+def _codex_thread_row(name: str, session_id: str | None = None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        name=name,
+        harness_session_id=session_id,
+    )
+
+
+def test_row_is_advancing_reads_the_shared_progress_classifier(monkeypatch) -> None:
+    """x-9958 Task 2: the discriminator is classify_progress's own verdict -
+    advancing on transcript-turn, a working reading inside STALE_ATTENTION_S.
+    A silent or unreadable probe is never advancing."""
+    from fno import doctor_footprint
+    import fno.agents.session_truth as session_truth
+
+    row = _codex_thread_row("t-probe-row", "tid-1")
+    answer: dict = {}
+
+    def fake_truth(handle, **kwargs):
+        return dict(answer)
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+    answer.update(
+        {"state": "working", "last_activity_age_s": 30, "observed_model": None}
+    )
+    assert doctor_footprint._row_is_advancing(row) is True
+
+    answer.update({"state": "unknown", "reason": "not-found", "last_activity_age_s": None})
+    assert doctor_footprint._row_is_advancing(row) is False
+
+    def crashed_truth(handle, **kwargs):
+        raise RuntimeError("unreadable store")
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", crashed_truth)
+    assert doctor_footprint._row_is_advancing(row) is False
+
+
+def test_live_root_pids_resolves_a_codex_thread_row_through_its_rollout(
+    monkeypatch,
+) -> None:
+    """x-9958 Task 3: a codex thread row's session id has an accepting route -
+    the rollout fd - and a resolved, live pid attributes like any root."""
+    from fno import doctor_footprint
+
+    row = _codex_thread_row("t-codex-thread", "tid-907")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.codex_rollout_pid_map",
+        lambda session_ids, **kwargs: {"tid-907": 907},
+    )
+    monkeypatch.setattr(doctor_footprint, "_root_pid_is_live", lambda pid, start: True)
+
+    assert doctor_footprint._live_root_pids() == ({907}, None)
+
+
+def test_live_root_pids_keeps_an_unresolved_codex_row_as_a_named_gap(monkeypatch) -> None:
+    """One oracle answered nothing: fail closed, the row stays a NAMED gap -
+    a rollout miss proves nothing, so it never corpse-drops."""
+    from fno import doctor_footprint
+
+    row = _codex_thread_row("t-codex-thread", "tid-907")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.codex_rollout_pid_map", lambda session_ids, **kwargs: {}
+    )
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "t-codex-thread" in error.text
+
+
+def test_live_root_pids_refuses_a_resolved_codex_root_that_is_dead(monkeypatch) -> None:
+    """A rollout pid that died between the walk and the liveness check is the
+    same hard unreadable the claude routed arm refuses on."""
+    from fno import doctor_footprint
+
+    row = _codex_thread_row("t-codex-thread", "tid-907")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.codex_rollout_pid_map",
+        lambda session_ids, **kwargs: {"tid-907": 907},
+    )
+    monkeypatch.setattr(doctor_footprint, "_root_pid_is_live", lambda pid, start: False)
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert error == "worker root liveness unavailable"
+
+
+def test_live_root_pids_spares_an_advancing_row_and_names_only_the_silent_one(
+    monkeypatch,
+) -> None:
+    """x-9958 Task 2: a pidless row advancing by transcript evidence is a live
+    worker, not an unattributable process - it drops from the gap and the
+    reading stands as an undercount. Positive marker: the silent sibling is
+    still named, and only the silent row was ever witnessed."""
+    from fno import doctor_footprint
+    import fno.agents.session_truth as session_truth
+
+    advancing = _codex_thread_row("t-adv-row")
+    silent = _codex_thread_row("t-silent-row")
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [advancing, silent]
+    )
+
+    def fake_truth(handle, **kwargs):
+        if handle == "t-adv-row":
+            return {
+                "state": "working",
+                "last_activity_age_s": 30,
+                "observed_model": None,
+            }
+        return {
+            "state": "unknown",
+            "reason": "not-found",
+            "last_activity_age_s": None,
+            "observed_model": {"kind": "no-transcript"},
+        }
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+    witness_calls: list[str] = []
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_claim_witness",
+        lambda name: witness_calls.append(name) or "live",
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "t-silent-row" in error.text
+    assert "t-adv-row" not in error.text
+    assert witness_calls == ["t-silent-row"]
+
+
+def test_live_root_pids_spends_no_advancing_probes_on_a_spent_deadline(monkeypatch) -> None:
+    """The advancing pass is a budget consumer: once the reading's deadline is
+    gone, probes stop and the rows fall to the witness, which fails closed."""
+    import time as time_mod
+
+    from fno import doctor_footprint
+
+    row = _codex_thread_row("t-late-row")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    def refused(*args, **kwargs):
+        raise AssertionError("advancing probe ran on a spent deadline")
+
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", refused)
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time_mod.monotonic() - 1)
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+
+
 def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) -> None:
     """A pane burns CPU inside the mux server process the reading attributes;
     whatever the probe answers, the pane adds no unattributed cost. Only an
-    answer the mux could NOT give leaves the cost unproven."""
+    answer the mux could NOT give leaves the cost unproven. The harness is
+    one with no shared daemon, so the row rides the pane-probe path (x-cb2b
+    moved pidless codex rows to the daemon verdict)."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -720,7 +894,7 @@ def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) ->
         status="live",
         pid=None,
         pid_start_time=None,
-        harness="codex",
+        harness="luna",
         short_id="",
         name="t-pane",
         mux={"session": "main", "pane_id": 7},
@@ -1459,6 +1633,142 @@ def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
     assert isinstance(error, doctor_footprint.AttributionGap)
     assert "codex" in error.text
     assert "w1 (node=unknown)" in error.text
+
+
+def test_codex_app_server_serve_attributes_a_live_root(monkeypatch, tmp_path) -> None:
+    """x-cb2b: the fno-harness-daemon state file names a live root; that pid
+    joins the attributed roots and the verdict reads live."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": 910, "processStartToken": 555}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 910 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({910}, "live")
+
+
+def test_codex_app_server_serve_accepts_alternate_token_spellings(
+    monkeypatch, tmp_path
+) -> None:
+    """The Rust reader (codex_inject.rs parse_state) tolerates several token
+    spellings; the Python reader answers the same words, so one provider
+    spelling variant cannot gap the fleet."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": 913, "process_start_time": 557}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 913 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({913}, "live")
+
+
+def test_codex_app_server_serve_falls_back_to_the_provider_pid_file(
+    monkeypatch, tmp_path
+) -> None:
+    """No fno state file, but the provider's own app-server.pid names a live
+    root: the fallback oracle attributes it, liveness proven without a token."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "app-server.pid").write_text(
+        json.dumps({"pid": 912}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: True if pid == 912 else None,
+    )
+
+    assert doctor_footprint._codex_app_server_serve(set()) == ({912}, "live")
+
+
+def test_codex_app_server_serve_survives_a_malformed_state(monkeypatch, tmp_path) -> None:
+    """x-cb2b: a malformed codex state file with no readable fallback never
+    kills the reading; the serve answers unreadable and the caller degrades
+    its rows to a gap."""
+    from fno import doctor_footprint
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "app-server-daemon").mkdir(parents=True)
+    (codex_home / "app-server-daemon" / "fno-harness-daemon.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert doctor_footprint._codex_app_server_serve(set()) == (set(), "unreadable")
+
+
+def test_pidless_codex_row_rides_a_live_shared_daemon(monkeypatch):
+    """x-cb2b, the falsifiable discriminator: one live pidless codex row with
+    a live app-server verdict is ATTRIBUTED, not a gap, so the refusal this
+    node names (a later spawn denied while naming that row) cannot fire."""
+    from fno import doctor_footprint
+
+    def refused(*args, **kwargs):
+        raise AssertionError("a live daemon verdict must not spend the row chain")
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", refused)
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", refused)
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "live"}
+    )
+    assert roots == set()
+    assert error is None
+
+
+def test_pidless_codex_row_stays_a_gap_under_an_unreadable_daemon(monkeypatch):
+    """Fail closed: with the daemon verdict unreadable the row falls through
+    to the per-row chain, and with no rollout, no advancing evidence and a
+    live claim witness it lands back in the named gap sentence."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_row_is_advancing", lambda _row: False)
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "unreadable"}
+    )
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "codex" in error.text
+    assert "w1 (node=unknown)" in error.text
+
+
+def test_pidless_unknown_harness_row_gains_nothing_from_daemon_verdicts(monkeypatch):
+    """A harness with no shared daemon still gaps regardless of verdict, so
+    the codex attribution buys no other row class a free pass."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("luna")]
+    )
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+    roots, error = doctor_footprint._live_root_pids(
+        serves={"codex-app-server": "live"}
+    )
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "luna" in error.text
 
 
 def test_pidless_unknown_harness_row_is_the_same_named_gap(monkeypatch):

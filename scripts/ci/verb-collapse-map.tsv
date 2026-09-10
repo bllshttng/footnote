@@ -18,6 +18,7 @@ agents court-fold	T1	agents court-fold	0
 agents route-slot	T1	agents route-slot	0
 agents blueprint-feed	T1	agents blueprint-feed	0
 agents spawn-overlay	T1	agents spawn-overlay	0
+agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
 agents authorized-merge	T1	agents authorized-merge	0
 agents crown	T1	agents crown	17
@@ -101,6 +102,7 @@ agents status	T1	agents status	5
 agents stop	T1	agents stop	22
 agents subscribe	T1	agents subscribe	2
 agents sweep	T1	agents sweep	1
+agents test-run	T1	agents test-run	3
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
 agents truth	T1	agents truth	16
@@ -115,6 +117,7 @@ agents worker reconcile	T1	agents worker reconcile	0
 agents worker review	T1	agents worker review	0
 agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
+agents workspace reap	T1	agents workspace reap	0
 agents workspace worktree archive	T1	agents workspace worktree archive	4
 agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
@@ -238,6 +241,7 @@ backlog unqueue	T1	backlog unqueue	0
 backlog unsupersede	T1	backlog unsupersede	0
 backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
 backlog view	T1	backlog view	3
+backlog worked	T1	backlog worked	2
 bundle check	T1	bundle check	11
 bundle lint	T1	bundle lint	2
 carveout add	T1	carveout add	27
@@ -586,3 +590,4 @@ agents harness probe	T1	agents harness probe	0
 agents king shape	T1	agents king shape	5	
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
+doctor graph export	T1	doctor graph export	0

@@ -5,8 +5,77 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::GcSummary;
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
 use serde_json::{json, Value};
+
+/// Render the file-only reap receipt independently from row retirement.
+pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) -> String {
+    if json_out {
+        return format!(
+            "{}\n",
+            json!({
+                "families": {
+                    "expired_claims": summary.expired_claims,
+                    "plan_locks": summary.plan_locks,
+                    "agent_locks": summary.agent_locks,
+                    "pr_status_cache": summary.pr_status_cache,
+                },
+                "totals": summary.totals,
+                "applied": summary.applied,
+                "dry_run": summary.dry_run,
+                "skip_reason": summary.skip_reason,
+            })
+        );
+    }
+
+    fn family_line(name: &str, family: &StateReapFamilySummary) -> String {
+        let mut reason_counts = std::collections::BTreeMap::new();
+        for entry in &family.kept {
+            *reason_counts.entry(entry.reason.as_str()).or_insert(0usize) += 1;
+        }
+        let kept = reason_counts
+            .into_iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let oldest = family
+            .oldest_age_s
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        format!(
+            "{name}: scanned {}; deleted {}; would_delete {}; bytes {}; oldest_age_s {oldest}; kept [{}]\n",
+            family.scanned, family.deleted, family.would_delete, family.bytes, kept
+        )
+    }
+
+    let mut out = String::new();
+    for (name, family) in [
+        ("expired_claims", &summary.expired_claims),
+        ("plan_locks", &summary.plan_locks),
+        ("agent_locks", &summary.agent_locks),
+        ("pr_status_cache", &summary.pr_status_cache),
+    ] {
+        out.push_str(&family_line(name, family));
+    }
+    let oldest = summary
+        .totals
+        .oldest_age_s
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    out.push_str(&format!(
+        "total: scanned {}; deleted {}; would_delete {}; bytes {}; oldest_age_s {oldest}; kept {}; skip_reason {}\n",
+        summary.totals.scanned,
+        summary.totals.deleted,
+        summary.totals.would_delete,
+        summary.totals.bytes,
+        summary.totals.kept,
+        summary.skip_reason.as_deref().unwrap_or("none")
+    ));
+    if summary.dry_run {
+        out.push_str("(dry-run: no changes made)\n");
+    }
+    out
+}
 
 /// Render a sweep outcome. Pure, so the one property that matters here is
 /// testable without a registry: every bucket appears at every pass, zero
@@ -33,7 +102,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         let open_work: Vec<Value> = summary
             .kept_open_work
             .iter()
-            .map(|(id, node, status)| json!({"id": id, "node": node, "status": status}))
+            .map(|(id, node, status, reader)| {
+                json!({"id": id, "node": node, "status": status, "reader": reader})
+            })
             .collect();
         let active: Vec<Value> = summary
             .kept_active
@@ -150,8 +221,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (not a spawn row: {why})\n"));
     }
     for id in &summary.kept_no_provenance {
+        // x-2774 change 4: this line used to emit an unbalanced paren and a
+        // literal backslash-n; invisible only while the bucket measured
+        // empty. One spelling with every other kept line.
         out.push_str(&format!(
-            "  kept {id} ({}\\n",
+            "  kept {id} ({})\n",
             crate::gc::KeepReason::NoProvenance.as_str()
         ));
     }
@@ -163,8 +237,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  kept {id} (pr state contradicts: {node} {detail})\n"
         ));
     }
-    for (id, node, status) in &summary.kept_open_work {
-        out.push_str(&format!("  kept {id} (open work: {node} {status})\n"));
+    for (id, node, status, reader) in &summary.kept_open_work {
+        out.push_str(&format!(
+            "  kept {id} (open work: {node} {status}; read via {reader})\n"
+        ));
     }
     for (id, node) in &summary.kept_open_do_row {
         out.push_str(&format!("  kept {id} (open do row on done node: {node})\n"));
@@ -522,19 +598,68 @@ mod tests {
     #[test]
     fn reap_names_open_work_with_its_node_and_status() {
         let s = GcSummary {
-            kept_open_work: vec![("b1".into(), "N3".into(), "in_review".into())],
+            kept_open_work: vec![(
+                "b1".into(),
+                "N3".into(),
+                "in_review".into(),
+                "sessions".into(),
+            )],
             ..Default::default()
         };
         let text = render_reap(&s, false, false);
         assert!(
-            text.contains("  kept b1 (open work: N3 in_review)"),
+            text.contains("  kept b1 (open work: N3 in_review; read via sessions)"),
             "{text}"
         );
         let out = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(
             v["kept_open_work"],
-            json!([{"id": "b1", "node": "N3", "status": "in_review"}])
+            json!([{"id": "b1", "node": "N3", "status": "in_review", "reader": "sessions"}])
+        );
+    }
+
+    /// x-2774 change 4: the no-provenance keep line carries a closing paren
+    /// and a real newline. The old spelling emitted an unbalanced paren and
+    /// a literal backslash-n; invisible only while the bucket measured
+    /// empty.
+    #[test]
+    fn reap_no_provenance_line_is_well_formed() {
+        let s = GcSummary {
+            kept_no_provenance: vec!["d1".into()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        let line = text
+            .lines()
+            .find(|l| l.contains("kept d1"))
+            .expect("the keep line renders");
+        assert!(
+            line.starts_with("  kept d1 (no provenance:") && line.ends_with(')'),
+            "{line}"
+        );
+        assert!(
+            !text.contains("\\n"),
+            "no literal backslash-n in stdout: {text}"
+        );
+    }
+
+    /// x-2774 change 2: a terminal-state retirement names the session state
+    /// and the reader in the basis; the all-done basis is byte-identical to
+    /// its old string.
+    #[test]
+    fn reap_retired_bases_spell_their_answer() {
+        let s = GcSummary {
+            retired: vec![(
+                "a1".into(),
+                "session terminal: harness state done (via sessions); node N3 in_review".into(),
+            )],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("session terminal: harness state done"),
+            "{text}"
         );
     }
 
@@ -558,7 +683,12 @@ mod tests {
         // within-grace, uncorroborated, or backstop.
         let s = GcSummary {
             retired: vec![("a1".into(), "every named node done: N1".into())],
-            kept_open_work: vec![("b1".into(), "N3".into(), "in_review".into())],
+            kept_open_work: vec![(
+                "b1".into(),
+                "N3".into(),
+                "in_review".into(),
+                "sessions".into(),
+            )],
             kept_active: vec![("c1".into(), 10)],
             kept_no_provenance: vec!["d1".into()],
             ..Default::default()
@@ -693,5 +823,61 @@ mod tests {
             receipt.notice.as_deref(),
             Some("server liveness incomplete")
         );
+    }
+
+    #[test]
+    fn state_file_reap_json_keeps_all_four_zero_count_families() {
+        let summary = crate::gc_sweep::StateFilesReapSummary::default();
+        let out = render_state_files_reap(&summary, true);
+        let value: Value = serde_json::from_str(out.trim()).expect("valid json");
+
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert_eq!(value["families"][family]["scanned"], json!(0));
+            assert_eq!(value["families"][family]["deleted"], json!(0));
+            assert_eq!(value["families"][family]["would_delete"], json!(0));
+            assert_eq!(value["families"][family]["bytes"], json!(0));
+            assert!(value["families"][family].get("oldest_age_s").is_some());
+            assert_eq!(value["families"][family]["kept"], json!([]));
+        }
+        assert_eq!(value["totals"]["scanned"], json!(0));
+        assert_eq!(value["totals"]["deleted"], json!(0));
+        assert_eq!(value["totals"]["would_delete"], json!(0));
+        assert_eq!(value["applied"], json!(false));
+        assert_eq!(value["dry_run"], json!(true));
+        assert_eq!(value["skip_reason"], Value::Null);
+    }
+
+    #[test]
+    fn state_file_reap_text_names_each_family_total_and_dry_run() {
+        let mut summary = crate::gc_sweep::StateFilesReapSummary::default();
+        summary.plan_locks.kept = vec![
+            crate::gc_sweep::StateReapKept {
+                path: "locks/plan.lock".into(),
+                reason: "within retention window".into(),
+            };
+            10_000
+        ];
+        summary.totals.kept = 10_000;
+        let out = render_state_files_reap(&summary, false);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 6, "four families, total, and dry-run marker");
+        assert!(
+            out.len() < 1_024,
+            "text output grew with kept paths: {}B",
+            out.len()
+        );
+        assert!(lines[0].starts_with("expired_claims:"));
+        assert!(lines[1].starts_with("plan_locks:"));
+        assert!(lines[1].contains("within retention window=10000"));
+        assert!(lines[2].starts_with("agent_locks:"));
+        assert!(lines[3].starts_with("pr_status_cache:"));
+        assert!(lines[4].starts_with("total:"));
+        assert_eq!(lines[5], "(dry-run: no changes made)");
     }
 }

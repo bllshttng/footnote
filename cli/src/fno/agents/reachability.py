@@ -26,6 +26,10 @@ Four rules, all load-bearing:
 3. ``unknown`` is TERMINAL. No consumer may coerce it to either pole. Absence of
    evidence stays absence of evidence.
 4. Basis and age are part of the VALUE. A bare ``live`` is unprintable.
+5. Positive evidence EXPIRES. Transcript activity certifies liveness only
+   inside ``TRANSCRIPT_EVIDENCE_S``; past it an active tail demotes to
+   ``unknown`` (basis ``stale-transcript``), never ``unreachable`` -- an old
+   transcript is absence of evidence exactly as silence is (x-c1a3).
 
 Why silence is never ``unreachable``
 ------------------------------------
@@ -155,6 +159,19 @@ def rendered_activity(
 #: finished-but-live worker got reported unreachable.
 _ACTIVE_STATES = frozenset({"working", "watching", "your-move"})
 
+#: Transcript activity is positive evidence of liveness only while it is FRESH.
+#: Past this, an active-looking tail records that a session WAS active, not that
+#: it is now. Measured twice: a fleet of dead workers idle 20 to 58 minutes, all
+#: reporting live (the STALE_ATTENTION_S note in session_truth), and node x-52d2
+#: wedged behind a transcript quiet for 83 minutes that still read ``working``.
+#: Deliberately not STALE_ATTENTION_S: that constant refuses to carry a
+#: decision, and this one is a decision.
+TRANSCRIPT_EVIDENCE_S = 20 * 60
+
+#: Basis when an active tail resolved but is too old to certify liveness now.
+#: UNKNOWN, never UNREACHABLE: an old transcript is absence of evidence.
+STALE_TRANSCRIPT = "stale-transcript"
+
 
 @dataclass(frozen=True)
 class Reachability:
@@ -179,6 +196,7 @@ def classify_reachability(
     truth_state: Optional[str],
     age_s: Optional[int],
     falsifier: Optional[str],
+    fresh_s: float = TRANSCRIPT_EVIDENCE_S,
 ) -> Reachability:
     """Pure classifier. ``falsifier`` is a basis string, or None for "did not fire".
 
@@ -191,6 +209,11 @@ def classify_reachability(
     if falsifier is not None:
         return Reachability(UNREACHABLE, falsifier, age_s)
     if truth_state in _ACTIVE_STATES:
+        # An unknowable age stays REACHABLE. Only POSITIVE evidence of staleness
+        # demotes; a missing age is not evidence, and the monotone rule in this
+        # module's header forbids lowering on absence.
+        if age_s is not None and age_s > fresh_s:
+            return Reachability(UNKNOWN, STALE_TRANSCRIPT, age_s)
         return Reachability(REACHABLE, TRANSCRIPT, age_s)
     if truth_state is None or truth_state == "unknown":
         return Reachability(UNKNOWN, NO_EVIDENCE, age_s)

@@ -196,6 +196,8 @@ class DispatchClaimObservation:
     holder: str
     truth_status: str
     action: str
+    worker: str = ""
+    block_reason: Optional[str] = None
 
     @property
     def blocks_dispatch(self) -> bool:
@@ -203,6 +205,13 @@ class DispatchClaimObservation:
 
     @property
     def refusal_reason(self) -> Optional[str]:
+        # The action token wins when it is the more specific refusal: a node
+        # at its dead-dispatch limit that also hits a roster failure reports
+        # auto-deferred, not the authority error that merely co-occurred.
+        if self.action in ("auto-deferred", "defer-failed"):
+            return self.action
+        if self.block_reason:
+            return self.block_reason
         if self.action == "blocked":
             return "already-claimed"
         return self.action if self.blocks_dispatch else None
@@ -570,7 +579,12 @@ def _undispatched_nodes(
         cmd += ["--project", project]
     if mission:
         cmd += ["--mission", mission]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"fno backlog undispatched did not answer inside its 60s budget: {' '.join(cmd)}"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"
@@ -1768,7 +1782,7 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, chain = route_resolve.resolve_slot(
+        candidate, chain, _verdict = route_resolve.resolve_slot(
             "target",
             node,
             capacity,
@@ -1783,14 +1797,11 @@ def _grid_lane_for(
     terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
         return None, None, None, None, terminal
-    # Placement commits a harness-keyed worktree, which unknown capacity must
-    # not buy: the grid's unknown-permitted posture is right for injection
-    # (defaults still compose the argv), wrong for a lane decision with no
-    # data at all. Fall back to the caller's defaults there.
-    state = capacity.get(candidate["harness"])
-    verdict = state.get("state", "unknown") if isinstance(state, dict) else state
-    if str(verdict).lower() not in ("ok", "low", "available"):
-        return None, None, None, None, f"grid=capacity-{str(verdict).lower()}"
+    # Placement retains the resolver's complete decision: the candidate
+    # carries the capacity verdict that selected it, and the resolver already
+    # skipped exhausted lanes. A second, harness-wide capacity re-check here
+    # would discard the selected coordinate and re-price it independently -
+    # the exact dual-decision this node deletes (x-90a9 task 2.1).
     return (
         candidate["harness"],
         candidate["model"],
@@ -1994,6 +2005,14 @@ def dispatch_lanes(
     native_verdicts = claim_verdicts(
         [key for node in selected for key in (f"node:{node['id']}", f"dispatch:{node['id']}")]
     )
+    worked_nodes: Optional[dict[str, list[str]]] = None
+    worked_error: Optional[str] = None
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+
+        worked_nodes = live_worked_node_ids(strict=True)
+    except Exception as exc:  # noqa: BLE001 - refuse the whole batch safely
+        worked_error = str(exc)
 
     canonical = _canonical_root()
     ev_path = events_path or _events_path(project_root or canonical)
@@ -2024,7 +2043,11 @@ def dispatch_lanes(
             # advance()/dispatch-node.sh path, which dedups on node:<id> +
             # dispatch:<id>. Guard with the same dispatch:<id> reservation.
             block_reason = _node_dispatch_block_reason(
-                node_id, str(root), native_verdicts=native_verdicts
+                node_id,
+                str(root),
+                native_verdicts=native_verdicts,
+                worked_nodes=worked_nodes,
+                worked_error=worked_error,
             )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
@@ -3046,6 +3069,8 @@ def _observe_node_claim(
     enforce_failure_limit: bool = True,
     emit: bool = True,
     native_info: Optional[dict] = None,
+    worked_nodes: Optional[dict[str, list[str]]] = None,
+    worked_error: Optional[str] = None,
 ) -> DispatchClaimObservation:
     """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
@@ -3064,6 +3089,19 @@ def _observe_node_claim(
     claim_state = info.get("state")
     holder = info.get("holder") or "unknown"
     occupied = verdict in ("ours", "foreign_live")
+    worker = ""
+    if worked_nodes is None and worked_error is None:
+        try:
+            from fno.graph.statuses import live_worked_node_ids
+
+            worked_nodes = live_worked_node_ids(strict=True)
+        except Exception as exc:  # noqa: BLE001 - refuse rather than fail open
+            worked_error = str(exc)
+    workers = (worked_nodes or {}).get(node_id, [])
+    if workers:
+        occupied = True
+        worker = ", ".join(workers)
+    block_reason = "worked-authority-unavailable" if worked_error else None
     dead_action = (
         None
         if occupied or not enforce_failure_limit
@@ -3074,6 +3112,8 @@ def _observe_node_claim(
         if occupied
         else dead_action
         if dead_action is not None
+        else "blocked"
+        if worked_error
         else "redispatch"
         if verdict == "dead_predecessor"
         else "dispatch"
@@ -3082,17 +3122,21 @@ def _observe_node_claim(
     if emit:
         from fno.agents import events as agent_events
 
-        agent_events.emit(
-            EVENT_CLAIM_OBSERVED,
-            node_id=node_id,
-            claim_verdict=verdict,
-            claim_state=claim_state,
-            holder=holder,
-            truth_status=truth,
-            action=action,
-            # Session witness basis, only when the classifier reported one.
-            **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
-        )
+        event_data: dict[str, Any] = {
+            "node_id": node_id,
+            "claim_verdict": verdict,
+            "claim_state": claim_state,
+            "holder": holder,
+            "truth_status": truth,
+            "action": action,
+        }
+        if info.get("session_basis"):
+            event_data["session_basis"] = info["session_basis"]
+        if worker:
+            event_data["worker"] = worker
+        if block_reason:
+            event_data["block_reason"] = block_reason
+        agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
         message = (
             f"dispatch {action} for {node_id}: node claim is {claim_state}, "
@@ -3108,6 +3152,8 @@ def _observe_node_claim(
         holder=holder,
         truth_status=truth,
         action=action,
+        worker=worker,
+        block_reason=block_reason,
     )
 
 
@@ -3116,6 +3162,8 @@ def _node_dispatch_block_reason(
     node_cwd: Optional[str] = None,
     *,
     native_verdicts: Optional[dict[str, dict]] = None,
+    worked_nodes: Optional[dict[str, list[str]]] = None,
+    worked_error: Optional[str] = None,
 ) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
     native_info = None
@@ -3123,7 +3171,13 @@ def _node_dispatch_block_reason(
         native_info = native_verdicts.get(f"node:{node_id}")
         if native_info is None:
             return "claim-verdict-unavailable"
-    observation = _observe_node_claim(node_id, node_cwd, native_info=native_info)
+    observation = _observe_node_claim(
+        node_id,
+        node_cwd,
+        native_info=native_info,
+        worked_nodes=worked_nodes,
+        worked_error=worked_error,
+    )
     if observation.blocks_dispatch:
         return observation.refusal_reason
     if _claim_is_live(f"dispatch:{node_id}", verdicts=native_verdicts):

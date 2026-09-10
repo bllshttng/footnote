@@ -52,7 +52,7 @@ fno-gh-proxy = "fno.pr.gh_proxy:main"
 path = "src/fno/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fno"]
+packages = ["src/fno", "src/fno_routing_sample"]
 
 # The canonical events schema ships INSIDE the wheel as `fno/events/schema.yaml`
 # - ordinary package data under `src/fno`, so both the wheel and the sdist carry

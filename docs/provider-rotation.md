@@ -43,6 +43,8 @@ before `dispatch_env()` returns a usable env dict.
 or `{"HOME": ...}`) that, when merged into a subprocess's env, points the CLI
 at the correct credentials directory.
 
+**Routing row's account axis** - A `[[routing.models]]` row's `account` names one record `id` here, and its `route` names the vendor whose quota a launch spends. The pair makes the ACCESS PATH the priced unit. The same model over a subscription record and over per-token API dollars is two rows with two cost profiles, never one averaged number. Under the strict inventory policy (`routing.enforce_inventory`), capacity is observed per named account, so one locked-out record skips its own lane without walling the harness. The routing audit (`fno-agents route-slot audit`) names the selected record per verified session. See [role-based-model-routing.md](architecture/role-based-model-routing.md).
+
 ---
 
 ## Schema reference
@@ -1033,7 +1035,7 @@ Plan A introduces a NEW state file at `.fno/provider-runtime-state.json` for per
 | File | Owns | Lifetime | Lock |
 |---|---|---|---|
 | `failover-state.json` | phase storm-cap, no-swap-back | per-phase (resets on phase boundary) | `<path>.lock` |
-| `provider-runtime-state.json` | per-provider backoff_level + rate_limited_until | survives target spawns within a megawalk campaign; 1h TTL | `<path>.update.lock` |
+| `provider-runtime-state.json` | per-provider backoff_level + rate_limited_until | survives target spawns within a multi-node campaign; 1h TTL | `<path>.update.lock` |
 
 The two files use different sidecar lock paths so the runtime-state writer cannot self-deadlock on `atomic_write`'s internal lock. The `failover-state.json` schema (phase_id, swaps_this_phase, last_swap_from, last_swap_at_iso) is unchanged.
 
@@ -1135,7 +1137,7 @@ The headline scenario (`test_ac3_1_opus_locked_sonnet_free`) pins the user-visib
 
 ## Combos and round-robin (Plan B)
 
-Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`) and add per-combo cursor state in the same `provider-runtime-state.json` so parallel target spawns within a megawalk campaign share rotation.
+Combos are named ordered provider lists with a rotation strategy. They sit on top of the Plan A substrate (`ProviderHealth`, `is_in_cooldown`, `classify_error`, `update_provider_health`). Per-combo cursor state lives in the same `provider-runtime-state.json`, so parallel target spawns within a multi-node campaign share rotation.
 
 ### Schema
 
@@ -1240,10 +1242,10 @@ Single-provider combos short-circuit (cursor never advances past `idx=0`).
 
 | Surface | How combo is supplied |
 |---------|-----------------------|
-| `/target` skill | `/target combo my-stack "feature"` (positional 2-token modifier) |
-| `/megawalk` skill | `/megawalk combo my-stack` |
+| `/target` skill | `/fno:target combo my-stack "feature"` (positional 2-token modifier) |
 | `run-target-loop.sh` | `TARGET_COMBO=my-stack bash scripts/run-target-loop.sh <plan>` (env; the `fno loop` verb is removed) |
-| `fno megawalk` | `fno megawalk --combo my-stack` |
+
+(The `/megawalk` skill and `fno megawalk` combo rows are gone with the retired megawalk surface.)
 
 All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawned subprocesses (`spawn_with_provider_snapshot` already propagates env to target children).
 
@@ -1690,6 +1692,8 @@ separate post-hoc layer).
 | size `L` | `full_sigma` |
 | size `M` | `diverse_preferred` |
 | size `S` / unknown | `portable` |
+
+The effective kinds start from the session's ambient harness (`resolve_harness_identity`), and an implementer with no ledger row yet is that same harness. A codex session with cross-model off reads `[codex]` and can never satisfy high assurance on its own. That is the honest reading under law d-d4b4293e. Review runs in the session that did the work. The only way to hand that session a different family was a spawned review session.
 
 `assess_assurance(policy, ...)` turns the *effective reviewer kinds* (what the
 panel will genuinely dispatch to) into a verdict with a single load-bearing

@@ -78,6 +78,38 @@ pub struct GcRow {
     /// live; relayed here so the keep is named by the policy, never silently
     /// dropped. `None` when nothing holds.
     pub confirm_hold: Option<KeepReason>,
+    /// The harness-published terminal state for this session (`done`,
+    /// `stopped`, `failed`), when the harness publishes one (x-2774 change
+    /// 1). `None` covers both "not terminal" and "no such instrument":
+    /// neither is evidence.
+    pub session_terminal: Option<String>,
+    /// A LIVE newer registry row resolves the same node this row does
+    /// (x-2774 change 3), formatted `{name} (created {ts})`. The node's
+    /// openness justifies that row, not this one.
+    pub superseded_by_live_peer: Option<String>,
+    /// The open node's RECORDED `merge_status` reads `merged` (x-2774
+    /// change 6): the status field can lag the merge by minutes when
+    /// reconcile is slow. Recorded evidence outranks the lagging status.
+    pub node_merged: bool,
+    /// The row's own pid answered ESRCH (x-2774 change 8): a provably dead
+    /// process. Death overrides transcript recency - a dead process writes
+    /// nothing, so a fresh mtime without a living writer is an artifact -
+    /// but an absent or unanswerable pid never does: only ESRCH is death.
+    pub pid_gone: bool,
+}
+
+impl GcRow {
+    /// The session-shaped release (x-2774): the ONE predicate the policy
+    /// arm and the sweep's obligation yields both read, so they cannot
+    /// drift. A released row's own open do row is the stale record of work
+    /// that moved on, never a live assignment.
+    pub fn session_released(&self) -> bool {
+        self.session_terminal.is_some()
+            || self.superseded_by_live_peer.is_some()
+            || matches!(&self.work, WorkState::Open { status, .. }
+                if INACTIVE_NODE_STATUSES.contains(&status.as_str()))
+            || self.node_merged
+    }
 }
 
 /// The statuses that complete a PLANNING assignment: the plan was written
@@ -87,6 +119,13 @@ pub struct GcRow {
 /// revision assignment stays outstanding).
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
+
+/// Node statuses that are NOT active work. A parked or never-started node
+/// is not evidence that a session is alive, so it does not shield one
+/// (x-2774 change 6). `superseded` is deliberately absent: a superseded
+/// node's work moved elsewhere and the row's own supersession is a registry
+/// question, not a node-status one.
+pub const INACTIVE_NODE_STATUSES: [&str; 2] = ["deferred", "idea"];
 
 /// WHICH gate is holding a [`GcAction::Keep`] row. Every keep is named - a
 /// row that is stuck and invisible is the failure mode this enum exists to
@@ -217,6 +256,11 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // replanning worker inherits no completion an earlier blueprint
             // wrote. An absent or empty closed set fails closed, exactly as
             // the empty-status guard below does.
+            // x-2774: the lane keeps precedence over the session-shaped
+            // releases below - a bp- row the releases would free but whose
+            // own assignment is still outstanding (AC3-EDGE, the idea-node
+            // hold) stays outstanding. Every change-1/3/6 acceptance row is
+            // a non-planner row, so their outcomes are unchanged.
             if let Some(assignments) = &row.planning {
                 // An EMPTY status set fails closed: a lane that fires on a
                 // vacuous all() would retire a row the graph could not
@@ -237,6 +281,34 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                         ),
                     };
                 }
+                if !assignments.is_empty() {
+                    // AC3-EDGE: an assignment that never reached a
+                    // planning-complete status holds the row - the plan it
+                    // was dispatched to write never landed. The x-2774
+                    // releases below do not steal this hold: an unfinished
+                    // planning assignment is work, whatever the node's
+                    // status says.
+                    return (
+                        GcAction::Keep,
+                        Some(KeepReason::OpenWork {
+                            node: node.clone(),
+                            status: status.clone(),
+                        }),
+                    );
+                }
+            }
+            // x-2774 changes 1, 3, 6, 8: open NODE state alone is not
+            // evidence a SESSION is alive. Four positive facts say this
+            // row's own story is over, and each falls through to the same
+            // grace gate a done node takes (the transcript gates keep this
+            // from being a blanket sweep):
+            // - the harness publishes a terminal state for the session;
+            // - a live newer registry row resolves the same node;
+            // - the node is parked (deferred) or never started (idea);
+            // - the node's recorded merge_status already reads merged.
+            // Dead pid is change 8 and rides the grace gate itself.
+            if row.session_released() {
+                return grace_gate(row, grace_secs);
             }
             (
                 GcAction::Keep,
@@ -255,7 +327,12 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     match row.transcript_age_s {
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-        Some(age) if age <= grace_secs => (GcAction::Keep, Some(KeepReason::Active { age_s: age })),
+        // x-2774 change 8: a provably dead pid (ESRCH) overrides recency.
+        // Recency without a living writer is not liveness; only ESRCH
+        // revokes it, never an absent or unanswerable pid.
+        Some(age) if age <= grace_secs && !row.pid_gone => {
+            (GcAction::Keep, Some(KeepReason::Active { age_s: age }))
+        }
         Some(_) => (GcAction::Retire, None),
     }
 }
@@ -645,6 +722,55 @@ pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
         })
 }
 
+const STATE_REAP_FIELDS: [&str; 5] = ["deleted", "would_delete", "kept", "bytes", "oldest_age_s"];
+
+fn state_reap_family_tuple(family: &gc_sweep::StateReapFamilySummary) -> serde_json::Value {
+    serde_json::json!([
+        family.deleted,
+        family.would_delete,
+        family.kept.len(),
+        family.bytes,
+        family.oldest_age_s,
+    ])
+}
+
+fn state_reap_event_payload(summary: &gc_sweep::StateFilesReapSummary) -> serde_json::Value {
+    serde_json::json!({
+        "fields": STATE_REAP_FIELDS,
+        "families": {
+            "expired_claims": state_reap_family_tuple(&summary.expired_claims),
+            "plan_locks": state_reap_family_tuple(&summary.plan_locks),
+            "agent_locks": state_reap_family_tuple(&summary.agent_locks),
+            "pr_status_cache": state_reap_family_tuple(&summary.pr_status_cache),
+        },
+        "totals": [
+            summary.totals.deleted,
+            summary.totals.would_delete,
+            summary.totals.kept,
+            summary.totals.bytes,
+            summary.totals.oldest_age_s,
+        ],
+        "skip_reason": summary.skip_reason,
+    })
+}
+
+/// Apply the configured expendable-state retention policy and record one
+/// bounded outcome event, including quiet and disabled passes.
+pub fn state_file_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    cwd: &std::path::Path,
+) -> gc_sweep::StateFilesReapSummary {
+    let summary = gc_sweep::reap_state_files_for_cwd(
+        home,
+        cwd,
+        crate::agents_config::state_reap_config(cwd),
+        true,
+    );
+    let _ = emitter.emit("state_reap", &state_reap_event_payload(&summary));
+    summary
+}
+
 /// The idle tick's two sweeps no registry row accounts for. `gc_sweep` retires
 /// ROWS; a child whose parent died is reparented to init and nothing owned it
 /// at all, and the latch's record dir is keyed by argv, so a roster whose
@@ -693,6 +819,7 @@ pub fn maybe_retirement_sweep(
         let emitter = EventEmitter::new(events, "daemon");
         let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
+        let _ = state_file_sweep(&home, &emitter, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // Hand back the NEXT window's interval, resolved off-loop: the tick
@@ -901,6 +1028,180 @@ mod tests {
         assert_eq!(retire_interval_snapshot(&cell).as_secs(), 45);
     }
 
+    #[test]
+    fn state_reap_event_reports_counts() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let prior_claims = std::env::var_os("FNO_CLAIMS_ROOT");
+        let prior_home = std::env::var_os("HOME");
+        let prior_pr_cache = std::env::var_os("FNO_PR_STATUS_CACHE_DIR");
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        std::env::set_var("HOME", root.path());
+        std::env::set_var(
+            "FNO_PR_STATUS_CACHE_DIR",
+            root.path().join(".fno/cache/pr-status"),
+        );
+        let home = AgentsHome::at(root.path().join("agents"));
+        home.ensure_root().unwrap();
+        let cwd = root.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(
+            cwd.join(".fno/config.toml"),
+            "[agents.state_reap]\n\
+             enabled = true\n\
+             locks_retain_days = 1\n\
+             expired_claims_retain_days = 1\n\
+             pr_status_cache_retain_days = 1\n",
+        )
+        .unwrap();
+        let claim = root.path().join(".fno/claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&claim)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let summary = state_file_sweep(&home, &emitter, &cwd);
+
+        assert_eq!(summary.expired_claims.deleted, 1);
+        assert!(!claim.exists());
+        let quiet = state_file_sweep(&home, &emitter, &cwd);
+        assert_eq!(quiet.totals.scanned, 0);
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "each periodic pass must emit one event");
+        let event = &lines[0];
+        assert_eq!(event["type"], "state_reap");
+        assert_ne!(event["type"], "event_payload_too_large");
+        assert_eq!(event["source"], "test");
+        let data = &event["data"];
+        assert_eq!(
+            data["fields"],
+            serde_json::json!(["deleted", "would_delete", "kept", "bytes", "oldest_age_s"])
+        );
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert_eq!(
+                data["families"][family].as_array().map(Vec::len),
+                Some(5),
+                "missing compact {family} tuple: {data}"
+            );
+        }
+        assert_eq!(data["families"]["expired_claims"][0], 1);
+        assert_eq!(data["families"]["expired_claims"][1], 0);
+        assert_eq!(data["families"]["expired_claims"][2], 0);
+        assert_eq!(data["families"]["expired_claims"][3], 5);
+        assert!(data["families"]["expired_claims"][4].is_number());
+        assert_eq!(data["totals"][0], 1);
+        assert_eq!(data["totals"][1], 0);
+        assert_eq!(data["totals"][2], 0);
+        assert_eq!(data["totals"][3], 5);
+        assert!(data["totals"][4].is_number());
+        assert!(data["skip_reason"].is_null());
+        assert_eq!(lines[1]["type"], "state_reap");
+        assert_eq!(
+            lines[1]["data"]["totals"],
+            serde_json::json!([0, 0, 0, 0, null])
+        );
+        assert!(lines[1]["data"]["skip_reason"].is_null());
+
+        let mut live = gc_sweep::StateFilesReapSummary::default();
+        live.expired_claims.deleted = 6_594;
+        live.expired_claims.would_delete = 2_393;
+        live.expired_claims.kept = vec![
+            gc_sweep::StateReapKept {
+                path: String::new(),
+                reason: String::new(),
+            };
+            27
+        ];
+        live.expired_claims.bytes = 9_880_000;
+        live.expired_claims.oldest_age_s = Some(8_631_360);
+        live.plan_locks.deleted = 2_393;
+        live.agent_locks.deleted = 4_344;
+        live.pr_status_cache.deleted = 123;
+        live.totals.deleted = 13_454;
+        live.totals.would_delete = 2_393;
+        live.totals.kept = 27;
+        live.totals.bytes = 9_880_000;
+        live.totals.oldest_age_s = Some(8_631_360);
+        let payload = state_reap_event_payload(&live);
+        let payload_len = serde_json::to_vec(&payload).unwrap().len();
+        assert!(
+            payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES,
+            "live-sized state_reap payload is {payload_len}B: {payload}"
+        );
+        match prior_claims {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match prior_pr_cache {
+            Some(value) => std::env::set_var("FNO_PR_STATUS_CACHE_DIR", value),
+            None => std::env::remove_var("FNO_PR_STATUS_CACHE_DIR"),
+        }
+    }
+
+    #[test]
+    fn state_reap_event_reports_disabled_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(root.path().join("agents"));
+        home.ensure_root().unwrap();
+        let cwd = root.path().join("repo");
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(
+            cwd.join(".fno/config.toml"),
+            "[agents.state_reap]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let summary = state_file_sweep(&home, &emitter, &cwd);
+
+        assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
+        let raw = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["type"], "state_reap");
+        assert_ne!(event["type"], "event_payload_too_large");
+        assert_eq!(
+            event["data"]["fields"],
+            serde_json::json!(["deleted", "would_delete", "kept", "bytes", "oldest_age_s"])
+        );
+        for family in [
+            "expired_claims",
+            "plan_locks",
+            "agent_locks",
+            "pr_status_cache",
+        ] {
+            assert_eq!(
+                event["data"]["families"][family],
+                serde_json::json!([0, 0, 0, 0, null])
+            );
+        }
+        assert_eq!(
+            event["data"]["totals"],
+            serde_json::json!([0, 0, 0, 0, null])
+        );
+        assert_eq!(event["data"]["skip_reason"], "disabled");
+    }
+
     // --- the orphan process sweep ---
 
     fn orphan(args: &str, ppid: u32, age_secs: u64) -> ProcRow {
@@ -1094,6 +1395,10 @@ mod tests {
             planning: None,
             planning_closed: Vec::new(),
             confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
         }
     }
 
@@ -1345,7 +1650,7 @@ mod tests {
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1441,7 +1746,7 @@ mod tests {
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1775,5 +2080,133 @@ mod tests {
         );
         assert_eq!(transcript_age_s(None, now), None);
         assert_eq!(transcript_age_s(Some(&[]), now), None);
+    }
+
+    // ── x-2774: the reaper asks the session, not only the node ──────────
+
+    /// An open-work row that is quiet past the grace - the shape the old
+    /// policy held forever.
+    fn open_row(status: &str) -> GcRow {
+        GcRow {
+            work: WorkState::Open {
+                node: "N1".into(),
+                status: status.into(),
+            },
+            ..retiring()
+        }
+    }
+
+    /// Change 1: the harness publishing a terminal state overrides the
+    /// open-work keep. The grace gate still rules: a fresh transcript keeps
+    /// under `active`, and a non-terminal state keeps under open work.
+    #[test]
+    fn terminal_session_state_releases_the_open_work_keep() {
+        let mut row = open_row("in_review");
+        row.session_terminal = Some("done".into());
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+
+        row.transcript_age_s = Some(10);
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 }),),
+            "a terminal state never sweeps a transcript inside the grace"
+        );
+        // A non-terminal state never reaches this field: the population
+        // site filters through is_terminal_roster_state, covered at sweep
+        // level by x2774_terminal_harness_state_releases_an_open_work_row.
+    }
+
+    /// Change 3: a live newer peer on the same node releases the shield.
+    #[test]
+    fn a_live_newer_peer_releases_the_open_work_keep() {
+        let mut row = open_row("in_review");
+        row.superseded_by_live_peer = Some("newer (created 2026-09-09T23:00:00Z)".into());
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+    }
+
+    /// Change 6: a parked or never-started node is not evidence a session
+    /// is alive. `in_review` still holds a non-planner row.
+    #[test]
+    fn an_inactive_node_status_releases_the_open_work_keep() {
+        for status in ["deferred", "idea"] {
+            let row = open_row(status);
+            assert_eq!(
+                gc_decide(&row, GRACE),
+                (GcAction::Retire, None),
+                "status {status} is not active work"
+            );
+        }
+        assert!(matches!(
+            gc_decide(&open_row("in_review"), GRACE),
+            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+        ));
+    }
+
+    /// Change 6: a recorded merge the node status lags is not active work.
+    #[test]
+    fn a_recorded_merge_releases_the_open_work_keep() {
+        let mut row = open_row("in_progress");
+        row.node_merged = true;
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+    }
+
+    /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,
+    /// but never transcript UNRESOLVED - absence is not quiet even for a
+    /// dead pid, because a dead pid says nothing about the transcript.
+    #[test]
+    fn a_dead_pid_overrides_recency_but_not_unresolved() {
+        let mut row = retiring();
+        row.transcript_age_s = Some(100);
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 100 })),
+        );
+        row.pid_gone = true;
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+
+        let mut unresolved = retiring();
+        unresolved.transcript_age_s = None;
+        unresolved.pid_gone = true;
+        assert_eq!(
+            gc_decide(&unresolved, GRACE),
+            (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
+            "dead pid does not make an unreadable transcript quiet"
+        );
+    }
+
+    /// Change 1, inverse: no terminal state, live transcript - the row
+    /// keeps. The release is never a blanket sweep.
+    #[test]
+    fn a_live_session_on_an_open_node_keeps_its_row() {
+        let row = open_row("in_review");
+        assert!(matches!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+        ));
+    }
+
+    /// An adopted orphan row named on no node survives the sweep:
+    /// NoProvenance -> Keep, addressable until the operator resumes it or a
+    /// node names it. Moved here from client_verbs.rs, which is over the
+    /// file budget and may only shrink; the policy is this module's.
+    #[test]
+    fn gc_keeps_synthesized_idle_row() {
+        let row = GcRow {
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: WorkState::NoProvenance,
+            transcript_age_s: Some(10_000),
+            owns_worktree: true,
+            worktree_clean: None,
+            branch_merged: None,
+            planning: None,
+            planning_closed: Vec::new(),
+            confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
+        };
+        assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
 }

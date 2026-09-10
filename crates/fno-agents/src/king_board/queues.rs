@@ -5,7 +5,7 @@ use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
     SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, TERMINAL_RUNGS,
+    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -266,6 +266,14 @@ pub(crate) struct Queue {
     pub(crate) verb: &'static str,
 }
 
+/// The not-read statuses, decided once. A budget kill is `over_budget`;
+/// every other failed read is `unreadable`. Both mean the queue answered
+/// nothing, so every not-read consumer (null count, tally, exit code,
+/// termination rendering) reads this predicate instead of re-deciding.
+pub(crate) fn not_read_status(status: &str) -> bool {
+    status == "unreadable" || status == "over_budget"
+}
+
 pub(crate) fn queue(
     name: &'static str,
     source: String,
@@ -280,7 +288,11 @@ pub(crate) fn queue(
         return Queue {
             name,
             source,
-            status: "unreadable",
+            status: if read.over_budget {
+                "over_budget"
+            } else {
+                "unreadable"
+            },
             error: read.error.clone().unwrap_or_default(),
             count: -1,
             rows: Vec::new(),
@@ -308,7 +320,7 @@ pub(crate) fn queue_json(q: &Queue) -> Value {
         "source": q.source,
         "status": q.status,
         "error": q.error,
-        "count": if q.status == "unreadable" { Value::Null } else { json!(q.count) },
+        "count": if not_read_status(q.status) { Value::Null } else { json!(q.count) },
         "rows": q.rows,
         "actionable": q.actionable,
         "note": q.note,
@@ -320,6 +332,7 @@ pub(crate) fn queue_json(q: &Queue) -> Value {
 pub(crate) struct BoardInputs {
     pub(crate) ready: SourceRead,
     pub(crate) claims: SourceRead,
+    pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     pub(crate) prs: SourceRead,
@@ -825,15 +838,20 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &if inputs.undispatched.is_ok() && inputs.claims.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
-                    SourceRead {
-                        error: inputs.undispatched.error.clone(),
-                        ..Default::default()
-                    }
+                let combined = inputs
+                    .undispatched
                     .error
+                    .clone()
                     .or_else(|| inputs.claims.error.clone())
-                    .unwrap_or_default(),
-                )
+                    .unwrap_or_default();
+                // The composed read keeps the louder verdict: a budget kill
+                // must not degrade into "unreadable" because a second source
+                // was wrapped around it.
+                if inputs.undispatched.over_budget || inputs.claims.over_budget {
+                    SourceRead::over_budget(combined)
+                } else {
+                    SourceRead::err(combined)
+                }
             },
             undispatched_rows,
             true,
@@ -843,8 +861,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS}"),
-            &if inputs.ready.is_ok() && inputs.claims.is_ok() {
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
+            &if inputs.ready.is_ok() && inputs.claims.is_ok() && inputs.worked.is_ok() {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -853,6 +871,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.worked.error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -1019,9 +1038,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     let mut actionable: i64 = 0;
     let mut unreadable: i64 = 0;
+    let mut over_budget: i64 = 0;
     for q in &queues {
-        if q.status == "unreadable" {
-            unreadable += 1;
+        if not_read_status(q.status) {
+            if q.status == "over_budget" {
+                over_budget += 1;
+            } else {
+                unreadable += 1;
+            }
             // A blind ACTIONABLE queue is work: the king may not exit while it
             // cannot see a queue it could have shrunk. A blind report-only
             // queue is loud (the exit code) and still uncounted.
@@ -1037,9 +1061,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     json!({
         "actionable": actionable,
         "unreadable": unreadable,
+        "over_budget": over_budget,
         "queues": queues_json,
         "warnings": warnings,
-        "exit_code": if unreadable > 0 { 1 } else { 0 },
+        "exit_code": if unreadable + over_budget > 0 { 1 } else { 0 },
     })
 }
 
@@ -1108,6 +1133,49 @@ mod tests {
                 .any(|r| r["id"] == "x-out" && r["queue"] == "mergeable_pr"),
             "cross-territory nomination vanished from the board: {out:?}"
         );
+    }
+
+    #[test]
+    fn a_budget_kill_reads_over_budget_not_unreadable() {
+        let read = SourceRead::over_budget(
+            "fno backlog undispatched --json: killed at its 28.5s slice of the board budget; the source did not fail",
+        );
+        let q = queue(
+            "undispatched",
+            "src".to_string(),
+            &read,
+            Vec::new(),
+            true,
+            String::new(),
+            "/fno:target",
+            None,
+        );
+        assert_eq!(q.status, "over_budget");
+        let body = queue_json(&q);
+        assert_eq!(body["count"], Value::Null);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("slice of the board budget"));
+    }
+
+    #[test]
+    fn a_failed_exit_still_reads_unreadable() {
+        let read = SourceRead::err("exit 1: boom");
+        let q = queue(
+            "claims",
+            "src".to_string(),
+            &read,
+            Vec::new(),
+            true,
+            String::new(),
+            "",
+            None,
+        );
+        assert_eq!(q.status, "unreadable");
+        let body = queue_json(&q);
+        assert_eq!(body["count"], Value::Null);
+        assert!(body["error"].as_str().unwrap().contains("exit 1"));
     }
 
     #[test]

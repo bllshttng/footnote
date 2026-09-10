@@ -59,6 +59,7 @@ pub const EPHEMERAL_EVENT_TYPES: &[&str] = &[
     "claim_refreshed",
     "claim_released",
     "claim_stale_reclaimed",
+    "graph_tx_conflict",
     "human_touch",
     "mux_pane_counters",
     "orphan_reap_sweep",

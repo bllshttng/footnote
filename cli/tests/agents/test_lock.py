@@ -18,8 +18,25 @@ import fcntl
 import multiprocessing
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+def _replace_path_on_first_flock(monkeypatch, module, lock_path: Path):
+    real_flock = module.fcntl.flock
+    replaced = False
+
+    def racing_flock(handle, operation):
+        nonlocal replaced
+        if not replaced and operation & fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    monkeypatch.setattr(module.fcntl, "flock", racing_flock)
+    return real_flock
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +93,58 @@ def test_hold_agent_lock_uses_registry_lock_path(tmp_path: Path) -> None:
     with hold_agent_lock("alpha", registry_path):
         # File is created by the context manager
         assert expected.exists()
+
+
+def test_agent_lock_revalidates_inode_after_path_replacement(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents import lock as lock_mod
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_path = _agent_lock_path("inode-race", registry_path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    real_flock = _replace_path_on_first_flock(monkeypatch, lock_mod, lock_path)
+
+    with lock_mod.hold_agent_lock("inode-race", registry_path, timeout=1):
+        with lock_path.open("a") as contender:
+            with pytest.raises(BlockingIOError):
+                real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_agent_lock_replacement_loop_honors_timeout(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents import lock as lock_mod
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_path = _agent_lock_path("timeout-race", registry_path)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    real_flock = lock_mod.fcntl.flock
+    attempts = 0
+
+    def replace_each_time(handle, operation):
+        nonlocal attempts
+        if operation & fcntl.LOCK_EX:
+            attempts += 1
+            if attempts > 2:
+                raise AssertionError("inode replacement loop ignored timeout")
+            lock_path.unlink()
+            lock_path.touch()
+        return real_flock(handle, operation)
+
+    ticks = iter([0.0, 2.0])
+    monkeypatch.setattr(lock_mod.fcntl, "flock", replace_each_time)
+    monkeypatch.setattr(
+        lock_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None),
+    )
+
+    with pytest.raises(lock_mod.AgentLockTimeout) as exc_info:
+        with lock_mod.hold_agent_lock("timeout-race", registry_path, timeout=1):
+            pass
+    assert exc_info.value.timeout == 1
+    assert attempts == 1
 
 
 # ---------------------------------------------------------------------------

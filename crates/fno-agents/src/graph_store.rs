@@ -190,6 +190,8 @@ pub enum StoreError {
     Invalid(String),
     #[error("{0}")]
     ClaimsUnavailable(String),
+    #[error("sqlite: {0}")]
+    Sqlite(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1947,6 +1949,22 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let prefix = format!("{}.bak.", name);
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for legacy in entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            {
+                let source = legacy.path();
+                let target = dir.join(legacy.file_name());
+                if std::fs::rename(&source, &target).is_err()
+                    && std::fs::copy(&source, &target).is_ok()
+                {
+                    let _ = std::fs::remove_file(source);
+                }
+            }
+        }
+    }
     let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1998,6 +2016,8 @@ pub struct MutateOutcome {
     /// that preserves them named.
     pub dropped: usize,
     pub backup: Option<String>,
+    /// Best-effort shadow failures are visible without failing the JSON publish.
+    pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
@@ -2005,6 +2025,11 @@ pub struct MutateOutcome {
     /// True when this graph file is the configured canonical graph
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
+    /// The content digest of the published bytes, computed from the same
+    /// `body` the atomic replace wrote (not re-read from the file). A caller
+    /// that pairs this digest with a file stat can PROVE the file still holds
+    /// this publish before caching against it.
+    pub version: String,
 }
 
 /// Inputs to the store-side mutate cycle that the CLIENT computes
@@ -2031,6 +2056,8 @@ pub struct MutateInput {
     /// plan-based statuses ONLY from this map; `None` keeps stored statuses
     /// (a caller that is not re-deriving from plans).
     pub plan_rungs: Option<BTreeMap<String, String>>,
+    /// True after the read cutover is proven and SQLite owns durable writes.
+    pub sqlite_authoritative: bool,
 }
 
 /// The content digest a begin/commit pair compares (the wire "version").
@@ -2063,12 +2090,21 @@ pub fn locked_mutate(
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
     if let Some(expected) = &input.base_version {
-        let current = file_content_version(path);
+        let current = if input.sqlite_authoritative {
+            crate::graph_sqlite::version(path).map_err(StoreError::Sqlite)?
+        } else {
+            file_content_version(path)
+        };
         if current != *expected {
             return Err(StoreError::Conflict);
         }
     }
-    let raw = match read_raw(path)? {
+    let raw_read = if input.sqlite_authoritative {
+        RawRead::Entries(crate::graph_sqlite::read_entries(path).map_err(StoreError::Sqlite)?)
+    } else {
+        read_raw(path)?
+    };
+    let raw = match raw_read {
         RawRead::Entries(v) => v,
         RawRead::Empty => vec![],
         RawRead::MalformedRoot => {
@@ -2083,6 +2119,8 @@ pub fn locked_mutate(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
+    let mut shadow_before = pre_normalized.clone();
+    canonicalize_entries(&mut shadow_before);
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2202,16 +2240,32 @@ pub fn locked_mutate(
 
     canonicalize_entries(&mut entries);
 
-    let backup = create_backup(path);
-    let body = serialize_graph_file(&entries);
-    write_atomic(path, &body)?;
+    let (backup, shadow_warning, version) = if input.sqlite_authoritative {
+        let version = crate::graph_sqlite::authoritative_sync(path, &shadow_before, &entries)
+            .map_err(StoreError::Sqlite)?;
+        (None, None, version)
+    } else {
+        let backup = create_backup(path);
+        let body = serialize_graph_file(&entries);
+        write_atomic(path, &body)?;
+        let version = {
+            use sha2::Digest as _;
+            format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
+        };
+        let warning = crate::graph_sqlite::shadow_sync(path, &shadow_before, &entries, &version)
+            .err()
+            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
+        (backup, warning, version)
+    };
 
     Ok(MutateOutcome {
         entries,
         dropped,
         backup: backup.map(|p| p.display().to_string()),
+        shadow_warning,
         closure_releases,
         is_canonical,
+        version,
     })
 }
 
@@ -2400,6 +2454,47 @@ mod tests {
     }
 
     #[test]
+    fn create_backup_prunes_legacy_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(&graph, b"current graph").unwrap();
+
+        let legacy_one = root.path().join("graph.json.bak.20240101T000000000000");
+        let legacy_two = root.path().join("graph.json.bak.20240102T000000000000");
+        std::fs::write(&legacy_one, b"legacy one").unwrap();
+        std::fs::write(&legacy_two, b"legacy two").unwrap();
+
+        let retained_dir = root.path().join("backups");
+        std::fs::create_dir(&retained_dir).unwrap();
+        let retained = retained_dir.join("graph.json.bak.retained");
+        std::fs::write(&retained, b"retained bytes").unwrap();
+        let unrelated = root.path().join("other.json.bak.20240101T000000000000");
+        std::fs::write(&unrelated, b"unrelated bytes").unwrap();
+
+        let legacy_count = || {
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("graph.json.bak.")
+                })
+                .count()
+        };
+        assert_eq!(legacy_count(), 2, "positive control for legacy siblings");
+
+        let created = create_backup(&graph).expect("new retained backup");
+
+        assert_eq!(legacy_count(), 0);
+        assert_eq!(created.parent(), Some(retained_dir.as_path()));
+        assert_eq!(std::fs::read(&created).unwrap(), b"current graph");
+        assert_eq!(std::fs::read(&retained).unwrap(), b"retained bytes");
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated bytes");
+    }
+
+    #[test]
     fn presence_type_refuses_the_measured_wipe() {
         // The 2026-09-02 defect: `--details ""` wiped 3,036 characters. The
         // type cannot express it.
@@ -2496,6 +2591,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2509,6 +2605,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2522,6 +2619,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2624,6 +2722,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )

@@ -103,6 +103,17 @@ pub(crate) fn classify_check(check: &Value) -> &'static str {
     "pending"
 }
 
+/// One failed `gh pr list` read rendered as both queue reads it feeds.
+/// Sits between run_json and the queues so the listing's verdict survives
+/// the split: a budget kill must not become "unreadable" here.
+fn split_failed_listing(listing: &SourceRead) -> (SourceRead, SourceRead) {
+    let err = listing.error.clone().unwrap_or_default();
+    (
+        listing.rewrap(err.clone()),
+        listing.rewrap(format!("undriven_pr: {err}")),
+    )
+}
+
 /// Dedup to the latest run per check name/context (check_supersession's
 /// generated selector), then drop the coverage projections, then every fetched
 /// row is judged.
@@ -125,12 +136,8 @@ pub(crate) fn read_prs(
     ];
     let listing = run_json(cmd, cwd, slice);
     if !listing.is_ok() {
-        let err = listing.error.clone().unwrap_or_default();
-        return (
-            SourceRead::err(err.clone()),
-            SourceRead::err(format!("undriven_pr: {err}")),
-            Vec::new(),
-        );
+        let (mergeable, undriven) = split_failed_listing(&listing);
+        return (mergeable, undriven, Vec::new());
     }
     let rows = listing.rows();
     let mut warnings: Vec<String> = Vec::new();
@@ -383,6 +390,22 @@ pub(crate) fn derived_status(entry: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_killed_pr_listing_keeps_the_over_budget_verdict_in_both_queues() {
+        let listing = SourceRead::over_budget(
+            "gh pr list --state open: killed at its 0.8s slice of the board budget; the source did not fail",
+        );
+        let (mergeable, undriven) = split_failed_listing(&listing);
+        assert!(mergeable.over_budget);
+        assert!(undriven.over_budget);
+        assert!(undriven
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("undriven_pr:"));
+    }
+
     #[test]
     fn branch_ids_never_match_a_partial_hex_prefix() {
         assert_eq!(

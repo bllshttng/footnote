@@ -23,8 +23,9 @@
 //! afterwards.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
@@ -84,8 +85,10 @@ pub struct GcSummary {
     /// blueprint/think row on it carries no `ended_at` - the completion
     /// belongs to an earlier assignment, never to this worker (x-5aef).
     pub kept_planning_unclosed: Vec<(String, String)>,
-    /// `(id, node, status)`: a named node is not done; the first open one.
-    pub kept_open_work: Vec<(String, String, String)>,
+    /// `(id, node, status, reader)` (x-2774 change 4): a named node is not
+    /// done; the first open one, and the provenance source that resolved it,
+    /// so a sessions-join keep is distinguishable from a name-pattern keep.
+    pub kept_open_work: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// The transcript could not be resolved through the row's own store.
@@ -129,6 +132,75 @@ pub struct GcSummary {
     pub kept_receipts: Vec<(String, String)>,
 }
 
+/// One state file selected for deletion by the shared age policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateReapEntry {
+    pub path: String,
+    pub bytes: u64,
+    pub age_s: u64,
+}
+
+/// One state file retained because its safety proof was incomplete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateReapKept {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Structured outcome for one independently retained state-file family.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StateReapFamilySummary {
+    pub scanned: usize,
+    pub deleted: usize,
+    pub would_delete: usize,
+    pub bytes: u64,
+    pub oldest_age_s: Option<u64>,
+    pub kept: Vec<StateReapKept>,
+    pub deleted_entries: Vec<StateReapEntry>,
+    pub would_delete_entries: Vec<StateReapEntry>,
+}
+
+/// Totals are derived only from the four named families.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StateReapTotals {
+    pub scanned: usize,
+    pub deleted: usize,
+    pub would_delete: usize,
+    pub bytes: u64,
+    pub oldest_age_s: Option<u64>,
+    pub kept: usize,
+}
+
+/// State-file-only sweep outcome. This type cannot represent row retirement,
+/// so operator and scheduled callers share the file policy without gaining a
+/// path to mutate the live agent registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateFilesReapSummary {
+    pub expired_claims: StateReapFamilySummary,
+    pub plan_locks: StateReapFamilySummary,
+    pub agent_locks: StateReapFamilySummary,
+    pub pr_status_cache: StateReapFamilySummary,
+    pub totals: StateReapTotals,
+    pub applied: bool,
+    pub dry_run: bool,
+    pub skip_reason: Option<String>,
+}
+
+impl Default for StateFilesReapSummary {
+    fn default() -> Self {
+        Self {
+            expired_claims: StateReapFamilySummary::default(),
+            plan_locks: StateReapFamilySummary::default(),
+            agent_locks: StateReapFamilySummary::default(),
+            pr_status_cache: StateReapFamilySummary::default(),
+            totals: StateReapTotals::default(),
+            applied: false,
+            dry_run: true,
+            skip_reason: None,
+        }
+    }
+}
+
 /// The graph read that feeds a sweep: the entries (working graph plus
 /// archive), the reverse-join index over them, and the open-do map (`session
 /// -> nodes carrying an OPEN do row for it`).
@@ -144,10 +216,12 @@ pub struct GraphRead {
     /// its key set is the id set the name and transcript routes resolve
     /// against, so no second id read exists.
     pub statuses: HashMap<String, String>,
-    /// Node id -> (merge_status, additional_prs length) (x-5a62). The
-    /// confirm step reads positive PR-state evidence from it; a missing
-    /// merge_status is recorded as unrecorded, never asserted unmerged.
-    pub pr_state: HashMap<String, (Option<String>, usize)>,
+    /// Node id -> (merge_status, additional_prs total, additional_prs still
+    /// open by recorded state) (x-5a62, x-2774 change 7). The confirm step
+    /// reads positive PR-state evidence from it; a missing merge_status is
+    /// recorded as unrecorded, never asserted unmerged, and an additional PR
+    /// whose state is unrecorded still counts as open.
+    pub pr_state: HashMap<String, (Option<String>, usize, usize)>,
     /// Lowercased session id -> the node ids where THIS session's own
     /// `blueprint` or `think` sessions[] row carries a non-empty `ended_at`
     /// (x-5aef task 1.2). The positive marker the planner's own close
@@ -162,6 +236,12 @@ pub(crate) struct RetireOrder {
     pub(crate) created_at: String,
     pub(crate) tree: TreeAction,
     pub(crate) worktree: Option<String>,
+    /// The session-shaped release (x-2774) that let an OPEN-work row
+    /// retire: terminal state, live peer, parked node, or recorded merge.
+    /// The obligation re-checks yield to it - the released session's own
+    /// open do row is the stale record of work that moved on, not a live
+    /// assignment.
+    pub(crate) released: bool,
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
@@ -239,7 +319,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
-    let mut pr_state: HashMap<String, (Option<String>, usize)> = HashMap::new();
+    let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -252,6 +332,15 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 .unwrap_or_default()
                 .to_string(),
         );
+        let additional = entry
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let additional_open = additional
+            .iter()
+            .filter(|extra| additional_pr_recorded_open(extra))
+            .count();
         pr_state.insert(
             node_id.to_string(),
             (
@@ -259,11 +348,8 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .get("merge_status")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                entry
-                    .get("additional_prs")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0),
+                additional.len(),
+                additional_open,
             ),
         );
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
@@ -330,12 +416,23 @@ pub struct StaleDoRow {
     pub session_id: String,
 }
 
+/// Whether an `additional_prs` entry is still open by RECORDED state alone
+/// (x-2774 change 7). Only an entry whose own `merge_status` reads `merged`
+/// has settled; an entry with no recorded state is still open - absence is
+/// never read as merged, the same fail-closed direction the node-level
+/// confirm takes. Nothing here queries a live tracker: recording the state
+/// at merge time is `fno do pr merge`'s job (`_sync_graph_merge_status`).
+pub(crate) fn additional_pr_recorded_open(extra: &Value) -> bool {
+    extra.get("merge_status").and_then(Value::as_str) != Some("merged")
+}
+
 /// Every open do row sitting on a settled node. Every clause is a positive
 /// marker: `status == "done"`; `merge_status == "merged"`, a field written
 /// only when a caller resolved MERGED from `gh`, so its absence has two
 /// explanations and neither is asserted here; and no `additional_prs` entry
-/// at all - the graph records no per-entry merge state for an additional PR,
-/// so any additional PR holds the row.
+/// still open by recorded state - presence alone never holds the row, an
+/// entry whose recorded merge state says merged does not either, and an
+/// UNRECORDED entry does (x-2774 change 7).
 pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
     let mut stale = Vec::new();
     for entry in entries {
@@ -351,7 +448,7 @@ pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
         let holds_pr = entry
             .get("additional_prs")
             .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+            .is_some_and(|a| a.iter().any(|extra| additional_pr_recorded_open(extra)));
         if holds_pr {
             continue;
         }
@@ -472,6 +569,7 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             canonical_path: None,
             base_version: Some(base),
             plan_rungs: None,
+            sqlite_authoritative: false,
         },
         graph_store::DEFAULT_LOCK_TIMEOUT,
     );
@@ -570,8 +668,8 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
 /// --json --all` snapshot. `Some(reason)` proves the session finished - the
 /// same standard rm's live gate accepts. A finished claude agent never
 /// leaves the roster; it stays listed with state `done`, so absence can
-/// never be the proof here. `blocked` is NOT terminal: the row may be
-/// rotated and resumed, so it holds.
+/// never be the proof here. `blocked` is NOT terminal: the session is
+/// waiting for input, so it holds.
 pub(crate) fn claude_death_reason(
     e: &state::RegistryEntry,
     agents: &crate::claude_roster::ClaudeAgentsSnapshot,
@@ -696,6 +794,13 @@ pub struct ProvenanceVerdict {
     pub route: node_route::NodeRoute,
     pub hold: Option<KeepReason>,
     pub merge_note: Vec<String>,
+    /// The Open node whose RECORDED `merge_status` reads `merged`
+    /// (x-2774 change 6): the status field can lag the merge by minutes
+    /// when reconcile is slow, and the merge evidence is already in the
+    /// same graph read. `Some(node)` releases the open-work shield the way
+    /// a terminal session state does; absence keeps the row, because a
+    /// conservative hold is the right failure and a wrong reap is not.
+    pub merged_but_open: Option<String>,
 }
 
 pub fn provenance_verdict(
@@ -726,34 +831,52 @@ pub fn provenance_verdict(
             b: node,
         });
     let mut merge_note: Vec<String> = Vec::new();
-    if let WorkState::AllDone { nodes } = &work {
-        for node in nodes {
-            let (merge_status, extra) = graph.pr_state.get(node).cloned().unwrap_or((None, 0));
-            if extra > 0 {
-                hold = Some(KeepReason::PrStateContradicts {
-                    node: node.clone(),
-                    detail: format!("additional_prs: {extra}"),
-                });
-                break;
-            }
-            match &merge_status {
-                Some(m) if m != "merged" => {
+    let mut merged_but_open: Option<String> = None;
+    match &work {
+        WorkState::AllDone { nodes } => {
+            for node in nodes {
+                let (merge_status, total, open) =
+                    graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+                if open > 0 {
                     hold = Some(KeepReason::PrStateContradicts {
                         node: node.clone(),
-                        detail: format!("merge_status: {m}"),
+                        detail: format!("additional_prs: {open} of {total} not recorded merged"),
                     });
                     break;
                 }
-                Some(m) => merge_note.push(format!("{node}:{m}")),
-                None => merge_note.push(format!("{node}:unrecorded")),
+                match &merge_status {
+                    Some(m) if m != "merged" => {
+                        hold = Some(KeepReason::PrStateContradicts {
+                            node: node.clone(),
+                            detail: format!("merge_status: {m}"),
+                        });
+                        break;
+                    }
+                    Some(m) => merge_note.push(format!("{node}:{m}")),
+                    None => merge_note.push(format!("{node}:unrecorded")),
+                }
             }
         }
+        // The merge-lag window (x-2774 change 6): the pr_state read used to
+        // be fenced inside the AllDone arm, so the merge evidence already
+        // loaded for every node was discarded on the one branch that needs
+        // it. Recorded merged is positive evidence the work shipped; only
+        // Some("merged") counts, everything else keeps the row.
+        WorkState::Open { node, .. } => {
+            let (merge_status, _total, _open) =
+                graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+            if merge_status.as_deref() == Some("merged") {
+                merged_but_open = Some(node.clone());
+            }
+        }
+        WorkState::NoProvenance => {}
     }
     ProvenanceVerdict {
         work,
         route,
         hold,
         merge_note,
+        merged_but_open,
     }
 }
 
@@ -804,11 +927,68 @@ pub(crate) fn run(
     let mut to_retire: std::collections::BTreeMap<String, RetireOrder> =
         std::collections::BTreeMap::new();
     // The agents snapshot is read at most once per sweep, on the first row
-    // that reaches the stop gate - never on the empty/kept hot path.
+    // that reaches the stop gate - never on the empty/kept hot path. The
+    // terminal-state read (x-2774 change 1) shares the memo: an Open claude
+    // row triggers the same one-snapshot read, so a fleet still pays at
+    // most one `claude agents` per sweep.
     let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
         std::cell::RefCell::new(None);
 
+    // Pass 1 (x-2774 change 3): prove provenance and transcript age ONCE per
+    // spawn row, so the supersession map and the row pass read the same
+    // verdict instead of answering the reverse join twice. Entries the
+    // origin gates already hold stay None - their buckets are decided in
+    // pass 2 without a verdict.
+    let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
+        Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
+        let eligible = e.origin.as_deref() == Some("spawn") && e.crown_level.is_none();
+        if !eligible {
+            staged.push(None);
+            continue;
+        }
+        let Some(graph) = &graph else {
+            staged.push(None);
+            continue;
+        };
+        let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
+        let hits = store_matches(e);
+        let verdict = provenance_verdict(e, sid, graph, hits.as_deref());
+        let age = transcript_age_s(hits.as_deref(), now);
+        staged.push(Some((verdict, age)));
+    }
+
+    // The live-peer map (x-2774 change 3): node -> (name, created_at) of the
+    // NEWEST spawn row on that node whose transcript is inside the grace
+    // window. Both halves are positive markers - a newer spawn exists and it
+    // is demonstrably live - so a lone worker is never superseded and two
+    // quiet peers never sweep each other. Ties resolve by created_at then
+    // name so the map never depends on registry order.
+    let mut live_peer: HashMap<String, (String, String)> = HashMap::new();
+    for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
+        let Some((verdict, age)) = staged_row else {
+            continue;
+        };
+        let fresh = matches!(age, Some(a) if *a <= grace_secs);
+        if !fresh {
+            continue;
+        }
+        if let WorkState::Open { node, .. } = &verdict.work {
+            let take = match live_peer.get(node) {
+                None => true,
+                Some((_, created)) if created.as_str() < e.created_at.as_str() => true,
+                Some((name, created)) => {
+                    created.as_str() == e.created_at.as_str() && name.as_str() < e.name.as_str()
+                }
+                Some((_, _)) => false,
+            };
+            if take {
+                live_peer.insert(node.clone(), (e.name.clone(), e.created_at.clone()));
+            }
+        }
+    }
+
+    for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_handle(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
@@ -832,9 +1012,15 @@ pub(crate) fn run(
             summary.kept_graph_unreadable.push(id);
             continue;
         };
+        let Some((verdict, age)) = staged_row else {
+            // A row pass 1 did not stage: the graph read failed there too.
+            // Same bucket as a failed direct read - never a retirement on a
+            // failed read.
+            summary.kept_graph_unreadable.push(id);
+            continue;
+        };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        let verdict = provenance_verdict(e, sid, graph, store_matches(e).as_deref());
-        let work = verdict.work;
+        let work = verdict.work.clone();
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -845,9 +1031,9 @@ pub(crate) fn run(
                 continue;
             }
         }
-        let confirm_hold = verdict.hold;
-        let merge_note = verdict.merge_note;
-        let age = transcript_age_s(store_matches(e).as_deref(), now);
+        let confirm_hold = verdict.hold.clone();
+        let merge_note = verdict.merge_note.clone();
+        let age = *age;
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
         // The planning lane (x-70e1 task 2): a blueprint/think row's OWN job
         // ends at plan-written-and-node-ready. A row whose sessions[] phases
@@ -885,6 +1071,35 @@ pub(crate) fn run(
         } else {
             Vec::new()
         };
+        // x-2774 changes 1, 3 and 6: the session-shaped releases. The
+        // harness's terminal state, a live newer peer on the same node, a
+        // parked or never-started node, and a recorded merge the status lags
+        // all answer the same question - is THIS session's own story over -
+        // and each falls through to the grace gate in gc_decide.
+        let session_terminal =
+            if matches!(work, WorkState::Open { .. }) && e.harness_name() == "claude" {
+                let mut memo = agents_memo.borrow_mut();
+                let snapshot = memo.get_or_insert_with(&agents_read);
+                crate::daemon::claude_row_id(e)
+                    .and_then(|rid| snapshot.find(&rid).cloned())
+                    .and_then(|row| row.state)
+                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
+            } else {
+                None
+            };
+        let superseded_by_live_peer = match &work {
+            WorkState::Open { node, .. } => live_peer
+                .get(node)
+                .filter(|(peer_name, peer_created)| {
+                    peer_name != &e.name && peer_created.as_str() > e.created_at.as_str()
+                })
+                .map(|(name, created)| format!("{name} (created {created})")),
+            _ => None,
+        };
+        let node_merged = verdict.merged_but_open.is_some();
+        // x-2774 change 8: the existence-specific probe on the row's own
+        // pid. One kill(2) per row, no subprocess; only ESRCH counts.
+        let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -896,6 +1111,10 @@ pub(crate) fn run(
             planning,
             planning_closed,
             confirm_hold,
+            session_terminal,
+            superseded_by_live_peer,
+            node_merged,
+            pid_gone,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
@@ -905,7 +1124,13 @@ pub(crate) fn run(
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => summary.kept_no_provenance.push(id),
                 Some(KeepReason::OpenWork { node, status }) => {
-                    summary.kept_open_work.push((id, node, status))
+                    let reader = verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                        .to_string();
+                    summary.kept_open_work.push((id, node, status, reader))
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
@@ -955,7 +1180,12 @@ pub(crate) fn run(
         // classified would-retire, so the hot path pays nothing.
         if !dry_run {
             let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
-            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs);
+            // x-2774 change 8: activity without a living writer is not
+            // activity. A pid that answered ESRCH at the re-check keeps its
+            // retirement even if the transcript mtime moved - the write came
+            // from something else.
+            let pid_gone_now = e.pid.is_some_and(crate::daemon::pid_is_gone);
+            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs) || pid_gone_now;
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
@@ -990,11 +1220,15 @@ pub(crate) fn run(
         // in the caller that owns the snapshot, so the shared signature is
         // untouched.
         let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
+        // x-2774: the session-shaped release that let an OPEN-work row
+        // retire. The obligation re-checks (stage and commit) yield to it.
+        let released = row.session_released();
         if let Err(refusal) = stage_session_retirement(
             home,
             e,
             ledger.as_deref(),
             dry_run,
+            released,
             &stop_on_death,
             surface_removal,
             &mut receipts,
@@ -1052,8 +1286,36 @@ pub(crate) fn run(
                 note.push_str(&format!("; merge_status: {}", merge_note.join(", ")));
                 format!("{named} ({note})")
             }
-            _ => "done".to_string(), // unreachable: only AllDone retires
+            WorkState::Open { node, status } => {
+                // x-2774 change 2: an Open-work retirement is now reachable,
+                // and it is never anonymous. The arm order mirrors the
+                // release precedence in gc_decide: terminal state, then live
+                // peer, then inactive status, then recorded merge.
+                if let Some(peer) = &probed.superseded_by_live_peer {
+                    format!("superseded on {node} by live peer {peer}")
+                } else if let Some(state) = &probed.session_terminal {
+                    format!(
+                        "session terminal: harness state {state} (via {}); node {node} {status}",
+                        via.as_str()
+                    )
+                } else if crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str()) {
+                    format!("node {node} is {status}, not active work")
+                } else {
+                    format!("node {node} {status}; recorded merge_status merged")
+                }
+            }
+            _ => "done".to_string(), // unreachable: only AllDone and the released Open arms retire
         };
+        // x-2774 change 8: name the early fire in the audit line. A basis
+        // that reads "quiet past grace" when the transcript was actually
+        // inside grace misreports why the row went; the pid evidence is the
+        // reason it went when it did.
+        let basis =
+            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
+                format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
+            } else {
+                basis
+            };
         let worktree = if probed.owns_worktree {
             Some(e.cwd.clone())
         } else {
@@ -1073,6 +1335,7 @@ pub(crate) fn run(
                 created_at: e.created_at.clone(),
                 tree,
                 worktree,
+                released,
             },
         );
     }
@@ -1181,6 +1444,7 @@ pub(crate) fn stage_session_retirement(
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
     dry_run: bool,
+    session_released: bool,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
@@ -1194,7 +1458,15 @@ pub(crate) fn stage_session_retirement(
     // happens on rows already classified would-retire, so steady state pays
     // nothing. The commit-level re-check remains as the second belt for the
     // effects-to-registry-drop span, where holding is harmless.
-    if !dry_run {
+    // x-2774: the re-check yields to a session-shaped release - a session
+    // released by terminal harness state, a live newer peer, a parked node,
+    // or a recorded merge has finished its own story on this node. Its open
+    // do row is the stale record of exactly the work that moved on (to the
+    // peer, to the merge, to the park), and the settle or reconcile owns
+    // closing it. Holding the row here would re-hold every released row one
+    // gate later, on the very obligation the release just resolved. The
+    // grace and freshness gates still protect a genuinely live session.
+    if !dry_run && !session_released {
         if let Some(graph) = read_graph_entries(home) {
             let sid = e
                 .harness_session_id
@@ -1327,6 +1599,10 @@ pub(crate) fn commit_retirements(
         Some(graph) => {
             let held: Vec<(String, String)> = to_retire
                 .iter()
+                // x-2774: a session-shaped release outranks the row's own
+                // stale do row here too, the same yield the stage-time
+                // re-check makes.
+                .filter(|(_, order)| !order.released)
                 .filter_map(|(name, _)| {
                     let entry = entries.iter().find(|e| &e.name == name)?;
                     let sid = entry
@@ -1623,6 +1899,515 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
     }
 }
 
+fn lock_name(shared_root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(shared_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(unix)]
+fn opened_path_matches(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let opened = file.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    Ok((opened.dev(), opened.ino()) == (current.dev(), current.ino()))
+}
+
+#[cfg(not(unix))]
+fn opened_path_matches(_file: &std::fs::File, _path: &std::path::Path) -> std::io::Result<bool> {
+    Ok(true)
+}
+
+fn state_path(shared_root: &std::path::Path, path: &std::path::Path) -> String {
+    lock_name(shared_root, path)
+}
+
+fn keep_state_file(summary: &mut StateReapFamilySummary, path: String, reason: impl Into<String>) {
+    summary.kept.push(StateReapKept {
+        path,
+        reason: reason.into(),
+    });
+}
+
+fn observe_age(summary: &mut StateReapFamilySummary, age_s: u64) {
+    summary.oldest_age_s = Some(summary.oldest_age_s.unwrap_or(0).max(age_s));
+}
+
+fn record_state_file_action(
+    path: &std::path::Path,
+    display_path: String,
+    bytes: u64,
+    age_s: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+) {
+    let entry = StateReapEntry {
+        path: display_path.clone(),
+        bytes,
+        age_s,
+    };
+    if !apply {
+        summary.would_delete += 1;
+        summary.bytes = summary.bytes.saturating_add(bytes);
+        summary.would_delete_entries.push(entry);
+        return;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            summary.deleted += 1;
+            summary.bytes = summary.bytes.saturating_add(bytes);
+            summary.deleted_entries.push(entry);
+        }
+        Err(err) => keep_state_file(summary, display_path, format!("delete failed: {err}")),
+    }
+}
+
+fn read_state_dir(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    summary: &mut StateReapFamilySummary,
+) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            keep_state_file(
+                summary,
+                state_path(shared_root, dir),
+                format!("read directory failed: {err}"),
+            );
+            None
+        }
+    }
+}
+
+fn reap_mtime_family(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    retain_days: u64,
+    extension: Option<&str>,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+) {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                keep_state_file(
+                    summary,
+                    state_path(shared_root, dir),
+                    format!("read entry failed: {err}"),
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
+        {
+            continue;
+        }
+        summary.scanned += 1;
+        let display_path = state_path(shared_root, &path);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                keep_state_file(summary, display_path, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(err) => {
+                keep_state_file(summary, display_path, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, display_path, "within retention window");
+            continue;
+        }
+        record_state_file_action(&path, display_path, metadata.len(), age_s, apply, summary);
+    }
+}
+
+fn reap_pr_status_rows(
+    shared_root: &Path,
+    dir: &Path,
+    retain_days: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+) {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        summary.scanned += 1;
+        let name = state_path(shared_root, &path);
+        let row = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                keep_state_file(summary, name, format!("open failed: {error}"));
+                continue;
+            }
+        };
+        let metadata = match row.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                keep_state_file(summary, name, format!("metadata failed: {error}"));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                keep_state_file(summary, name, format!("metadata failed: {error}"));
+                continue;
+            }
+        };
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, name, "within retention window");
+            continue;
+        }
+        let lock_path = path.with_extension("lock");
+        // A writer creates the sidecar before it touches the row, so no sidecar
+        // means no writer to serialize against. Requiring one here would strand
+        // every row whose lock aged out first: locks_retain_days is shorter than
+        // pr_status_cache_retain_days, and the lock family sweeps after this one.
+        if !lock_path.exists() {
+            match opened_path_matches(&row, &path) {
+                Ok(true) => {
+                    record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
+                }
+                Ok(false) => keep_state_file(summary, name, "path replaced"),
+                Err(error) => {
+                    keep_state_file(summary, name, format!("path revalidation failed: {error}"))
+                }
+            }
+            continue;
+        }
+        let lock = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .truncate(false)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                keep_state_file(summary, name, format!("row lock unavailable: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = lock.try_lock() {
+            keep_state_file(summary, name, format!("row lock held: {error}"));
+            continue;
+        }
+        match opened_path_matches(&row, &path) {
+            Ok(true) => {
+                record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
+            }
+            Ok(false) => keep_state_file(summary, name, "path replaced"),
+            Err(error) => {
+                keep_state_file(summary, name, format!("path revalidation failed: {error}"))
+            }
+        }
+        let _ = lock.unlock();
+    }
+}
+
+fn reap_lock_family(
+    shared_root: &std::path::Path,
+    dir: &std::path::Path,
+    retain_days: u64,
+    apply: bool,
+    summary: &mut StateReapFamilySummary,
+    before_revalidate: &dyn Fn(&std::path::Path),
+) {
+    let Some(entries) = read_state_dir(shared_root, dir, summary) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let window_secs = retain_days.saturating_mul(86_400);
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                keep_state_file(
+                    summary,
+                    state_path(shared_root, dir),
+                    format!("read entry failed: {err}"),
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("lock") {
+            continue;
+        }
+        summary.scanned += 1;
+        let name = state_path(shared_root, &path);
+        let direct = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(err) => {
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        if !direct {
+            keep_state_file(summary, name, "not a direct file");
+            continue;
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                keep_state_file(summary, name, format!("open failed: {err}"));
+                continue;
+            }
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(err) => {
+                keep_state_file(summary, name, format!("metadata failed: {err}"));
+                continue;
+            }
+        };
+        let age_s = now.duration_since(modified).unwrap_or_default().as_secs();
+        observe_age(summary, age_s);
+        if age_s <= window_secs {
+            keep_state_file(summary, name, "within retention window");
+            continue;
+        }
+        if metadata.len() != 0 {
+            keep_state_file(summary, name, "nonzero lock file");
+            continue;
+        }
+        if let Err(err) = file.try_lock() {
+            let reason = match err {
+                std::fs::TryLockError::WouldBlock => "held".to_string(),
+                std::fs::TryLockError::Error(err) => format!("flock failed: {err}"),
+            };
+            keep_state_file(summary, name, reason);
+            continue;
+        }
+        before_revalidate(&path);
+        match opened_path_matches(&file, &path) {
+            Ok(true) => {
+                record_state_file_action(&path, name, metadata.len(), age_s, apply, summary)
+            }
+            Ok(false) => keep_state_file(summary, name, "path replaced"),
+            Err(err) => keep_state_file(summary, name, format!("path revalidation failed: {err}")),
+        }
+        let _ = file.unlock();
+    }
+}
+
+fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
+    let families = [
+        &summary.expired_claims,
+        &summary.plan_locks,
+        &summary.agent_locks,
+        &summary.pr_status_cache,
+    ];
+    StateReapTotals {
+        scanned: families.iter().map(|family| family.scanned).sum(),
+        deleted: families.iter().map(|family| family.deleted).sum(),
+        would_delete: families.iter().map(|family| family.would_delete).sum(),
+        bytes: families.iter().map(|family| family.bytes).sum(),
+        oldest_age_s: families
+            .iter()
+            .filter_map(|family| family.oldest_age_s)
+            .max(),
+        kept: families.iter().map(|family| family.kept.len()).sum(),
+    }
+}
+
+struct StateReapRoots {
+    claims_root: PathBuf,
+    claims_dir: PathBuf,
+    locks_root: PathBuf,
+    agents_root: PathBuf,
+    agents_dir: PathBuf,
+    state_root: PathBuf,
+    pr_status_dir: PathBuf,
+}
+
+fn reap_state_files_with_roots(
+    roots: StateReapRoots,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let mut summary = StateFilesReapSummary {
+        applied: apply && config.enabled,
+        dry_run: !apply,
+        ..Default::default()
+    };
+    if !config.enabled {
+        summary.skip_reason = Some("disabled".to_string());
+        return summary;
+    }
+    reap_mtime_family(
+        &roots.claims_root,
+        &roots.claims_dir.join(".expired"),
+        config.expired_claims_retain_days,
+        None,
+        apply,
+        &mut summary.expired_claims,
+    );
+    reap_lock_family(
+        &roots.locks_root,
+        &roots.locks_root.join("locks"),
+        config.locks_retain_days,
+        apply,
+        &mut summary.plan_locks,
+        &|_| {},
+    );
+    reap_lock_family(
+        &roots.agents_root,
+        &roots.agents_dir.join("locks"),
+        config.locks_retain_days,
+        apply,
+        &mut summary.agent_locks,
+        &|_| {},
+    );
+    reap_pr_status_rows(
+        &roots.state_root,
+        &roots.pr_status_dir,
+        config.pr_status_cache_retain_days,
+        apply,
+        &mut summary.pr_status_cache,
+    );
+    reap_lock_family(
+        &roots.state_root,
+        &roots.pr_status_dir,
+        config.locks_retain_days,
+        apply,
+        &mut summary.pr_status_cache,
+        &|_| {},
+    );
+    summary.totals = state_reap_totals(&summary);
+    summary
+}
+
+/// Test/injected-home entry point. Production callers use
+/// [`reap_state_files_for_cwd`] so each family follows its canonical resolver.
+pub fn reap_state_files(
+    home: &AgentsHome,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let Some(root) = home.root().parent() else {
+        let mut summary = StateFilesReapSummary::default();
+        summary.skip_reason = Some("state root unavailable".into());
+        return summary;
+    };
+    reap_state_files_with_roots(
+        StateReapRoots {
+            claims_root: root.to_path_buf(),
+            claims_dir: root.join("claims"),
+            locks_root: root.to_path_buf(),
+            agents_root: root.to_path_buf(),
+            agents_dir: root.join("agents"),
+            state_root: root.to_path_buf(),
+            pr_status_dir: root.join("cache/pr-status"),
+        },
+        config,
+        apply,
+    )
+}
+
+/// Production entry point: claims, machine locks, agent locks, and PR cache
+/// remain independent roots instead of inheriting `FNO_AGENTS_HOME`'s parent.
+pub fn reap_state_files_for_cwd(
+    home: &AgentsHome,
+    cwd: &std::path::Path,
+    config: crate::agents_config::StateReapConfig,
+    apply: bool,
+) -> StateFilesReapSummary {
+    let Some(claims_root) = crate::claims::global_claims_root() else {
+        return unavailable_state_reap("claims root unavailable");
+    };
+    let Some(claims_dir) = crate::claims::claims_dir_for(None) else {
+        return unavailable_state_reap("claims root unavailable");
+    };
+    let Some(locks_dir) = crate::agents_config::machine_locks_dir() else {
+        return unavailable_state_reap("machine locks root unavailable");
+    };
+    let Some(state_root) = crate::agents_config::state_dir(cwd) else {
+        return unavailable_state_reap("state root unavailable");
+    };
+    let Some(pr_status_dir) = crate::agents_config::pr_status_cache_dir(cwd) else {
+        return unavailable_state_reap("PR-status cache root unavailable");
+    };
+    let Some(locks_root) = locks_dir.parent().map(Path::to_path_buf) else {
+        return unavailable_state_reap("machine locks root unavailable");
+    };
+    reap_state_files_with_roots(
+        StateReapRoots {
+            claims_root,
+            claims_dir,
+            locks_root,
+            agents_root: home.root().parent().unwrap_or(home.root()).to_path_buf(),
+            agents_dir: home.root().to_path_buf(),
+            state_root,
+            pr_status_dir,
+        },
+        config,
+        apply,
+    )
+}
+
+fn unavailable_state_reap(reason: &str) -> StateFilesReapSummary {
+    StateFilesReapSummary {
+        skip_reason: Some(reason.into()),
+        ..Default::default()
+    }
+}
+
+pub fn state_reap_has_failures(summary: &StateFilesReapSummary) -> bool {
+    summary.skip_reason.is_some()
+        || [
+            &summary.expired_claims,
+            &summary.plan_locks,
+            &summary.agent_locks,
+            &summary.pr_status_cache,
+        ]
+        .iter()
+        .flat_map(|family| family.kept.iter())
+        .any(|kept| {
+            kept.reason.contains("failed")
+                || kept.reason.contains("unavailable")
+                || kept.reason.contains("revalidation")
+        })
+}
+
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = value?.as_str()?;
     chrono::DateTime::parse_from_rfc3339(raw)
@@ -1663,6 +2448,418 @@ pub(crate) fn default_ledger_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
+        let base = std::env::temp_dir().join(format!(
+            "fno-expire-stale-state-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(base.join("agents"));
+        home.ensure_root().unwrap();
+        (base, home)
+    }
+
+    fn age_file(path: &std::path::Path, days: u64) {
+        let modified = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(days * 86_400))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+
+    fn run_empty_registry_sweep(home: &AgentsHome, dry_run: bool) -> GcSummary {
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        run(
+            home,
+            &emitter,
+            900,
+            dry_run,
+            7,
+            &|_| panic!("empty registry must return before graph read"),
+            &|_| None,
+            &|_| false,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| (None, None),
+            &|_| None,
+        )
+    }
+
+    #[test]
+    fn row_sweep_does_not_reap_state_files() {
+        let (base, home) = stale_state_home("claims");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let old = expired.join("old-claim");
+        let fresh = expired.join("fresh-claim");
+        let future = expired.join("future-claim");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        std::fs::write(&future, b"{}").unwrap();
+        age_file(&old, 40);
+        age_file(&fresh, 2);
+        std::fs::File::options()
+            .write(true)
+            .open(&future)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(86_400),
+            ))
+            .unwrap();
+
+        let summary = run_empty_registry_sweep(&home, false);
+
+        assert!(old.exists());
+        assert!(fresh.exists());
+        assert!(future.exists(), "future mtimes saturate to age zero");
+        assert_eq!(summary, GcSummary::default());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_removes_old_pr_status_json_and_lock_sidecars() {
+        let (base, home) = stale_state_home("pr-status");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&statuses).unwrap();
+        let old = statuses.join("old.json");
+        let fresh = statuses.join("fresh.json");
+        let lock = statuses.join("old.lock");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&old, 20);
+        age_file(&fresh, 2);
+        age_file(&lock, 20);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(!lock.exists());
+        assert_eq!(summary.pr_status_cache.deleted, 2);
+        assert_eq!(summary.pr_status_cache.kept.len(), 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The default windows retire a sidecar before its row is even eligible
+    /// (7 days against 14, lock family second). A row that outlives its lock
+    /// must still be reapable, or the family stops cleaning after one week.
+    #[test]
+    fn state_reap_still_removes_a_row_whose_lock_aged_out_first() {
+        let (base, home) = stale_state_home("row-outlives-lock");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&statuses).unwrap();
+        let row = statuses.join("42.json");
+        let lock = statuses.join("42.lock");
+        std::fs::write(&row, b"{}").unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&row, 10);
+        age_file(&lock, 10);
+
+        let first = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!lock.exists(), "the lock is past its 7-day window");
+        assert!(row.exists(), "the row is still inside its 14-day window");
+        assert_eq!(first.pr_status_cache.deleted, 1);
+
+        age_file(&row, 20);
+        let second = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!row.exists(), "an orphaned row must not outlive its window");
+        assert_eq!(second.pr_status_cache.deleted, 1);
+        assert!(second.pr_status_cache.kept.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expire_stale_state_keeps_and_names_entries_whose_age_cannot_be_read() {
+        use std::os::unix::fs::symlink;
+
+        let (base, home) = stale_state_home("unknown-age");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let broken = expired.join("broken-claim");
+        symlink(expired.join("missing-target"), &broken).unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(broken.symlink_metadata().is_ok());
+        assert_eq!(summary.expired_claims.kept.len(), 1);
+        assert_eq!(
+            summary.expired_claims.kept[0].path,
+            "claims/.expired/broken-claim"
+        );
+        assert!(summary.expired_claims.kept[0]
+            .reason
+            .contains("metadata failed"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_state_keeps_fresh_groom_marker_for_staleness_consumer() {
+        let (base, home) = stale_state_home("groom");
+        let expired = base.join("claims/.expired");
+        std::fs::create_dir_all(&expired).unwrap();
+        let groom = expired.join("groom:2026-09-08");
+        std::fs::write(&groom, b"{}").unwrap();
+        age_file(&groom, 2);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(groom.exists());
+        assert_eq!(summary.expired_claims.deleted, 0);
+        assert_eq!(summary.expired_claims.kept.len(), 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_state_dry_run_deletes_nothing() {
+        let (base, home) = stale_state_home("dry-run");
+        let expired = base.join("claims/.expired");
+        let statuses = base.join("cache/pr-status");
+        std::fs::create_dir_all(&expired).unwrap();
+        std::fs::create_dir_all(&statuses).unwrap();
+        let claim = expired.join("old-claim");
+        let status = statuses.join("old.json");
+        std::fs::write(&claim, b"{}").unwrap();
+        std::fs::write(&status, b"{}").unwrap();
+        age_file(&claim, 40);
+        age_file(&status, 20);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            false,
+        );
+
+        assert!(claim.exists());
+        assert!(status.exists());
+        assert_eq!(summary.expired_claims.would_delete, 1);
+        assert_eq!(summary.pr_status_cache.would_delete, 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_locks_deletes_only_unheld_old_zero_byte_files() {
+        let (base, home) = stale_state_home("locks");
+        let plan_dir = base.join("locks");
+        let agent_dir = base.join("agents/locks");
+        let cache_dir = base.join("cache/pr-status");
+        for dir in [&plan_dir, &agent_dir, &cache_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let old = plan_dir.join("plan-old.lock");
+        let held = agent_dir.join("held.lock");
+        let nonzero = cache_dir.join("nonzero.lock");
+        std::fs::write(&old, b"").unwrap();
+        std::fs::write(&held, b"").unwrap();
+        std::fs::write(&nonzero, b"holder").unwrap();
+        for path in [&old, &held, &nonzero] {
+            age_file(path, 8);
+        }
+        let held_file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&held)
+            .unwrap();
+        held_file.try_lock().unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!old.exists());
+        assert!(held.exists());
+        assert!(nonzero.exists());
+        assert!(summary
+            .plan_locks
+            .deleted_entries
+            .iter()
+            .any(|entry| entry.path == "locks/plan-old.lock"));
+        assert!(summary
+            .agent_locks
+            .kept
+            .iter()
+            .any(|entry| entry.path == "agents/locks/held.lock" && entry.reason.contains("held")));
+        assert!(summary
+            .pr_status_cache
+            .kept
+            .iter()
+            .any(|entry| entry.path == "cache/pr-status/nonzero.lock"
+                && entry.reason.contains("nonzero")));
+        held_file.unlock().unwrap();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn expire_stale_locks_keeps_a_path_replaced_before_unlink() {
+        let (base, home) = stale_state_home("lock-race");
+        let lock_dir = base.join("locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let path = lock_dir.join("plan-race.lock");
+        std::fs::write(&path, b"").unwrap();
+        age_file(&path, 8);
+
+        let mut summary = StateReapFamilySummary::default();
+        reap_lock_family(&base, &lock_dir, 7, true, &mut summary, &|candidate| {
+            if candidate == path {
+                std::fs::remove_file(candidate).unwrap();
+                std::fs::write(candidate, b"").unwrap();
+            }
+        });
+
+        assert!(path.exists());
+        assert!(summary
+            .kept
+            .iter()
+            .any(|entry| entry.path == "locks/plan-race.lock"
+                && entry.reason.contains("path replaced")));
+        std::fs::remove_dir_all(&base).ok();
+        drop(home);
+    }
+
+    #[test]
+    fn expire_stale_locks_dry_run_deletes_nothing() {
+        let (base, home) = stale_state_home("lock-dry-run");
+        let path = base.join("locks/plan-old.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        age_file(&path, 8);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            false,
+        );
+
+        assert!(path.exists());
+        assert_eq!(summary.plan_locks.deleted, 0);
+        assert_eq!(summary.plan_locks.would_delete, 1);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_dry_run_enumerates_all_families_without_deleting() {
+        let (base, home) = stale_state_home("state-files-dry-run");
+        let claim = base.join("claims/.expired/old-claim");
+        let plan_lock = base.join("locks/plan-old.lock");
+        let quota_lock = base.join("locks/github-graphql-quota.lock");
+        let agent_lock = base.join("agents/locks/worker-old.lock");
+        let pr_status = base.join("cache/pr-status/42.json");
+        for path in [&claim, &plan_lock, &quota_lock, &agent_lock, &pr_status] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+            age_file(path, 40);
+        }
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig {
+                enabled: true,
+                locks_retain_days: 7,
+                expired_claims_retain_days: 30,
+                pr_status_cache_retain_days: 14,
+            },
+            false,
+        );
+
+        assert!(claim.exists());
+        assert!(plan_lock.exists());
+        assert!(quota_lock.exists());
+        assert!(agent_lock.exists());
+        assert!(pr_status.exists());
+        assert_eq!(summary.expired_claims.would_delete, 1);
+        assert_eq!(summary.plan_locks.would_delete, 2);
+        assert_eq!(summary.agent_locks.would_delete, 1);
+        assert_eq!(summary.pr_status_cache.would_delete, 1);
+        assert_eq!(summary.totals.would_delete, 5);
+        assert_eq!(
+            summary.totals.would_delete,
+            summary.expired_claims.would_delete
+                + summary.plan_locks.would_delete
+                + summary.agent_locks.would_delete
+                + summary.pr_status_cache.would_delete
+        );
+        assert!(!summary.applied);
+        assert!(summary.dry_run);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_apply_uses_config_and_never_retires_registry_rows() {
+        let (base, home) = stale_state_home("state-files-apply");
+        let claim = base.join("claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        age_file(&claim, 40);
+        let registry =
+            br#"{"entries":[{"name":"live-worker","created_at":"2026-09-09T00:00:00Z"}]}"#;
+        std::fs::write(home.registry_json(), registry).unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!claim.exists());
+        assert_eq!(summary.expired_claims.deleted, 1);
+        assert_eq!(summary.totals.deleted, 1);
+        assert_eq!(std::fs::read(home.registry_json()).unwrap(), registry);
+        assert!(summary.applied);
+        assert!(!summary.dry_run);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_files_only_disabled_is_an_exact_named_skip() {
+        let (base, home) = stale_state_home("state-files-disabled");
+        let claim = base.join("claims/.expired/old-claim");
+        std::fs::create_dir_all(claim.parent().unwrap()).unwrap();
+        std::fs::write(&claim, b"claim").unwrap();
+        age_file(&claim, 40);
+        let mut config = crate::agents_config::StateReapConfig::default();
+        config.enabled = false;
+
+        let summary = reap_state_files(&home, config, true);
+
+        assert!(claim.exists());
+        assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
+        assert_eq!(summary.totals.deleted, 0);
+        assert_eq!(summary.totals.would_delete, 0);
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// A one-worker roster in the confirmed live shape (the shape the
     /// claude_roster parse test accepts).
@@ -1747,7 +2944,7 @@ mod tests {
                 ("N1".to_string(), "done".to_string()),
                 ("N2".to_string(), "open".to_string()),
             ]),
-            pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0, 0))]),
             ..Default::default()
         };
         let verdict = provenance_verdict(&e, "sid-77", &graph, None);

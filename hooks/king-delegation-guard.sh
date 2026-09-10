@@ -45,7 +45,7 @@ _approve() {
 _deny_text() {
     printf '%s\n' \
 "king-delegation-guard: a crowned court session does not implement (directive point 5).
-Delegate it: fno agents spawn --node <id> --substrate bg
+Delegate it: fno agents spawn '/fno:target <id>' --node <id> --substrate thread
 Or hand the whole scope out: fno backlog advance --epic <scope>
 Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes."
 }

@@ -77,6 +77,10 @@ VALUE_FORM_FLAGS = frozenset(
         "-m",
         "--search", "--append-system-prompt",
         "--source-inbox-msg",
+        # test_cmd.py's rust-thread clamp (x-d10f): the value is a locally
+        # computed positive int (`str(effective)`), never hyphen-leading, so
+        # it can never be misread as a flag by the launcher parser.
+        "--test-threads",
     }
 )
 

@@ -78,7 +78,7 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     received = _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"])
 
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"
@@ -119,7 +119,7 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
     )
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"]
     )
 
     assert result.exit_code == 22
@@ -174,7 +174,7 @@ def test_an_unobservable_pane_exits_nonzero_without_denying_the_seed(
     )
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"]
     )
 
     assert result.exit_code == 22, "a pane nobody could see must not certify a spawn"
@@ -199,7 +199,7 @@ def test_an_observed_pane_with_a_delivered_seed_exits_clean(monkeypatch, runner)
     )
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"]
     )
 
     assert result.exit_code == 0, result.output
@@ -223,7 +223,7 @@ def test_the_pane_observation_is_omitted_when_the_spawn_never_set_it(
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"]
     )
 
     assert result.exit_code == 0, result.output
@@ -237,7 +237,7 @@ def test_spawn_infers_claude_from_harness(monkeypatch, runner):
     received = _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
-    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"])
+    result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test", "--substrate", "pane"])
 
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"

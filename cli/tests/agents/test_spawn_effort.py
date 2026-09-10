@@ -294,7 +294,7 @@ def test_cli_threads_effort_to_pane_dispatch(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "worker", "hi", "--harness", "claude", "--effort", "high"],
+        ["spawn", "--name", "worker", "hi", "--harness", "claude", "--substrate", "pane", "--effort", "high"],
     )
     assert result.exit_code == 0, result.output
     assert received["effort"] == "high"
@@ -306,7 +306,7 @@ def test_cli_forwards_model_specific_effort_before_spawn(runner, monkeypatch):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "worker", "hi", "--harness", "codex", "--effort", "light"],
+        ["spawn", "--name", "worker", "hi", "--harness", "codex", "--substrate", "pane", "--effort", "light"],
     )
     assert result.exit_code == 0, result.output
     assert received["effort"] == "light"

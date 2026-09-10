@@ -272,41 +272,84 @@ pub fn run(
         // phantom node, so weak provenance keeps even at `all`.
         // NoProvenance keeps at EVERY scope: an operator session names no
         // fno node, so this keep is by construction, not by default value.
+        // x-2774: open NODE state alone is not evidence a SESSION is alive.
+        // A terminal harness state on the row itself, a parked or
+        // never-started node, or a recorded merge the status lags release
+        // the open-work hold the same way they do in the registry sweep -
+        // INSIDE the population the scope already allows. `all` is the only
+        // scope whose population includes open-work rows, so the release
+        // retires there; at every other scope the row still keeps, and the
+        // reason names the release so the operator can see what a wider
+        // scope would do. Supersession is registry-only: roster rows carry
+        // no created_at to order by.
+        let via = verdict
+            .route
+            .source
+            .map(|s| s.as_str())
+            .unwrap_or("sessions");
+        let open_release: Option<String> = match &verdict.work {
+            WorkState::Open { node: n, status } => {
+                let terminal = row
+                    .state
+                    .as_deref()
+                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
+                let inactive = crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str());
+                let merged = verdict.merged_but_open.is_some();
+                if terminal.is_some() || inactive || merged {
+                    Some(match (terminal, inactive, merged) {
+                        (Some(state), _, _) => format!(
+                            "session terminal: harness state {state} (via {via}); node {n} {status}"
+                        ),
+                        (None, true, _) => format!("node {n} is {status}, not active work"),
+                        (None, false, true) => {
+                            format!("node {n} {status}; recorded merge_status merged")
+                        }
+                        (None, false, false) => unreachable!("release required a positive fact"),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         let basis: String = match &verdict.work {
-            WorkState::AllDone { nodes } => format!(
-                "every named node done: {} (via {})",
-                nodes.join(", "),
-                verdict
-                    .route
-                    .source
-                    .map(|s| s.as_str())
-                    .unwrap_or("sessions")
-            ),
-            WorkState::Open { node: n, status }
-                if scope == crate::agents_config::RosterScope::All
+            WorkState::AllDone { nodes } => {
+                format!("every named node done: {} (via {via})", nodes.join(", "),)
+            }
+            WorkState::Open { node: n, status } => {
+                let scope_all_strong = scope == crate::agents_config::RosterScope::All
                     && matches!(
                         verdict.route.source,
                         Some(crate::node_route::NodeSource::Sessions)
                             | Some(crate::node_route::NodeSource::Registry)
-                    ) =>
-            {
-                format!(
-                    "open work {n} {status} at roster scope all (via {})",
-                    verdict
-                        .route
-                        .source
-                        .map(|s| s.as_str())
-                        .unwrap_or("sessions")
-                )
-            }
-            WorkState::Open { node: n, status } => {
-                summary.kept.push(judgement(
-                    &ident,
-                    Some(n.clone()),
-                    format!("open work: {n} {status}"),
-                    false,
-                ));
-                continue;
+                    );
+                match &open_release {
+                    Some(release) => {
+                        if scope_all_strong {
+                            release.clone()
+                        } else {
+                            summary.kept.push(judgement(
+                                &ident,
+                                Some(n.clone()),
+                                format!("open work: {n} {status}; {release}"),
+                                false,
+                            ));
+                            continue;
+                        }
+                    }
+                    None if scope_all_strong => {
+                        format!("open work {n} {status} at roster scope all (via {via})")
+                    }
+                    None => {
+                        summary.kept.push(judgement(
+                            &ident,
+                            Some(n.clone()),
+                            format!("open work: {n} {status}"),
+                            false,
+                        ));
+                        continue;
+                    }
+                }
             }
             WorkState::NoProvenance => {
                 summary.kept.push(judgement(
@@ -319,8 +362,12 @@ pub fn run(
             }
         };
         // The quiet gate: an unresolved transcript is never quiet, and the
-        // age rides the reason so a keep is auditable.
+        // age rides the reason so a keep is auditable. x-2774 change 8: a
+        // provably dead pid (ESRCH) overrides recency here too, the same
+        // override the registry sweep makes in grace_gate - recency without
+        // a living writer is not liveness.
         let age = transcript_age_s(hits.as_deref(), now);
+        let pid_gone = row.pid.is_some_and(crate::daemon::pid_is_gone);
         match age {
             None => summary.kept.push(judgement(
                 &ident,
@@ -328,13 +375,18 @@ pub fn run(
                 "transcript unresolved".into(),
                 false,
             )),
-            Some(age) if age <= grace_secs => summary.kept.push(judgement(
+            Some(age) if age <= grace_secs && !pid_gone => summary.kept.push(judgement(
                 &ident,
                 node,
                 format!("active: transcript written {age}s ago"),
                 false,
             )),
             Some(_) => {
+                let basis = if pid_gone {
+                    format!("{basis}; pid {} is gone", row.pid.unwrap_or(0))
+                } else {
+                    basis
+                };
                 if dry_run {
                     summary.retired.push(judgement(&ident, node, basis, true));
                 } else {
@@ -343,9 +395,17 @@ pub fn run(
                         write_receipt(home, &entry, &outcome, node.as_deref(), &basis);
                         summary.retired.push(judgement(&ident, node, basis, true));
                     } else {
+                        // Name WHY the removal did not confirm, not just the
+                        // outcome tag: the detail is what tells the operator
+                        // whether the row is a race to re-run or a real
+                        // refusal (x-2774, sub-defect b).
+                        let detail = outcome.detail().unwrap_or_else(|| "no detail".to_string());
                         summary.refused.push((
                             ident.clone(),
-                            format!("the native removal did not confirm ({})", outcome.as_str()),
+                            format!(
+                                "the native removal did not confirm ({}: {detail})",
+                                outcome.as_str()
+                            ),
                         ));
                     }
                 }
@@ -450,7 +510,7 @@ mod tests {
     fn graph_done(node: &str) -> GraphRead {
         GraphRead {
             statuses: HashMap::from([(node.to_string(), "done".to_string())]),
-            pr_state: HashMap::from([(node.to_string(), (Some("merged".into()), 0))]),
+            pr_state: HashMap::from([(node.to_string(), (Some("merged".into()), 0, 0))]),
             ..Default::default()
         }
     }
@@ -530,6 +590,82 @@ mod tests {
         );
         assert_eq!(summary.kept_owned, 1);
         assert!(summary.retired.is_empty());
+    }
+
+    // x-2774: a terminal harness state releases the open-work keep inside
+    // the population the scope allows. At `all` with strong provenance the
+    // row retires naming the session state; at `provenanced` it keeps, and
+    // the reason names the release so the operator sees what a wider scope
+    // would do.
+    #[test]
+    fn x2774_terminal_state_releases_open_work_inside_the_scope() {
+        let dir = tmpdir("term");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-bbbb".into(), "in_review".into());
+        g.index.insert(
+            "sid-1".to_string(),
+            vec![("x-bbbb".to_string(), "in_review".to_string())],
+        );
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .starts_with("session terminal: harness state done"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // At the default scope, the same row keeps - but the reason names the
+    // terminal state, so the hold is legible.
+    #[test]
+    fn x2774_terminal_state_names_itself_at_the_default_scope() {
+        let dir = tmpdir("term-keep");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-bbbb".into(), "in_review".into());
+        g.index.insert(
+            "sid-1".to_string(),
+            vec![("x-bbbb".to_string(), "in_review".to_string())],
+        );
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        let kept = summary
+            .kept
+            .iter()
+            .find(|j| j.reason.contains("session terminal:"))
+            .expect("the keep names the terminal state");
+        assert!(
+            kept.reason.contains("open work: x-bbbb in_review"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // An open node holds the row: the work is not done.
@@ -876,9 +1012,17 @@ mod tests {
     fn all_scope_retires_a_spawn_provenanced_open_node_row() {
         let dir = tmpdir("scope-all-sessions");
         let transcript = quiet_transcript(&dir, "sid-1");
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        // A non-terminal state: the widening itself is under test here. A
+        // done state would take the x-2774 session-terminal release instead
+        // (x2774_terminal_state_releases_open_work_inside_the_scope).
+        let mut live = row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"));
+        live.state = Some("working".into());
+        let rows = vec![live];
         let mut g = graph_done("x-aaaa");
         g.statuses.insert("x-aaaa".into(), "in_progress".into());
+        // No recorded merge on the open node: the widening itself is under
+        // test, not the merge-lag release.
+        g.pr_state.insert("x-aaaa".into(), (None, 0, 0));
         g.index
             .insert("sid-1".into(), vec![("x-aaaa".into(), "do".into())]);
         let at_all = run(
@@ -958,7 +1102,7 @@ mod tests {
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
         let g = GraphRead {
             statuses: HashMap::from([("x-aaaa".to_string(), "done".to_string())]),
-            pr_state: HashMap::from([("x-aaaa".to_string(), (Some("open".to_string()), 0))]),
+            pr_state: HashMap::from([("x-aaaa".to_string(), (Some("open".to_string()), 0, 0))]),
             ..Default::default()
         };
         let summary = run(

@@ -31,6 +31,7 @@ fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
         | E::Unreadable(_, _)
         | E::EmptyFieldUpdate(_)
         | E::Invalid(_)
+        | E::Sqlite(_)
         | E::Io(_)
         | E::LockTimeout(_, _)
         | E::Conflict => "GraphUnreadableError".to_string(),
@@ -133,6 +134,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 canonical_path: None,
                 base_version: Some(base),
                 plan_rungs: Some(rungs),
+                sqlite_authoritative: false,
             },
             std::time::Duration::from_secs(5),
         )
@@ -611,6 +613,7 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
                         canonical_path: None,
                         base_version: Some(base),
                         plan_rungs: None, // concurrent-writer probe: statuses stay stored
+                        sqlite_authoritative: false,
                     },
                     std::time::Duration::from_secs(10),
                 ) {

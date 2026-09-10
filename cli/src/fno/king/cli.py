@@ -668,6 +668,8 @@ def _render(board: dict, max_rows: int) -> None:
     for q in board["queues"]:
         if q["status"] == "unreadable":
             typer.echo(f"  {q['name']:<20} UNREADABLE  {q['error']}")
+        elif q["status"] == "over_budget":
+            typer.echo(f"  {q['name']:<20} NOT READ    {q['error']}")
         else:
             mark = "*" if q["actionable"] and q["count"] else " "
             verb = f"  -> {q['verb']}" if q.get("verb") else ""

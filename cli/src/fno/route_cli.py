@@ -254,26 +254,26 @@ def routing_init_cmd(
 
     The sample documents the ``[routing]`` block shape; nothing is enabled until
     you uncomment and edit rows. Idempotent: a config already carrying the
-    sample marker is left untouched. The sample lives INSIDE the package
-    (``fno/routing_sample.toml``) so an installed wheel finds it exactly like a
-    checkout does - the events-schema precedent.
+    sample marker is left untouched. The sample ships in its own data package
+    (``fno_routing_sample``) so an installed wheel finds it like a checkout does.
     """
     import fcntl
     from pathlib import Path
 
     from fno.config.writer import _target_path
 
-    sample = Path(__file__).resolve().parent / "routing_sample.toml"
-    if not sample.is_file():
-        typer.echo(f"error: sample not found at {sample}", err=True)
-        raise typer.Exit(1)
+    # The sample ships beside the package (a wheel-packaged data package, not
+    # inside fno/: the Python tree is budget-capped and the sample is pure data).
+    from importlib.resources import files as _res_files
+
+    sample_text = _res_files("fno_routing_sample").joinpath("routing_sample.toml").read_text(encoding="utf-8")
     target = _target_path("project" if local else "global", None)
     if target.is_symlink():
         target = Path(os.path.realpath(target))
     marker = "# SAMPLE routing inventory"
     commented = "\n".join(
         ("# " + line.rstrip()) if line.strip() else "#" for line in
-        sample.read_text(encoding="utf-8").splitlines()
+        sample_text.splitlines()
     )
     # The SAME exclusive lock discipline config.writer._locked_update uses
     # (sidecar <config>.lock + flock), held across the read and the append, so
@@ -362,6 +362,8 @@ def inventory_cmd(
             "prefer_harness": inv.prefer_harness,
             "models": rows,
             "slots": slots,
+            "fingerprint": next((s["fingerprint"] for s in slots if s.get("fingerprint")), ""),
+            "policy": _routing_policy_safe(),
         }, indent=2))
     else:
         typer.echo(f"objective={inv.objective}"
@@ -383,6 +385,16 @@ def inventory_cmd(
         typer.echo(f"refused: {line}", err=True)
 
 
+def _routing_policy_safe() -> dict:
+    from fno.config import load_settings
+    from fno.route_resolve import _routing_policy_payload
+
+    try:
+        return _routing_policy_payload(load_settings())
+    except Exception:  # noqa: BLE001 - an unreadable config answers unknown
+        return {"enforce_inventory": False, "operator_access": "unknown"}
+
+
 def _echo_slots(slots: list[dict]) -> None:
     """Print the per-verb slot readout under the row table."""
     typer.echo("slots: preview (simulated; no launch)")
@@ -400,7 +412,14 @@ def _echo_slots(slots: list[dict]) -> None:
             line += f"; on_exhausted={slot['on_exhausted']}"
         line += f"; would take {slot['would_take']}"
         line += f"; routing={slot.get('routing', 'unarmed')}"
+        if slot.get("work_kind"):
+            line += f"; work={slot['work_kind']}"
+        if slot.get("operator_access"):
+            line += f"; access={slot['operator_access']}"
         typer.echo(line)
+        for reason in slot.get("skipped") or []:
+            typer.echo(f"    {reason}")
+
 
 
 @route_app.command("env")

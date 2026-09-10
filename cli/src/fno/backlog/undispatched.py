@@ -149,6 +149,11 @@ def classify_planned_unclaimed(
     from fno.graph._intake import make_selection_sort_key
 
     live = frozenset(n for n, state in claimed.items() if state == "live")
+    # The keys-only snapshot carries state null, so `live` is empty on the
+    # real path: the observer no longer floats an epic whose only progress
+    # signal is a live claim on a sibling. Presence-only by contract; the
+    # in-progress signal survives via node status/session_id/completed_at.
+    # Test callers may still pass state-carrying rows.
     # The key sorts full entries; a row is a projection that already dropped
     # rank and created_at, so sort through `by_id` rather than through the row.
     order = make_selection_sort_key(entries, live_claimed=live)
@@ -200,13 +205,13 @@ def read_planned_unclaimed(
 
 
 def read_claim_snapshot() -> list[dict]:
-    from fno.claims.core import list_claims
-    from fno.claims.io import global_claims_root
+    from fno.claims.io import global_claims_root, list_claim_keys
 
     try:
-        return list_claims(
-            prefix="node:", include_stale=True, root=global_claims_root()
-        )
+        return [
+            {"key": key, "state": None}
+            for key in list_claim_keys("node:", global_claims_root())
+        ]
     except Exception as exc:  # noqa: BLE001 - identify the failed source
         raise ObserverReadError(f"claims unreadable: {exc}") from exc
 
@@ -219,10 +224,27 @@ def read_planned_unclaimed_from_entries(
     roadmap_id: str | None = None,
     parent: str | None = None,
 ) -> dict:
+    from fno.graph.statuses import live_worked_node_ids
+
+    try:
+        claims = read_claim_snapshot()
+        # A node whose worker outlived its claim TTL must not read as
+        # offerable here either: fold the worked overlay in as synthetic
+        # claims, and refuse on an unreadable roster rather than offer nodes
+        # whose liveness could not be checked.
+        worked = live_worked_node_ids(strict=True, entries=entries)
+    except ValueError as exc:
+        raise ObserverReadError(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - unknown liveness refuses the offer
+        raise ObserverReadError(f"worked overlay unreadable: {exc}") from exc
+    claims = [
+        *claims,
+        *( {"key": f"node:{node_id}", "state": "live-worker"} for node_id in worked ),
+    ]
     try:
         return classify_planned_unclaimed(
             entries,
-            read_claim_snapshot(),
+            claims,
             project=project,
             mission=mission,
             roadmap_id=roadmap_id,

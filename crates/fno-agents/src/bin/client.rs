@@ -63,6 +63,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "test-run",
     "promote",
     "reap",
     "roster-reap",
@@ -82,6 +83,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
+    "spawn-axes",
     "fallback-chain",
     "state",
     "status",
@@ -286,6 +288,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
     }
 
+    // `test-run`: the native process-group owner behind `fno doctor test`
+    // (see test_run.rs doc). Direct dispatch, no daemon RPC - a test run must
+    // not depend on a live daemon to clean up after itself. Same `matches!`
+    // treatment as `probe-run`/`state` so it stays out of CLIENT_VERB_USAGE /
+    // RUST_CLIENT_VERBS and the routable-verb parity guard: this is not an
+    // `fno agents` verb, `cli/src/fno/test_runner.py` is its only caller.
+    if verb == "test-run" {
+        return fno_agents::test_run::run_test_run(&args[1..]);
+    }
+
     // `review-coverage`: standalone review_coverage producer (see its own doc
     // in loopcheck.rs). Direct dispatch like loop-check; no daemon RPC.
     if verb == "review-coverage" {
@@ -331,6 +343,13 @@ async fn run(args: Vec<String>) -> i32 {
     // and read the answer back.
     if verb == "spawn-overlay" {
         return fno_agents::spawn_overlay::run_spawn_overlay(&args[1..]);
+    }
+
+    // `spawn-axes`: the billing axes of the spawn seam (route/account/model),
+    // decided in one place (see spawn_axes.rs doc). The Python front door
+    // projects the seam's facts and applies the returned plan verbatim.
+    if verb == "spawn-axes" {
+        return fno_agents::spawn_axes::run_spawn_axes(&args[1..]);
     }
 
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
@@ -741,6 +760,23 @@ async fn run(args: Vec<String>) -> i32 {
     // codex/gemini + --once -> dispatch_codex_once / dispatch_gemini_once.
     // `host` and `promote` must fall through to the daemon RPC unchanged.
     if method == "agent.spawn" && verb_owned == "spawn" {
+        // The seam gate comes FIRST. A spawn that skipped
+        // the Python seam carries no configured route/model/effort/account,
+        // so it goes back to the front door (FNO_AGENTS_RUNTIME=python stops
+        // the loop: the re-exec crosses the seam, gets the marker, and comes
+        // back marked). On exec failure this spawn's only decision path is
+        // gone and its policy state is unknown, so it refuses rather than
+        // falling through to a harness default the seam could have refused.
+        if spawn_needs_python_seam(&params) {
+            let err = exec_python_front(&args);
+            eprintln!(
+                "fno-agents: config.agents.profiles is read only by the Python \
+                 spawn seam, and exec of 'fno agents spawn' failed: {err}. No \
+                 configured route, model, effort or account was applied; policy \
+                 state unknown; refusing."
+            );
+            return 2;
+        }
         // 4a-G2: the `pane` substrate (the default) is mux-hosted now, and the
         // Python back half owns it (fno.agents.mux_spawn: front-half reuse +
         // `fno mux pane run` + the registry mux ref). The Python front door
@@ -750,24 +786,37 @@ async fn run(args: Vec<String>) -> i32 {
         // PTY host (retiring at G4; a silent daemon fallback is exactly what
         // AC1-ERR forbids). FNO_AGENTS_RUNTIME=python stops the front door
         // routing straight back here.
-        let substrate = params
+        let mut substrate = params
             .get("substrate")
             .and_then(|v| v.as_str())
-            .unwrap_or("pane");
+            .unwrap_or_else(|| default_substrate(&params))
+            .to_string();
         // `thread` is the public substrate name. The lower-level dispatch arms
         // retain their historical `bg` selector until their wire contract moves.
-        let substrate = if substrate == "thread" {
-            "bg"
-        } else {
-            substrate
-        };
+        if substrate == "thread" {
+            substrate = "bg".to_string();
+        }
+        let substrate = substrate.as_str();
         if let Err(message) = validate_spawn_placement(&params, substrate) {
             eprintln!("{message}");
             return 2;
         }
+        // The default view (mirrors the Python seam): a bare spawn that took
+        // the built-in thread default from INSIDE a mux opens portal 0 on its
+        // worker. An explicit --portal wins; outside a mux nothing auto-opens.
+        if substrate == "bg"
+            && params.get("substrate").is_none()
+            && params.get("portal").is_none()
+            && std::env::var("FNO_PANE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("portal".into(), Value::from(0u8));
+            }
+        }
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
-            use std::os::unix::process::CommandExt;
             // Provider parity with the optional-provider Python resolver: a
             // MISSING --provider is legal on the pane substrate (the Python
             // re-exec resolves it from the invoking harness), so let None fall
@@ -786,11 +835,16 @@ async fn run(args: Vec<String>) -> i32 {
                 }
                 Some(_) => {}
             }
-            let err = std::process::Command::new("fno")
-                .arg("agents")
-                .args(&args[..])
-                .env("FNO_AGENTS_RUNTIME", "python")
-                .exec();
+            // A marked call that still lands here must not forward the marker
+            // into the Python CLI (an unknown flag there): strip it from the
+            // re-exec argv. The seam gate above already sent unmarked spawns
+            // back; this keeps even a hand-built marked pane argv clean.
+            let pane_args: Vec<String> = args
+                .iter()
+                .filter(|a| !a.starts_with("--defaults-applied"))
+                .cloned()
+                .collect();
+            let err = exec_python_front(&pane_args);
             eprintln!(
                 "fno-agents: substrate 'pane' is mux-hosted via the Python CLI, \
                  but exec of 'fno agents spawn' failed: {err}. Install the fno \
@@ -806,12 +860,12 @@ async fn run(args: Vec<String>) -> i32 {
         // the known "two path gates for a new provider field" drift class.
         // FNO_AGENTS_RUNTIME=python stops the Python front door bouncing back.
         if params.get("account").and_then(|v| v.as_str()).is_some() {
-            use std::os::unix::process::CommandExt;
-            let err = std::process::Command::new("fno")
-                .arg("agents")
-                .args(&args[..])
-                .env("FNO_AGENTS_RUNTIME", "python")
-                .exec();
+            let account_args: Vec<String> = args
+                .iter()
+                .filter(|a| !a.starts_with("--defaults-applied"))
+                .cloned()
+                .collect();
+            let err = exec_python_front(&account_args);
             eprintln!(
                 "fno-agents: --account resolution runs in the Python CLI, but \
                  exec of 'fno agents spawn' failed: {err}. Run `fno agents \
@@ -1335,6 +1389,42 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
     Ok(())
 }
 
+/// The Python seam (rust_runtime.make_context -> inject_spawn_defaults) is
+/// the only reader of config.agents.profiles. A spawn that skipped it carries
+/// no configured route, model, effort or account, so it goes back to the
+/// front door; the marker asserts the crossing and is parsed beside `--yolo`.
+/// A marker is an upstream seam crossing, never proof a model is authorized -
+/// the strict coordinate checks still own that.
+fn spawn_needs_python_seam(params: &Value) -> bool {
+    // FNO_SPAWN_GATE=0 is the operator bypass both gate implementations honor
+    // (spawn_gate.rs, spawn_gate.py); it excuses the seam bounce the same way.
+    if std::env::var_os("FNO_SPAWN_GATE").is_some_and(|v| v == "0") {
+        return false;
+    }
+    params.get("defaults_applied").is_none()
+}
+
+/// Exec the Python front door with the given spawn argv. `fno` is the entry
+/// point on a deployed machine; a bare venv install (CI runners included)
+/// only ships `fno-py`, so a NotFound on the first candidate falls through
+/// to it. Returns the last exec error so the caller's refusal names reality.
+fn exec_python_front(args: &[String]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new("fno")
+        .arg("agents")
+        .args(args)
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .exec();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return std::process::Command::new("fno-py")
+            .arg("agents")
+            .args(args)
+            .env("FNO_AGENTS_RUNTIME", "python")
+            .exec();
+    }
+    err
+}
+
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     use fno_agents::agy_ask::dispatch_agy_once_with_effort;
     use fno_agents::claude_ask::{
@@ -1366,11 +1456,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let substrate = params
         .get("substrate")
         .and_then(|v| v.as_str())
-        .unwrap_or("pane");
+        .unwrap_or_else(|| default_substrate(&params))
+        .to_string();
     let substrate = if substrate == "thread" {
         "bg"
     } else {
-        substrate
+        substrate.as_str()
     };
 
     // unwrap_or_default is acceptable HERE (unlike the ask pre-check, which
@@ -2151,6 +2242,45 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
 
+    if rest.iter().any(|arg| arg == "--state-files-only") {
+        let apply = rest.iter().any(|arg| arg == "--apply");
+        let explicit_dry_run = rest.iter().any(|arg| arg == "--dry-run");
+        if apply && explicit_dry_run {
+            eprintln!("fno-agents: reap --state-files-only cannot combine --apply and --dry-run");
+            return 2;
+        }
+        let extras: Vec<&str> = rest
+            .iter()
+            .map(String::as_str)
+            .filter(|arg| {
+                !matches!(
+                    *arg,
+                    "--state-files-only" | "--apply" | "--dry-run" | "--json" | "-J"
+                )
+            })
+            .collect();
+        if !extras.is_empty() {
+            eprintln!(
+                "fno-agents: reap --state-files-only takes only --apply/--dry-run/--json (got: {})",
+                extras.join(" ")
+            );
+            return 2;
+        }
+        let home = AgentsHome::from_env();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let summary = fno_agents::gc_sweep::reap_state_files_for_cwd(
+            &home,
+            &cwd,
+            fno_agents::agents_config::state_reap_config(&cwd),
+            apply,
+        );
+        print!(
+            "{}",
+            fno_agents::reap_render::render_state_files_reap(&summary, json_out)
+        );
+        return i32::from(fno_agents::gc_sweep::state_reap_has_failures(&summary));
+    }
+
     // The verify probe (x-70e1 task 5): read-only audit of the receipts
     // store over `--since`, pinned to THIS build. Nonzero exit on any
     // unmet condition - empty window, stale build, partial effects - so the
@@ -2641,6 +2771,28 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
     }
 }
 
+/// The substrate a spawn with NO explicit `--substrate` gets: thread where the
+/// harness seats one, else the closable pane. The Python seam (the public
+/// `fno agents spawn` front door) resolves the SAME default in its own body
+/// and opens the thread's default view through the mux thread verb, so this
+/// helper only answers for a DIRECT binary call.
+/// It seats only the three lanes this client itself routes (claude/codex
+/// bg, opencode serve); a keeper-lane harness (pi, cursor-agent, grok, agy)
+/// keeps the pane default here and seats its thread through the Python seam's
+/// keeper carve-out instead. The harness default matches the daemon's
+/// `handle_spawn` provider default (codex) so a bare direct call and the
+/// daemon route cannot disagree.
+fn default_substrate(params: &Value) -> &'static str {
+    let harness = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
+    match harness {
+        "claude" | "codex" | "opencode" => "thread",
+        _ => "pane",
+    }
+}
+
 fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String> {
     let mut params = Map::new();
     let mut positional: Vec<String> = Vec::new();
@@ -2866,6 +3018,28 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--yolo" | "-Y" => {
                 // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
                 params.insert("yolo".into(), Value::Bool(true));
+            }
+            // The Python spawn seam (rust_runtime
+            // make_context -> inject_spawn_defaults) is the only reader of
+            // config.agents.profiles. This token asserts it crossed upstream
+            // and carries its enforcement verdict. Consumed here - never
+            // forwarded, never read past the `--` fence - so no harness argv
+            // or worker message can see it. Not in VALUE_FLAGS on purpose:
+            // the bare token must not eat a neighbor as its value.
+            "--defaults-applied" => {
+                params.insert(
+                    "defaults_applied".into(),
+                    Value::String("unenforced".into()),
+                );
+            }
+            other if other.starts_with("--defaults-applied=") => {
+                // if/else, not a match: an inner `"word" =>` arm would read as
+                // a phantom verb to the Python parity parser's arm scan.
+                let v = &other["--defaults-applied=".len()..];
+                if v != "enforced" && v != "unenforced" {
+                    return Err("--defaults-applied takes 'enforced' or 'unenforced'".into());
+                }
+                params.insert("defaults_applied".into(), Value::String(v.into()));
             }
             "--permission-mode" => {
                 // x-dfa4: provider permission/approval mode. Parsed here so the

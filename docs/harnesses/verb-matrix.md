@@ -24,6 +24,7 @@ The needs vocabulary is `loop`, every feature key the table declares a probe for
 | cache-keepalive | claude | `native` | `absent` | `absent` | `absent` | `absent` | `absent` | `unmeasured` | `unmeasured` | `absent` | `absent` |
 | execute | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | fix | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
+| fno-me | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | groom | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | growth-launch | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 | king-for-a-day | loop, spawn | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |

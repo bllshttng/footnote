@@ -102,6 +102,7 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
+pub mod graph_sqlite;
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -162,6 +163,7 @@ pub mod screen;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod spawn_axes;
 pub mod spawn_gate;
 pub mod spawn_overlay;
 pub mod spawn_payload;
@@ -173,6 +175,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
 pub mod territory;
+pub mod test_run;
 pub mod tick_ledger;
 pub mod truth_probe;
 pub mod usage;
@@ -902,6 +905,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // One bounded count summary for every configured state-retention pass.
+    "state_reap",
+    "graph_write_gate",
+    "graph_export_failed",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

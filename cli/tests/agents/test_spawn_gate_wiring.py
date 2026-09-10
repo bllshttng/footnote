@@ -206,7 +206,8 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hi", "--harness", "claude"]
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "pane"],
     )
     assert result.exit_code == 0, result.output
     assert calls[0]["substrate"] == "pane"

@@ -31,6 +31,10 @@ A **harness name on the provider axis is refused by name**: `--provider claude` 
 
 Two shorts moved to make room. `-H` takes a harness value; it used to mean headless. `-p` now means headless, mirroring the harnesses' own one-shot short (`claude -p`), which is why the provider axis takes the capital `-P`. A one-shot is `--headless`, `-p`, `--once`, `-o`, or `--substrate headless`.
 
+## The default substrate
+
+A spawn with no `--substrate` seats a **thread** wherever the harness seats one. A harness with no thread lane falls back to a **pane**. Thread is the persistent lane: closing a view never ends the worker. Two spawn inputs still imply the pane: the pane placement flags (`--workspace`, `--split`, `--at`, `--tab`) and a `--` passthrough fence. Only the pane argv builders honor those, so the implicit thread refuses them with a pointer to `--substrate pane`.
+
 ## Routing a worker to another vendor
 
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
@@ -52,8 +56,12 @@ This shells `claude --bg --name frontend-worker <message>` (the subscription lan
 stdout is exactly one compact JSON receipt line:
 
 ```json
-{"name": "frontend-worker", "short_id": "7c5dcf5d", "provider": "claude", "status": "live"}
+{"name": "frontend-worker", "short_id": "7c5dcf5d", "harness": "claude", "status": "live"}
 ```
+
+A claude thread reads `live` only after claude records the prompt as `intent` in its job state (`~/.claude/jobs/<short_id>/state.json`). If that record does not appear, the receipt reads `"status": "spawning"`, adds `"seed": "unverified"`, and adds a `seed_unverified` reason that names the file it read. The spawn still exits 0.
+
+A claude thread spawn with no message is refused before launch. Claude starts that session with no prompt, and it waits for one forever. A `--resume` needs no message.
 
 Pipe it: `fno agents spawn "task" --name w1 -H claude | jq -r .short_id`.
 
@@ -130,7 +138,7 @@ A thread hosts no pane until a portal opens one. Before `--portal`, that took tw
 fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1
 ```
 
-When the command completes, portal 1 is open and already shows the new worker. Omit `--portal` and the spawn creates a thread with no portal, so nothing appears on screen. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
+When the command completes, portal 1 is open and already shows the new worker. Outside a mux, omitting `--portal` creates the thread with no portal and nothing appears on screen. From inside a mux, a spawn that takes the default thread substrate opens portal 0 on the new worker automatically. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
 
 ### Choose the geometry
 
@@ -215,7 +223,7 @@ fno agents spawn "/target ab-1234abcd" --name w1 -H claude --fresh
 
 Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins; `--here` (alias `--in-place`) opts back out of `--fresh` and keeps the caller cwd. `--fresh` is a no-op when the caller is already at canonical, and falls back to the caller cwd (the safe side) when resolution is ambiguous: a bare or `--separate-git-dir` checkout, or no `git` on `$PATH`. A real redirect prints one stderr line so it is never silent.
 
-`--fresh` is opt-in at this layer, so plain interactive `ask` / `host` / `spawn` keep the caller cwd. The policy that turns it on for autonomous single-repo target-class work lives one layer up: `/target bg` (via `dispatch-node.sh`) defaults a node with no recorded cwd to `--fresh`, and a megawalk worker launched from a worktree is rooted at canonical. Cross-project dispatch and non-target verbs are exempt.
+`--fresh` is opt-in at this layer, so plain interactive `ask` / `host` / `spawn` keep the caller cwd. The policy that turns it on lives one layer up. For autonomous single-repo target-class work, `/target bg` (via `dispatch-node.sh`) defaults a node with no recorded cwd to `--fresh`. Cross-project dispatch and non-target verbs are exempt.
 
 ## Errors you will see
 

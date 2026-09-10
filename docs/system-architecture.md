@@ -45,9 +45,9 @@ graph TB
         CMD["/target, /blueprint, /execute, /execute waves, /fix investigate, /fix, /review, /think, /think what-if"]
     end
 
-    subgraph "Skills Layer (25 skills)"
+    subgraph "Skills Layer (24 skills)"
         direction TB
-        WF["Workflow Skills<br/>target, plan, execute, operator,<br/>megawalk"]
+        WF["Workflow Skills<br/>target, plan, execute, operator"]
         DS["Design Skills<br/>think, what-if, audit"]
         EX["Execution Skills<br/>tdd, fix, debug, speculate"]
         RV["Review Skills<br/>review, create-pr,<br/>check-pr"]
@@ -591,9 +591,8 @@ footnote/                               # Flat root (plugin.json at .claude-plug
         operator/SKILL.md               # Heavy orchestrator
         review/SKILL.md                  # The owned review lane
         codemap/SKILL.md               # AST structural analysis
-        megawalk/SKILL.md            # Multi-session orchestration
         ...
-    agents/                              # 12 agents
+    agents/                              # 17 agents
         archer.md                       # TDD task executor (Sonnet)
         code-reviewer.md                # Code review (Opus)
         goal-verifier.md               # Goal verification (Sonnet)

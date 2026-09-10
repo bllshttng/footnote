@@ -1,13 +1,4 @@
-"""``fno workspace`` - worktree lifecycle and runtime-worker registration.
-
-Minted in unit 6 of the x-9d6c reorg from the former top-level worktree
-app plus the runtime merge: ``runtime worktree --action create``
-duplicated what ``worktree ensure`` already covered and had zero lifetime
-calls, so the capability folded in here rather than carrying the flag-shaped
-command across. The old top-level spellings stay one-release shims
-(``fno.verb_moves`` for ``worktree`` and, since x-6233, ``workspace`` itself;
-the runtime root is retired outright - its refusal teaches this verb).
-"""
+"""``fno workspace`` - lazy-mounted worktree lifecycle and worker registration; old root spellings remain one-release shims."""
 from __future__ import annotations
 
 import json
@@ -22,12 +13,30 @@ cli = typer.Typer(
     no_args_is_help=True,
 )
 
-# The worktree lifecycle sub-group (the former top-level worktree app,
-# mounted whole): status / stranded / cleanup / archive / reapable / ensure /
-# policy / overlap-record / overlaps.
 from fno.worktree_cli import app as _worktree_app  # noqa: E402
 
 cli.add_typer(_worktree_app, name="worktree")
+
+
+@cli.command(name="reap")
+def reap_state_files_cmd(apply: bool = typer.Option(False, "--apply"), json_out: bool = typer.Option(False, "--json", "-J")) -> None:
+    """Age-reap expendable state files without retiring agent rows."""
+    import subprocess
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import find_dev_binary, resolve_binary
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.echo("fno agents workspace reap: the fno-agents binary was not found; run `fno doctor update --rust`.", err=True)
+        raise typer.Exit(code=127)
+
+    args = [str(binary), "reap", "--state-files-only", "--apply" if apply else "--dry-run"]
+    args += ["--json"] if json_out else []
+    try:
+        result = subprocess.run(args, check=False)
+    except OSError as exc:
+        typer.echo(f"fno agents workspace reap: failed to run {binary}: {exc}", err=True)
+        raise typer.Exit(code=127) from exc
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 # `register-worker` moved from the retired runtime root: its other leaf, and its

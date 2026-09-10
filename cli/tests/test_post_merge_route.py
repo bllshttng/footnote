@@ -229,6 +229,53 @@ class TestCodexWarmRoute:
         monkeypatch.setattr(dispatch, "_deliver_live", lambda *a, **k: False)
         assert inject_pr_merged("cx-9", 42, "codex") == (False, "not-live")
 
+    def test_inject_codex_stamps_the_callers_own_handle(self, monkeypatch):
+        """The sender string names this session, not a literal no
+        registry row resolves."""
+        from types import SimpleNamespace
+
+        import fno.agents.dispatch as dispatch
+        import fno.agents.self_stamp as self_stamp
+        from fno.harness_identity import canonical_handle
+
+        session = "aaaabbbb-1111-7222-8333-444455556666"
+        monkeypatch.setattr(
+            self_stamp,
+            "resolve_self_identity",
+            lambda: SimpleNamespace(session_id=session, harness="claude"),
+        )
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-9", "live")])
+        sent = {}
+
+        def _fake_deliver(e, body, from_name="fno", mail=None):
+            sent["from_name"] = from_name
+            return True
+
+        monkeypatch.setattr(dispatch, "_deliver_live", _fake_deliver)
+        delivered, _ = inject_pr_merged("cx-9", 42, "codex")
+        assert delivered is True
+        assert sent["from_name"] == canonical_handle(session)
+
+    def test_inject_codex_unresolvable_identity_keeps_the_default(self, monkeypatch):
+        import fno.agents.dispatch as dispatch
+        import fno.agents.self_stamp as self_stamp
+
+        def _boom():
+            raise RuntimeError("no ambient identity")
+
+        monkeypatch.setattr(self_stamp, "resolve_self_identity", _boom)
+        _patch_registry(monkeypatch, [_FakeEntry("codex", "cx-9", "live")])
+        sent = {}
+
+        def _fake_deliver(e, body, from_name="fno", mail=None):
+            sent["from_name"] = from_name
+            return True
+
+        monkeypatch.setattr(dispatch, "_deliver_live", _fake_deliver)
+        delivered, _ = inject_pr_merged("cx-9", 42, "codex")
+        assert delivered is True
+        assert sent["from_name"] == "fno"
+
     def test_inject_gemini_unsupported(self, monkeypatch):
         delivered, reason = inject_pr_merged("gm-1", 42, "gemini")
         assert delivered is False

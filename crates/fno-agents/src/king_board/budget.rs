@@ -48,6 +48,25 @@ impl Budget {
     }
 }
 
+/// Why a bounded read produced no stdout. A budget kill is a different event
+/// from a source failure: the source may have been healthy, the board just
+/// stopped paying for it, and downstream the two must not render as one word.
+pub(crate) enum RunFailure {
+    Failed(String),
+    KilledAtSlice(String),
+}
+
+impl RunFailure {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            RunFailure::Failed(m) | RunFailure::KilledAtSlice(m) => m,
+        }
+    }
+    pub(crate) fn over_budget(&self) -> bool {
+        matches!(self, RunFailure::KilledAtSlice(_))
+    }
+}
+
 /// Run a subprocess with a hard wall-clock bound. A dedicated reader per pipe
 /// drains stdout/stderr WHILE the child runs: a 210KB payload over a pipe the
 /// parent never reads while waiting blocks the child on write until the kill,
@@ -59,7 +78,7 @@ pub(crate) fn run_with_timeout(
     cmd: &[String],
     cwd: &Path,
     timeout: Duration,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, RunFailure> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut child = Command::new(&cmd[0])
@@ -69,7 +88,7 @@ pub(crate) fn run_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("{}: {}", cmd[0], e))?;
+        .map_err(|e| RunFailure::Failed(format!("{}: {}", cmd[0], e)))?;
     let deadline = Instant::now() + timeout;
     // Drain the pipes concurrently; a killed child's pipe stays readable to
     // EOF, so the joins return promptly even on the kill path.
@@ -102,11 +121,11 @@ pub(crate) fn run_with_timeout(
                     } else {
                         detail.to_string()
                     };
-                    return Err(format!(
+                    return Err(RunFailure::Failed(format!(
                         "exit {}: {}",
                         status.code().unwrap_or(-1),
                         detail.chars().take(500).collect::<String>()
-                    ));
+                    )));
                 }
                 return Ok(stdout);
             }
@@ -119,21 +138,22 @@ pub(crate) fn run_with_timeout(
                     if cmd.len() > 6 {
                         shown.push_str(" ...");
                     }
-                    return Err(format!(
-                        "{shown}: timed out after {:.1}s",
+                    return Err(RunFailure::KilledAtSlice(format!(
+                        "{shown}: killed at its {:.1}s slice of the board budget; the source did not fail",
                         timeout.as_secs_f64()
-                    ));
+                    )));
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return Err(format!("{}: {}", cmd[0], e)),
+            Err(e) => return Err(RunFailure::Failed(format!("{}: {}", cmd[0], e))),
         }
     }
 }
 
 pub(crate) fn run_json(cmd: Vec<String>, cwd: &Path, timeout: Duration) -> SourceRead {
     match run_with_timeout(&cmd, cwd, timeout) {
-        Err(e) => SourceRead::err(e),
+        Err(e) if e.over_budget() => SourceRead::over_budget(e.message().to_string()),
+        Err(e) => SourceRead::err(e.message().to_string()),
         Ok(stdout) => {
             if stdout.is_empty() {
                 return SourceRead::ok(Value::Null);
@@ -214,5 +234,36 @@ mod tests {
             b.spent_error(),
             "not-read: board budget exhausted after backlog undispatched"
         );
+    }
+
+    #[test]
+    fn a_budget_kill_names_the_slice_and_says_the_source_did_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = vec!["/bin/sleep".to_string(), "5".to_string()];
+        let err = run_with_timeout(&cmd, dir.path(), Duration::from_millis(200)).unwrap_err();
+        assert!(
+            err.over_budget(),
+            "the kill path must carry the over_budget marker"
+        );
+        assert!(
+            err.message()
+                .contains("killed at its 0.2s slice of the board budget"),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("the source did not fail"));
+    }
+
+    #[test]
+    fn a_nonzero_exit_is_a_failure_never_a_budget_kill() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo boom >&2; exit 3".to_string(),
+        ];
+        let err = run_with_timeout(&cmd, dir.path(), Duration::from_secs(10)).unwrap_err();
+        assert!(!err.over_budget());
+        assert!(err.message().contains("exit 3"), "{}", err.message());
     }
 }

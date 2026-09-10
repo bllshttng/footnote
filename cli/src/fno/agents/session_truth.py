@@ -14,13 +14,16 @@ mid-conversation). The transcript was the only surface that told the truth at
 every point, so it is the only one this module reads.
 
 State precedence (a content signal in the last assistant turn beats the mtime
-fallback, so an old ``<promise>`` is still ``done`` and an old question is still
-``your-move``):
+fallback, EXPIRED past ``STALLED_AFTER_S``: a tag describes a TURN, and a turn
+stops being news once the transcript has been silent past the bound. An old
+``<promise>`` is still ``done`` because a promise is a turn OUTCOME, not news;
+an old ``<watching>`` or old question decays to ``stalled`` -- x-c1a3 measured
+a dead worker reading ``watching`` at any age, and a wedged node blocked on it):
 
-    <promise ...>                 -> done         (mission declared complete)
-    <watching ...>                -> watching     (armed on an external check)
-    ends in '?' OR <help ...>     -> your-move    (needs the operator)
-    ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, x-1182)
+    <promise ...>                 -> done         (mission declared complete, any age)
+    <watching ...>                -> watching     (fresh; past the bound -> stalled)
+    ends in '?' OR <help ...>     -> your-move    (fresh; past the bound -> stalled)
+    ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, x-1182; fresh)
     (none) transcript fresh       -> working
     (none) silent for hours       -> stalled
     unresolvable / no records     -> unknown      (hands off, fail-quiet)
@@ -102,17 +105,24 @@ def classify_tail(
     ``mtime_age_s is None`` means the age is unknowable (an opencode DB has no
     per-session file mtime), so stalled cannot be proven and the fallback is
     ``working`` -- truth never falsely asserts a silent session.
+
+    Expiry (x-c1a3): a tag describes a turn, and a turn stops being news once
+    the transcript has been silent past ``stalled_after_s`` -- the content arms
+    checked the age AFTER answering, which made the bound unreachable for
+    exactly the two states a liveness reader trusts. ``done`` is a turn OUTCOME
+    and does not go stale.
     """
     text = last_text or ""
+    stale = mtime_age_s is not None and mtime_age_s > stalled_after_s
     if last_role == "assistant":
         if _WATCHING_RE.search(text):
-            return "watching"
+            return "stalled" if stale else "watching"
         if _PROMISE_RE.search(text):
             return "done"
         stripped = text.rstrip()
         if stripped.endswith("?") or _HELP_RE.search(text) or _OPTION_PROMPT_RE.search(stripped):
-            return "your-move"
-    if mtime_age_s is not None and mtime_age_s > stalled_after_s:
+            return "stalled" if stale else "your-move"
+    if stale:
         return "stalled"
     return "working"
 

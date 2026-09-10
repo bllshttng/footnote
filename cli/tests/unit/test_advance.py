@@ -257,6 +257,103 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     assert res.decision == "skipped" and res.reason == "already-claimed"
 
 
+def test_live_worked_node_refuses_and_names_worker(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {NODE["id"]: ["bp-worker"]},
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+
+    observation = adv._observe_node_claim(NODE["id"])
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "already-claimed"
+    assert observation.worker == "bp-worker"
+    assert emitted[0][1]["worker"] == "bp-worker"
+
+
+def test_worked_authority_failure_refuses_dispatch(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "worked-authority-unavailable"
+    assert observation.block_reason == "worked-authority-unavailable"
+
+
+def test_dead_dispatch_limit_outranks_worked_error(monkeypatch):
+    """A durable refusal must not be masked by an authority error that merely
+    co-occurred: the caller can act on auto-deferred, and the remedy text that
+    names it is what spawn-guard renders."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        adv,
+        "_refuse_repeated_dead_dispatch",
+        lambda *_a, **_kw: "auto-deferred",
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.action == "auto-deferred"
+    assert observation.refusal_reason == "auto-deferred"
+    assert observation.blocks_dispatch is True
+
+
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_advance_preserves_family2_refusal_reason(iso, monkeypatch, reason):
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -3258,7 +3355,7 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
         seen["verb"] = verb
         seen["node"] = node
         seen["role"] = kw.get("role")
-        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"]
+        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"], "armed"
 
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     monkeypatch.setattr(
@@ -3275,7 +3372,7 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
 
     # a decline keeps the receipt vocabulary: the terminal reason surfaces
     monkeypatch.setattr(
-        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
+        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"], "capacity-held")
     )
     harness, model, route, account, reason = adv._grid_lane_for(node, model=None, provider=None)
     assert (harness, model, route, account) == (None, None, None, None)
@@ -3291,7 +3388,7 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
                  "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"}
     monkeypatch.setattr(
         route_resolve, "resolve_slot",
-        lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"]),
+        lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"], "armed"),
     )
     monkeypatch.setattr(
         route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
@@ -3399,3 +3496,29 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     )
     cmd = captured["cmd"]
     assert "--account" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _undispatched_nodes: the observer timeout names what was being read (x-be7f)
+# ---------------------------------------------------------------------------
+
+
+def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise _subprocess_module.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match=r"60s budget: .*backlog undispatched"):
+        adv._undispatched_nodes("fno")
+
+
+def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
+    receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
+
+    def fake_run(cmd, **kwargs):
+        return _FakeProc(0, json.dumps(receipt))
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    assert adv._undispatched_nodes("fno") == receipt

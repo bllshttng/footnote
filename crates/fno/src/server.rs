@@ -74,8 +74,11 @@ mod row_set;
 mod shutdown_capture;
 mod squad_persistence;
 mod squad_sync;
+mod truth_probe;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
+use self::truth_probe::TruthReading;
+use self::truth_probe::{probe_truth_map, TruthProbeLatch, TRUTH_PROBE_EVERY};
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -2111,66 +2114,6 @@ struct PendingRestore {
 /// applies anyway with shells for the unresolved. The reader ticks ~1/s, so this
 /// is a generous few-second grace for restored sessions to register.
 const MAX_RESTORE_ATTEMPTS: u32 = 30;
-
-/// (v48) How often the off-loop task re-probes the fleet's reachability
-/// evidence. One CLI process per interval; the ages it yields feed a 600s
-/// attention threshold, so a refresh cadence two orders of magnitude below
-/// that threshold cannot change a row's tier, only polish its displayed age.
-const TRUTH_PROBE_EVERY: Duration = Duration::from_secs(10);
-
-/// (v48) One whole-fleet reachability probe: `fno agents list --json`, the
-/// surface whose row shape already pins the triple. Join key is the registry
-/// name, the same field both list lanes and this server's registry rows
-/// carry. `None` on any failure (no binary, unparseable output) so the caller
-/// can keep the last good map rather than blanking every row on one miss.
-/// Rows whose probe fields are null still enter the map: a probe that did not
-/// answer for one row is that row's absence, not the fleet's.
-fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
-    let mut command = crate::process_admission::std_command("fno");
-    command.args(["agents", "list", "--json"]);
-    let out = crate::process_admission::std_output(&mut command).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let mut map = HashMap::new();
-    for row in parsed.get("agents")?.as_array()? {
-        // A malformed row is skipped, not fatal: one bad entry must not cost
-        // the whole fleet its readings.
-        let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        // Identity-first key: the full harness
-        // session id when the row carries one, the label otherwise (legacy
-        // rows). A rename no longer orphans a row's readings.
-        let key = row
-            .get("harness_session_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| name.to_string());
-        let basis = row
-            .get("basis")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let age_s = row
-            .get("last_activity_age_s")
-            .and_then(|v| v.as_f64())
-            .map(|f| f as u64);
-        map.insert(key, TruthReading { basis, age_s });
-    }
-    Some(map)
-}
-
-/// (v48) One registry row's reachability evidence, as the off-loop probe read
-/// it: which basis answered and the transcript age it measured. The verdict
-/// word is deliberately absent - it is derivable from the basis and it is the
-/// half of the triple that reads healthy for a worker dead under two hours.
-#[derive(Debug, Clone, Default)]
-struct TruthReading {
-    basis: Option<String>,
-    age_s: Option<u64>,
-}
 
 pub(crate) struct Core {
     session: Session,
@@ -14312,10 +14255,15 @@ async fn serve(
                 crate::transcript_tail::TailReader::new(),
             ));
             let mut last_truth = Instant::now();
+            // Shared with the detached probe tasks: clear means no probe is
+            // in flight. Held by [`TruthProbeLatch`], which clears it on drop.
+            let truth_in_flight = Arc::new(AtomicBool::new(false));
             // Logged ONCE on the first daemon miss, never per
             // tick: the fallback is a fact about the environment, and a fleet
             // with no daemon must not pay one line per second for it.
             let mut fallback_logged = false;
+            // Same once-only discipline for the wedged-probe skip below.
+            let mut latch_wedge_logged = false;
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
             let mut truth_probe_seq: u64 = 0;
@@ -14365,23 +14313,45 @@ async fn serve(
                 // process for the whole fleet on a slow sub-interval. Each
                 // probe runs as its own task so a slow CLI start never stalls
                 // the 1s registry tick; a failed probe sends nothing and the
-                // last good map stands. Ages are measured at probe time, so
-                // between probes a row's displayed age lags by at most this
-                // interval - invisible next to the 600s threshold it feeds.
+                // last good map stands. The latch skips a tick whose
+                // predecessor still runs, so a probe slower than the interval
+                // stacks no second interpreter. Ages are measured at probe
+                // time, so between probes a row's displayed age lags by at
+                // most this interval - invisible next to the 600s threshold
+                // it feeds.
                 if last_truth.elapsed() >= TRUTH_PROBE_EVERY {
-                    last_truth = Instant::now();
-                    truth_probe_seq += 1;
-                    let seq = truth_probe_seq;
-                    let tx = core_tx.clone();
-                    tokio::spawn(async move {
-                        if let Some(map) = tokio::task::spawn_blocking(probe_truth_map)
-                            .await
-                            .ok()
-                            .flatten()
-                        {
-                            let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
+                    match TruthProbeLatch::begin(&truth_in_flight) {
+                        Some(latch) => {
+                            last_truth = Instant::now();
+                            truth_probe_seq += 1;
+                            let seq = truth_probe_seq;
+                            let tx = core_tx.clone();
+                            tokio::spawn(async move {
+                                let probe = tokio::task::spawn_blocking(probe_truth_map)
+                                    .await
+                                    .ok()
+                                    .flatten();
+                                drop(latch);
+                                if let Some(map) = probe {
+                                    let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
+                                }
+                            });
                         }
-                    });
+                        None => {
+                            // A probe still running a full interval after it
+                            // started is wedged, not slow. The old code healed
+                            // that by stacking a new probe; the latch cannot,
+                            // so say so once instead of silently freezing
+                            // every row's age at the last good reading.
+                            if !latch_wedge_logged {
+                                latch_wedge_logged = true;
+                                eprintln!(
+                                    "fno mux: a fleet truth probe has run over {TRUTH_PROBE_EVERY:?}; \
+                                     skipping probes until it exits"
+                                );
+                            }
+                        }
+                    }
                 }
                 // The registry leg subscribes to the daemon
                 // when its socket answers (AC12): rows are SERVED, the stamp

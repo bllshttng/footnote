@@ -2531,8 +2531,9 @@ def _emit_human(
             "`fno backlog archive-dedupe-ids --apply` to remint the archived side."
         )
 
-    # Canonical-sync freshness. Advisory like grooming: the alarm
-    # exists because process-liveness reads green through this exact failure.
+    export = result.get("graph_export") or {}
+    if export.get("stale"):
+        out(f"fno doctor: graph export STALE - SQLite {export.get('version')} is newer than graph.json {export.get('exported_version') or 'never exported'}; run `fno doctor graph export --now`.")
     pms = result.get("post_merge_sync") or {}
     if pms.get("stale"):
         out(
@@ -4128,9 +4129,8 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # changes status/exit.
     result["pre_push_hook"] = _pre_push_hook_report(src)
 
-    # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
-    # LaunchAgent DOES change the exit code - an installed-but-dead agent is
-    # exactly the silence this check exists to break.
+    from fno.doctor_graph import export_health
+    result["graph_export"] = export_health()
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()

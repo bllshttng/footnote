@@ -35,6 +35,12 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$FAKE_CLAUDE_ARGV" ]; then printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGV"; fi
+if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
+  # Real claude records the prompt as job-state intent before it returns.
+  jobs="$(dirname "$FAKE_CLAUDE_SESSIONS")/jobs/7c5dcf5d"
+  mkdir -p "$jobs"
+  printf '{"state":"running","intent":"%s"}\n' "${FAKE_CLAUDE_INTENT-seeded}" > "$jobs/state.json"
+fi
 write_session() {
   mkdir -p "$FAKE_CLAUDE_SESSIONS"
   printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
@@ -160,6 +166,47 @@ fn ask_unknown_name_exits_16_not_create() {
 }
 
 #[test]
+fn spawn_receipt_marks_an_unrecorded_prompt_unverified() {
+    // Claude records the prompt as job-state intent before `--bg` returns. An
+    // empty intent is a session waiting for input, so the receipt is not live.
+    let home = AgentsHome::at(tmpdir("seedless-home"));
+    let ch = ClaudeHome::at(tmpdir("seedless-claude"));
+    let cwd = tmpdir("seedless-cwd");
+    let bin = tmpdir("seedless-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "seedless",
+        "hello",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+            ("FAKE_CLAUDE_INTENT", ""),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(receipt["status"], "spawning", "{}", out.stdout);
+    assert_eq!(receipt["seed"], "unverified", "{}", out.stdout);
+    let state = ch.jobs_dir_for("7c5dcf5d").join("state.json");
+    let reason = receipt["seed_unverified"].as_str().unwrap();
+    assert!(reason.contains(&state.display().to_string()), "{reason}");
+}
+
+#[test]
 fn spawn_writes_python_readable_row_and_emits_done() {
     // Create-machinery coverage: dispatch_claude_spawn writes the registry row.
     let home = AgentsHome::at(tmpdir("create-home"));
@@ -199,6 +246,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     assert!(receipt.get("provider").is_none());
     assert!(receipt.get("model").is_none());
     assert_eq!(receipt["status"], "live");
+    assert!(receipt.get("seed_unverified").is_none(), "{}", out.stdout);
     let short_id = receipt["short_id"].as_str().unwrap();
     assert_eq!(short_id, "7c5dcf5d");
 

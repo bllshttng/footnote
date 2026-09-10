@@ -20,7 +20,7 @@ Six letters, reserved across the entire CLI:
 | Short | Long | Type | On (examples) |
 |-------|------|------|---------------|
 | `-J` | `--json` | bool | the runaway most-common flag (~40 commands) |
-| `-A` | `--all` | bool | backlog next/ready/status/pick/queued, triage, megawalk |
+| `-A` | `--all` | bool | backlog next/ready/status/pick/queued, triage |
 | `-F` | `--force` | bool | backlog decompose/remove, providers add/remove, agents rm, claim release, update |
 | `-N` | `--dry-run` | bool | backlog intake/reconcile, worktree cleanup, update |
 | `-R` | `--reason` | value | backlog defer/queue/supersede, claim acquire/release, capture passes |

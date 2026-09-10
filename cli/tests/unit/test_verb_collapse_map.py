@@ -133,9 +133,15 @@ def test_map_covers_current_surface_once():
     # independently allocates `agents distress-verdicts`, the king board's
     # watchdog-verdict lookup (hidden verb): 585 -> 586. The court scope
     # fold allocates `agents court-fold`, the native read `fno agents
-    # court -n` relays to (hidden verb): 586 -> 587. Counted from the
-    # merged file, never taken from either side: 587.
-    assert len(mapped) == 587, (
+    # court -n` relays to (hidden verb): 586 -> 587. Upstream allocates
+    # `agents spawn-axes`, the spawn seam's axes round-trip (hidden verb):
+    # 587 -> 588, then allocates `agents workspace reap`: 588 -> 589. This
+    # branch also allocates `agents test-run`, the native test-suite
+    # process-group owner, and `backlog worked`, the one-read live-worker
+    # surface the ready gate and king board consume (hidden verbs): 589 ->
+    # 591. Upstream adds `doctor graph export`: 591 -> 592. Counted from
+    # the merged file, never taken from either side: 592.
+    assert len(mapped) == 592, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -229,7 +235,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # king faq add/list (x-9e1e) added no leaves here: they live under the
     # collapsed `agents` group (mapped-count only), not the top-level `king`
     # hidden alias.
-    assert len(leaves) <= 129
+    # +1 for `workspace reap`, the explicit state-retention operator control.
+    assert len(leaves) <= 130
     assert "fno-agents" in leaves
 
 

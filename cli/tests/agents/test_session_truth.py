@@ -31,7 +31,16 @@ import pytest
         ("assistant", "still grinding on the parser", None, "working"),  # can't prove stalled
         # a content signal beats the mtime fallback even when old
         ("assistant", "<promise>done</promise>", 99999, "done"),
-        ("assistant", "anything ending in a question?", 99999, "your-move"),
+        # x-c1a3: a tag describes a TURN, and a turn stops being news once the
+        # transcript has been silent past stalled_after_s. Only <promise> is a
+        # turn OUTCOME and survives any age; watching/questions decay to stalled.
+        ("assistant", '<watching reason="ci" pr="5" timeout="30m">', 3 * 3600, "stalled"),
+        ("assistant", "anything ending in a question?", 99999, "stalled"),
+        ("assistant", "proceed with the merge? (Y/n)", 3 * 3600, "stalled"),
+        ("assistant", '<help reason="stuck" evidence="x">need a decision</help>', 99999, "stalled"),
+        # an unknowable age is never evidence of staleness: the news survives
+        ("assistant", '<watching reason="ci" pr="5" timeout="30m">', None, "watching"),
+        ("assistant", "anything ending in a question?", None, "your-move"),
         # watching outranks promise when both appear (runtime parks watching)
         ("assistant", "<promise>done</promise> but also <watching pr=1>", 10, "watching"),
         # exact-marker discipline: a lookalike word is NOT a promise
@@ -199,12 +208,17 @@ def test_resolve_without_a_title_reports_absence(tmp_path):
 def test_resolve_reads_worktree_transcript_your_move(tmp_path):
     """AC2-HP + integrates the resolver fix: session dispatched with canonical
     cwd, live transcript in the worktree dir, last turn ends in a question."""
+    import os
+
     from fno.agents.session_truth import resolve_session_truth
 
     canonical = "/Users/bb16/code/footnote/footnote"
     worktree = "/Users/bb16/code/footnote/footnote/.claude/worktrees/x-a472"
     sid = "4ec8a08b-9fe7-4550-8e40-00c7fd4e600a"
-    _write_claude_transcript(tmp_path, worktree, sid, ["Should I rebase onto main?"])
+    path = _write_claude_transcript(tmp_path, worktree, sid, ["Should I rebase onto main?"])
+    # Fresh relative to now_s: expiry (x-c1a3) means a question tail only reads
+    # your-move while the transcript is recent.
+    os.utime(path, (2_000_000_000 - 60, 2_000_000_000 - 60))
 
     session = SimpleNamespace(agent="claude", session_id=sid, cwd=canonical, short_id=sid[:8])
     result = resolve_session_truth(

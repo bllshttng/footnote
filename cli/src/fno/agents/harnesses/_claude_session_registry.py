@@ -43,7 +43,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from fno.harness_identity import claude_transport_short_id
 
@@ -334,6 +334,29 @@ def _parse_state(state_path: Path) -> StateSnapshot:
         output_result=output.get("result") if isinstance(output, dict) else None,
         intent=raw.get("intent"),
     )
+
+
+SEED_WAIT_S = 5.0
+
+
+def seed_unverified_reason(
+    short_id: str, env: Optional[Mapping[str, str]] = None, timeout_s: float = SEED_WAIT_S
+) -> Optional[str]:
+    """``None`` once job state holds the ``intent`` claude writes before ``--bg``
+    returns, else why not. Only an account overlay's CLAUDE_CONFIG_DIR moves the root."""
+    cfg = (env or {}).get("CLAUDE_CONFIG_DIR")
+    jobs_dir = Path(cfg) / "jobs" / short_id if cfg else _jobs_dir_for(short_id)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            intent = read_state_json(jobs_dir).intent
+            if isinstance(intent, str) and intent.strip():
+                return None
+        except (OSError, json.JSONDecodeError):
+            pass
+        if time.monotonic() >= deadline:
+            return f"{jobs_dir / 'state.json'} records no prompt after {timeout_s:g}s"
+        time.sleep(0.2)
 
 
 def read_timeline_tail(jobs_dir: Path, offset: int) -> str:

@@ -347,6 +347,11 @@ jobs:
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
+      - name: File budget gate selftest
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_file_budget.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}
@@ -367,6 +372,11 @@ jobs:
         run: |
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
+
+      - name: Graph store parity guard
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-graph-parity.sh --self-test
 
       # From the installed-tree import crash: parents[N]/scripts joins in
       # cli/src/fno escape the package root and the wheel never ships them.

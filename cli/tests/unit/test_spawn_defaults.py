@@ -330,7 +330,7 @@ def test_grid_account_wins_over_the_config_default(monkeypatch):
 
 
 def test_grid_routeless_row_injects_no_route(monkeypatch):
-    """AC4-EDGE (x-b545): a routeless row (claude-canonical-*) produces argv
+    """AC4-EDGE (x-b545): a routeless row (one with no `route` key) produces argv
     unchanged from today - no lane selector."""
     _declare_inventory(monkeypatch, [
         {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
@@ -1619,7 +1619,7 @@ def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
 
 
 @requires_rust
-def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
+def test_model_vendor_mismatch_emits_measurement_event(monkeypatch, tmp_path):
     emitted = []
     monkeypatch.setattr(
         "fno.agents.events.emit",
@@ -1634,7 +1634,11 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     # `model_source` and `outcome` ride the event because the measurement is
     # useless without them: a warned typed pairing and a refused injected one
     # are different facts, and the old payload rendered them identically.
-    assert emitted == [
+    # The seam's own spawn_defaults_applied receipt (task 0.1) no longer rides
+    # this emit: it is appended through the route-slot journal into the
+    # pinned journal, so it is asserted there.
+    mismatch = [e for e in emitted if e[0] == "model_vendor_mismatch"]
+    assert mismatch == [
         (
             "model_vendor_mismatch",
             {
@@ -1646,6 +1650,14 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
             },
         )
     ]
+    journal = tmp_path / "events.jsonl"
+    rows = (
+        [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+        if journal.exists()
+        else []
+    )
+    receipts = [r for r in rows if r.get("kind") == "spawn_defaults_applied"]
+    assert len(receipts) == 1
 
 
 @requires_rust

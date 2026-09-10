@@ -311,6 +311,12 @@ FIELD_META: dict[str, Meta] = {
     "agents.retire_interval_s": Meta("advanced", "Seconds between runs of the daemon's retirement sweep (default 300, a third of the retire grace). The Rust resolver clamps this under a third of agents.retire_grace_s: the interval must be a fraction of the grace, never a multiple, so an eligible row never waits past the grace window it retires inside. Unset, unparseable, or below the 5s daemon tick resolves to the default. The `retire` row in `fno agents status` carries the value the loop enforces.", default_source="default"),
     "agents.reap_receipts.retain_days": Meta("advanced", "Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.", default_source="default"),
     "agents.reap.roster_scope": Meta("advanced", "Which rows the roster sweep may retire: off retires nothing, provenanced (the default) only rows whose provenance resolves to fno and whose work is done, all widens to rows fno itself spawned (sessions or registry provenance) with open work. A row that resolves to no fno node is never retirable at any value, including all, so a session the operator started by hand is safe by construction. A present value that cannot be honored degrades in place to the default and is named by fno config doctor.", default_source="default"),
+    "agents.state_reap.enabled": Meta("advanced", "Run age-based cleanup for expendable lock, expired-claim, and PR-status cache files (default true).", default_source="default"),
+    "agents.state_reap.locks_retain_days": Meta("advanced", "Days to retain inactive lock files before state cleanup removes them (default 7).", default_source="default"),
+    "agents.state_reap.expired_claims_retain_days": Meta("advanced", "Days to retain claims moved into the expired-claims graveyard (default 30).", default_source="default"),
+    "agents.state_reap.pr_status_cache_retain_days": Meta("advanced", "Days to retain expendable PR-status cache files (default 14).", default_source="default"),
+    "graph.commit_mode": Meta("advanced", "Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).", default_source="default"),
+    "graph.read_source": Meta("advanced", "Authoritative graph reader: json or the shadow SQLite row store (default json).", default_source="default"),
     "agents.single_flight_ttl_seconds": Meta("advanced", "Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.", default_source="default"),
     "agents.single_flight_join_budget_seconds": Meta("advanced", "Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents.", default_source="default"),
     "agents.orphan_reap_after_seconds": Meta("advanced", "Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.", default_source="default"),
@@ -551,13 +557,19 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
-        "never", "The routing inventory: a list of {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A small built-in table is a FALLBACK under this key: a row here OVERRIDES the built-in of the same name per field and a new name EXTENDS the set, so adding a model is a config edit and never a Python edit. Declare none and the grid still records no-inventory-declared and injects nothing; the fallback only keeps a tier request answerable. `fno/routing_sample.toml` ships as a labelled sample no code path reads.",
+        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
     ),
     "routing.objective": Meta(
         "advanced", "How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.",
     ),
     "routing.prefer_harness": Meta(
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
+    ),
+    "routing.enforce_inventory": Meta(
+        "never", "Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only; explicit flags constrain, never bypass, and an unresolvable request is a named refusal. Default off.",
+    ),
+    "routing.operator_access": Meta(
+        "never", "The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.",
     ),
     # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
     # Four axis tables, every key naming its axis. A bare key under

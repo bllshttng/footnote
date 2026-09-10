@@ -54,6 +54,9 @@ cli = typer.Typer(
 # Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
 _register_node_builder(cli)
+from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
+
+cli.command("worked", hidden=True)(_cmd_worked)
 
 cli.add_typer(_triage_cli, name="triage")
 
@@ -4019,6 +4022,10 @@ def cmd_update(
     from fno.graph.load import load_graph
 
     stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    if locked_by is not None:
+        from fno.backlog.requeue import verify_lock_stamp_receipt
+
+        verify_lock_stamp_receipt(stored_node, locked_by, task_id)
     if add_pr is not None and stored_node.get("status") == "ready":
         typer.echo(
             f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
@@ -4038,19 +4045,6 @@ def cmd_update(
             f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
             f"{ready_effect}"
         )
-    # Earned-success rule, same as unclaim: an open do row holds in_progress
-    # on its own, so a lock clear that did not transition the node refuses
-    # the Updated receipt and names the verb that settles the row.
-    if locked_by == "null" and stored_node.get("status") == "in_progress":
-        from fno.backlog.requeue import _wedge_refusal
-        from fno.graph.statuses import is_open_do_row
-
-        _wedge_refusal(
-            "update",
-            stored_node.get("id", task_id),
-            sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
-        )
-
     typer.echo(f"Updated {task_id}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row
@@ -4694,9 +4688,6 @@ def cmd_next(
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
 
-# -- undispatched --
-
-
 @cli.command("undispatched", hidden=True)
 def cmd_undispatched(
     project: Optional[str] = typer.Option(None, "--project", "-p"),
@@ -4742,9 +4733,6 @@ def cmd_undispatched(
     typer.echo(json.dumps(receipt, indent=2))
 
 
-# -- ready --
-
-
 @cli.command("ready", hidden=True)
 def cmd_ready(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
@@ -4772,9 +4760,6 @@ def cmd_ready(
         "--mission",
         help="Restrict to nodes whose mission_id matches (same contract as `next`).",
     ),
-    # ponytail: `ready` already always emits JSON; the flag exists only so a
-    # caller passing --json (inbox triage) isn't rejected with Typer exit 2.
-    # Accepted-and-ignored, never a behavior switch.
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
     ),
@@ -13715,6 +13700,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "find",
         "next",
         "ready",
+        "worked",
         "queued",
         "provenance",
         "roadmap",

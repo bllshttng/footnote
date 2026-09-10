@@ -234,6 +234,7 @@ def test_cli_assess_assurance_exits_0_when_satisfied() -> None:
 
 from types import SimpleNamespace  # noqa: E402
 
+from fno.harness_identity import HarnessIdentity  # noqa: E402
 from fno.review import policy as review_mod  # noqa: E402
 
 
@@ -266,6 +267,67 @@ def test_review_assurance_blocks_when_cross_model_disabled() -> None:
         v = review_mod.review_assurance("sess", size="S", risk_surfaces=["auth"])
     assert v["satisfied"] is False
     assert v["effective"] == "unresolved"
+
+
+def test_review_assurance_ambient_harness_is_implementer_and_sole_kind() -> None:
+    """A codex session with no ledger row yet implements as codex; with
+    cross-model off the only effective kind is codex - never a claude the
+    session would have to spawn (x-b144)."""
+    with patch.object(
+        review_mod, "resolve_harness_identity", return_value=HarnessIdentity(session_id="t", harness="codex")
+    ), patch(
+        "fno.review.provider_resolution.load_implementer_identity", return_value=("claude", False)
+    ), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch(
+        "fno.review.policy._cross_model_enabled", return_value=False
+    ):
+        v = review_mod.review_assurance("sess", size="M")
+    assert v["implementer_provider"] == "codex"
+    assert v["identity_known"] is True
+    assert v["effective_reviewer_kinds"] == ["codex"]
+    assert v["effective"] == "portable"
+    assert v["satisfied"] is True
+
+
+def test_review_assurance_review_gate_never_claims_claude_on_codex() -> None:
+    """A codex session cannot satisfy high assurance: the reason names
+    different-family capacity and claude is not listed as effective."""
+    with patch.object(
+        review_mod, "resolve_harness_identity", return_value=HarnessIdentity(session_id="t", harness="codex")
+    ), patch(
+        "fno.review.provider_resolution.load_implementer_identity", return_value=("claude", False)
+    ), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch(
+        "fno.review.policy._cross_model_enabled", return_value=False
+    ):
+        v = review_mod.review_assurance("sess", size="M", risk_surfaces=["review-gate"])
+    assert v["satisfied"] is False
+    assert v["effective"] == "unresolved"
+    assert "different-family capacity" in v["reason"]
+    assert "claude" not in v["effective_reviewer_kinds"]
+
+
+def test_review_assurance_claude_ambient_unchanged_when_cross_model_off() -> None:
+    """A claude session keeps today's all-claude effective set."""
+    with patch.object(
+        review_mod, "resolve_harness_identity", return_value=HarnessIdentity(session_id="t", harness="claude")
+    ), patch(
+        "fno.review.provider_resolution.exhausted_provider_kinds", return_value=set()
+    ), patch(
+        "fno.review.policy._cross_model_enabled", return_value=False
+    ):
+        v = review_mod.review_assurance("sess", size="S")
+    assert v["effective_reviewer_kinds"] == ["claude"]
+
+
+def test_read_state_parses_frontmatter_session_id(tmp_path) -> None:
+    """The manifest is YAML frontmatter; session_id is read, not json.loads."""
+    state = tmp_path / "target-state.md"
+    state.write_text("---\nsession_id: abc\n---\nbody\n", encoding="utf-8")
+    assert review_mod._read_state(state) == {"session_id": "abc"}
+    assert review_mod._read_state(tmp_path / "absent.md") == {}
 
 
 def test_review_assurance_blocks_on_unknown_identity() -> None:

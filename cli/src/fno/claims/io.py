@@ -125,6 +125,11 @@ def global_claims_dir() -> Path:
 #                  worktrees), so a cwd-local root would dedupe nothing. Rust
 #                  owns the latch; this entry keeps `fno agents claim status`
 #                  reading the same lockfile.
+# - gate:<side>    the machine-wide spawn-gate mutex (spawn_gate.py and the
+#                  Rust twin serialize EVERY spawner on the machine against
+#                  one lock). A cwd-local root would let two checkouts
+#                  serialize against different files and admit double the
+#                  capped-lane load.
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
 _GLOBAL_ID_PREFIXES = frozenset(
@@ -137,6 +142,11 @@ _GLOBAL_ID_PREFIXES = frozenset(
         "update",
         "config-optout",
         "flight",
+        "gate",
+        # `test:suite`, the fno-agents test-run admission claim (Rust-only
+        # caller): keeps parity with crates/fno-agents/src/claims.rs so the
+        # same key never routes to two different roots.
+        "test",
     }
 )
 
@@ -225,9 +235,41 @@ def decode_key(filename: str) -> str:
     return unquote(filename)
 
 
+def list_claim_keys(prefix: str | None = None, root: Path | None = None) -> list[str]:
+    """Keys present in the claims dir, by directory walk only.
+
+    Presence, never liveness: a key is listed because its ``.lock`` file
+    exists. No verdict subprocess, no file parse. For callers that only need
+    "is this key claimed" (the undispatched observer), the verdict leg of
+    :func:`fno.claims.core.list_claims` cost 33s under load and its state
+    column was discarded. Skips subdirs (the ``.expired`` archive) and any
+    non-``.lock`` name; a corrupted file still counts as claimed.
+    """
+    cdir = claims_dir(root)
+    if not cdir.is_dir():
+        return []
+    keys = [
+        decode_key(entry.name)
+        for entry in cdir.iterdir()
+        if not entry.is_dir() and entry.name.endswith(".lock")
+    ]
+    if prefix is not None:
+        keys = [key for key in keys if key.startswith(prefix)]
+    return sorted(keys)
+
+
 def claim_path(key: str, root: Path | None = None) -> Path:
     """Return the canonical file path for a claim key."""
     return claims_dir(root) / f"{encode_key(key)}.lock"
+
+
+def node_has_live_claim(key: str, roots: "list[Path | None] | None" = None) -> bool:
+    """Does a claim lockfile for ``key`` exist in any swept root? Shared by
+    the reap mirror-clear and the update write-time warning so both answer
+    the same question the same way."""
+    if roots is None:
+        roots = [claims_root_for(key), None]
+    return any(claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots))
 
 
 def expired_archive_path(key: str, ts_ms: int, root: Path | None = None) -> Path:

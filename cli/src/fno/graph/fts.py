@@ -16,7 +16,6 @@ degrade to the substring lane instead of failing.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import sqlite3
 import tempfile
@@ -40,9 +39,11 @@ def index_path(graph_path: Path) -> Path:
 
 
 def _graph_hash(graph_path: Path) -> str:
-    # A cache key, not a gate: the hash decides when to rebuild, never
-    # whether the graph is readable.
-    return hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    # Ask the keeper for the authoritative backend version. During SQLite
+    # cutover graph.json is a debounced export and its bytes may be older.
+    from fno.graph.store import _client_for
+
+    return str(_client_for(graph_path).read_file(graph_path)["sha256"])
 
 
 def _fts5_supported() -> bool:

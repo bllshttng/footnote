@@ -216,15 +216,43 @@ class AttributionGap:
 
 
 def _pidless_route(row: Any) -> str | None:
-    """Name the route that can resolve this pidless row, or None.
+    """Name the bg-socket route that can resolve this pidless row, or None.
 
-    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id, while a codex first-8 collides, so its handle has no accepting route here.
+    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id. A codex row's route is the rollout-fd oracle, partitioned separately in `_live_root_pids`; None here sends it there, not to the gap.
     """
     if getattr(row, "short_id", None):
         return "bg-socket"
     if str(getattr(row, "harness", "")) == "claude" and getattr(row, "harness_session_id", None):
         return "bg-socket"
     return None
+
+
+def _row_is_advancing(row: Any) -> bool:
+    """Positive transcript evidence this pidless row is advancing: the shared classifier's own ADVANCING verdict, a working/watching reading inside STALE_ATTENTION_S (x-9958). Never raises: an unreadable probe proves nothing and the row stays judged by the witness, which fails closed to a gap."""
+    try:
+        from fno.agents import session_truth
+        from fno.agents.reachability import ADVANCING, classify_progress, classify_reachability
+        truth = session_truth.resolve_session_truth(str(getattr(row, "name", "") or ""))
+        state = truth.get("state")
+        age_s = truth.get("last_activity_age_s")
+        reach = classify_reachability(truth_state=state, age_s=age_s, falsifier=None)
+        prog = classify_progress(truth_state=state, reachability=reach.verdict, observed_model=truth.get("observed_model"), harness=getattr(row, "harness", None), route_settings_path=getattr(row, "route_settings_path", None), last_activity_age_s=age_s)
+        return prog.verdict == ADVANCING
+    except Exception:  # noqa: BLE001 - an unreadable probe never voids or clears
+        return False
+
+
+_SHARED_DAEMON_BY_HARNESS: dict[str, str] = {"codex": "codex-app-server"}
+
+
+def _shared_daemon_label(row: Any) -> str | None:
+    """Name the shared daemon hosting this row's work, or None (x-cb2b).
+
+    Deliberately not a ``_pidless_route`` widening: a shared-daemon row
+    resolves to no process of its own. A table, so the next harness with a
+    shared daemon plugs in beside codex.
+    """
+    return _SHARED_DAEMON_BY_HARNESS.get(str(getattr(row, "harness", "")))
 
 
 def _claim_witness(name: str) -> str | None:
@@ -300,6 +328,7 @@ def _live_root_pids(
     deadline: float | None = None,
     snapshot_pids: set[int] | None = None,
     snapshot_at: float | None = None,
+    serves: dict[str, str] | None = None,
 ) -> tuple[set[int], str | AttributionGap | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
@@ -349,13 +378,69 @@ def _live_root_pids(
         pidless_rows = [
             row for row in rows if row.status in LIVE_STATUSES and row.pid is None
         ]
-        unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
-        routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
+        serves = serves or {}
+        # A row whose work runs inside a shared daemon is attributed by that
+        # daemon's verdict, not by an identity route of its own (x-cb2b). A
+        # live verdict means the cost already sits inside the attributed
+        # shared root; any other verdict falls through to the per-row
+        # identity chain below (the rollout fd, then advancing, then the
+        # witness), which still fails closed to a gap.
+        daemon_rows = [
+            row for row in pidless_rows if _shared_daemon_label(row) is not None
+        ]
+        attributed_daemon = {
+            id(row)
+            for row in daemon_rows
+            if serves.get(_shared_daemon_label(row) or "", "unreadable") == "live"
+        }
+        own_rows = [row for row in pidless_rows if id(row) not in attributed_daemon]
+        unrouted_rows = [row for row in own_rows if _pidless_route(row) is None]
+        routed_rows = [row for row in own_rows if _pidless_route(row) is not None]
         routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
+        # x-9958: a codex thread row's session id has an accepting route (the
+        # rollout fd) even though the claude short-id oracle cannot answer for
+        # it; resolved rows attribute like any root, unresolved ones ride the
+        # gap path below.
+        codex_keys = [
+            (str(getattr(row, "harness_session_id", "") or ""), row)
+            for row in unrouted_rows
+            if str(getattr(row, "harness", "")) == "codex"
+            and getattr(row, "harness_session_id", None)
+        ]
+        resolved_codex_ids: set[int] = set()
+        codex_pids: dict[str, int] = {}
+        if codex_keys and (deadline is None or time.monotonic() < deadline):
+            from fno.agents.session_procs import codex_rollout_pid_map
+
+            codex_pids = codex_rollout_pid_map(
+                {sid for sid, _row in codex_keys},
+                timeout=(5.0 if deadline is None else max(0.01, deadline - time.monotonic())),
+            )
+        for sid, row in codex_keys:
+            pid = codex_pids.get(sid)
+            if pid is not None:
+                if _root_pid_is_live(pid, None) is not True:
+                    return roots, "worker root liveness unavailable"
+                roots.add(pid)
+                resolved_codex_ids.add(id(row))
         # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
         # only while a witness says the cost is real; past it all stay gaps.
+        # x-9958: a row advancing by transcript evidence is a live worker whose
+        # pid no route can see, never an unattributable process - it drops from
+        # the gap and the reading stands as an undercount (an undercount is
+        # recoverable, a void is not).
+        unresolved_rows = [row for row in unrouted_rows if id(row) not in resolved_codex_ids]
+        advancing_ids: set[int] = set()
+        for row in unresolved_rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                break  # out of budget: the rest stay with the witness, fail closed
+            if _row_is_advancing(row):
+                advancing_ids.add(id(row))
         fleet_unrouted = [
-            row for row in unrouted_rows if _unrouted_row_costs_fleet(row, deadline)
+            row
+            for row in unresolved_rows
+            if id(row) not in advancing_ids
+            and _unrouted_row_costs_fleet(row, deadline)
         ]
         gap_labels = sorted(
             f"{getattr(row, 'name', '?')} "
@@ -417,6 +502,61 @@ def _live_root_pids(
         return roots, "worker root discovery unavailable"
 
 
+def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], str]:
+    """The shared codex app-server's live root and its verdict (x-cb2b).
+
+    The verdict is ``live``, ``absent`` (every oracle cleanly names no live
+    process) or ``unreadable`` (some oracle could not be read, so absence is
+    unproven and the caller must fail its rows closed). Oracles: fno's own
+    state file, then the provider's ``app-server.pid``, which carries no
+    start token. The token spellings mirror the Rust reader
+    (``codex_inject.rs`` ``parse_state``).
+    """
+    daemons = Path(
+        os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+    ).expanduser() / "app-server-daemon"
+    oracles: list[tuple[Path, tuple[str, ...]]] = [
+        (
+            daemons / "fno-harness-daemon.json",
+            ("processStartToken", "process_start_time", "startTime", "processStartTime"),
+        ),
+        (daemons / "app-server.pid", ()),
+    ]
+    all_absent = True
+    for path, token_keys in oracles:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except Exception:
+            record = None
+        pid = record.get("pid") if isinstance(record, dict) else None
+        token = None
+        for key in token_keys:
+            value = record.get(key) if isinstance(record, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                token = value
+                break
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+            or (bool(token_keys) and token is None)
+        ):
+            all_absent = False
+            continue
+        root_live = _root_pid_is_live(pid, token)
+        if root_live is None:
+            return set(), "unreadable"
+        if root_live:
+            return {pid}, "live"
+        if snapshot_pids is not None and pid in snapshot_pids:
+            # A root gone dead mid-reading is not a clean absence answer.
+            all_absent = False
+        # A dead root is a positive answer: no live process sits here.
+    return set(), ("absent" if all_absent else "unreadable")
+
+
 def _live_shared_serve_root_pids(
     *, snapshot_pids: set[int] | None = None
 ) -> tuple[set[int], str | None]:
@@ -470,8 +610,17 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     if error is not None or ps_output is None:
         return None, error or "footprint unavailable: ps returned no output"
     snapshot_pids = _snapshot_pids(ps_output)
+    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
+        snapshot_pids=snapshot_pids
+    )
+    if shared_serve_error is not None:
+        return None, f"footprint unavailable: {shared_serve_error}"
+    codex_roots, codex_verdict = _codex_app_server_serve(snapshot_pids)
     root_pids, root_error = _live_root_pids(
-        deadline=deadline, snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
+        deadline=deadline,
+        snapshot_pids=snapshot_pids,
+        snapshot_at=snapshot_at,
+        serves={"codex-app-server": codex_verdict},
     )
     attribution_gap = None
     if isinstance(root_error, AttributionGap):
@@ -481,18 +630,13 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         root_error = None
     if root_error is not None:
         return None, f"footprint unavailable: {root_error}"
-    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
-        snapshot_pids=snapshot_pids
-    )
-    if shared_serve_error is not None:
-        return None, f"footprint unavailable: {shared_serve_error}"
-    if (root_pids | shared_serve_pids) - snapshot_pids:
+    if (root_pids | shared_serve_pids | codex_roots) - snapshot_pids:
         return None, "footprint unavailable: discovered worker root missing from ps snapshot"
     reading = parse_footprint(
         ps_output,
         excluded_root_pids={os.getpid()},
-        attributed_root_pids=root_pids | shared_serve_pids,
-        threshold_excluded_root_pids=shared_serve_pids,
+        attributed_root_pids=root_pids | shared_serve_pids | codex_roots,
+        threshold_excluded_root_pids=shared_serve_pids | codex_roots,
     )
     if reading.unparsed_lines:
         return None, (

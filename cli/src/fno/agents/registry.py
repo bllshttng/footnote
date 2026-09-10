@@ -1130,31 +1130,47 @@ def _hold_registry_lock(
     """Acquire the registry-wide flock, optionally within a caller budget."""
     lock_file = _registry_lock_path(registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_file, "w") as fh:
-        if timeout is None:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-        else:
-            validate_timeout_budget(
-                timeout,
-                label="registry lock",
-                poll=poll_seconds,
-            )
-            deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RegistryLockTimeout(
-                            f"registry lock timeout after {timeout:g}s at {lock_file}"
-                        )
-                    time.sleep(min(poll_seconds, remaining))
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    if timeout is not None:
+        validate_timeout_budget(timeout, label="registry lock", poll=poll_seconds)
+        deadline = time.monotonic() + timeout
+    while True:
+        with open(lock_file, "w") as fh:
+            if timeout is None:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            else:
+                while True:
+                    try:
+                        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise RegistryLockTimeout(
+                                f"registry lock timeout after {timeout:g}s at {lock_file}"
+                            )
+                        time.sleep(min(poll_seconds, remaining))
+            try:
+                opened = os.fstat(fh.fileno())
+                current = lock_file.stat()
+                same_inode = (opened.st_dev, opened.st_ino) == (
+                    current.st_dev,
+                    current.st_ino,
+                )
+            except OSError:
+                same_inode = False
+            if not same_inode:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+                if timeout is not None and time.monotonic() >= deadline:
+                    raise RegistryLockTimeout(
+                        f"registry lock timeout after {timeout:g}s at {lock_file}"
+                    )
+                continue
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            return
 
 
 def _validate_single_live_ref(entry: AgentEntry) -> None:

@@ -34,7 +34,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
     let mut index: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
     let mut statuses: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut pr_state: std::collections::HashMap<String, (Option<String>, usize)> =
+    let mut pr_state: std::collections::HashMap<String, (Option<String>, usize, usize)> =
         std::collections::HashMap::new();
     for (sid, node, status) in named {
         index
@@ -42,7 +42,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
             .or_default()
             .push((node.to_string(), status.to_string()));
         statuses.insert(node.to_string(), status.to_string());
-        pr_state.insert(node.to_string(), (None, 0));
+        pr_state.insert(node.to_string(), (None, 0, 0));
     }
     let mut open: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for (sid, node) in open_do {
@@ -198,7 +198,8 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
         vec![(
             "rowb".to_string(),
             "N3".to_string(),
-            "in_review".to_string()
+            "in_review".to_string(),
+            "sessions".to_string()
         )]
     );
     assert_eq!(summary.kept_no_provenance, vec!["rowc".to_string()]);
@@ -3711,6 +3712,7 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
         created_at: entry.created_at.clone(),
         tree: crate::gc::TreeAction::None,
         worktree: None,
+        released: false,
     };
     let mut to_retire = std::collections::BTreeMap::new();
     to_retire.insert(entry.name.clone(), order);
@@ -4020,4 +4022,388 @@ fn dry_run_promises_only_provable_rows() {
     assert_eq!(waiting, vec!["aaaa7777"]);
     assert_eq!(*stops.borrow(), 0, "dry run never stops anything");
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── x-2774: the reaper asks the session, not only the node ──────────────
+
+/// An in-review node with the given session ids joined through sessions[].
+fn x2774_open_node(id: &str, status: &str, sids: &[&str]) -> Value {
+    let rows: Vec<Value> = sids
+        .iter()
+        .map(|sid| {
+            json!({
+                "phase": "do",
+                "harness": "claude",
+                "session_id": sid,
+                "started_at": "2026-09-01T01:00:00Z",
+            })
+        })
+        .collect();
+    json!({
+        "id": id,
+        "status": status,
+        "sessions": rows,
+    })
+}
+
+/// A spawn-origin claude registry row with a pinned short id.
+fn x2774_spawn(name: &str, short_id: &str, sid: &str) -> state::RegistryEntry {
+    let mut e = ask_row(name, None);
+    e.short_id = short_id.into();
+    e.harness = Some("claude".into());
+    e.harness_session_id = Some(sid.into());
+    e.origin = Some("spawn".into());
+    e
+}
+
+/// The x-2774 sweep harness: production graph read over a staged graph.json,
+/// staged transcripts, stop confirmed, no tree.
+#[allow(clippy::too_many_arguments)]
+fn x2774_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace: i64,
+    dry_run: bool,
+    transcripts: impl Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    agents: crate::claude_roster::ClaudeAgentsSnapshot,
+) -> GcSummary {
+    gc_sweep::run(
+        home,
+        emitter,
+        grace,
+        dry_run,
+        7,
+        &gc_sweep::read_graph_entries,
+        &transcripts,
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &move || agents.clone(),
+        &|_| (None, None),
+        &|_| None,
+    )
+}
+
+/// Change 1 + 2: a spawn row whose node reads in_review and whose harness
+/// state reads done retires with a basis naming the session state, and the
+/// agent_row_reaped event carries it. `working` keeps; a failed roster read
+/// keeps (fail closed).
+#[test]
+fn x2774_terminal_harness_state_releases_an_open_work_row() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "q.jsonl", 2 * 3600);
+    stage_graph(
+        dir.path(),
+        json!([x2774_open_node("N1", "in_review", &["s-term"])]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("row-term", "t-term", "s-term"));
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-term") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+
+    // Terminal roster state: the row retires on the session question.
+    let done_agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-term", Some("done")),
+    ]);
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, done_agents);
+    assert_eq!(summary.retired.len(), 1, "{summary:?}");
+    assert!(
+        summary.retired[0]
+            .1
+            .starts_with("session terminal: harness state done (via sessions); node N1 in_review"),
+        "basis names the session state: {summary:?}"
+    );
+
+    // The inverse: a working state keeps under open work, and the keep names
+    // the reader (change 4).
+    let working_agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-term", Some("working")),
+    ]);
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, working_agents);
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(
+        summary.kept_open_work,
+        vec![(
+            "t-term".to_string(),
+            "N1".to_string(),
+            "in_review".to_string(),
+            "sessions".to_string()
+        )]
+    );
+
+    // A roster read that fails outright keeps everything (change 1).
+    let unreadable = crate::claude_roster::ClaudeAgentsSnapshot::unknown("staged: unreadable");
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, unreadable);
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Change 3: one node, two spawn rows. Older quiet, newer live: the OLDER
+/// retires naming the live peer, the newer keeps under active. Both quiet:
+/// neither retires on the supersession path.
+#[test]
+fn x2774_supersession_and_its_fail_closed_corner() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "old.jsonl", 2 * 3600);
+    let fresh = quiet_transcript(transcripts.path(), "new.jsonl", 100);
+    stage_graph(
+        dir.path(),
+        json!([x2774_open_node("N1", "in_review", &["s-old", "s-new"])]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        let mut older = x2774_spawn("row-old", "t-old", "s-old");
+        older.created_at = "2026-09-09T22:00:00Z".into();
+        let mut newer = x2774_spawn("row-new", "t-new", "s-new");
+        newer.created_at = "2026-09-09T23:00:00Z".into();
+        r.entries.push(older);
+        r.entries.push(newer);
+    })
+    .unwrap();
+    let older_quiet = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-old") => Some(vec![quiet.clone()]),
+        Some("s-new") => Some(vec![fresh.clone()]),
+        _ => None,
+    };
+    let summary = x2774_sweep(&home, &emitter, 900, false, older_quiet, no_agents());
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "t-old".to_string(),
+            "superseded on N1 by live peer row-new (created 2026-09-09T23:00:00Z)".to_string()
+        )],
+        "{summary:?}"
+    );
+    assert_eq!(
+        summary.kept_open_work,
+        vec![(
+            "t-new".to_string(),
+            "N1".to_string(),
+            "in_review".to_string(),
+            "sessions".to_string()
+        )],
+        "the live newest row keeps under its own open-work shield: {summary:?}"
+    );
+
+    let both_quiet = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-old") | Some("s-new") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    // Run 1 (acting) retired and removed t-old; restore it for the
+    // both-quiet world.
+    state::update_registry(&home.registry_json(), |r| {
+        let mut older = x2774_spawn("row-old", "t-old", "s-old");
+        older.created_at = "2026-09-09T22:00:00Z".into();
+        r.entries.push(older);
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, false, both_quiet, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(summary.kept_open_work.len(), 2, "{summary:?}");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Change 6: the node status lags a recorded merge. The row retires with a
+/// basis naming the recorded merge, not the lagging status. No recorded
+/// merge_status keeps the row under open work, as today.
+#[test]
+fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "lag.jsonl", 2 * 3600);
+    let mut node = x2774_open_node("N1", "in_progress", &["s-lag"]);
+    node["merge_status"] = json!("merged");
+    node["sessions"][0]["ended_at"] = json!("2026-09-09T12:00:00Z");
+    stage_graph(dir.path(), json!([node]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-lag") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    let summary = x2774_sweep(&home, &emitter, 900, false, picks, no_agents());
+    assert_eq!(
+        summary.retired,
+        vec![(
+            "t-lag".to_string(),
+            "node N1 in_progress; recorded merge_status merged".to_string()
+        )],
+        "{summary:?}"
+    );
+    let mut plain = x2774_open_node("N1", "in_progress", &["s-lag"]);
+    plain["merge_status"] = Value::Null;
+    stage_graph(dir.path(), json!([plain]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("row-lag", "t-lag", "s-lag"));
+    })
+    .unwrap();
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Change 4: an open-work keep names the provenance source that resolved
+/// its node. A name-route row resolves N2 (statuses map), the sessions
+/// join answers nothing, and the keep reads `read via name`.
+#[test]
+fn x2774_open_work_keeps_name_their_reader() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "name.jsonl", 2 * 3600);
+    stage_graph(dir.path(), json!([x2774_open_node("N2", "in_review", &[])]));
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(x2774_spawn("target-N2", "t-name", "s-name"));
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-name") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
+    assert_eq!(
+        summary.kept_open_work,
+        vec![(
+            "t-name".to_string(),
+            "N2".to_string(),
+            "in_review".to_string(),
+            "name".to_string()
+        )],
+        "{summary:?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Change 5: one staged world judged twice. Dry and acting agree row for
+/// row, except the two permitted divergences, each asserted by name:
+/// needs_live_stop (dry only: a claude row with no death evidence) and the
+/// freshness re-check (acting only, covered by
+/// activity_arriving_in_the_apply_window_keeps_the_row in gc.rs).
+#[test]
+fn x2774_dry_and_acting_agree_row_for_row() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    let fresh = quiet_transcript(transcripts.path(), "fresh.jsonl", 10);
+    let done_node = json!({
+        "id": "ND",
+        "status": "done",
+        "sessions": [
+            {"phase": "do", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "do", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+        ]
+    });
+    stage_graph(
+        dir.path(),
+        json!([
+            done_node,
+            x2774_open_node("N1", "in_review", &["s-term", "s-work"])
+        ]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        let mut done = x2774_spawn("row-done", "t-done", "s-done");
+        done.harness = Some("codex".into());
+        r.entries.push(done);
+        r.entries.push(x2774_spawn("row-term", "t-term", "s-term"));
+        r.entries.push(x2774_spawn("row-work", "t-work", "s-work"));
+        let mut nostop = x2774_spawn("row-nostop", "t-nostop", "s-nostop");
+        nostop.harness = Some("claude".into());
+        r.entries.push(nostop);
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-done") => Some(vec![quiet.clone()]),
+        Some("s-nostop") | Some("s-term") | Some("s-work") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    let roster = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-term", Some("done")),
+        crate::claude_roster::ClaudeAgentRow::new("t-work", Some("working")),
+        crate::claude_roster::ClaudeAgentRow::new("t-nostop", Some("working")),
+    ]);
+    let dry = x2774_sweep(&home, &emitter, 900, true, &picks, roster.clone());
+    let acting = x2774_sweep(&home, &emitter, 900, false, &picks, roster);
+    assert_eq!(
+        dry.kept_open_work, acting.kept_open_work,
+        "open-work bucket agrees"
+    );
+    assert_eq!(dry.kept_active, acting.kept_active, "active bucket agrees");
+    assert_eq!(
+        dry.kept_no_provenance, acting.kept_no_provenance,
+        "provenance bucket agrees"
+    );
+    let dry_ids: Vec<&str> = dry.retired.iter().map(|(id, _)| id.as_str()).collect();
+    let acting_ids: Vec<&str> = acting.retired.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        dry_ids,
+        vec!["t-done", "t-term"],
+        "dry predicts only rows with provable death evidence"
+    );
+    assert_eq!(
+        acting_ids,
+        vec!["t-done", "t-term", "t-nostop"],
+        "acting additionally retires the row whose stop it can confirm"
+    );
+    assert_eq!(
+        dry.needs_live_stop.len(),
+        1,
+        "the predicted-only row is named"
+    );
+    assert_eq!(acting.needs_live_stop.len(), 0);
+    assert_eq!(acting.stop_refused.len(), 0, "{:?}", acting.stop_refused);
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Change 7: the stale-do-row settle tests whether an additional PR is
+/// OPEN by RECORDED state, not whether one exists. Recorded merged does
+/// not hold; recorded open does not settle; unrecorded does not settle
+/// (absence is never read as merged).
+#[test]
+fn x2774_additional_pr_openness_decides_the_settle() {
+    let merged = json!({"number": 1522, "url": "https://github.com/o/r/pull/1522", "merge_status": "merged"});
+    let open =
+        json!({"number": 1600, "url": "https://github.com/o/r/pull/1600", "merge_status": "open"});
+    let unrecorded = json!({"number": 1601, "url": "https://github.com/o/r/pull/1601"});
+
+    // All recorded merged: the row settles.
+    let entries = vec![done_node(
+        "NA",
+        json!("merged"),
+        json!([merged.clone()]),
+        vec![open_do_row("claude", "sess-a")],
+    )];
+    let stale = gc_sweep::stale_open_do_rows(&entries);
+    assert_eq!(stale.len(), 1, "{stale:?}");
+
+    // One recorded-open additional PR: the do row is NOT settled.
+    let entries = vec![done_node(
+        "NB",
+        json!("merged"),
+        json!([merged.clone(), open]),
+        vec![open_do_row("claude", "sess-b")],
+    )];
+    let stale = gc_sweep::stale_open_do_rows(&entries);
+    assert!(stale.is_empty(), "{stale:?}");
+
+    // One unrecorded additional PR: NOT settled - absence is never merged.
+    let entries = vec![done_node(
+        "NC",
+        json!("merged"),
+        json!([merged, unrecorded]),
+        vec![open_do_row("claude", "sess-c")],
+    )];
+    let stale = gc_sweep::stale_open_do_rows(&entries);
+    assert!(stale.is_empty(), "{stale:?}");
 }
