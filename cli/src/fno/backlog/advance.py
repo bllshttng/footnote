@@ -570,7 +570,12 @@ def _undispatched_nodes(
         cmd += ["--project", project]
     if mission:
         cmd += ["--mission", mission]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"fno backlog undispatched did not answer inside its 60s budget: {' '.join(cmd)}"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"

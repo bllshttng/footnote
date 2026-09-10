@@ -3381,3 +3381,29 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     )
     cmd = captured["cmd"]
     assert "--account" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _undispatched_nodes: the observer timeout names what was being read (x-be7f)
+# ---------------------------------------------------------------------------
+
+
+def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise _subprocess_module.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match=r"60s budget: .*backlog undispatched"):
+        adv._undispatched_nodes("fno")
+
+
+def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
+    receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
+
+    def fake_run(cmd, **kwargs):
+        return _FakeProc(0, json.dumps(receipt))
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    assert adv._undispatched_nodes("fno") == receipt
