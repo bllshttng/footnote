@@ -1,8 +1,8 @@
 """Compile the merge result before the merge lands.
 
 Two green parents can merge red when git joins hunks that never met (PR #1654:
-3334b826a133, F821 at store.py:525, both parents green). The merge-tree and
-the static step live in scripts/ci/check-merge-result.sh.
+3334b826a133, F821 at store.py:525, both parents green); the merge-tree and
+static step live in scripts/ci/check-merge-result.sh.
 """
 import json
 import os
@@ -65,14 +65,13 @@ def merge_result_verdict(pr_number: int, cwd: str) -> tuple[str, str]:
     base, head_oid = refs
     if not _fetch_ref(base, cwd):
         return ("unknown", f"could not fetch base branch '{base}'")
-    base_rev = f"origin/{base}"
-    contains = _probe(["git", "merge-base", "--is-ancestor", base_rev, head_oid], cwd)
+    contains = _probe(["git", "merge-base", "--is-ancestor", f"origin/{base}", head_oid], cwd)
     if contains is not None and contains.ok:
         return ("ok", f"head already contains {base} - CI on the head is the merge result")
     fetched = _fetch_pull_head(pr_number, cwd)
     if fetched != head_oid:
         return ("unknown", f"PR head moved during the probe ({fetched[:8] or 'nothing'} != {head_oid[:8]})")
-    return _run_script(_rev("--show-toplevel", cwd) or cwd, base_rev, fetched, cwd)
+    return _run_script(_rev("--show-toplevel", cwd) or cwd, f"origin/{base}", fetched, cwd)
 
 
 def run_merge_result_check(pr_number: int, cwd: str | None = None) -> int:
