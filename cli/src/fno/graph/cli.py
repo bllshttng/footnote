@@ -8794,7 +8794,6 @@ def cmd_reopen(
     locked_mutate_graph(_graph_path(), lambda entries: entries)
 
 
-@cli.command("advance", hidden=True)
 def _refuse_unknown_source(verb_name: str, source: Optional[str]) -> None:
     """x-84b2: an unknown --source refuses at the door (exit 2), never
     defaults - fabricating provenance is what the vocabulary stops."""
@@ -8806,6 +8805,7 @@ def _refuse_unknown_source(verb_name: str, source: Optional[str]) -> None:
         raise typer.Exit(code=2)
 
 
+@cli.command("advance", hidden=True)
 def cmd_advance(
     closed: Optional[str] = typer.Option(
         None,
