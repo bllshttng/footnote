@@ -19,6 +19,11 @@ installed binary is present). See :data:`AUTO_ROUTE_VERBS`.
 - ``python`` -- force the Python dispatch; never touch the binary.
 - unset / anything else -- ``auto`` (the default described above).
 
+Retired twins: ``ask`` and ``rm`` have NO Python implementation. In ``auto``
+they run on the binary (a missing binary refuses through
+:func:`refuse_without_binary`, never a silent Python leg); ``=python`` cannot
+force them and refuses by name; ``=rust`` is unchanged.
+
 To keep the default from surprising a *development* checkout, ``auto`` resolves
 only *installed* binaries (bundled wheel dir / launcher sibling / ``PATH``) and
 ignores the cargo dev target; a dev opts into the local build with
@@ -953,10 +958,11 @@ def _rm_target_name(args: Sequence[str]) -> Optional[str]:
 def _gate_rm_at_seam(args: Sequence[str]) -> bool:
     """Warn that ``rm`` forfeits a resume handle; return False only on a declined prompt.
 
-    Runs at the routing seam so the ONE implementation covers both runtimes:
+    Runs at the routing seam so the ONE implementation covers every route:
     ``rm`` is in :data:`AUTO_ROUTE_VERBS`, so an installed binary serves it and
-    a notice living only in ``dispatch.rm_agent`` would be dead code for every
-    installed user.
+    the Python twin that once lived in ``dispatch`` is gone (one verb, one
+    implementation). A notice below the seam would only reach the no-binary
+    refusal this module also owns.
 
     A ``--help`` on the verb, or a call with no name, is left entirely alone:
     the real parser owns those, and warning about a reap that is not about to

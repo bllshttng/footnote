@@ -4738,7 +4738,12 @@ def cmd_rm(
 ) -> None:
     """Remove an agent: harness or mux session first, registry row after.
 
-    Per-harness teardown:
+    rm runs on the Rust runtime only: it requires the `fno-agents` binary,
+    and `FNO_AGENTS_RUNTIME=python` cannot force it onto Python. With a
+    binary installed, `auto` routing (the default) execs it directly, so
+    this body is reached only when no binary resolved.
+
+    Per-harness teardown (all on the Rust side):
 
     \b
       claude    bg session: drops the claude session record; pane session:
@@ -4753,48 +4758,25 @@ def cmd_rm(
     Your history is never removed here -- teardown drops the harness's
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
-    the orphan in the receipt. A live row is refused by the Rust runtime
-    (the default route; the Python runtime does not gate on liveness), and
-    a blocked row names model rotation as its remedy. Terminal rows need
-    no separate stop first.
-
-    This implementation refuses a live row on its own stored status and the
-    harness teardown call's exit code; it does not itself re-check the
-    claude roster (that reconciliation, claude only today (codex/opencode
-    are not yet covered), is ``fno-agents``'s Rust ``agent.rm`` RPC, which
-    ``auto`` routing prefers when the binary is installed -- self-review
-    finding: this docstring is what a Python-fallback or
-    ``FNO_AGENTS_RUNTIME=python`` invocation actually runs, so it must not
-    claim a check only the other implementation makes, for a harness that
-    check does not even cover). Do not tear a session down by hand: the
+    the orphan in the receipt. A live row is refused until the row is
+    provably gone: a pane worker is told to kill its pane and re-run rm,
+    and a claude row names what its roster read showed. Terminal rows need
+    no separate stop first. Do not tear a session down by hand: the
     harness session record IS the resume handle, and dropping it directly
     spends that handle for nothing this command has not already done. If one
     is already orphaned, use the retained full ``harness_session_id`` with
-    ``fno agents adopt``. A short id is only a best-effort lookup while durable
-    harness evidence still resolves it.
-
-    A linked worktree is removed only when the shared guarded predicate says it
-    is clean, merged, and unowned; otherwise the row is removed and the
-    worktree receipt names the refusal.
+    ``fno agents adopt``. A linked worktree is removed only when the shared
+    guarded predicate says it is clean, merged, and unowned; otherwise the
+    row is removed and the worktree receipt names the refusal.
     """
-    from fno.agents.dispatch import DispatchAskError, rm_agent
+    from fno import rust_binary
+    from fno.agents.rust_runtime import refuse_without_binary, runtime_mode
 
-    try:
-        kwargs: dict[str, Any] = {"force": force}
-        if audit_actor is not None:
-            kwargs["audit_actor"] = audit_actor
-        if audit_reason != "operator-requested":
-            kwargs["audit_reason"] = audit_reason
-        if audit_request_id is not None:
-            kwargs["audit_request_id"] = audit_request_id
-        if audit_worktree_touched:
-            kwargs["audit_worktree_touched"] = True
-        if audit_reclaimed_bytes is not None:
-            kwargs["audit_reclaimed_bytes"] = audit_reclaimed_bytes
-        rm_agent(name, **kwargs)
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+    binary = rust_binary.resolve_installed_binary()
+    if runtime_mode() == "python" or binary is None:
+        # There is no Python rm to fall back to: the twin was deleted
+        # (d-e11b2b3e: one verb, one implementation). Refuse by name.
+        refuse_without_binary("rm")
 
 
 @agents_app.command("reconcile", hidden=True)
