@@ -142,7 +142,7 @@ def stamp_request_origin(
 ) -> "tuple[str | None, str | None]":
     """One birth record through the native owner (`fno-agents node-origin`).
 
-    Returns (origin, evidence). The evidence is the caller's own birth fact,
+    Returns (origin, evidence); the evidence is the caller's own birth fact,
     stamped regardless of the transport; the category fail-opens to unknown.
     """
     import subprocess

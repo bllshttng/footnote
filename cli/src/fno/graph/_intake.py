@@ -1538,8 +1538,8 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     except ValueError as exc:
         raise ValueError(f"{spec['plan_path']}: {exc}") from exc
 
-    # Request origin (x-1005): intake keeps the plan's own references as
-    # evidence but never claims a requester the plan did not declare.
+    # Request origin (x-1005): intake keeps the plan's references as evidence,
+    # never claims a requester the plan did not declare.
     from fno.graph.node_builder import stamp_request_origin
 
     plan_sources = fm.get("sources") or []

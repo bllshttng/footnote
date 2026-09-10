@@ -1309,9 +1309,7 @@ def cmd_add(
     evidence: Optional[str] = typer.Option(
         None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
-    origin_evidence: Optional[str] = typer.Option(
-        None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP
-    ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
         None, "--description", help=DESCRIPTION_HELP
     ),
@@ -1483,9 +1481,7 @@ def cmd_idea(
     evidence: Optional[str] = typer.Option(
         None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
-    origin_evidence: Optional[str] = typer.Option(
-        None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP
-    ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
         None, "--description", help=DESCRIPTION_HELP
     ),
