@@ -2054,9 +2054,9 @@ def run_validity_sweep(
     )
 
 
-# Leg 9: abandoned do rows (x-f714). An open do row wedges its node
+# Leg 9: abandoned do rows (x-f714) - an open do row wedges its node
 # in_progress, and in_progress hides the row from the Rust settle's
-# done+merged gate; the contract lives in docs/backlog-usage.md.
+# done+merged gate. Contract: docs/backlog-usage.md "Abandoned do rows".
 
 AbandonedDoRow = namedtuple(
     "AbandonedDoRow", "node harness session_id verdict reason"
@@ -2064,9 +2064,8 @@ AbandonedDoRow = namedtuple(
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
-    """True only on a resolved, quiet-past-the-bar, non-engaged transcript;
-    every other answer is False with the reason named (a hold, never a
-    guess). Never raises."""
+    """Proof of session death from transcript truth; False holds with a named
+    reason. Never raises."""
     try:
         if harness not in {"claude", "codex"}:
             return False, "harness not file-backed"
@@ -2090,8 +2089,7 @@ def detect_abandoned_do_rows(
     entries, *, live_claimed, live_worked, prover, now_s, quiet_after_s
 ):
     """Stamp every non-terminal, unclaimed open-do-row node gone or held;
-    the vetoes outrank the prover and held candidates are named, never
-    skipped. Pure over its arguments (readers injected)."""
+    vetoes outrank the prover, held candidates are named, never skipped."""
     from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
 
     out: list[AbandonedDoRow] = []
@@ -2104,12 +2102,10 @@ def detect_abandoned_do_rows(
             if not is_open_do_row(row):
                 continue
             harness, sid = row.get("harness"), row.get("session_id")
-            if nid in live_claimed:
-                out.append(AbandonedDoRow(nid, harness, sid, "held", "live claim"))
-            elif live_worked.get(nid):
-                out.append(AbandonedDoRow(
-                    nid, harness, sid, "held",
-                    f"live roster worker {', '.join(live_worked[nid])}"))
+            if nid in live_claimed or live_worked.get(nid):
+                why = ("live claim" if nid in live_claimed
+                       else f"live roster worker {', '.join(live_worked[nid])}")
+                out.append(AbandonedDoRow(nid, harness, sid, "held", why))
             else:
                 gone, reason = prover(harness, sid, e.get("cwd"),
                                       quiet_after_s=quiet_after_s, now_s=now_s)
@@ -2119,12 +2115,8 @@ def detect_abandoned_do_rows(
 
 
 def abandoned_leg(entries, claimed, graph_path, apply):
-    """Detect + reap + render for cmd_maintain. Returns ``(report_fragment,
-    human_lines, warning)``. The config bar is
-    ``backlog.maintain.abandoned_do_row_hours`` (default 24). A roster read
-    that fails closed refuses the leg, never the sweep; a ``gone`` row reaps
-    under ``--apply`` only, one locked store op per row keyed on the exact
-    identity, capped at AUTO_DEFER_BLAST_CAP."""
+    """Detect + reap + render for cmd_maintain; see backlog-usage.md. Returns
+    ``(report_fragment, human_lines, warning)``."""
     try:
         from fno.config import load_settings
 
@@ -2177,19 +2169,7 @@ def abandoned_leg(entries, claimed, graph_path, apply):
             verb = "would reap" if r.verdict == "gone" else "held"
             lines.append(f"  {verb} do row {r.node} ({tag}): {r.reason}")
     if truncated:
-        lines.append(
-            f"  NOTE: abandoned-do-row blast cap hit - {truncated} further gone "
-            f"row(s) NOT reaped this run (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue"
-        )
-    report = {
-        "abandoned_do_rows": len(reaped) if apply else len(rows),
-        "abandoned_do_row_nodes": [
-            {"node_id": r.node, "verdict": r.verdict, "reason": r.reason,
-             **({"row_removed": rep.get("row_removed"),
-                 "status_after": rep.get("status_after")}
-                if apply and (rep := reaped.get(r.node)) else {})}
-            for r in rows
-        ],
-        "abandoned_do_row_truncated": truncated,
-    }
-    return report, lines, None
+        lines.append(f"  NOTE: abandoned-do-row blast cap hit - {truncated} gone "
+                     f"row(s) not reaped (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue")
+    return {"abandoned_do_rows": len(reaped) if apply else len(rows),
+            "abandoned_do_row_truncated": truncated}, lines, None
