@@ -550,13 +550,19 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
-        "never", "The routing inventory: a list of {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A small built-in table is a FALLBACK under this key: a row here OVERRIDES the built-in of the same name per field and a new name EXTENDS the set, so adding a model is a config edit and never a Python edit. Declare none and the grid still records no-inventory-declared and injects nothing; the fallback only keeps a tier request answerable. `fno/routing_sample.toml` ships as a labelled sample no code path reads.",
+        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
     ),
     "routing.objective": Meta(
         "advanced", "How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.",
     ),
     "routing.prefer_harness": Meta(
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
+    ),
+    "routing.enforce_inventory": Meta(
+        "never", "Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only; explicit flags constrain, never bypass, and an unresolvable request is a named refusal. Default off.",
+    ),
+    "routing.operator_access": Meta(
+        "never", "The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.",
     ),
     # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
     # Four axis tables, every key naming its axis. A bare key under

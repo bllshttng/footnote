@@ -5,22 +5,21 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/authorized_merge.rs	556	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	759	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	780	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1276	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	2288	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/bin/client.rs	3629	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	1314	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	1367	let err = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	2362	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	3726	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	1277	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2944	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3012	let mut pane_command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3330	let mut pane_command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	1124	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	1284	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2369	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2438	std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6713	let mut child = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6772	let mut child = match std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	7931	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	2367	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/daemon.rs	2436	std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6498	let mut child = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6557	let mut child = match std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	7716	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1880	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1936	let ok = Command::new("fno")
@@ -35,6 +34,7 @@ crossing	crates/fno-agents/src/loopcheck.rs	12233	let fno_bin = loopcheck_fno_bi
 crossing	crates/fno-agents/src/nudge.rs	35	let output = Command::new("fno")
 crossing	crates/fno-agents/src/provider.rs	544	let out = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/reentry.rs	135	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/route_slot.rs	2410	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/scrape.rs	174	fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	276	let bin = fno_bin();
 crossing	crates/fno-agents/src/spawn_gate.rs	378	let _ = std::process::Command::new("fno")

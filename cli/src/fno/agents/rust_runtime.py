@@ -280,6 +280,10 @@ RUST_CLIENT_VERBS = frozenset(
         # The harness-keyed spawn-defaults resolver (x-8975): payload JSON in,
         # the answer out; Python calls it via fno.agents.spawn_overlay_client.
         "spawn-overlay",
+        # The billing axes of the spawn seam (route/account/model): payload
+        # JSON in, the {inject, applied, suppressed, messages} plan out;
+        # Python calls it via fno.agents.spawn_axes_client.
+        "spawn-axes",
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
@@ -496,6 +500,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
+    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
 }
@@ -927,6 +932,20 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     if verb != "spawn":
         return False
     return _has_flag(args, "-P", ("--route", "--provider"))
+
+
+def _with_seam_marker(args: "list[str]", verb: str) -> "list[str]":
+    """Assert the Python seam crossed, and carry its enforcement verdict:
+    ``--defaults-applied=<state>`` straight after the verb is the only record
+    the config-blind binary sees of the seam's decision. The token is
+    inserted, never appended: everything after ``--`` is the worker's seed.
+    Spawn-only: no other verb crosses this fork.
+    """
+    if verb != "spawn" or not args or args[0] != "spawn":
+        return args
+    from fno.agents.spawn_defaults import spawn_seam_marker
+
+    return [args[0], spawn_seam_marker(), *args[1:]]
 
 
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any
@@ -1474,13 +1493,13 @@ def make_agents_group_cls() -> type:
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(list(args))  # execs; does not return
+                    route_to_rust(_with_seam_marker(list(args), verb))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(list(args), binary=binary)  # execs
+                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)
