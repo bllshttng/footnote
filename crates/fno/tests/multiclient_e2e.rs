@@ -8,7 +8,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{spawn_server, Absorbed, FakeClient};
+use common::{spawn_server, Absorbed, ClientHarness, FakeClient};
 use fno::proto::Command;
 
 struct Scratch(PathBuf);
@@ -769,4 +769,220 @@ fn concurrent_graft_one_commits_one_refuses() {
     let layout = c.wait_layout(10, "settled to two panes", |l| l.panes.len() == 2);
     // No orphan shell from the refused graft: exactly the anchor + one shell.
     assert_eq!(layout.panes.len(), 2);
+}
+
+// -- x-78c1: a close issued from OUTSIDE an attached client (the workspace
+//    prune's one-shot control connection) must still converge every OTHER
+//    attached client. The operator's prune closed 19 tabs; a spectator's tab
+//    bar kept painting the pre-prune catalog. These are the node's markers:
+//    the NON-issuing client's rendered/catalog tab count changes. ----------
+
+/// Tab count of the client's active squad in the last absorbed Layout.
+fn active_tabs(l: &common::LayoutSnap) -> Option<usize> {
+    l.squads
+        .iter()
+        .find(|s| s.id == l.active_squad)
+        .map(|s| s.tabs.len())
+}
+
+#[test]
+fn tab_close_over_a_one_shot_connection_converges_the_other_clients_catalog() {
+    let scratch = Scratch::new("close-catalog");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    a.wait_layout(10, "first layout", |l| l.panes.len() == 1);
+    a.cmd(Command::NewTab);
+    a.cmd(Command::NewTab);
+    a.wait_layout(10, "three tabs", |l| active_tabs(l) == Some(3));
+
+    // B joins the same squad and settles on the three-tab catalog.
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "b joins", |l| active_tabs(l) == Some(3));
+
+    // The prune's transport: a one-shot control connection with no attached
+    // viewer closes the MIDDLE tab, so every later ordinal renumbers.
+    let out = fno_cmd(
+        &scratch,
+        &["mux", "tab", "close", "--squad", "id:1", "--tab", "2"],
+    );
+    assert!(
+        out.status.success(),
+        "one-shot close failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The marker: B, which issued nothing, sees the catalog shrink.
+    b.wait_layout(10, "b renumbers to two tabs", |l| active_tabs(l) == Some(2));
+    a.wait_layout(10, "a renumbers to two tabs", |l| active_tabs(l) == Some(2));
+
+    // Positive control: the server itself reads two tabs (a clean zero would
+    // also read as convergence, so name what the wire actually carried).
+    let ls = fno_cmd(&scratch, &["mux", "tab", "ls", "--squad", "id:1", "--json"]);
+    assert!(ls.status.success());
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    assert_eq!(
+        stdout.matches("\"tab_id\"").count(),
+        2,
+        "server holds two tabs: {stdout}"
+    );
+}
+
+#[test]
+fn squad_removal_over_a_one_shot_connection_converges_the_other_client() {
+    let scratch = Scratch::new("close-squad");
+    let _server = sh_server(&scratch);
+    let cwd1 = scratch.dir("w1");
+    let cwd2 = scratch.dir("w2");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd1.to_str().unwrap());
+    a.wait_layout(10, "a squad", |l| l.squads.len() == 1);
+    // A second workspace: B's attach (different cwd) mints squad 2.
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd2.to_str().unwrap());
+    a.wait_layout(10, "two squads", |l| l.squads.len() == 2);
+
+    // Squad removal: closing a workspace's LAST tab removes the squad.
+    let out = fno_cmd(
+        &scratch,
+        &["mux", "tab", "close", "--squad", "id:2", "--tab", "1"],
+    );
+    assert!(
+        out.status.success(),
+        "one-shot last-tab close failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The marker: A (which issued nothing) sees squad 2 leave the catalog.
+    a.wait_layout(10, "a sees one squad", |l| l.squads.len() == 1);
+    // B, whose VIEW was the removed tab, re-anchors to the survivor.
+    b.wait_layout(10, "b re-anchors to squad 1", |l| l.active_squad == 1);
+}
+
+#[test]
+fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
+    // The real-client form of the marker: the RENDERED tab strip on a client
+    // that typed nothing. The operator's screenshot after his own prune is
+    // the counter-example this test exists to refute.
+    let scratch = common::Scratch::new("close-strip");
+    let mut a = ClientHarness::spawn(&scratch);
+    a.wait_screen(15, |s| !s.trim().is_empty());
+    a.wait_input_ready(10);
+    a.type_bytes(b"\x02c"); // prefix+c: second tab
+    a.type_bytes(b"\x02c"); // third tab
+    let mut b = ClientHarness::spawn(&scratch);
+    b.wait_screen(15, |s| !s.trim().is_empty());
+
+    let strip = |s: &str| s.lines().next().unwrap_or("").to_string();
+    let a_row = strip(&a.screen());
+    assert!(
+        a_row.contains(" 3]"),
+        "a shows three tabs before the close; strip: {a_row:?}"
+    );
+    b.wait_screen(15, |s| strip(s).contains(" 3]"));
+
+    let out = scratch
+        .command()
+        .args(["mux", "tab", "close", "--squad", "id:1", "--tab", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "one-shot close failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The marker: the client that issued nothing repaints the strip with the
+    // closed tab's ordinal gone (every later tab renumbers down).
+    let b_row = b.wait_screen(15, |s| !strip(s).contains(" 3]"));
+    assert!(
+        b_row.contains(" 2]"),
+        "the renumbered strip still names ordinal 2: {b_row:?}"
+    );
+    a.wait_screen(15, |s| !strip(s).contains(" 3]"));
+}
+
+#[test]
+fn workspace_prune_converges_the_spectating_clients_catalog() {
+    // The operator's surface verbatim: `fno mux workspace prune` closes the
+    // surplus pristine tabs, and the clients that never typed anything must
+    // repaint the renumbered bar. The incident: 19 closes, and the
+    // spectator's bar kept painting the pre-prune count.
+    let scratch = Scratch::new("prune-spectator");
+    // bash, so spawned shells integrate OSC 133 and read pristine once they
+    // draw a prompt - the prune's default fold only closes pristine tabs.
+    let _server = spawn_server(&scratch.sock(), &[("SHELL", "/bin/bash")]);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    a.wait_layout(10, "first layout", |l| l.panes.len() == 1);
+    a.cmd(Command::NewTab);
+    a.cmd(Command::NewTab);
+    a.wait_layout(10, "three tabs", |l| active_tabs(l) == Some(3));
+
+    // Every SURPLUS pane must have drawn a prompt (pristine) before the
+    // prune, or the fold honestly keeps it and the marker proves nothing.
+    // Poll the SAME instrument the fold reads (pane ls's pristine flag); the
+    // active tab's pane is exempt: the last-in-squad guard keeps it whatever
+    // it reads.
+    let iso_cmd = |args: &[&str]| {
+        // The store pass must write the SAME isolated store the server uses
+        // (spawn_server pins FNO_AGENTS_HOME); without it the build-tree
+        // guard refuses the write to the developer's real ~/.fno.
+        let store_home = scratch.0.join("iso-agents");
+        std::fs::create_dir_all(&store_home).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_fno"))
+            .args(args)
+            .env("FNO_MUX_DIR", &scratch.0)
+            .env("FNO_AGENTS_HOME", &store_home)
+            .output()
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let out = iso_cmd(&["mux", "pane", "ls", "--json"]);
+        assert!(out.status.success(), "pane ls failed");
+        let pristine = String::from_utf8_lossy(&out.stdout)
+            .matches("\"pristine_idle_shell\":true")
+            .count();
+        if pristine >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "surplus panes never read pristine; pane ls: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // B joins as the spectator and settles on the three-tab catalog.
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "b joins", |l| active_tabs(l) == Some(3));
+
+    let out = iso_cmd(&["mux", "workspace", "prune", "--json"]);
+    assert!(
+        out.status.success(),
+        "prune failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        receipt.contains("\"tabs_closed\":2") || receipt.contains("\"tabs_closed\": 2"),
+        "the fold closed the two surplus tabs: {receipt}"
+    );
+
+    // The markers: BOTH spectators renumber to the one surviving tab.
+    b.wait_layout(10, "b renumbers to one tab", |l| active_tabs(l) == Some(1));
+    a.wait_layout(10, "a renumbers to one tab", |l| active_tabs(l) == Some(1));
+
+    // Positive control: the server itself reads one tab, one pane.
+    let ls = fno_cmd(&scratch, &["mux", "tab", "ls", "--squad", "id:1", "--json"]);
+    assert!(ls.status.success());
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    assert_eq!(
+        stdout.matches("\"tab_id\"").count(),
+        1,
+        "server holds one tab: {stdout}"
+    );
 }
