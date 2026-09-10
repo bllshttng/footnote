@@ -750,6 +750,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         from fno.paths import graph_json
         from fno.graph.store import locked_mutate_graph
 
+        from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
@@ -764,11 +765,34 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         if not path.exists():
             return
 
+        # The graph is cross-project: a bare PR number can collide across
+        # repos. An additional-PR entry is stamped only when its url
+        # resolves to the same repo the merge ran in; an unresolvable slug
+        # on either side stamps nothing (unrecorded stays open, the
+        # fail-closed default the reaper reads).
+        our_slug = resolve_current_repo_slug(cwd or os.getcwd())
+
         def _mut(entries: List[dict]) -> List[dict]:
+            # The merged PR may be the node's PRIMARY ref or one of its
+            # additional refs (x-2774 change 7): stamp whichever it is, so a
+            # merged additional PR is recorded merged and the reaper's
+            # recorded-openness test can settle its do rows. Unrecorded stays
+            # open everywhere - this is the recorder, never the assertion.
             for e in entries:
                 if e.get("pr_number") == pr_number:
                     e["merge_status"] = merge_status
-                    break
+                    return entries
+            for e in entries:
+                for extra in e.get("additional_prs") or []:
+                    if not isinstance(extra, dict) or extra.get("number") != pr_number:
+                        continue
+                    if our_slug is None:
+                        return entries
+                    their_slug = repo_slug_from_url(extra.get("url") or "")
+                    if their_slug is None or their_slug.lower() != our_slug.lower():
+                        continue
+                    extra["merge_status"] = merge_status
+                    return entries
             return entries
 
         locked_mutate_graph(path, _mut)

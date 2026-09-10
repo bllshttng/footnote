@@ -414,6 +414,7 @@ fn run_request(
             entry,
             ledger,
             false,
+            false,
             &stop,
             seams.surface_removal,
             &mut receipts,
@@ -423,6 +424,7 @@ fn run_request(
                     entry.name.clone(),
                     crate::gc_sweep::RetireOrder {
                         id: entry.name.clone(),
+                        released: false,
                         basis: format!(
                             "merge-cleanup:{} all nodes done+merged",
                             request.request_id

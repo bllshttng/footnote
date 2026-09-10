@@ -85,8 +85,10 @@ pub struct GcSummary {
     /// blueprint/think row on it carries no `ended_at` - the completion
     /// belongs to an earlier assignment, never to this worker (x-5aef).
     pub kept_planning_unclosed: Vec<(String, String)>,
-    /// `(id, node, status)`: a named node is not done; the first open one.
-    pub kept_open_work: Vec<(String, String, String)>,
+    /// `(id, node, status, reader)` (x-2774 change 4): a named node is not
+    /// done; the first open one, and the provenance source that resolved it,
+    /// so a sessions-join keep is distinguishable from a name-pattern keep.
+    pub kept_open_work: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// The transcript could not be resolved through the row's own store.
@@ -214,10 +216,12 @@ pub struct GraphRead {
     /// its key set is the id set the name and transcript routes resolve
     /// against, so no second id read exists.
     pub statuses: HashMap<String, String>,
-    /// Node id -> (merge_status, additional_prs length) (x-5a62). The
-    /// confirm step reads positive PR-state evidence from it; a missing
-    /// merge_status is recorded as unrecorded, never asserted unmerged.
-    pub pr_state: HashMap<String, (Option<String>, usize)>,
+    /// Node id -> (merge_status, additional_prs total, additional_prs still
+    /// open by recorded state) (x-5a62, x-2774 change 7). The confirm step
+    /// reads positive PR-state evidence from it; a missing merge_status is
+    /// recorded as unrecorded, never asserted unmerged, and an additional PR
+    /// whose state is unrecorded still counts as open.
+    pub pr_state: HashMap<String, (Option<String>, usize, usize)>,
     /// Lowercased session id -> the node ids where THIS session's own
     /// `blueprint` or `think` sessions[] row carries a non-empty `ended_at`
     /// (x-5aef task 1.2). The positive marker the planner's own close
@@ -232,6 +236,12 @@ pub(crate) struct RetireOrder {
     pub(crate) created_at: String,
     pub(crate) tree: TreeAction,
     pub(crate) worktree: Option<String>,
+    /// The session-shaped release (x-2774) that let an OPEN-work row
+    /// retire: terminal state, live peer, parked node, or recorded merge.
+    /// The obligation re-checks yield to it - the released session's own
+    /// open do row is the stale record of work that moved on, not a live
+    /// assignment.
+    pub(crate) released: bool,
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
@@ -309,7 +319,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
-    let mut pr_state: HashMap<String, (Option<String>, usize)> = HashMap::new();
+    let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -322,6 +332,15 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 .unwrap_or_default()
                 .to_string(),
         );
+        let additional = entry
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let additional_open = additional
+            .iter()
+            .filter(|extra| additional_pr_recorded_open(extra))
+            .count();
         pr_state.insert(
             node_id.to_string(),
             (
@@ -329,11 +348,8 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .get("merge_status")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                entry
-                    .get("additional_prs")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0),
+                additional.len(),
+                additional_open,
             ),
         );
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
@@ -400,12 +416,23 @@ pub struct StaleDoRow {
     pub session_id: String,
 }
 
+/// Whether an `additional_prs` entry is still open by RECORDED state alone
+/// (x-2774 change 7). Only an entry whose own `merge_status` reads `merged`
+/// has settled; an entry with no recorded state is still open - absence is
+/// never read as merged, the same fail-closed direction the node-level
+/// confirm takes. Nothing here queries a live tracker: recording the state
+/// at merge time is `fno do pr merge`'s job (`_sync_graph_merge_status`).
+pub(crate) fn additional_pr_recorded_open(extra: &Value) -> bool {
+    extra.get("merge_status").and_then(Value::as_str) != Some("merged")
+}
+
 /// Every open do row sitting on a settled node. Every clause is a positive
 /// marker: `status == "done"`; `merge_status == "merged"`, a field written
 /// only when a caller resolved MERGED from `gh`, so its absence has two
 /// explanations and neither is asserted here; and no `additional_prs` entry
-/// at all - the graph records no per-entry merge state for an additional PR,
-/// so any additional PR holds the row.
+/// still open by recorded state - presence alone never holds the row, an
+/// entry whose recorded merge state says merged does not either, and an
+/// UNRECORDED entry does (x-2774 change 7).
 pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
     let mut stale = Vec::new();
     for entry in entries {
@@ -421,7 +448,7 @@ pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
         let holds_pr = entry
             .get("additional_prs")
             .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+            .is_some_and(|a| a.iter().any(|extra| additional_pr_recorded_open(extra)));
         if holds_pr {
             continue;
         }
@@ -766,6 +793,13 @@ pub struct ProvenanceVerdict {
     pub route: node_route::NodeRoute,
     pub hold: Option<KeepReason>,
     pub merge_note: Vec<String>,
+    /// The Open node whose RECORDED `merge_status` reads `merged`
+    /// (x-2774 change 6): the status field can lag the merge by minutes
+    /// when reconcile is slow, and the merge evidence is already in the
+    /// same graph read. `Some(node)` releases the open-work shield the way
+    /// a terminal session state does; absence keeps the row, because a
+    /// conservative hold is the right failure and a wrong reap is not.
+    pub merged_but_open: Option<String>,
 }
 
 pub fn provenance_verdict(
@@ -796,34 +830,52 @@ pub fn provenance_verdict(
             b: node,
         });
     let mut merge_note: Vec<String> = Vec::new();
-    if let WorkState::AllDone { nodes } = &work {
-        for node in nodes {
-            let (merge_status, extra) = graph.pr_state.get(node).cloned().unwrap_or((None, 0));
-            if extra > 0 {
-                hold = Some(KeepReason::PrStateContradicts {
-                    node: node.clone(),
-                    detail: format!("additional_prs: {extra}"),
-                });
-                break;
-            }
-            match &merge_status {
-                Some(m) if m != "merged" => {
+    let mut merged_but_open: Option<String> = None;
+    match &work {
+        WorkState::AllDone { nodes } => {
+            for node in nodes {
+                let (merge_status, total, open) =
+                    graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+                if open > 0 {
                     hold = Some(KeepReason::PrStateContradicts {
                         node: node.clone(),
-                        detail: format!("merge_status: {m}"),
+                        detail: format!("additional_prs: {open} of {total} not recorded merged"),
                     });
                     break;
                 }
-                Some(m) => merge_note.push(format!("{node}:{m}")),
-                None => merge_note.push(format!("{node}:unrecorded")),
+                match &merge_status {
+                    Some(m) if m != "merged" => {
+                        hold = Some(KeepReason::PrStateContradicts {
+                            node: node.clone(),
+                            detail: format!("merge_status: {m}"),
+                        });
+                        break;
+                    }
+                    Some(m) => merge_note.push(format!("{node}:{m}")),
+                    None => merge_note.push(format!("{node}:unrecorded")),
+                }
             }
         }
+        // The merge-lag window (x-2774 change 6): the pr_state read used to
+        // be fenced inside the AllDone arm, so the merge evidence already
+        // loaded for every node was discarded on the one branch that needs
+        // it. Recorded merged is positive evidence the work shipped; only
+        // Some("merged") counts, everything else keeps the row.
+        WorkState::Open { node, .. } => {
+            let (merge_status, _total, _open) =
+                graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+            if merge_status.as_deref() == Some("merged") {
+                merged_but_open = Some(node.clone());
+            }
+        }
+        WorkState::NoProvenance => {}
     }
     ProvenanceVerdict {
         work,
         route,
         hold,
         merge_note,
+        merged_but_open,
     }
 }
 
@@ -874,11 +926,68 @@ pub(crate) fn run(
     let mut to_retire: std::collections::BTreeMap<String, RetireOrder> =
         std::collections::BTreeMap::new();
     // The agents snapshot is read at most once per sweep, on the first row
-    // that reaches the stop gate - never on the empty/kept hot path.
+    // that reaches the stop gate - never on the empty/kept hot path. The
+    // terminal-state read (x-2774 change 1) shares the memo: an Open claude
+    // row triggers the same one-snapshot read, so a fleet still pays at
+    // most one `claude agents` per sweep.
     let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
         std::cell::RefCell::new(None);
 
+    // Pass 1 (x-2774 change 3): prove provenance and transcript age ONCE per
+    // spawn row, so the supersession map and the row pass read the same
+    // verdict instead of answering the reverse join twice. Entries the
+    // origin gates already hold stay None - their buckets are decided in
+    // pass 2 without a verdict.
+    let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
+        Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
+        let eligible = e.origin.as_deref() == Some("spawn") && e.crown_level.is_none();
+        if !eligible {
+            staged.push(None);
+            continue;
+        }
+        let Some(graph) = &graph else {
+            staged.push(None);
+            continue;
+        };
+        let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
+        let hits = store_matches(e);
+        let verdict = provenance_verdict(e, sid, graph, hits.as_deref());
+        let age = transcript_age_s(hits.as_deref(), now);
+        staged.push(Some((verdict, age)));
+    }
+
+    // The live-peer map (x-2774 change 3): node -> (name, created_at) of the
+    // NEWEST spawn row on that node whose transcript is inside the grace
+    // window. Both halves are positive markers - a newer spawn exists and it
+    // is demonstrably live - so a lone worker is never superseded and two
+    // quiet peers never sweep each other. Ties resolve by created_at then
+    // name so the map never depends on registry order.
+    let mut live_peer: HashMap<String, (String, String)> = HashMap::new();
+    for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
+        let Some((verdict, age)) = staged_row else {
+            continue;
+        };
+        let fresh = matches!(age, Some(a) if *a <= grace_secs);
+        if !fresh {
+            continue;
+        }
+        if let WorkState::Open { node, .. } = &verdict.work {
+            let take = match live_peer.get(node) {
+                None => true,
+                Some((_, created)) if created.as_str() < e.created_at.as_str() => true,
+                Some((name, created)) => {
+                    created.as_str() == e.created_at.as_str() && name.as_str() < e.name.as_str()
+                }
+                Some((_, _)) => false,
+            };
+            if take {
+                live_peer.insert(node.clone(), (e.name.clone(), e.created_at.clone()));
+            }
+        }
+    }
+
+    for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_handle(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
@@ -902,9 +1011,15 @@ pub(crate) fn run(
             summary.kept_graph_unreadable.push(id);
             continue;
         };
+        let Some((verdict, age)) = staged_row else {
+            // A row pass 1 did not stage: the graph read failed there too.
+            // Same bucket as a failed direct read - never a retirement on a
+            // failed read.
+            summary.kept_graph_unreadable.push(id);
+            continue;
+        };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        let verdict = provenance_verdict(e, sid, graph, store_matches(e).as_deref());
-        let work = verdict.work;
+        let work = verdict.work.clone();
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -915,9 +1030,9 @@ pub(crate) fn run(
                 continue;
             }
         }
-        let confirm_hold = verdict.hold;
-        let merge_note = verdict.merge_note;
-        let age = transcript_age_s(store_matches(e).as_deref(), now);
+        let confirm_hold = verdict.hold.clone();
+        let merge_note = verdict.merge_note.clone();
+        let age = *age;
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
         // The planning lane (x-70e1 task 2): a blueprint/think row's OWN job
         // ends at plan-written-and-node-ready. A row whose sessions[] phases
@@ -955,6 +1070,35 @@ pub(crate) fn run(
         } else {
             Vec::new()
         };
+        // x-2774 changes 1, 3 and 6: the session-shaped releases. The
+        // harness's terminal state, a live newer peer on the same node, a
+        // parked or never-started node, and a recorded merge the status lags
+        // all answer the same question - is THIS session's own story over -
+        // and each falls through to the grace gate in gc_decide.
+        let session_terminal =
+            if matches!(work, WorkState::Open { .. }) && e.harness_name() == "claude" {
+                let mut memo = agents_memo.borrow_mut();
+                let snapshot = memo.get_or_insert_with(&agents_read);
+                crate::daemon::claude_row_id(e)
+                    .and_then(|rid| snapshot.find(&rid).cloned())
+                    .and_then(|row| row.state)
+                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
+            } else {
+                None
+            };
+        let superseded_by_live_peer = match &work {
+            WorkState::Open { node, .. } => live_peer
+                .get(node)
+                .filter(|(peer_name, peer_created)| {
+                    peer_name != &e.name && peer_created.as_str() > e.created_at.as_str()
+                })
+                .map(|(name, created)| format!("{name} (created {created})")),
+            _ => None,
+        };
+        let node_merged = verdict.merged_but_open.is_some();
+        // x-2774 change 8: the existence-specific probe on the row's own
+        // pid. One kill(2) per row, no subprocess; only ESRCH counts.
+        let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -966,6 +1110,10 @@ pub(crate) fn run(
             planning,
             planning_closed,
             confirm_hold,
+            session_terminal,
+            superseded_by_live_peer,
+            node_merged,
+            pid_gone,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
@@ -975,7 +1123,13 @@ pub(crate) fn run(
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => summary.kept_no_provenance.push(id),
                 Some(KeepReason::OpenWork { node, status }) => {
-                    summary.kept_open_work.push((id, node, status))
+                    let reader = verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                        .to_string();
+                    summary.kept_open_work.push((id, node, status, reader))
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
@@ -1025,7 +1179,12 @@ pub(crate) fn run(
         // classified would-retire, so the hot path pays nothing.
         if !dry_run {
             let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
-            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs);
+            // x-2774 change 8: activity without a living writer is not
+            // activity. A pid that answered ESRCH at the re-check keeps its
+            // retirement even if the transcript mtime moved - the write came
+            // from something else.
+            let pid_gone_now = e.pid.is_some_and(crate::daemon::pid_is_gone);
+            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs) || pid_gone_now;
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
@@ -1060,11 +1219,15 @@ pub(crate) fn run(
         // in the caller that owns the snapshot, so the shared signature is
         // untouched.
         let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
+        // x-2774: the session-shaped release that let an OPEN-work row
+        // retire. The obligation re-checks (stage and commit) yield to it.
+        let released = row.session_released();
         if let Err(refusal) = stage_session_retirement(
             home,
             e,
             ledger.as_deref(),
             dry_run,
+            released,
             &stop_on_death,
             surface_removal,
             &mut receipts,
@@ -1122,8 +1285,36 @@ pub(crate) fn run(
                 note.push_str(&format!("; merge_status: {}", merge_note.join(", ")));
                 format!("{named} ({note})")
             }
-            _ => "done".to_string(), // unreachable: only AllDone retires
+            WorkState::Open { node, status } => {
+                // x-2774 change 2: an Open-work retirement is now reachable,
+                // and it is never anonymous. The arm order mirrors the
+                // release precedence in gc_decide: terminal state, then live
+                // peer, then inactive status, then recorded merge.
+                if let Some(peer) = &probed.superseded_by_live_peer {
+                    format!("superseded on {node} by live peer {peer}")
+                } else if let Some(state) = &probed.session_terminal {
+                    format!(
+                        "session terminal: harness state {state} (via {}); node {node} {status}",
+                        via.as_str()
+                    )
+                } else if crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str()) {
+                    format!("node {node} is {status}, not active work")
+                } else {
+                    format!("node {node} {status}; recorded merge_status merged")
+                }
+            }
+            _ => "done".to_string(), // unreachable: only AllDone and the released Open arms retire
         };
+        // x-2774 change 8: name the early fire in the audit line. A basis
+        // that reads "quiet past grace" when the transcript was actually
+        // inside grace misreports why the row went; the pid evidence is the
+        // reason it went when it did.
+        let basis =
+            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
+                format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
+            } else {
+                basis
+            };
         let worktree = if probed.owns_worktree {
             Some(e.cwd.clone())
         } else {
@@ -1143,6 +1334,7 @@ pub(crate) fn run(
                 created_at: e.created_at.clone(),
                 tree,
                 worktree,
+                released,
             },
         );
     }
@@ -1251,6 +1443,7 @@ pub(crate) fn stage_session_retirement(
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
     dry_run: bool,
+    session_released: bool,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
@@ -1264,7 +1457,15 @@ pub(crate) fn stage_session_retirement(
     // happens on rows already classified would-retire, so steady state pays
     // nothing. The commit-level re-check remains as the second belt for the
     // effects-to-registry-drop span, where holding is harmless.
-    if !dry_run {
+    // x-2774: the re-check yields to a session-shaped release - a session
+    // released by terminal harness state, a live newer peer, a parked node,
+    // or a recorded merge has finished its own story on this node. Its open
+    // do row is the stale record of exactly the work that moved on (to the
+    // peer, to the merge, to the park), and the settle or reconcile owns
+    // closing it. Holding the row here would re-hold every released row one
+    // gate later, on the very obligation the release just resolved. The
+    // grace and freshness gates still protect a genuinely live session.
+    if !dry_run && !session_released {
         if let Some(graph) = read_graph_entries(home) {
             let sid = e
                 .harness_session_id
@@ -1397,6 +1598,10 @@ pub(crate) fn commit_retirements(
         Some(graph) => {
             let held: Vec<(String, String)> = to_retire
                 .iter()
+                // x-2774: a session-shaped release outranks the row's own
+                // stale do row here too, the same yield the stage-time
+                // re-check makes.
+                .filter(|(_, order)| !order.released)
                 .filter_map(|(name, _)| {
                     let entry = entries.iter().find(|e| &e.name == name)?;
                     let sid = entry
@@ -2738,7 +2943,7 @@ mod tests {
                 ("N1".to_string(), "done".to_string()),
                 ("N2".to_string(), "open".to_string()),
             ]),
-            pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0))]),
+            pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0, 0))]),
             ..Default::default()
         };
         let verdict = provenance_verdict(&e, "sid-77", &graph, None);
