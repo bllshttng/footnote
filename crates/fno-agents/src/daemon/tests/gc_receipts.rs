@@ -3004,14 +3004,16 @@ fn a_ctrl_r_rename_emits_once_and_never_touches_the_label() {
 fn rename_emits_ride_the_successful_write() {
     // The emit loop sits AFTER the write-failure return inside
     // `run_reconcile_sweep`, so a failed write never announces a rename
-    // it did not persist. Structural, so pin it like the budget clock.
+    // it did not persist. The write itself is delegated to
+    // `liveness_sweep::apply_reconcile_changes`. Structural, so pin it
+    // like the budget clock.
     let src = include_str!("../../daemon.rs");
     let sweep = src
         .split("fn run_reconcile_sweep(")
         .nth(1)
         .expect("run_reconcile_sweep exists");
     let write = sweep
-        .find("apply_title_changes(r, &entries, &titles)")
+        .find("liveness_sweep::apply_reconcile_changes(r, &entries, &changes, &titles")
         .expect("title write");
     let fail = sweep.find("registry write failed").expect("failure return");
     let emit = sweep.find("\"agent_renamed\"").expect("rename emit");
