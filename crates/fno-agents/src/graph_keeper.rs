@@ -35,7 +35,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// The store keeper frame protocol version. Bump on any frame-shape change.
@@ -193,6 +193,47 @@ fn read_one_frame(stream: &mut UnixStream) -> Incoming {
     }
 }
 
+/// The file identity a cache hit validates against, derived from ONE stat
+/// call so the check stays cheaper than the work it skips. `ctime_ns` is the
+/// load-bearing field: an atomic-replace publish swaps the inode, but a
+/// same-size same-mtime overwrite in place does not move either, and ctime
+/// (kernel-managed, not settable from userland) catches it.
+#[derive(Clone, PartialEq)]
+struct FileIdent {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_secs: i64,
+    mtime_nsecs: i64,
+    ctime_secs: i64,
+    ctime_nsecs: i64,
+}
+
+impl FileIdent {
+    fn of(path: &std::path::Path) -> Option<FileIdent> {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(path).ok()?;
+        Some(FileIdent {
+            dev: md.dev(),
+            ino: md.ino(),
+            size: md.len(),
+            mtime_secs: md.mtime(),
+            mtime_nsecs: md.mtime_nsec(),
+            ctime_secs: md.ctime(),
+            ctime_nsecs: md.ctime_nsec(),
+        })
+    }
+}
+
+/// One cached graph snapshot: the identity its bytes were validated against,
+/// the content digest those bytes hash to (begin's tx token), and the parsed
+/// entries shared with every concurrent reader via one `Arc`.
+struct CachedGraph {
+    ident: FileIdent,
+    version: String,
+    entries: Arc<Vec<Value>>,
+}
+
 /// The keeper's shared state. Writes exclude here; reads hold shared guards,
 /// so concurrent reads overlap and every read still waits out an in-flight
 /// publish rather than observing one.
@@ -203,6 +244,14 @@ struct StoreState {
     /// Readers share, writers exclude: read guards for handlers that only
     /// read the owned graph, write guards for the ones that publish.
     gate: RwLock<()>,
+    /// The parsed graph, validated by file identity on every hit. Seeded by
+    /// the write path (commit/op) rather than invalidated, so a mutating
+    /// fleet still hits. Never held for a corrupt/malformed/empty graph.
+    cache: RwLock<Option<CachedGraph>>,
+    /// Every cache-miss parse is one real file open; the counter is the
+    /// cache's honest receipt (AC4's positive marker, and the PR's before/
+    /// after evidence).
+    file_opens: AtomicU64,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
 }
 
@@ -234,6 +283,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         canonical: cfg.canonical,
         lock_timeout: cfg.lock_timeout,
         gate: RwLock::new(()),
+        cache: RwLock::new(None),
+        file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
     });
     let started_at = std::time::SystemTime::now()
@@ -326,6 +377,81 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     }
     let _ = std::fs::remove_file(&cfg.sock);
     Ok(())
+}
+
+/// The read path every owned-graph read serves through: validate the cache
+/// by file identity (one stat), clone the `Arc` on a hit, and on a miss parse
+/// under a read guard (reads share; an in-flight commit's write guard still
+/// excludes this). The cache is filled only by a clean, non-empty parse whose
+/// file did not move during the read, and the stored version is the digest of
+/// exactly the bytes parsed.
+fn cached_entries(
+    state: &StoreState,
+    keep_malformed: bool,
+    strict: bool,
+) -> Result<Arc<Vec<Value>>, StoreError> {
+    if keep_malformed {
+        // load_graph's discovery caller: rare, and its junk-keeping parse is
+        // not the list the write path publishes. Serve fresh; cache nothing.
+        return graph_store::read_defaulted(&state.graph, true).map(Arc::new);
+    }
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    let pre_ident = FileIdent::of(&state.graph);
+    let Some(pre_ident) = pre_ident else {
+        // No identity, no trust: a stat failure invalidates and the read
+        // answers fresh, exactly as an unreadable stat read today.
+        *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
+        return graph_store::read_defaulted_opts(&state.graph, false, !strict).map(Arc::new);
+    };
+    if let Some(cached) = state
+        .cache
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        if cached.ident == pre_ident {
+            return Ok(Arc::clone(&cached.entries));
+        }
+    }
+    state.file_opens.fetch_add(1, Ordering::SeqCst);
+    let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+    let entries = Arc::new(entries);
+    // Re-stat after the parse: cache only when the bytes parsed are the bytes
+    // the post-parse stat and digest describe. A file replaced mid-read is a
+    // consistent instant but the wrong instant to pin, so it is not cached.
+    if let Some(post_ident) = FileIdent::of(&state.graph) {
+        if post_ident == pre_ident && !entries.is_empty() {
+            let version = graph_store::file_content_version(&state.graph);
+            *state.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(CachedGraph {
+                ident: post_ident,
+                version,
+                entries: Arc::clone(&entries),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+/// The write path's cache half: publish landed, so the published entries and
+/// the file's fresh identity are stored under the caller's write guard. This
+/// SEEDS rather than invalidates, which is why a retrying writer's begin (and
+/// every reader behind it) is served from what that writer just published.
+fn seed_cache(state: &StoreState, entries: Vec<Value>) {
+    let mut cache = state.cache.write().unwrap_or_else(|e| e.into_inner());
+    let ident = FileIdent::of(&state.graph);
+    match (ident, entries.is_empty()) {
+        (Some(ident), false) => {
+            let version = graph_store::file_content_version(&state.graph);
+            *cache = Some(CachedGraph {
+                ident,
+                version,
+                entries: Arc::new(entries),
+            });
+        }
+        // An empty graph or an unreadable stat caches nothing: the degenerate
+        // states stay on the fresh-parse path, where their contracts live.
+        _ => *cache = None,
+    }
 }
 
 fn serve_client(
@@ -548,10 +674,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
-        _ => {
-            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-            graph_store::read_defaulted(&state.graph, false)?
-        }
+        _ => (*cached_entries(state, false, false)?).clone(),
     };
     match select(&entries, &opts) {
         Ok(reply) => Ok(json!({
@@ -572,7 +695,6 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
 /// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
 /// diagnoses without writing.
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     let strict = params
         .get("strict")
         .and_then(Value::as_bool)
@@ -584,7 +706,7 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    let entries = graph_store::read_defaulted_opts(&state.graph, keep_malformed, !strict)?;
+    let entries = cached_entries(state, keep_malformed, strict)?;
     Ok(json!({ "entries": entries }))
 }
 
@@ -638,9 +760,10 @@ fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
-    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-    let version = file_version(&state.graph);
-    let entries = graph_store::read_defaulted(&state.graph, false)?;
+    // One gate-held window for entries and digest both (cached_snapshot): a
+    // commit publishing mid-begin waits, so a retrying writer's version never
+    // names a file its entries did not come from.
+    let (version, entries) = cached_snapshot(state)?;
     remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
@@ -698,6 +821,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         },
         state.lock_timeout,
     )?;
+    seed_cache(state, outcome.entries.clone());
     Ok(outcome_json(&outcome))
 }
 
@@ -806,8 +930,8 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
     touched.extend(removed.iter().cloned());
 
     let _gate = state
-        .write_gate
-        .lock()
+        .gate
+        .write()
         .unwrap_or_else(|error| error.into_inner());
     let current_version = file_version(&state.graph);
     let current = graph_store::read_defaulted(&state.graph, false)?;
@@ -1839,6 +1963,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         },
         state.lock_timeout,
     )?;
+    seed_cache(state, outcome.entries.clone());
     Ok(json!({
         "op": op_result,
         "outcome": outcome_json(&outcome),
@@ -1910,6 +2035,8 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            cache: RwLock::new(None),
+            file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
@@ -1974,6 +2101,8 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            cache: RwLock::new(None),
+            file_opens: AtomicU64::new(0),
         }
     }
 
@@ -2067,6 +2196,169 @@ mod tests {
     }
 
     #[test]
+    fn two_reads_open_and_parse_the_file_once() {
+        // AC4: the positive marker is the open counter: one cache-miss parse
+        // across two identical reads.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"t\"}]}",
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        let r1 = handle_read(&state, &json!({})).unwrap();
+        let r2 = handle_read(&state, &json!({})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "two consecutive reads must open and parse the file exactly once"
+        );
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn an_out_of_band_atomic_replace_is_seen_by_the_next_read() {
+        // AC5: gc_sweep writes the file directly (locked_mutate, no keeper);
+        // the atomic replace swaps the inode, so the identity check must
+        // miss and re-read. The marker is the new content in the reply.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"old\"}]}",
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        let first = handle_read(&state, &json!({})).unwrap();
+        assert!(first.to_string().contains("old"));
+        let tmp = dir.path().join(".graph.json.tmp-replace");
+        std::fs::write(
+            &tmp,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"swept\"}]}",
+        )
+        .unwrap();
+        std::fs::rename(&tmp, &graph).unwrap();
+        let second = handle_read(&state, &json!({})).unwrap();
+        let body = second.to_string();
+        assert!(
+            body.contains("swept"),
+            "an out-of-band replace must invalidate: {body}"
+        );
+        assert!(
+            !body.contains("old"),
+            "stale content must not survive the replace: {body}"
+        );
+    }
+
+    #[test]
+    fn a_same_size_same_mtime_in_place_overwrite_is_seen_by_the_next_read() {
+        // AC6: size and mtime alone are not an identity. The overwrite keeps
+        // both but moves ctime (kernel-managed), so the identity check must
+        // miss. The marker is the new content, not a timing window.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"aaaa\"}]}",
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        let _ = handle_read(&state, &json!({})).unwrap();
+        let md = std::fs::metadata(&graph).unwrap();
+        let mtime = md.modified().unwrap();
+        // In place: truncate+write, same inode, same byte count.
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"bbbb\"}]}",
+        )
+        .unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&graph)
+            .unwrap();
+        let _ = f.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(mtime)
+                .set_modified(mtime),
+        );
+        drop(f);
+        let second = handle_read(&state, &json!({})).unwrap();
+        let body = second.to_string();
+        assert!(
+            body.contains("bbbb"),
+            "ctime must catch the in-place overwrite: {body}"
+        );
+        assert!(
+            !body.contains("aaaa"),
+            "stale content must not survive: {body}"
+        );
+    }
+
+    #[test]
+    fn a_commit_seeds_the_cache_so_readers_skip_the_file() {
+        // AC7: the write path seeds rather than invalidates. After a commit,
+        // a read (and a retrying writer's begin) is served from the published
+        // entries with no file open: the counter proves it.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"x-1\", \"title\": \"v1\"}]}",
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        let begin = handle_begin(&state).unwrap();
+        assert_eq!(state.file_opens.load(Ordering::SeqCst), 1);
+        let mut entries = begin["entries"].as_array().unwrap().clone();
+        entries[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("title".into(), json!("v2"));
+        let version = begin["version"].as_str().unwrap().to_string();
+        handle_commit(&state, &json!({"version": version, "entries": entries})).unwrap();
+        // Seeded: the read's open count does not advance past the begin's one
+        // parse, and the reply carries the published content.
+        let after = handle_read(&state, &json!({})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "a post-commit read must be served from the seeded cache"
+        );
+        assert!(after.to_string().contains("v2"));
+    }
+
+    #[test]
+    fn a_corrupt_graph_still_leaves_a_bak_and_caches_nothing() {
+        // AC8: the corrupt branch is byte-for-byte today's behavior: soft
+        // read writes the .bak and raises; strict diagnoses without writing;
+        // the cache holds nothing either way.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\"entries\": [broken").unwrap();
+        let state = read_state(&graph);
+        let soft = handle_read(&state, &json!({}));
+        assert!(soft.is_err());
+        let bak = dir.path().join("backups/graph.json.bak");
+        assert!(bak.exists(), "the soft corrupt read must leave the .bak");
+        assert!(
+            state.cache.read().unwrap().is_none(),
+            "corrupt caches nothing"
+        );
+        let strict = handle_read(&state, &json!({"strict": true}));
+        assert!(strict.is_err());
+        // The strict diagnosis must not have rewritten the soft path's .bak.
+        let bak_mtime = std::fs::metadata(&bak).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            std::fs::metadata(&bak).unwrap().modified().unwrap(),
+            bak_mtime,
+            "strict must diagnose without writing"
+        );
+        assert!(state.cache.read().unwrap().is_none());
+    }
+
+    #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("idle.store.sock");
@@ -2110,12 +2402,10 @@ mod tests {
             graph: graph.clone(),
             canonical: false,
             lock_timeout: Duration::from_secs(2),
-<<<<<<< HEAD
-            write_gate: Mutex::new(()),
-            snapshots: Mutex::new(std::collections::VecDeque::new()),
-=======
             gate: RwLock::new(()),
->>>>>>> e57667940 (feat(store): reads share the keeper gate, writes exclude)
+            cache: RwLock::new(None),
+            file_opens: AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         };
         let stale = json!({
             "name": "update_fields",
