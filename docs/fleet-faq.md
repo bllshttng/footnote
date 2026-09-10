@@ -333,7 +333,7 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 
 **Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
 
-**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A king reading the roster still sees a full crown.
+**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A king reading the roster still sees a full crown. Two readers disagree here. Trust the lane. A peer confirmed the lane read 9 of 10, with both rows absent from its holders. The roster still listed them as `parked`.
 
 *Graduates to:* a lane released on delivery, rather than on an exit event that never arrives.
 
