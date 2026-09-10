@@ -42,8 +42,12 @@ if [ "$st" -eq 0 ]; then
     exit 0
 fi
 red="$(printf '%s\n' "$static_out" | grep -E '^src/' | sed 's|^src/|cli/src/|' | head -3 | paste -sd '; ' - || true)"
-if [ -z "$red" ]; then
-    red="$(printf '%s\n' "$static_out" | grep -v '^$' | tail -3 | paste -sd '; ' - || true)"
+if [ -n "$red" ]; then
+    echo "merge-result: red - $red"
+    exit 3
 fi
-echo "merge-result: red - ${red:-static step failed without diagnosable output}"
-exit 3
+# A crashed tool (mypy internal error, uv build failure) verified nothing: a
+# tail of crash prose is never a red.
+tail="$(printf '%s\n' "$static_out" | grep -v '^$' | tail -3 | paste -sd '; ' - || true)"
+echo "merge-result: static step exited $st without src/-prefixed errors: ${tail:-no output}" >&2
+exit 4
