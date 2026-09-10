@@ -8410,19 +8410,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
     if let Some(hit) = check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
-        let message = format!("cancel sentinel present{}", hit.attribution());
-        let mut data = serde_json::json!({
-            "session_id": session_id,
-            "reason": "Interrupted",
-            "message": message,
-        });
-        if let Some(author) = &hit.author {
-            data["cancel_author"] = serde_json::json!(author);
-        }
-        if let Some(reason) = &hit.reason {
-            data["cancel_reason"] = serde_json::json!(reason);
-        }
-        emit("termination", data);
+        emit("termination", hit.termination_data(&session_id));
         // One-shot: once a sentinel has terminated this run it has done its
         // job. Consuming it is what stops a cancel from re-terminating every
         // later stop of a session that recovers and keeps working.
@@ -8434,7 +8422,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             allow_output(
                 "allow",
                 Some(TerminationReason::Interrupted),
-                &message,
+                &hit.termination_message(),
                 0,
                 None,
             ),

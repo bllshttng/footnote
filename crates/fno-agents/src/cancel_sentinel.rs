@@ -43,6 +43,27 @@ impl CancelHit {
             (None, None) => " (no author recorded)".to_string(),
         }
     }
+
+    /// The reader's human-readable termination line, attribution included.
+    pub(crate) fn termination_message(&self) -> String {
+        format!("cancel sentinel present{}", self.attribution())
+    }
+
+    /// The `termination` event payload, attribution fields included.
+    pub(crate) fn termination_data(&self, session_id: &str) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "session_id": session_id,
+            "reason": "Interrupted",
+            "message": self.termination_message(),
+        });
+        if let Some(author) = &self.author {
+            data["cancel_author"] = serde_json::json!(author);
+        }
+        if let Some(reason) = &self.reason {
+            data["cancel_reason"] = serde_json::json!(reason);
+        }
+        data
+    }
 }
 
 /// Parse `author:` / `reason:` lines out of a sentinel payload. First
