@@ -109,8 +109,12 @@ if [[ -z "$ADDED" && -z "$REMOVED" ]]; then
   echo "check-autonomy-registry: ok ($(wc -l < "$BASE" | tr -d ' ') site(s) match the baseline)"
   # x-84b2: the dispatch-provenance audit. Positive completeness marker for
   # the source/verb vocabulary - every registered path must carry a code, and
-  # the marker line (not an empty grep) is the evidence.
-  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+  # the marker line (not an empty grep) is the evidence. Prefer the repo venv
+  # python: the audit imports the CLI's own deps (typer), which a bare
+  # system python3 may lack.
+  PY="$REPO_ROOT/cli/.venv/bin/python"
+  [[ -x "$PY" ]] || PY=python3
+  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c '
 from fno.autonomy_cli import audit_dispatch_provenance
 
 audit_dispatch_provenance()

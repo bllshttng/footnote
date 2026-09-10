@@ -3,12 +3,12 @@
 import pytest
 
 from fno.agents.naming import (
-    DISPATCH_SOURCES,
-    DISPATCH_VERBS,
     MAX_LEN,
     AgentNameError,
     agent_name,
     dispatch_agent_name,
+    dispatch_sources,
+    dispatch_verbs,
     parse_dispatch_agent_name,
     slug_component,
 )
@@ -199,7 +199,7 @@ def test_parse_legacy_and_junk_names_return_none():
 def test_source_and_verb_vocabularies_do_not_collide_within_a_slot():
     # Every source is also a legal FIRST token only when followed by a verb;
     # the one shared code (th) must resolve by position.
-    assert "th" in DISPATCH_SOURCES and "th" in DISPATCH_VERBS
+    assert "th" in dispatch_sources() and "th" in dispatch_verbs()
     assert parse_dispatch_agent_name("th-th-x-1").source == "th"
     assert parse_dispatch_agent_name("th-x-1").verb == "th"
 
@@ -235,7 +235,11 @@ def test_bridge_dispatch_form_prints_the_canonical_name():
 def test_bridge_dispatch_form_refusals():
     assert _run_name("", "x-1", "--source", "ab").exit_code == 2  # --source needs --verb
     assert _run_name("legacy", "x-1", "--verb", "t").exit_code == 2  # not both forms
-    assert _run_name("", "x-1", "--verb", "target").exit_code == 3
+    # An unknown word refuses (exit 3), never defaulting to t; a work-verb
+    # word maps through the vocabulary owner.
+    assert _run_name("", "x-1", "--verb", "impeccable").exit_code == 3
+    word = _run_name("", "x-1", "--verb", "target")
+    assert word.exit_code == 0 and word.stdout.strip() == "t-x-1"
     assert _run_name("", "x-1", "--source", "zz", "--verb", "t").exit_code == 3
 
 

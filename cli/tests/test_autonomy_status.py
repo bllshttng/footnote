@@ -13,10 +13,10 @@ import typer.main
 from typer.models import TyperInfo
 
 from fno.autonomy_cli import (
-    DISPATCH_PROVENANCE,
     SpawnerStatus,
     autonomy_app,
     collect_status,
+    dispatch_provenance,
     format_table,
 )
 
@@ -256,12 +256,13 @@ def test_format_table_renders_source_verb_columns() -> None:
 
 
 def test_provenance_inventory_is_complete() -> None:
-    assert len(DISPATCH_PROVENANCE) == 18
-    sites = [row.site for row in DISPATCH_PROVENANCE]
+    rows = dispatch_provenance()
+    assert len(rows) == 18
+    sites = [row[0] for row in rows]
     assert len(set(sites)) == len(sites)
-    sources = {row.source for row in DISPATCH_PROVENANCE}
+    sources = {row[1] for row in rows}
     assert {"sob", "ac"} <= sources, "sob and ac must be distinct rows"
-    assert sum(1 for row in DISPATCH_PROVENANCE if row.source == "ab") == 2
+    assert sum(1 for row in rows if row[1] == "ab") == 2
 
 
 def test_provenance_audit_prints_marker_and_exits_zero(tmp_path: Path) -> None:
@@ -275,8 +276,8 @@ def test_provenance_audit_fails_on_a_broken_inventory(
 ) -> None:
     import fno.autonomy_cli as autonomy_cli
 
-    broken = autonomy_cli.DISPATCH_PROVENANCE[:-1]  # 17 rows: short one path
-    monkeypatch.setattr(autonomy_cli, "DISPATCH_PROVENANCE", broken)
+    broken = autonomy_cli.dispatch_provenance()[:-1]  # 17 rows: short one path
+    monkeypatch.setattr(autonomy_cli, "dispatch_provenance", lambda: broken)
     result = runner.invoke(_cli(), ["provenance"])
     assert result.exit_code == 1
     assert "dispatch provenance: 18/18 coded" not in result.stdout

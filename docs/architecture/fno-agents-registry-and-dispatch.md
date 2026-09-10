@@ -128,6 +128,21 @@ The lock-path computation rejects path separators and `..` segments in the agent
 
 `ProviderMismatchError` carries the agent name, recorded provider, and requested provider in its message so the CLI can surface a useful error without the caller doing detective work.
 
+## Worker name vocabulary (x-84b2)
+
+Every dispatch path mints its worker name through one contract in `cli/src/fno/agents/naming.py` (`dispatch_agent_name`), also reachable from shell and Rust via `fno agents name --source <code> --verb <code>`:
+
+```
+[<source>-]<verb>-<identity>[-<qualifier>][-<slug>][-<discriminator>]
+```
+
+- **Source** (who launched it): `ab` active-backlog daemon, `ac` merge-triggered continuation, `sob` spawn-on-blueprint, `rd` reconcile de-stub, `th` spawn_think, `pm` post-merge judgment, `pw` pr-watch, `rec` recovery, `kg` keep-going, `gr` groom, `ro` restart revive, `ev` evals, `kl` king loop, `oh` outage handoff, `sh` target self-handoff, `ex` foreign wave, `jn` backlog join. An attended operator or king launch carries NO source: the name starts with the verb. Provenance is stamped only by the path that knows it; a `--source` the bridge does not know refuses with exit 3 before spawn.
+- **Verb** (what it runs): `t` target, `bp` blueprint, `r` research/review, `th` think, `f` fix. `fno agents name --verb` also accepts the work-verb word (`/target`, `blueprint`, ...). An unknown word refuses; nothing defaults to `t`.
+- **Identity**: the FULL configured node id (`x-84b2`, never a bare hex tail; prefixes are per-project config), or a typed non-node identity: `backlog` (groom), `evals`, `session-<handle>` (nodeless recovery/revive). A PR-scoped worker carries `pr-<n>` as a qualifier.
+- **Budget**: source, verb, identity, qualifier, and discriminator are required; only the human slug gives way to the 64-character runtime limit. An unrepresentable identity refuses before spawn.
+
+Legacy names (`target-<node>-*`, `think-<node>-*`, `reconcile-*`, `j-*`) still resolve through the read-side fallbacks in `parse_node_id` / `parse_worker_mission` and the reaper's legacy prefix path - the legacy-read window. New rows minted by recovery/restart preserve the predecessor name as a registry alias. The inventory is ratcheted: `fno agents autonomy provenance` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`; `scripts/ci/check-autonomy-registry.sh` fails CI when a registered path loses its code.
+
 ## Events
 
 `emit(kind, **data)` appends one well-formed JSON line per call to `state_dir() / "events.jsonl"`. Telemetry is best-effort — `OSError` (disk full, permission denied, unwritable parent) is logged to stderr and swallowed so a failed log write cannot break a successful dispatch.

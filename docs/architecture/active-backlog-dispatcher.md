@@ -18,6 +18,13 @@ projects, sleeping between drains. Config-gated, default-off, fail-safe.
 > are unchanged. Sections below are updated to this model; a few cross-cutting
 > ones (Why, circuit breaker, nudge) are unaffected.
 
+> **Worker names (x-84b2).** Daemon-dispatched workers are named
+> `ab-<verb>-<node>-<slug>` - the `ab` source says the active-backlog drain
+> launched them. The canonical vocabulary (every source and verb code, the
+> typed non-node identities, the legacy-read window) is documented in
+> [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md);
+> `fno agents autonomy provenance` prints the ratcheted inventory.
+
 ## Why
 
 Footnote's headless loop is already a deterministic dispatcher: `run_loop` pulls `queue.next()`, hands the unit to `dispatcher.run(unit)`, and moves on. Selection is a pure rule (status, dependencies, priority lane key, claim lease) with no relatedness judgment anywhere on the path. The gap was that the loop is *invocation-scoped*: a human starts a target run, or arms merge-triggered auto-continue, and the loop terminates on `NoWork`. This feature adds the **always-on** behavior so the board drains itself.
@@ -37,7 +44,7 @@ config.active_backlog (master switch) + epics with mission_active=true
      reconcile prior fire-and-forget dispatches from events -> feed breaker
        -> Closed: active_backlog_dispatched; Parked: breaker++ (defer at limit)
        -> worker died with no termination event: crash floor -> failure
-     dispatch: fno backlog advance --epic <id> --continuation --json
+     dispatch: fno backlog advance --epic <id> --continuation --source ab --json
        -> deactivated / all_done: active_backlog_mission_retired, loop exits
        -> children[] is the enqueue authority:
             decision=dispatched + substrate=headless: SYNCHRONOUS - the
