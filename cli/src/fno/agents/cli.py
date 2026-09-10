@@ -2651,22 +2651,15 @@ def cmd_name(
     node_id: str = typer.Argument(..., help="Full backlog node id; never abbreviated."),
     slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
     qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
-    discriminator: str = typer.Option(
-        "", "--discriminator", help="Per-invocation uniqueness token; never shaved."
-    ),
-    source: str = typer.Option(
-        "", "--source", help="Dispatch source code (x-84b2); omit for an attended launch."
-    ),
-    verb: str = typer.Option(
-        "", "--verb", help="Dispatch verb: a code (t|bp|r|th|f) or a work verb the bridge maps (/target, blueprint, ...)."
-    ),
+    discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
+    source: str = typer.Option("", "--source", help="Dispatch source code (x-84b2); omit when attended."),
+    verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
-    Prints one name on stdout; shell callers never reimplement the 64-char
-    budget. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage error,
-    which an `fno` too old to know this verb also returns - a caller treating
-    2 as a refusal would refuse the whole fleet on a stale install.
+    Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is
+    Click's usage error, which an `fno` too old to know this verb also
+    returns - treating 2 as a refusal refuses the fleet on a stale install.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 

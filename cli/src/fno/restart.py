@@ -156,11 +156,8 @@ def _revive_orphans(
                 err=True,
             )
             continue
-        # x-84b2: the revived worker gets the ro-<verb>-<node-or-session>-<short>
-        # name - source ro says a restart revive minted it, the predecessor's
-        # parsed verb and node (legacy target-*/think-* still resolve) ride
-        # along, and a genuinely nodeless row uses the typed session identity.
-        # The old name stays addressable as an alias of the new row.
+        # x-84b2: ro-<verb>-<node-or-session>-<short>; the old name becomes an
+        # alias of the new row on success.
         from fno.agents.naming import (
             AgentNameError,
             dispatch_agent_name,
@@ -171,10 +168,7 @@ def _revive_orphans(
         parsed = parse_dispatch_agent_name(name)
         verb = parsed.verb if parsed else (legacy_verb_code(name) or "t")
         short = str(session)[:8]
-        if parsed and parsed.node:
-            identity, slug = parsed.node, short
-        else:
-            identity, slug = f"session-{short}", None
+        identity, slug = (parsed.node, short) if parsed and parsed.node else (f"session-{short}", None)
         try:
             new_name = dispatch_agent_name("ro", verb, identity, slug=slug)
         except AgentNameError as exc:

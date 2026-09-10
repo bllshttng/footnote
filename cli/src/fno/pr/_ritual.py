@@ -837,19 +837,12 @@ class Ritual:
     def _spawn_judgment(self, deferred: int, files: int, lines: int) -> bool:
         """ONE headless one-shot carrying only the two judgment steps.
 
-        ``agents spawn`` takes ONE positional - the MESSAGE - and the agent name
-        rides ``--name``; a second positional is refused ("takes one positional;
-        the agent name moved to --name"). So the prompt is the sole positional
-        and ``pm-r-<node>-pr-<n>`` is passed via ``--name`` (x-84b2; the old
-        ``judgment-pr-<n>`` carried neither source nor node). A merged PR with
-        no recovered node binding refuses the spawn rather than substituting
-        the PR number as a fake node. (Before the axis
-        redesign the grammar was ``[name] [message]`` and the two were swapped
-        positionals; a stale two-positional call fails closed here, which is
-        exactly how the redesign's refusal caught this leg.) The headless worker
-        reads a diff and updates the backlog, which routinely exceeds a minute,
-        so it gets spawn's own ``--timeout`` and the outer bound matches it
-        rather than killing the worker early.
+        The prompt is the sole positional; ``pm-r-<node>-pr-<n>`` rides
+        ``--name`` (x-84b2; the old ``judgment-pr-<n>`` carried neither source
+        nor node). A merged PR with no recovered node binding refuses the
+        spawn rather than substituting the PR number as a fake node. The
+        worker reads a diff and updates the backlog - routinely over a minute -
+        so spawn's own ``--timeout`` bounds it.
         """
         node_ids = [str(node) for node in self.ctx.node_ids if str(node)]
         if not node_ids:

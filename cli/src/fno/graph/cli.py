@@ -4698,12 +4698,9 @@ def cmd_dispatch_lanes(
 
     Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
-    ``.fno/config.local.toml`` (: own project.id), and
-    spawns a detached ``/target`` worker rooted there (merge posture per
-    ``config.auto_merge.grant``). Prints one JSON object: ``lanes`` (one receipt
-    per selected lane, ``status`` dispatched | skipped) plus a ``fill`` summary.
-    ``max_lanes < 1`` spawns
-    nothing (a single lane is the daemon's sequential path).
+    ``.fno/config.local.toml``, and spawns a detached ``/target`` worker rooted
+    there. Prints one JSON object: ``lanes`` plus a ``fill`` summary.
+    ``max_lanes < 1`` spawns nothing (a single lane is the daemon's path).
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
@@ -8799,17 +8796,13 @@ def cmd_reopen(
 
 @cli.command("advance", hidden=True)
 def _refuse_unknown_source(verb_name: str, source: Optional[str]) -> None:
-    """x-84b2: an unknown --source refuses at the door (exit 2, a usage
-    error), never defaults - fabricating provenance is what the vocabulary
-    stops."""
+    """x-84b2: an unknown --source refuses at the door (exit 2), never
+    defaults - fabricating provenance is what the vocabulary stops."""
     from fno.agents.naming import dispatch_sources
 
     if source is not None and source not in dispatch_sources():
-        typer.echo(
-            f"{verb_name}: unknown --source {source!r}; "
-            f"known: {', '.join(sorted(dispatch_sources()))}",
-            err=True,
-        )
+        known = ", ".join(sorted(dispatch_sources()))
+        typer.echo(f"{verb_name}: unknown --source {source!r}; known: {known}", err=True)
         raise typer.Exit(code=2)
 
 
@@ -8820,37 +8813,26 @@ def cmd_advance(
         help="The just-merged node id whose close triggered this advance (AC1-RACE keying).",
     ),
     epic: Optional[str] = typer.Option(
-        None,
-        "--epic",
-        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects ( K1). Mutually exclusive with --closed.",
+        None, "--epic", help="Advance (converge) an epic mission: fan out its ready leaf children across all projects ( K1). Mutually exclusive with --closed.",
     ),
     stop: bool = typer.Option(
-        False,
-        "--stop",
-        help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
+        False, "--stop", help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
     continuation: bool = typer.Option(
-        False,
-        "--continuation",
-        hidden=True,
+        False, "--continuation", hidden=True,
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
     ),
     max_dispatch: Optional[int] = typer.Option(
-        None,
-        "--max",
-        help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
+        None, "--max", help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
     ),
-    project: Optional[str] = typer.Option(
-        None, "--project", "-p", help="Restrict next-node selection to this project."
-    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Restrict next-node selection to this project."),
     explain: bool = typer.Option(
         False,
         "--explain",
         help=(
-            "Dry run: report why this node and not another, which gate or cap "
-            "would refuse it with its measured value against its threshold, and "
-            "what the capacity grid resolves. Dispatches nothing, claims "
-            "nothing, and ignores config.auto_continue."
+            "Dry run: report why this node and not another - the refusing gate "
+            "or cap with its measured value, and the grid's resolve. Dispatches "
+            "nothing, claims nothing, ignores config.auto_continue."
         ),
     ),
     explain_node: Optional[str] = typer.Option(
@@ -8864,15 +8846,10 @@ def cmd_advance(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
     verbose: bool = typer.Option(False, "--verbose", help="Print the dispatch decision to stderr."),
     model: Optional[str] = typer.Option(
-        None,
-        "--model",
-        "-m",
-        help="Pin a model for the dispatched worker(s), overriding node annotations.",
+        None, "--model", "-m", help="Pin a model for the dispatched worker(s), overriding node annotations.",
     ),
     provider: Optional[str] = typer.Option(
-        None,
-        "--provider",
-        help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
+        None, "--provider", help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
     ),
     source: Optional[str] = typer.Option(
         None,
@@ -8882,17 +8859,11 @@ def cmd_advance(
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
 
-    Merge-triggered auto-continue (). Opt-in and non-fatal: when
-    auto-continue is disabled it emits advance_skipped{disabled} and dispatches
-    nothing. Driven by the merge event (reconcile / post-merge), so megawalk,
-    /target, and /megatron all inherit it without driver-specific code. Always
-    exits 0 (a dispatch decision is never an error to the host op).
-
-    ``--epic <id>`` switches to the epic advance / converge path ( K1):
-    mark the epic's mission active and fan out every currently-ready LEAF child
-    across all projects. Idempotent; the width derives from spawn-gate headroom
-    (fleet max_live and provider lanes) + ``--max`` overall. ``--stop``
-    deactivates instead.
+    Merge-triggered auto-continue (). Opt-in and non-fatal; driven by the
+    merge event (reconcile / post-merge). Always exits 0 (a dispatch decision
+    is never an error to the host op). ``--epic <id>`` switches to the epic
+    advance / converge path ( K1): mark the mission active and fan out every
+    ready LEAF child across all projects; ``--stop`` deactivates instead.
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
@@ -8902,9 +8873,7 @@ def cmd_advance(
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
-    # x-84b2: an unknown source refuses at the door (exit 2, a usage error),
-    # never defaults - fabricating provenance is what the vocabulary stops.
-    _refuse_unknown_source("advance", source)
+    _refuse_unknown_source("advance", source)  # x-84b2: refuse, never default.
 
     # --explain returns BEFORE every dispatch path, including the pin validation
     # below: it is a read, so an unparseable --model must not stop it from
@@ -9004,13 +8973,9 @@ def cmd_advance(
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
         raise typer.Exit(code=2)
 
-    # RC2 (): closed_project is the CLOSED NODE's own project, read from the
-    # graph - NEVER the --project next-selection flag. --project restricts which
-    # project advance() picks `next` from; it is normally OMITTED on a manual
-    # `advance --closed A`, which left closed_project=None and defeated
-    # advance_dependents' same-project guard, misrouting a same-project dependent
-    # through the cross-project --cwd path onto a protected branch where the bg
-    # worker dies. Mirror the reconcile path (cli.py reads the node's .project).
+    # RC2: closed_project is the CLOSED NODE's own project from the graph -
+    # NEVER the --project next-selection flag (which is normally OMITTED on a
+    # manual `advance --closed A`; see docs/architecture/backlog-board-ordering).
     closed_project: Optional[str] = None
     if closed:
         try:
@@ -10016,16 +9981,14 @@ def _reconcile_once(
         blocked_by_settlement.extend(blocked_by_settlement_acc)
 
         def _auto_continue_after_close(node_id, project, root):
-            """Merge-triggered auto-continue dispatch for one just-closed node:
-            same-project `next`, cross-project dependents, and contract de-stub.
-            Shared by directly-closed records AND cascade-closed ancestor epics
-            () so an epic-level dependent is dispatched, not stranded."""
+            """Merge-triggered auto-continue for one closed node: same-project
+            `next`, cross-project dependents, contract de-stub. Also shared by
+            cascade-closed ancestor epics ()."""
             from fno.backlog.advance import advance as _advance
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            # Merge continuation stamps ac into the worker names (x-84b2); the
-            # de-stub pass stamps its own rd at the spawn seam.
+            # Merge continuation stamps ac (x-84b2); de-stub stamps rd at the seam.
             _advance(closed_node_id=node_id, project=project, project_root=root, source="ac")
             _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root, source="ac")
             dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)

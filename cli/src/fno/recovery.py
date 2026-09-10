@@ -1101,16 +1101,26 @@ def _clear_dead_owner(node: str, cwd: str) -> bool:
     return False
 
 
+def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None:
+    """x-84b2: keep the predecessor name addressable on the successor row.
+    Best-effort: a miss never recolors a launched respawn."""
+    if not (new_name and old_name):
+        return
+    try:
+        from fno.agents.registry import append_row_alias
+
+        append_row_alias(new_name, old_name)
+    except Exception:  # noqa: BLE001 - aliasing is best-effort
+        pass
+
+
 def _recovery_agent_name(
     predecessor: Optional[str], node_or_session: str, short: str
 ) -> str:
-    """The x-84b2 ``rec-<verb>-<node-or-session>-<short>`` recovery name.
-
-    The verb is the RESUMED worker's, parsed from the predecessor's canonical
-    name; a pre-cutover ``target-*``/``think-*`` row still resolves through the
-    legacy-read window, and anything unrecognizable reads as the builtin
-    target path. ``node_or_session`` is the recovered node id, or a typed
-    ``session-<handle>`` for a genuinely nodeless resume.
+    """The x-84b2 ``rec-<verb>-<node-or-session>-<short>`` recovery name: the
+    resumed worker's verb parsed from the predecessor (legacy ``target-*`` /
+    ``think-*`` still resolve; else the builtin t), the recovered node id or a
+    typed ``session-<handle>`` identity, and the short discriminator.
     """
     from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
 
@@ -1277,16 +1287,7 @@ def _redispatch(
             # invite another failover spawn onto the same branch.
             _clear_dead_owner(node, cwd)
             return REDISPATCH_PARTIAL
-        # x-84b2: the predecessor's name stays addressable for the legacy-read
-        # window. Best-effort: a miss (row not yet flushed, alias taken) never
-        # recolors a launched respawn.
-        try:
-            from fno.agents.registry import append_row_alias
-
-            if name:
-                append_row_alias(agent, name)
-        except Exception:  # noqa: BLE001 - aliasing is best-effort
-            pass
+        _alias_predecessor(agent, name)
         return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
@@ -1569,14 +1570,8 @@ def _respawn_bg_resume(
             argv += ["--cwd", cwd]
         argv += ["--name", agent, CONTINUE_MESSAGE]
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=60, check=False)
-        if proc.returncode == 0 and name:
-            # x-84b2: the predecessor name stays addressable (best-effort).
-            try:
-                from fno.agents.registry import append_row_alias
-
-                append_row_alias(agent, name)
-            except Exception:  # noqa: BLE001 - aliasing is best-effort
-                pass
+        if proc.returncode == 0:
+            _alias_predecessor(agent, name)
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

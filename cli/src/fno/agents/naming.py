@@ -1,13 +1,7 @@
-"""The single owner of agent-name generation.
-
-Every dispatcher that assembles a provenance-carrying worker name routes
-through :func:`agent_name` (budget) or :func:`dispatch_agent_name` (the
-x-84b2 source/verb vocabulary, data in ``naming-codes.yaml``). The daemon
-(``crates/fno-agents/src/daemon.rs``) stays the validator at the protected
-spawn boundary; it must never become the generator, because truncating there
-would make the name a caller reasons about differ from the name the runtime
-registers.
-"""
+"""The single owner of agent-name generation: :func:`agent_name` budgets the
+64-char daemon contract; :func:`dispatch_agent_name` owns the x-84b2
+source/verb vocabulary (data in ``naming-codes.yaml``). The daemon stays the
+validator at the spawn boundary and must never become the generator."""
 
 from __future__ import annotations
 
@@ -53,9 +47,8 @@ def bridge_name(
     source: Optional[str] = None,
     verb: Optional[str] = None,
 ) -> str:
-    """The `fno agents name` assembly. ``--verb``/``--source`` select the
-    x-84b2 dispatch form (``--verb`` accepts a code or a work-verb word); a
-    positional prefix with no ``--verb`` is the legacy form."""
+    """The `fno agents name` assembly: ``--verb``/``--source`` select the
+    x-84b2 dispatch form; a positional prefix alone is the legacy form."""
     if verb or source:
         if prefix:
             raise BridgeUsageError(
@@ -105,8 +98,7 @@ def provenance_rows() -> tuple[tuple[str, str, str], ...]:
 
 
 def slug_component(raw: Optional[str], cap: int = SLUG_CAP) -> str:
-    """Normalize free text to a name-safe tail, byte-for-byte with the shell
-    (``sanitize_name`` in skills/agent/scripts/normalize.sh)."""
+    """Normalize free text to a name-safe tail, byte-for-byte with the shell."""
     if not raw:
         return ""
     s = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", raw.lower())).strip("-")
@@ -123,13 +115,10 @@ def agent_name(
 ) -> str:
     """Build ``<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]``.
 
-    Budget precedence: prefix, node id, qualifier, discriminator are required;
-    the expendable human slug absorbs what is left. The name is the dedup
-    token for ``fno agents spawn``, so a discriminator is never shaved, and an
-    over-budget required identity raises rather than inventing an altered one.
-
-    :raises AgentNameError: on an empty or over-budget required identity, or a
-        required component carrying characters outside the daemon contract.
+    The name is the dedup token for ``fno agents spawn``: source, verb,
+    identity, qualifier, and discriminator are required (never shaved); only
+    the human slug gives way. :raises AgentNameError: over-budget required
+    identity or a component outside the daemon contract.
     """
     prefix = (prefix or "").strip()
     node_id = (node_id or "").strip()
@@ -163,9 +152,8 @@ def agent_name(
 
 
 def verb_code_for(word: Optional[str]) -> str:
-    """The verb code for a harness-map work-verb word (``/target``,
-    ``/fno:blueprint``, ``$fno:blueprint``, ``builtin``, ...). Unknown words
-    raise: nothing defaults to ``t`` (AC1-EDGE)."""
+    """The verb code for a work-verb word (``/target``, ``/fno:blueprint``,
+    ``builtin``, ...). Unknown words raise: nothing defaults to ``t``."""
     v = (word or "").strip()
     if v.startswith("/fno:"):
         v = v[len("/fno:"):]
@@ -187,11 +175,9 @@ def dispatch_agent_name(
     qualifier: Optional[str] = None,
     discriminator: Optional[str] = None,
 ) -> str:
-    """Build ``[<source>-]<verb>-<identity>[-...]`` (x-84b2).
-
-    ``source`` None is the attended manual form; unknown codes raise rather
-    than fabricating provenance. Budget is :func:`agent_name`'s.
-    """
+    """Build ``[<source>-]<verb>-<identity>[-...]`` (x-84b2). ``source``
+    None is the attended manual form; unknown codes raise rather than
+    fabricating provenance."""
     v = (verb or "").strip()
     if v not in dispatch_verbs():
         raise AgentNameError(f"unknown dispatch verb {verb!r}")
@@ -221,13 +207,10 @@ class DispatchName:
 
 
 def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
-    """Parse ``[<source>-]<verb>-<identity>``, else None.
-
-    Positional grammar: the first token is a source only when the second is a
-    verb, so a node id whose configured prefix collides with a code cannot
-    misread. Pre-cutover names are NOT canonical (readers keep legacy
-    fallbacks; AC3-EDGE).
-    """
+    """Parse ``[<source>-]<verb>-<identity>``, else None. Positional
+    grammar: the first token is a source only when the second is a verb, so a
+    node prefix colliding with a code cannot misread. Pre-cutover names are
+    not canonical (AC3-EDGE)."""
     if not name:
         return None
     tokens = name.split("-")
