@@ -32,12 +32,9 @@ def _fetch_pull_head(pr_number: int, cwd: str) -> str:
 
 
 def _run_script(top: str, base_rev: str, head_oid: str, cwd: str) -> tuple[str, str]:
-    try:
-        from fno.paths import resolve_canonical_repo_root
+    from fno.paths import resolve_canonical_repo_root
 
-        cli = str(resolve_canonical_repo_root() / "cli")
-    except Exception:  # noqa: BLE001
-        cli = "cli"
+    cli = str(resolve_canonical_repo_root() / "cli")
     env = dict(os.environ)
     env["RUFF"] = "ruff" if shutil.which("ruff") else f"uv run --project {cli} ruff"
     env["MYPY"] = "mypy" if shutil.which("mypy") else f"uv run --project {cli} mypy"
