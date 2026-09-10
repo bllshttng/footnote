@@ -293,7 +293,7 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
     a positive UNREACHABLE verdict drops a row - absence of evidence stays.
     """
     from fno.agents.reachability import UNREACHABLE, classify_reachability, registry_falsifier
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
     from fno.agents.session_truth import resolve_session_truth
     from fno.agents.spawn_gate import LIVE_STATUSES
 
@@ -303,7 +303,9 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
         return []
     rows: list[dict] = []
     for e in entries:
-        if e.status in LIVE_STATUSES:
+        # Terminal rows are already answered (finished or provably gone);
+        # spending a transcript read on each would tax every render.
+        if e.status in LIVE_STATUSES or e.status in TERMINAL_STATUSES:
             continue
         truth = resolve_session_truth(e.name)
         reach = classify_reachability(
