@@ -145,6 +145,7 @@ Preflight runs before a push only at the policy's request. The single decision p
 On a stock config the pre-push obligation is the focused checks below, each taking seconds. There is deliberately no wrapper script for them. A new mandatory local runner rebuilds the gate this contract removes, one rung smaller.
 
 - `cargo fmt --check` for rust changes.
+- `bash scripts/ci/check-file-budget.sh` for source changes. It is the CI gate itself, so its number cannot disagree with CI. It prints `cli/src/fno net +N, allowance 100` and a line for each over-budget file you touched. Run it after the commit that grows code, not at ship. A cut is cheap before review and expensive after a red check. It counts commits only, and it names any uncommitted change it did not count.
 - The tests covering the diff's blast radius.
 
 `fno doctor lint style` remains available for voluntary hand runs. For Markdown, run `fno doctor lint style --surface markdown --files <changed .md> --diff-base origin/main`. It is not part of the stock pre-push or CI gate.
