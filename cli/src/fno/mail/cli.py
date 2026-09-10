@@ -4780,32 +4780,10 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
     if not is_deliverable(target):
-        # Name what the row actually is. A landed row is itself the receipt:
-        # it acknowledges another message, so "already delivered" would be
-        # false about the delivery proof rather than the mail.
-        from fno.bus.log import LANDED_KIND, TYPED_DELIVERY
+        # Each refusal names what the row is; the lines live in mail.ack_refusal.
+        from fno.mail.ack_refusal import refusal_line
 
-        if target.kind == LANDED_KIND:
-            acked = (target.meta or {}).get("landed")
-            print(
-                f"message {msg_id!r} is a landed receipt, not mail; "
-                f"it acknowledges {acked!r}; cursor not advanced",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        # `is_deliverable` excludes `typed` alongside `hosted`, so a forced pane
-        # message reported itself as "delivered (hosted)" here, which is the one
-        # claim the pane transport must never make: bytes at a prompt can be
-        # discarded by that prompt.
-        how = (
-            "typed into a pane (delivery unconfirmed)"
-            if target.delivery == TYPED_DELIVERY
-            else "already delivered (hosted)"
-        )
-        print(
-            f"message {msg_id!r} was {how}; cursor not advanced",
-            file=sys.stderr,
-        )
+        print(refusal_line(target), file=sys.stderr)
         raise typer.Exit(code=2)
 
     # The advance consumes every message addressed to `name` up through msg_id.
