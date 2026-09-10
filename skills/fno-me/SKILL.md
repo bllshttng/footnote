@@ -1,6 +1,11 @@
 ---
 name: fno-me
 description: Join this session to the fno mesh so other sessions can message you
+metadata:
+  internal: false
+  requires:
+    binaries:
+      - "fno >= 0.3.1"
 ---
 
 # fno-me
@@ -27,4 +32,9 @@ derived handle. Exit 3 means the session has no addressable harness identity
 
 This joins only THIS session. To auto-join every hand-started session in scope,
 set `agents.auto_register_sessions = true` in config; the default (`false`) is
-opt-in, which is exactly this command.
+opt-in, which is exactly this skill.
+
+That knob joins sessions at SessionStart only, so a session already running, or
+one another skill tells to join (reign, on crowning), still invokes this. This is
+a skill, not a command: the codex plugin manifest and the agy bundle ship
+`skills/` only, and a skill is the surface an agent can invoke itself.
