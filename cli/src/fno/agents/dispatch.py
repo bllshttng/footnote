@@ -62,7 +62,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import rm_notice
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
-from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.harness_map import DispatchResolveError, render_seed
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
@@ -2584,7 +2584,7 @@ def dispatch_spawn(
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, harness)
+            message = render_seed(message, harness)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message

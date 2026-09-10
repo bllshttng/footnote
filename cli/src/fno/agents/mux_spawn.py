@@ -49,7 +49,7 @@ from fno.agents.dispatch import (
     _touch_log_path,
     validate_spawn_name,
 )
-from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,
@@ -3858,7 +3858,7 @@ def dispatch_spawn_pane(
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, provider)
+            message = render_seed(message, provider)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message

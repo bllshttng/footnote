@@ -18,7 +18,11 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
-from fno.agents.harness_map import PERMISSION_MODE_HELP
+from fno.agents.harness_map import (
+    PERMISSION_MODE_HELP,
+    spawn_seed_receipt_fields,
+    spawn_seed_receipt_fragment,
+)
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -2314,7 +2318,7 @@ def cmd_spawn(
                 receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
             if effective_message is not None:
-                receipt_obj["effective_message"] = effective_message
+                receipt_obj.update(spawn_seed_receipt_fields(effective_message))
             if pane_result.placement is not None:
                 # Server-authored exact-placement receipt (anchor/direction/
                 # fallback/squad/tab); never synthesized from the request.
@@ -2568,11 +2572,7 @@ def cmd_spawn(
             else ""
         )
         effective_message = getattr(result, "effective_message", None)
-        message_field = (
-            f', "effective_message": {json.dumps(effective_message)}'
-            if effective_message is not None
-            else ""
-        )
+        message_field = spawn_seed_receipt_fragment(effective_message)
         # provider/model appear only for an explicit route or model. provider is the
         # vendor, never a harness; `model` is the EFFECTIVE model (--model wins).
         receipt_provider = route_provider or recorded_provider

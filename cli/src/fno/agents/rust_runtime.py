@@ -729,6 +729,31 @@ def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
         raise SystemExit(2)
 
 
+def _refuse_unfireable_seed(args: "Sequence[str]") -> None:
+    """Refuse a verb-shaped seed the codex session cannot expand, pre-route.
+
+    Beside ``_refuse_lost_verb_payload``: the Rust client execs the fleet's
+    default thread spawn, so a check inside ``cmd_spawn`` never sees it.
+    """
+    from fno.agents.harness_map import cannot_fire_refusal
+    from fno.agents.spawn_defaults import _seed_of
+
+    toks = list(args[1:])
+    seed = _seed_of(toks)
+    if not seed or not seed.strip().startswith(("/", "$fno:")):
+        return
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
+
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
+    refusal = cannot_fire_refusal(seed, harness)
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -1562,6 +1587,7 @@ def make_agents_group_cls() -> type:
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                         _refuse_lost_verb_payload(args)
+                        _refuse_unfireable_seed(args)
                     _export_worker_dirs_at_seam(args)
                     if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)
