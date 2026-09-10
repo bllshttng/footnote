@@ -2021,6 +2021,11 @@ pub struct MutateOutcome {
     /// True when this graph file is the configured canonical graph
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
+    /// The content digest of the published bytes, computed from the same
+    /// `body` the atomic replace wrote (not re-read from the file). A caller
+    /// that pairs this digest with a file stat can PROVE the file still holds
+    /// this publish before caching against it.
+    pub version: String,
 }
 
 /// Inputs to the store-side mutate cycle that the CLIENT computes
@@ -2221,6 +2226,13 @@ pub fn locked_mutate(
     let backup = create_backup(path);
     let body = serialize_graph_file(&entries);
     write_atomic(path, &body)?;
+    // The published bytes' own digest: identical in shape to
+    // file_content_version, but computed from the bytes we wrote rather than
+    // re-read, so it cannot describe a file someone else replaced after us.
+    let version = {
+        use sha2::Digest as _;
+        format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
+    };
 
     Ok(MutateOutcome {
         entries,
@@ -2228,6 +2240,7 @@ pub fn locked_mutate(
         backup: backup.map(|p| p.display().to_string()),
         closure_releases,
         is_canonical,
+        version,
     })
 }
 

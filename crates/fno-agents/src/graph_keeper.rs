@@ -469,20 +469,27 @@ fn cached_snapshot(state: &StoreState) -> Result<(String, Arc<Vec<Value>>), Stor
 /// the file's fresh identity are stored under the caller's write guard. This
 /// SEEDS rather than invalidates, which is why a retrying writer's begin (and
 /// every reader behind it) is served from what that writer just published.
-fn seed_cache(state: &StoreState, entries: Vec<Value>) {
+///
+/// The seed is VERIFIED: the file must still hash to the digest the publish
+/// computed from its own bytes. A foreign writer (gc_sweep mutating the file
+/// directly) landing between the publish and this check fails the digest
+/// match and caches nothing, so a mispaired identity/entries row can never
+/// enter the cache.
+fn seed_cache(state: &StoreState, entries: Vec<Value>, published_version: &str) {
     let mut cache = state.cache.write().unwrap_or_else(|e| e.into_inner());
     let ident = FileIdent::of(&state.graph);
-    match (ident, entries.is_empty()) {
-        (Some(ident), false) => {
-            let version = graph_store::file_content_version(&state.graph);
+    let verified =
+        !entries.is_empty() && graph_store::file_content_version(&state.graph) == published_version;
+    match (ident, verified) {
+        (Some(ident), true) => {
             *cache = Some(CachedGraph {
                 ident,
-                version,
+                version: published_version.to_string(),
                 entries: Arc::new(entries),
             });
         }
-        // An empty graph or an unreadable stat caches nothing: the degenerate
-        // states stay on the fresh-parse path, where their contracts live.
+        // An empty graph, an unreadable stat, or a file that no longer holds
+        // this publish caches nothing: the fresh-parse path owns those.
         _ => *cache = None,
     }
 }
@@ -890,7 +897,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         },
         state.lock_timeout,
     )?;
-    seed_cache(state, outcome.entries.clone());
+    seed_cache(state, outcome.entries.clone(), &outcome.version);
     Ok(outcome_json(&outcome))
 }
 
@@ -2032,7 +2039,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         },
         state.lock_timeout,
     )?;
-    seed_cache(state, outcome.entries.clone());
+    seed_cache(state, outcome.entries.clone(), &outcome.version);
     Ok(json!({
         "op": op_result,
         "outcome": outcome_json(&outcome),
