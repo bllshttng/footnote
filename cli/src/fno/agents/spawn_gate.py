@@ -1028,7 +1028,7 @@ def _refuse_gate_mutex(provider: Optional[str], error: BaseException) -> NoRetur
         f"spawn-gate: provider {provider}, gate mutex unavailable ({error}); "
         "refusing; no worker launched"
     )
-    receipt = {
+    receipt: dict[str, object] = {
         "status": "refused",
         "reason": "gate_mutex_unavailable",
         "provider": provider,
