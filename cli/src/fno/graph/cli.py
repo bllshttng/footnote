@@ -3651,6 +3651,11 @@ def cmd_update(
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
+            # An archived node must not read as absent (the reopen contract).
+            from fno.graph._archive_lookup import refuse_update_if_archived
+
+            if refuse_update_if_archived(task_id):
+                raise typer.Exit(code=1)
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
@@ -8903,38 +8908,11 @@ def _canonical_post_close(
 
 
 def _archived_entry(node_id: str) -> Optional[dict]:
-    """The node's row in graph-archive.json, or None. Read-only, never raises.
+    """The archive lookup, kept as a name for reopen's call sites; the
+    question owns the module now (fno.graph._archive_lookup)."""
+    from fno.graph._archive_lookup import archived_entry
 
-    Reopen needs this to tell "archived" apart from "absent". Without it an
-    archived node reports "not found", which is the same message a typo gets,
-    while the node sits readable in the sibling file - an absence with two
-    explanations and no way to distinguish them.
-    """
-    from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
-
-    try:
-        # The archive is default-backend storage: never consulted behind an
-        # external selection (the caller's refusal already fired; this guard
-        # keeps the helper honest for any future caller).
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
-            return None
-        # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
-        # already route through it, and a helper that resolves the archive its
-        # own way is a second path that drifts on the first config change.
-        path = _archive_path()
-        if not path.exists():
-            return None
-        # `_find_node`, not an exact compare: it is what resolved the id against
-        # the WORKING graph a line earlier, and a stricter match here recreates
-        # the very ambiguity this helper exists to remove. An exact compare made
-        # `reopen ab-9728` report "not found" for an archived ``,
-        # which is the same message a typo gets.
-        return _find_node(read_graph(path), node_id)
-    except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
-        return None
+    return archived_entry(node_id)
 
 
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
@@ -13198,12 +13176,13 @@ def cmd_supersede(
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets the compatibility edge plus a pending structured evidence record on
-    the old node. The old row stays active until a merged PR covers every
-    declared surface. Refuses if ``replaces`` still has live children unless
-    ``--force`` is given; under ``--force`` the live children's ``parent`` is
-    cleared so they stay dispatchable instead of stranding under a dead unit.
-    Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a structured evidence record on the old
+    node. The edge terminals the old row's status immediately (x-e8f3); the
+    record stays unverified until a merged PR covers every declared surface,
+    which reconcile reports as receipts. Refuses if ``replaces`` still has
+    live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -13225,10 +13204,11 @@ def cmd_supersede(
     if not cleaned_cause:
         typer.echo(
             "Error: --cause is required and cannot be blank.\n"
-            "A supersede now carries the evidence that closes it: what the old\n"
+            "A supersede carries the evidence trail: what the old\n"
             "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node stays open until a merged PR covers every\n"
-            "declared surface.\n"
+            "replaced it. The old node's status reads superseded from the edge\n"
+            "alone; a merged PR covering every declared surface later stamps the\n"
+            "evidence verified_at.\n"
             f"  {_SUPERSEDE_EXAMPLE}",
             err=True,
         )

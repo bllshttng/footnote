@@ -452,7 +452,10 @@ def test_supersede_requires_cause_and_surface_before_mutation(tmp_graph, tmp_pat
     ) is None
 
 
-def test_supersede_records_pending_evidence_without_terminalizing(tmp_graph, tmp_path):
+def test_supersede_records_pending_evidence_and_terminals_status(tmp_graph, tmp_path):
+    """The supersede edge is the terminal fact for status (x-e8f3): the
+    evidence record is still written unverified, but the old row persists
+    superseded instead of reading as live held work."""
     entries = _read_entries(tmp_graph)
     _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["src/old.py"])))
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["src/new.py"])))
@@ -478,10 +481,10 @@ def test_supersede_records_pending_evidence_without_terminalizing(tmp_graph, tmp
         "matched_surfaces": [],
     }
     assert old.get("deferred_at") is None
-    assert old["status"] != "superseded"
+    assert old["status"] == "superseded"
 
 
-def test_supersede_keeps_old_pending_until_verified(tmp_graph, tmp_path):
+def test_supersede_persists_old_row_superseded(tmp_graph, tmp_path):
     entries = _read_entries(tmp_graph)
     _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py", "y.py"])))
@@ -493,8 +496,8 @@ def test_supersede_keeps_old_pending_until_verified(tmp_graph, tmp_path):
     entries = _read_entries(tmp_graph)
     by_id = {e["id"]: e for e in entries}
     assert by_id["ab-old"].get("deferred_at") is None
-    assert by_id["ab-old"]["status"] == "blocked"
-    assert "pending supersession" in by_id["ab-old"]["blocked_reason"]
+    assert by_id["ab-old"]["status"] == "superseded"
+    assert by_id["ab-old"].get("blocked_reason") is None
 
 
 def test_supersede_done_node_rejected(tmp_graph, tmp_path):
@@ -665,7 +668,7 @@ def test_unsupersede_restores_node_and_clears_backref(tmp_graph, tmp_path):
 
     res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
     assert res.exit_code == 0, res.output
-    assert {e["id"]: e for e in _read_entries(tmp_graph)}["ab-old"]["status"] == "blocked"
+    assert {e["id"]: e for e in _read_entries(tmp_graph)}["ab-old"]["status"] == "superseded"
 
     res = _invoke("backlog", "unsupersede", "ab-old")
     assert res.exit_code == 0, res.output
@@ -678,9 +681,11 @@ def test_unsupersede_restores_node_and_clears_backref(tmp_graph, tmp_path):
 
 
 def test_unsupersede_resets_plan_status_off_terminal(tmp_graph, tmp_path):
-    """supersede stamps `status: superseded` into the plan; the forward-only
-    projector refuses to leave that terminal, so unsupersede must force the
-    plan back in step with the graph or plan consumers stay inconsistent."""
+    """supersede terminals the graph row from the edge alone (x-e8f3), so the
+    projector stamps the plan `superseded` in step; the forward-only projector
+    refuses to leave that terminal, so unsupersede forces the plan off it -
+    fail-closed to the non-dispatchable `design` rung, since supersede
+    overwrote the prior rung and it cannot be recovered."""
     plan = _write_quick_plan(tmp_path / "old.md", ["x.py"])
     entries = _read_entries(tmp_graph)
     _seed_node(entries, id_="ab-old", plan_path=str(plan))
@@ -688,11 +693,13 @@ def test_unsupersede_resets_plan_status_off_terminal(tmp_graph, tmp_path):
     tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
 
     _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
-    assert _plan_status(plan) is None
+    # The graph row went terminal from the edge alone (x-e8f3), so the
+    # projector stamps the plan in step with it.
+    assert _plan_status(plan) == "superseded"
 
     res = _invoke("backlog", "unsupersede", "ab-old")
     assert res.exit_code == 0, res.output
-    assert _plan_status(plan) == "ready"
+    assert _plan_status(plan) == "design"
 
 
 def test_unsupersede_preserves_plain_deferral(tmp_graph, tmp_path):
@@ -727,11 +734,14 @@ def test_unsupersede_blocked_plan_fails_closed_to_design(tmp_graph, tmp_path):
     tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
 
     _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
-    assert _plan_status(plan) is None
+    # The projector stamps the terminal the graph row now carries (x-e8f3).
+    assert _plan_status(plan) == "superseded"
 
     res = _invoke("backlog", "unsupersede", "ab-old")
     assert res.exit_code == 0, res.output
-    assert _plan_status(plan) is None
+    # Fail closed: the reversal cannot recover the overwritten rung, so the
+    # plan lands non-dispatchable `design`, never `ready`.
+    assert _plan_status(plan) == "design"
 
 
 def test_force_supersede_does_not_corrupt_shared_plan(tmp_graph, tmp_path):
