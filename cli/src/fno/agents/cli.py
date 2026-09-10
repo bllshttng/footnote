@@ -1494,17 +1494,12 @@ def cmd_spawn(
     defaulted = False
     if headless:
         substrate = "headless"
-    if not substrate and once:
-        # `--once` is the pre-substrate spelling of headless: it always means
-        # a one-shot, so it answers before the built-in default can seat a
-        # persistent thread.
+    if not substrate and once:  # --once always means a one-shot
         substrate = "headless"
     if not substrate:
-        # Empty = unset. A pane-only capability (the fence, placement, a
-        # monitor) implies the pane; otherwise the harness decides: thread
-        # where it seats one, else the closable pane. The thread default's
-        # portal 0 view is placed after the receipt (place_default_view),
-        # through the same two-call seam a user names by hand.
+        # Empty = unset: a pane-only capability implies the pane, else the
+        # harness decides (thread where seated). The view is placed after
+        # the receipt (place_default_view), via the two-call seam.
         defaulted = True
         from fno.agents.harness_map import thread_seatable
 
@@ -2632,8 +2627,7 @@ def cmd_spawn(
         and result.kind == "created"
         and os.environ.get("FNO_PANE")
     ):
-        # The built-in default's view: post-receipt and best effort, so a
-        # placement failure never recolors the spawn verdict.
+        # Post-receipt, best effort: a placement failure never recolors the verdict.
         from fno.agents.spawn_defaults import place_default_view
 
         place_default_view(result.name)
