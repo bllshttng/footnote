@@ -365,26 +365,34 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
     }
 }
 
-/// Seconds since the newest of the store's matches was written. Newest, not
-/// first: a session can leave stubs in other project dirs, and a stub whose
-/// creation post-dates the real transcript's last turn must not read as
-/// fresher than it is. `None` when no match resolves: an unresolved
-/// transcript is never a quiet one.
-pub fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
-    let newest = store_hits?.iter().max_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    })?;
-    let mtime = std::fs::metadata(newest)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)?;
-    Some(now.saturating_sub(mtime))
+/// The production transcript-age seam (x-54cf): the NEWEST TIMESTAMPED
+/// transcript entry, read through the shared truth probe (one batched,
+/// single-flighted child per sweep) - not a file stat, whose untimestamped
+/// trailing records keep a dead file reading fresh (measured median +20 min,
+/// max +240 h). A handle the probe cannot resolve is absent from the map, and
+/// the sweep reads absence as `None`: an unresolved transcript is never a
+/// quiet one.
+pub(crate) fn probe_entry_ages(
+    entries: &[&crate::state::RegistryEntry],
+) -> std::collections::HashMap<String, Option<i64>> {
+    let handles: Vec<String> = entries.iter().map(|e| row_handle(e)).collect();
+    if handles.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    crate::truth_probe::family1_truth_probe_many(&handles)
+        .into_iter()
+        .map(|(handle, probe)| (handle, probe.last_activity_age_s.map(|a| a as i64)))
+        .collect()
+}
+
+/// Per-row arm of the same seam, for the reapers whose loop shape predates the
+/// batch: one single-flighted probe answers this row only. `pub` because the
+/// client binary's pair leg rides it too.
+pub fn probe_row_age(entry: &crate::state::RegistryEntry) -> Option<i64> {
+    probe_entry_ages(&[entry])
+        .get(&row_handle(entry))
+        .copied()
+        .flatten()
 }
 
 // --- the sweep shells -------------------------------------------------------
@@ -455,6 +463,7 @@ pub fn gc_sweep(
         retain_days,
         &gc_sweep::read_graph_entries,
         &|e| store.borrow_mut().matches(e),
+        &probe_entry_ages,
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &crate::claude_roster::read_all_agents,
@@ -491,6 +500,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         0, // dry-run never expires: a rehearsal that pruned would not be one
         &read,
         &|e| store.borrow_mut().matches(e),
+        &probe_entry_ages,
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &crate::claude_roster::read_all_agents,
@@ -1663,6 +1673,12 @@ mod tests {
             7,
             &|_h| graph.borrow_mut().take(),
             &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (row_handle(e), Some(2 * 3600)))
+                    .collect::<HashMap<_, _>>()
+            },
             &move |_e| {
                 flag.store(true, Ordering::SeqCst);
                 true
@@ -1753,7 +1769,18 @@ mod tests {
         let flag = Arc::clone(&stopped);
         let calls = Cell::new(0u32);
         let calls_ref = &calls;
-        let transcript_path = transcript.clone();
+        // Call 1 (classification): the age seam answers 2000s, past grace.
+        // Call 2 (the apply-window re-check): the SAME row reads fresh, as if
+        // the session just wrote a turn.
+        let age_many = move |entries: &[&crate::state::RegistryEntry]| {
+            let n = calls_ref.get();
+            calls_ref.set(n + 1);
+            let age = if n == 0 { 2000 } else { 0 };
+            entries
+                .iter()
+                .map(|e| (row_handle(e), Some(age)))
+                .collect::<HashMap<_, _>>()
+        };
         let summary = gc_sweep::run(
             &home,
             &emitter,
@@ -1761,27 +1788,8 @@ mod tests {
             false,
             7,
             &|_h| graph.borrow_mut().take(),
-            // Call 1 (classification): the transcript is 2000s old, past
-            // grace. Call 2 (the apply-window re-check): the SAME file reads
-            // fresh, as if the session just wrote a turn.
-            &move |_e| {
-                let n = calls_ref.get();
-                calls_ref.set(n + 1);
-                if n == 0 {
-                    Some(vec![transcript_path.clone()])
-                } else {
-                    let fresh_file = transcript_path.clone();
-                    std::fs::File::options()
-                        .write(true)
-                        .open(&fresh_file)
-                        .unwrap()
-                        .set_times(
-                            std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()),
-                        )
-                        .unwrap();
-                    Some(vec![fresh_file])
-                }
-            },
+            &|_e| Some(vec![transcript.clone()]),
+            &age_many,
             &move |_e| {
                 flag.store(true, Ordering::SeqCst);
                 true
@@ -1846,6 +1854,13 @@ mod tests {
             // graph-unreadable if the origin gate did not run first.
             &|_| None,
             &|_| None,
+            &|entries| {
+                use std::collections::HashMap;
+                entries
+                    .iter()
+                    .map(|e| (row_handle(e), Some(2 * 3600)))
+                    .collect::<HashMap<_, _>>()
+            },
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &no_agents,
@@ -2059,27 +2074,6 @@ mod tests {
             KeepReason::OpenDoRow { node: "N".into() }.as_str(),
             "open do row on done node"
         );
-    }
-
-    #[test]
-    fn transcript_age_reads_the_newest_store_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old.jsonl");
-        let fresh = dir.path().join("fresh.jsonl");
-        std::fs::write(&old, "{}").unwrap();
-        std::fs::write(&fresh, "{}").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let hits = vec![old, fresh];
-        let age = transcript_age_s(Some(&hits), now).unwrap();
-        assert!(
-            age < 5,
-            "age {age} should be ~0 for a just-written transcript"
-        );
-        assert_eq!(transcript_age_s(None, now), None);
-        assert_eq!(transcript_age_s(Some(&[]), now), None);
     }
 
     // ── x-2774: the reaper asks the session, not only the node ──────────

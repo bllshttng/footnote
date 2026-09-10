@@ -28,6 +28,52 @@ pub(super) fn quiet_transcript(
     path
 }
 
+/// The test age seam (x-54cf): the sweep reads ages through the injected
+/// batch seam, and the fixtures answer from the SAME staged transcript files
+/// the old stat read - the seam is what changed, not the fixture ages.
+pub(super) fn staged_ages(
+    transcripts: &(dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>),
+) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> + '_ {
+    move |entries| {
+        entries
+            .iter()
+            .map(|e| {
+                let age = transcripts(e).and_then(|hits| {
+                    hits.iter()
+                        .filter_map(|p| {
+                            let secs = std::fs::metadata(p).ok()?.modified().ok()?;
+                            Some(secs.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+                        })
+                        .max()
+                });
+                (
+                    crate::gc::row_handle(e),
+                    age.map(|newest| {
+                        (std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64)
+                            .saturating_sub(newest)
+                    }),
+                )
+            })
+            .collect()
+    }
+}
+
+/// The single-fixture age seam: one staged age answers every row the sweep
+/// probes, the shape most call sites stage (`quiet_transcript(..., 2*3600)`).
+pub(super) fn uniform_ages(
+    age_s: i64,
+) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> {
+    move |entries| {
+        entries
+            .iter()
+            .map(|e| (crate::gc::row_handle(e), Some(age_s)))
+            .collect()
+    }
+}
+
 /// Build the injected graph seam from `(session, node, status)` triples and
 /// `(session, node)` open-do pairs.
 fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<GraphRead> {
@@ -83,6 +129,7 @@ fn retire_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
+        &staged_ages(transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -109,6 +156,7 @@ fn staged_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
+        &staged_ages(transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -296,6 +344,7 @@ fn a_prune_that_did_not_confirm_removal_is_never_reported_pruned() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -365,6 +414,7 @@ fn a_shared_worktree_survives_while_the_other_row_is_live() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -431,6 +481,7 @@ fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
             Some("sess-x") => Some(vec![q1.clone()]),
             _ => Some(vec![q2.clone()]),
         },
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -476,6 +527,7 @@ fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| panic!("active-surface removal must never run on a held parent"),
         &no_agents,
@@ -516,6 +568,7 @@ fn a_parent_retires_once_its_descendant_is_gone() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -558,6 +611,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         7,
         &|_| None,
         &|_| None,
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -585,6 +639,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|e| e.name != "row-a",
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -630,6 +685,7 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -675,6 +731,7 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -746,6 +803,7 @@ fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
             Some("sess-k") => Some(vec![q2.clone()]),
             _ => Some(vec![q3.clone()]),
         },
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -851,6 +909,7 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -922,6 +981,7 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -1119,6 +1179,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![q1.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &refusing,
         &no_agents,
@@ -1160,6 +1221,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet2.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &confirming,
         &no_agents,
@@ -1252,6 +1314,7 @@ fn the_receipt_is_on_disk_before_the_effects_fire() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![q1.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &probing_surface,
         &no_agents,
@@ -1300,6 +1363,7 @@ fn a_row_without_a_buildable_receipt_refuses_before_any_effect() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &move |_| {
             stop_for_seam.set(stop_for_seam.get() + 1);
             true
@@ -1375,6 +1439,7 @@ fn a_row_without_a_located_transcript_records_failed_resume_evidence() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![q1.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &confirming,
         &no_agents,
@@ -1463,6 +1528,7 @@ fn a_planner_retires_only_on_its_own_closed_assignment() {
         7,
         &crate::gc_sweep::read_graph_entries,
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| CascadeOutcome::Removed,
         &no_agents,
@@ -1629,6 +1695,7 @@ fn a_row_reaps_only_after_its_receipt_is_durable() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &no_agents,
@@ -3147,6 +3214,7 @@ fn settle_then_run(
             0,
             &|h| gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned)),
             transcripts,
+            &staged_ages(transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &move || agents.clone(),
@@ -3168,6 +3236,7 @@ fn settle_then_run(
             7,
             &gc_sweep::read_graph_entries,
             transcripts,
+            &staged_ages(transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &move || agents.clone(),
@@ -3634,6 +3703,7 @@ fn a_graph_obligation_opened_after_the_decision_holds_before_the_effects() {
         7,
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
         &move |_| {
             stop_for_seam.set(stop_for_seam.get() + 1);
             true
@@ -3837,6 +3907,7 @@ fn evidence_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
+        &staged_ages(transcripts),
         stop,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &move || agents.clone(),
@@ -4075,6 +4146,7 @@ fn x2774_sweep(
         7,
         &gc_sweep::read_graph_entries,
         &transcripts,
+        &staged_ages(&transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &move || agents.clone(),
