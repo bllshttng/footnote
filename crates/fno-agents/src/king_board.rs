@@ -121,6 +121,15 @@ impl SourceRead {
             over_budget: true,
         }
     }
+    /// Re-wrap a failed read under a new message, keeping its verdict: a
+    /// composition site must not flatten a budget kill into a plain failure.
+    pub(crate) fn rewrap(&self, msg: impl Into<String>) -> Self {
+        SourceRead {
+            payload: None,
+            error: Some(msg.into()),
+            over_budget: self.over_budget,
+        }
+    }
     pub(crate) fn is_ok(&self) -> bool {
         self.error.is_none()
     }
