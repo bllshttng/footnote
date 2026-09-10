@@ -21,16 +21,16 @@ The arms:
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
-The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is itself a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`, not `ok`. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm; a row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
+The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm. A row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
 
-Every red row names its cause as the first rule that holds; `unexplained` is written when no rule fires, so the rules having run is always visible:
+Every red row names its cause as the first rule that holds. If no rule fires, the row reads `unexplained`, so a reader can see the rules ran:
 
-- `daemon_young`: a daemon-scheduled arm on a daemon up less than twice the interval reads `pending`, not red; the first window has not elapsed.
-- `stale_daemon`: the daemon predates the installed build; run `fno agents restart`.
-- `daemon_down`: the daemon is not running.
-- `tick_timeout`: the pr-watch tick timed out before this arm ran; see `pr_watch_merge`.
-- `scheduler_silent`: no pr-watch tick inside 2x interval; run `fno do pr watch status`.
-- `unexplained`: the scheduler looks healthy; the arm itself did not tick.
+- `daemon_young`: A daemon-scheduled arm reads `pending`, not red, while the daemon is up less than twice the interval. The first window has not elapsed.
+- `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
+- `daemon_down`: The daemon is not running.
+- `tick_timeout`: The pr-watch tick timed out before this arm ran. See `pr_watch_merge`.
+- `scheduler_silent`: No pr-watch tick inside 2x interval. Run `fno do pr watch status`.
+- `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
 ## What was deleted
 
