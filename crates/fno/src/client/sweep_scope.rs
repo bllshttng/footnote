@@ -57,11 +57,14 @@ pub(super) fn parse_sweep_receipt(action: SweepAction, receipt: &serde_json::Val
 
 fn read_counts(n: &impl Fn(&str) -> Option<usize>) -> Option<SweepCounts> {
     let (named_tabs, named) = (n("tabs_skipped_named")?, n("tabs_named_would_close")?);
+    let used = n("tabs_used_shells")?;
     let kept = [
+        // With the flag off, each spent shell is also counted not-pristine,
+        // and the + used shells row already offers it.
         (
-            n("tabs_kept_not_pristine")?,
+            n("tabs_kept_not_pristine")?.saturating_sub(used),
             "not-pristine tabs",
-            "typed in or running",
+            "agent, command, or unmeasured shell",
         ),
         (
             n("tabs_kept_last_in_squad")?,
@@ -99,7 +102,7 @@ fn read_counts(n: &impl Fn(&str) -> Option<usize>) -> Option<SweepCounts> {
     .collect();
     Some(SweepCounts {
         tabs: n("tabs_would_close")?,
-        used: n("tabs_used_shells")?,
+        used,
         dead: n("members_reaped")?,
         named,
         squads: n("pruned_count")?,

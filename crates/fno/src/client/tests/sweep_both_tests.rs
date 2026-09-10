@@ -23,6 +23,34 @@ fn entry_labels(modal: &AuxPopup) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// A full default dry-run receipt: every count zero except the ones in `set`.
+fn receipt_with(set: &[(&str, u64)]) -> serde_json::Value {
+    let mut receipt = serde_json::json!({ "notice": null });
+    for key in [
+        "tabs_would_close",
+        "tabs_used_shells",
+        "members_reaped",
+        "pruned_count",
+        "tabs_skipped_named",
+        "tabs_named_would_close",
+        "tabs_kept_not_pristine",
+        "tabs_kept_last_in_squad",
+        "tabs_kept_zero_panes",
+        "tabs_kept_not_probed",
+        "kept_protected",
+        "kept_unknown",
+        "skipped_named",
+        "members_kept_live",
+        "members_kept_unknown",
+    ] {
+        receipt[key] = 0.into();
+    }
+    for (key, value) in set {
+        receipt[*key] = (*value).into();
+    }
+    receipt
+}
+
 /// The choice modal is centered (not anchored to the menu cell), offers
 /// the choices with live counts, and a zero count greys its entry
 /// out rather than offering a lie. The used-shell half (x-cf97) is its
@@ -117,24 +145,12 @@ fn sweep_both_row_enables_on_used_shells_alone_and_applies_all_three() {
 /// the stale rows, each as its own tap.
 #[test]
 fn sweep_modal_draws_kept_reasons_and_offers_named_tabs_and_stale_rows() {
-    let receipt = serde_json::json!({
-        "tabs_would_close": 0,
-        "tabs_used_shells": 0,
-        "members_reaped": 0,
-        "pruned_count": 3,
-        "tabs_skipped_named": 1,
-        "tabs_named_would_close": 1,
-        "tabs_kept_not_pristine": 7,
-        "tabs_kept_last_in_squad": 0,
-        "tabs_kept_zero_panes": 0,
-        "tabs_kept_not_probed": 0,
-        "kept_protected": 0,
-        "kept_unknown": 0,
-        "skipped_named": 0,
-        "members_kept_live": 0,
-        "members_kept_unknown": 0,
-        "notice": null,
-    });
+    let receipt = receipt_with(&[
+        ("pruned_count", 3),
+        ("tabs_skipped_named", 1),
+        ("tabs_named_would_close", 1),
+        ("tabs_kept_not_pristine", 7),
+    ]);
     let SweepMsg::Counts(parsed) = parse_sweep_receipt(SweepAction::Counts, &receipt) else {
         panic!("a full receipt must parse into counts");
     };
@@ -164,7 +180,7 @@ fn sweep_modal_draws_kept_reasons_and_offers_named_tabs_and_stale_rows() {
         })
         .collect();
     assert!(
-        headers.contains(&"not-pristine tabs 7 - typed in or running"),
+        headers.contains(&"not-pristine tabs 7 - agent, command, or unmeasured shell"),
         "the kept count and its reason are on screen: {headers:?}"
     );
     assert!(
@@ -195,4 +211,18 @@ fn named_and_stale_row_taps_expand_to_their_own_flags() {
         panic!("a receipt without tabs_named_would_close must refuse");
     };
     assert!(reason.contains("stale fno CLI"), "{reason}");
+}
+
+/// With the used-shell flag off, each spent shell is also counted
+/// not-pristine. The used row offers those, so the kept line leaves them out.
+#[test]
+fn kept_not_pristine_line_leaves_out_what_the_used_row_offers() {
+    let receipt = receipt_with(&[("tabs_used_shells", 5), ("tabs_kept_not_pristine", 7)]);
+    let SweepMsg::Counts(parsed) = parse_sweep_receipt(SweepAction::Counts, &receipt) else {
+        panic!("a full receipt must parse into counts");
+    };
+    assert_eq!(
+        parsed.kept,
+        vec!["not-pristine tabs 2 - agent, command, or unmeasured shell".to_string()]
+    );
 }
