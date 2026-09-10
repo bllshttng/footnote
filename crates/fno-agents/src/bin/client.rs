@@ -2741,8 +2741,9 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
 
 /// The substrate a spawn with NO explicit `--substrate` gets: thread where the
 /// harness seats one, else the closable pane. The Python seam (the public
-/// `fno agents spawn` front door) resolves the SAME default and injects it as
-/// an explicit token, so this helper only answers for a DIRECT binary call.
+/// `fno agents spawn` front door) resolves the SAME default in its own body
+/// and opens the thread's default view through the mux thread verb, so this
+/// helper only answers for a DIRECT binary call.
 /// It seats only the three lanes this client itself routes (claude/codex
 /// bg, opencode serve); a keeper-lane harness (pi, cursor-agent, grok, agy)
 /// keeps the pane default here and seats its thread through the Python seam's

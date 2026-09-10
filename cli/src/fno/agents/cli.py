@@ -1491,13 +1491,16 @@ def cmd_spawn(
 
     # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
     # an empty value resolves to the built-in default (thread where seated).
+    defaulted = False
     if headless:
         substrate = "headless"
     if not substrate:
         # Empty = unset. A pane-only capability (the fence, placement, a
         # monitor) implies the pane; otherwise the harness decides: thread
-        # where it seats one, else the closable pane (the portal view on that
-        # lane is placed Rust-side, portal 0 inside a mux).
+        # where it seats one, else the closable pane. The thread default's
+        # portal 0 view is placed after the receipt (place_default_view),
+        # through the same two-call seam a user names by hand.
+        defaulted = True
         from fno.agents.harness_map import thread_seatable
 
         pane_implied = bool(
@@ -2521,7 +2524,6 @@ def cmd_spawn(
     )
     _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
-
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.
         # Hand-rolled f-string (NOT json.dumps) for byte-parity with Rust Task 1.3.
@@ -2607,7 +2609,7 @@ def cmd_spawn(
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
         # QoS (x-c5cc): a bg worker is claude's child, so its exec can't be
-        # wrapped — demote post-hoc via the roster, bounded and non-fatal.
+        # wrapped, demote post-hoc via the roster, bounded and non-fatal.
         # After the receipt flush so line-parsing consumers never wait on it.
         if substrate == "bg" and result.provider == "claude" and result.short_id:
             from fno.agents.spawn_gate import qos_demote_bg_worker
@@ -2617,6 +2619,19 @@ def cmd_spawn(
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
+
+    if (
+        defaulted
+        and substrate == "bg"
+        and spawn_succeeded
+        and result.kind == "created"
+        and os.environ.get("FNO_PANE")
+    ):
+        # The built-in default's view: post-receipt and best effort, so a
+        # placement failure never recolors the spawn verdict.
+        from fno.agents.spawn_defaults import place_default_view
+
+        place_default_view(result.name)
 
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:

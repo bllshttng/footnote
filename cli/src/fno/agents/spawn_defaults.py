@@ -1811,3 +1811,38 @@ def resolve_spawn_gates(substrate, monitor, *, once, harness):
         )
         raise SystemExit(2)
     return substrate
+
+
+def place_default_view(worker: str) -> bool:
+    """Open the built-in default view (portal 0) on a freshly seated thread.
+
+    The bare spawn's view rides the SAME two-call seam a user names by hand
+    (``fno mux thread <name> --portal 0``); the spawn parser itself never
+    declares a portal flag. Best effort by contract: a failure prints a named
+    note with the manual reach and returns False - the worker receipt keeps
+    its own verdict.
+    """
+    import subprocess
+
+    argv = ["fno", "mux", "thread", worker, "--portal", "0"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"fno agents spawn: default view unavailable ({exc}); open it by "
+            f"hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit {proc.returncode}"
+        print(
+            f"fno agents spawn: default view not placed ({reason}); open it "
+            f"by hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    return True
