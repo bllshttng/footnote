@@ -1708,8 +1708,7 @@ fn persist_manifest_identity(
     home: &AgentsHome,
 ) -> Result<Value, AdoptError> {
     let mut entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
-    entry.last_message_at =
-        crate::claude_adopt::transcript_activity(id.canonical_session_id()).map(|(stamp, _)| stamp);
+    entry.last_message_at = crate::claude_adopt::transcript_stamp(id.canonical_session_id());
     // x-98ab: same missing-model closure as the roster adopt - the claude
     // transcript states the model; the provider comes only from the
     // route-settings match and otherwise records None.
@@ -3507,7 +3506,7 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                             || format!("last_message_at={stamp} (unparseable or ahead of now)"),
                             |age| {
                                 format!(
-                                    "last_activity_age_s={age} (from transcript mtime, read before the row write)"
+                                    "last_activity_age_s={age} (from the newest transcript entry, mtime fallback, read before the row write)"
                                 )
                             },
                         ),
