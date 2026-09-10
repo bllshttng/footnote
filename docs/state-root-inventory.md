@@ -148,7 +148,7 @@ One file per session, per day, or per throttle window.
 | `.worktree-hook-root` | `hooks/session-start.sh` | single file |
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
 | `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
-| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | consumed by the target reader |
+| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/cancel_sentinel.rs`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | one-shot: carries `author:`/`reason:` lines, deleted by the reader once it has terminated a run; stale copies wiped by init |
 | `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
 | `.reconcile-stamp`, `.reconcile-result.json`, `.shown`, `.reconcile-result.json.tmp`, `.reconcile-result.json.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` (the hook's consume-after-show move creates the `.shown` rename; the throttle's `mv -f` creates the `.tmp` mid-write) | throttle window |
 | `.plan-sync-watermark` | `plan/cli.py` | single file |
