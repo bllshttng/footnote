@@ -340,17 +340,10 @@ SEED_WAIT_S = 5.0
 
 
 def seed_unverified_reason(
-    short_id: str,
-    env: Optional[Mapping[str, str]] = None,
-    timeout_s: float = SEED_WAIT_S,
+    short_id: str, env: Optional[Mapping[str, str]] = None, timeout_s: float = SEED_WAIT_S
 ) -> Optional[str]:
-    """``None`` once claude's job state records the prompt, else why not.
-
-    ``claude --bg`` writes a non-empty ``intent`` before it returns. A session
-    started with no prompt reads ``intent: ""`` and waits for one forever. The
-    root follows ``CLAUDE_CONFIG_DIR`` (the spawn overlay, then ambient), the
-    same relocation claude applies to its whole config tree.
-    """
+    """``None`` once job state holds the ``intent`` claude writes before ``--bg``
+    returns, else why not. The root follows ``CLAUDE_CONFIG_DIR`` as claude does."""
     cfg = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
     jobs_dir = (Path(cfg) if cfg else Path.home() / ".claude") / "jobs" / short_id
     deadline = time.monotonic() + timeout_s

@@ -61,7 +61,7 @@ stdout is exactly one compact JSON receipt line:
 
 A claude thread reads `live` only after claude records the prompt as `intent` in its job state (`~/.claude/jobs/<short_id>/state.json`). If that record does not appear, the receipt reads `"status": "spawning"`, adds `"seed": "unverified"`, and adds a `seed_unverified` reason that names the file it read. The spawn still exits 0.
 
-A claude thread spawn with no message is refused before launch. Claude would start that session with no prompt, and it would wait for one forever. A `--resume` needs no message.
+A claude thread spawn with no message is refused before launch. Claude starts that session with no prompt, and it waits for one forever. A `--resume` needs no message.
 
 Pipe it: `fno agents spawn "task" --name w1 -H claude | jq -r .short_id`.
 
