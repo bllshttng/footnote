@@ -54,9 +54,12 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_MD,
 )
 
-# Transaction retry budget: each begin/commit pair re-reads under the
-# keeper's lock, so a conflict means an interleaved writer landed and the
-# retry sees fresh data. Five is generous for human-rate contention.
+# Transaction retry budget: a conflict means another writer committed between
+# our begin and commit, and the fleet is not human-rate - colliding writers
+# are correlated by construction, so the retry sleeps a FULL-JITTER
+# exponential delay (uniform in [0, base * 2**attempt], ceiling-capped) that
+# decorrelates them instead of waking every loser at the same instant. Five
+# attempts stay; the terminal error when they are spent is unchanged.
 _TX_ATTEMPTS = 5
 
 # Full-jitter backoff between retries. An immediate `continue` made N
@@ -65,6 +68,18 @@ _TX_ATTEMPTS = 5
 # floor is its own herd.
 _TX_BACKOFF_BASE_S = 0.05
 _TX_BACKOFF_CAP_S = 2.0
+
+
+def _tx_backoff_secs(attempt: int) -> float:
+    """The delay before retry attempt `attempt + 1` of the tx loop. Module
+    function so tests can drive the real draw through an injected sleep."""
+    bound = min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt)
+    return random.uniform(0.0, bound)
+
+
+# The seam the tx loop sleeps through: module-level so tests inject a
+# recorder and assert the DRAWN values, never wall-clock timing.
+_sleep = time.sleep
 
 # Bounded lock deadline handed to the keeper (its own default is 10s when
 # the spawn omits the flag).
@@ -1253,9 +1268,9 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 raise RuntimeError(
                     f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
                 ) from None
-            time.sleep(
-                random.uniform(0, min(_TX_BACKOFF_CAP_S, _TX_BACKOFF_BASE_S * 2**attempt))
-            )
+            # Full jitter between attempts: the colliding writers all woke at
+            # the same instant, so a fixed delay would only line them up again.
+            _sleep(_tx_backoff_secs(attempt))
             continue
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")

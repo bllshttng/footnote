@@ -1145,3 +1145,100 @@ def test_single_id_get_serves_the_exact_hit_from_the_by_id_read(tmp_path, monkey
     payload["missing"] = ["zz-none"]
     returned = get_batch.resolve_or_dispatch(["zz-none"], field=None, grouped=False, strict=False)
     assert returned == "zz-none"
+
+
+# -- the bounded retry (x-1601 wave 4, absorbed x-ae7b) --
+
+from fno.graph import store as store_mod  # noqa: E402 - the tx-loop section
+
+
+class _ScriptedClient:
+    """A keeper client whose commits conflict a scripted number of times.
+
+    The tx loop's mechanics (backoff, jitter, budget) are client-side, so the
+    contention tests script the transport instead of racing real writers."""
+
+    def __init__(self, conflicts: int, path: Path = Path("/tmp/x1601-tx.json")):
+        self.conflicts = conflicts
+        self.begins = 0
+        self.path = path
+
+    def request(self, method, params):
+        if method == "begin":
+            self.begins += 1
+            return {"version": f"v{self.begins}", "entries": []}
+        if method == "commit":
+            if self.conflicts > 0:
+                self.conflicts -= 1
+                raise store_mod._Conflict()
+            return {
+                "entries": [],
+                "dropped": 0,
+                "backup": None,
+                "closure_releases": [],
+                "is_canonical": False,
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+
+def _run_tx(client, monkeypatch, record):
+    monkeypatch.setattr(store_mod, "_client_for", lambda _path: client)
+    monkeypatch.setattr(store_mod, "_sleep", record)
+    return store_mod.locked_mutate_graph(client.path, lambda e: e)
+
+
+def test_two_colliding_writers_both_land_and_their_delays_differ(tmp_path, monkeypatch):
+    """AC13-HP + AC15-HP: the loser retries once and lands (both commits
+    land), and the two writers' drawn delays differ - asserted on the drawn
+    values through the injected sleep, never wall-clock timing."""
+    winner = _ScriptedClient(conflicts=0)
+    loser = _ScriptedClient(conflicts=1)
+    delays: list[float] = []
+    _run_tx(winner, monkeypatch, delays.append)
+    _run_tx(loser, monkeypatch, delays.append)
+    assert len(delays) == 1, "the un-contended winner must never sleep"
+    assert 0.0 <= delays[0] <= store_mod._TX_BACKOFF_BASE_S
+    # The draw is real (not injected), so two colliders at the same instant
+    # draw different values - the whole point of full jitter.
+    second = _ScriptedClient(conflicts=1)
+    delays2: list[float] = []
+    _run_tx(second, monkeypatch, delays2.append)
+    assert delays[0] != delays2[0], "two colliding writers must not draw equal delays"
+
+
+def test_the_retry_budget_is_bounded_and_every_delay_sits_in_its_band(tmp_path, monkeypatch):
+    """AC16-EDGE: across a full five-attempt budget every delay lies within
+    its attempt's full-jitter bound and the total wait stays under the stated
+    ceiling. A retry budget with no ceiling is the defect in a slower coat."""
+    spender = _ScriptedClient(conflicts=4)
+    delays: list[float] = []
+    _run_tx(spender, monkeypatch, delays.append)
+    assert len(delays) == 4, "four conflicts, four sleeps, no sleep after the last"
+    total = 0.0
+    for attempt, delay in enumerate(delays):
+        bound = min(
+            store_mod._TX_BACKOFF_BASE_S * 2**attempt,
+            store_mod._TX_BACKOFF_CAP_S,
+        )
+        assert 0.0 <= delay <= bound, f"attempt {attempt} drew {delay}, bound {bound}"
+        total += delay
+    # The stated ceiling: every band summed, since the bands are the whole
+    # budget the loop can spend before the fifth attempt raises.
+    ceiling = sum(
+        min(store_mod._TX_BACKOFF_BASE_S * 2**attempt, store_mod._TX_BACKOFF_CAP_S)
+        for attempt in range(4)
+    )
+    assert total <= ceiling + 1e-9
+
+
+def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypatch):
+    """AC14-EDGE: the failure contract is not part of this change - same
+    RuntimeError type, same message, when all five attempts conflict."""
+    doomed = _ScriptedClient(conflicts=5)
+    delays: list[float] = []
+    with pytest.raises(RuntimeError) as exc:
+        _run_tx(doomed, monkeypatch, delays.append)
+    assert str(exc.value) == (
+        "graph mutated under us 5 times at /tmp/x1601-tx.json; retrying stopped"
+    )
+    assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
