@@ -230,3 +230,120 @@ async fn rm_force_removes_a_blocked_claude_row() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// A live non-claude row carrying a usable mux ref is a pane worker, and
+/// stop cannot serve one (ruling d-658e6834): the refusal must name the
+/// pane-kill path with the row's real session and pane id, and say the
+/// registry row survives the kill.
+#[tokio::test]
+async fn rm_refusal_names_the_pane_kill_for_a_live_pane_worker() {
+    let home = short_home("rmpanekill");
+    let mut row = ask_row("pane-worker", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Live;
+    row.harness = Some("codex".into());
+    row.mux = Some(state::MuxRef {
+        session: "main".into(),
+        pane_id: 33,
+    });
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "pane-worker"}));
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a non-claude row must not read the claude roster"),
+        &|_| panic!("a refusal must not reach claude rm"),
+        &|_, _| panic!("a refusal must not reach mux kill"),
+        &|session, pane_id| {
+            assert_eq!((session, pane_id), ("main", 33));
+            PaneProbe::Unknown
+        },
+    )
+    .await;
+
+    let message = &response.error().unwrap().message;
+    assert!(
+        message.contains("fno mux pane kill main:33"),
+        "must name the pane-kill command: {message}"
+    );
+    assert!(
+        message.contains("registry row survives"),
+        "must say the row survives the kill: {message}"
+    );
+    assert!(
+        !message.contains("fno agents stop"),
+        "must not advise stop for a pane worker: {message}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// A live non-claude row with no mux ref keeps today's message byte for
+/// byte: stop is the right verb for a row with no pane.
+#[tokio::test]
+async fn rm_refusal_keeps_todays_stop_message_for_a_row_without_a_mux_ref() {
+    let home = short_home("rmnomux");
+    let mut row = ask_row("thread-worker", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Live;
+    row.harness = Some("codex".into());
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "thread-worker"}));
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a non-claude row must not read the claude roster"),
+        &|_| panic!("a refusal must not reach claude rm"),
+        &|_, _| panic!("a refusal must not reach mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let message = &response.error().unwrap().message;
+    assert_eq!(
+        message.as_str(),
+        "agent thread-worker is still live. Stop it with `fno agents stop thread-worker`; \
+         rm proceeds on its own once the row is gone. Forcing it through orphans a live \
+         process and spends the row's resume handle. If stop answers no_op (no addressable \
+         session behind the row), the row cannot prove liveness either way; the override \
+         for that case is documented in `fno agents rm --help`, not here."
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// A mux ref whose session is empty cannot print a runnable command, and a
+/// refusal with a hole in it (`fno mux pane kill :33`) is worse than one
+/// naming the wrong verb: fall back to today's message.
+#[tokio::test]
+async fn rm_refusal_falls_back_to_stop_when_the_mux_ref_has_no_session() {
+    let home = short_home("rmmalformedmux");
+    let mut row = ask_row("orphan-pane-worker", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Live;
+    row.harness = Some("codex".into());
+    row.mux = Some(state::MuxRef {
+        session: String::new(),
+        pane_id: 33,
+    });
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "orphan-pane-worker"}));
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a non-claude row must not read the claude roster"),
+        &|_| panic!("a refusal must not reach claude rm"),
+        &|_, _| panic!("a refusal must not reach mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let message = &response.error().unwrap().message;
+    assert!(
+        message.contains("fno agents stop orphan-pane-worker"),
+        "must fall back to today's message: {message}"
+    );
+    assert!(
+        !message.contains("fno mux pane kill"),
+        "must not print a command with a hole in it: {message}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

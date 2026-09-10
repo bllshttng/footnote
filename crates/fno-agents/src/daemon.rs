@@ -6747,15 +6747,13 @@ async fn handle_rm_with(
     // its own fail-closed posture. A claude row absent from the `claude agents
     // --json --all` roster is provably gone, whoever removed it (claude-only;
     // `claude_row_provably_absent` is unconditionally false elsewhere). A pane
-    // row whose terminal state is explicit is finished even though Claude
-    // keeps it in the roster, and a pane row whose pane the probe cannot find
-    // is provably gone because the pane is that row's ONE live ref. Anything
-    // less than proof keeps refusing, and `--force` remains the only escape.
-    // One death verdict for the whole gate, shared with the reaper: a claude
-    // row whose roster state is terminal, or whose roster pid is provably
-    // gone, is finished even though Claude keeps the row listed. The reaper
-    // accepts the same evidence - a merge cleanup whose stop cleared on it
-    // must not be refused by the very next `fno agents rm`.
+    // row whose pane the probe cannot find is provably gone - the pane is that
+    // row's ONE live ref - and a claude row whose roster state is terminal or
+    // whose roster pid is provably gone is finished even though Claude keeps
+    // it listed. Anything less than proof keeps refusing, and `--force`
+    // remains the only escape. One death verdict for the whole gate, shared
+    // with the reaper: a merge cleanup whose stop cleared on it must not be
+    // refused by the very next `fno agents rm`.
     let provably_gone = claude_agents
         .as_ref()
         .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
@@ -6783,6 +6781,7 @@ async fn handle_rm_with(
             roster_known,
             row_present,
             &warnings,
+            entry.mux.as_ref().map(|m| (m.session.as_str(), m.pane_id)),
         );
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
