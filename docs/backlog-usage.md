@@ -291,11 +291,18 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 ### Request origin: who asked for this
 
-`request_origin` names who requested the work, decided once at birth by the native decision in `crates/fno-agents/src/node_origin.rs` and never rewritten by later edits, re-intakes, or rulings. It is one of four buckets: `operator_request` (a human asked, via `--source-kind operator_request`), `agent_discovery` (an agent found it, declared with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`), `automated_followup` (a machine follow-up: retro landings, decomposed children), and `unknown`. A node carries `origin_evidence`, the producing-event reference the birth had (a capture fu-id and its substrate ref, a plan's sources, a causal node id).
+`request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
 
-Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin, and every node born before this field existed reads unknown.
+- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
+- `automated_followup`: a machine follow-up. Retro landings and decomposed children.
+- `unknown`: everything else.
 
-On the local board the four buckets appear as an `All origins` filter, a dashed pill on rows with a known origin, and an origin plus evidence line in each row's detail panel. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
+A node carries `origin_evidence`, the producing-event reference the birth had: a capture fu-id and its substrate ref, a plan's sources, or a causal node id.
+
+Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin. Every node born before this field existed reads unknown.
+
+On the local board the buckets appear as an `All origins` filter. Rows with a known origin wear a dashed pill. Each detail panel shows an origin line and its evidence. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
 
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
