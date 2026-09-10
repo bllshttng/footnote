@@ -882,6 +882,12 @@ class TestRunGate:
         )
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+        # The mutex is held and released every pass here: this pins the
+        # SLOT-cap timeout receipt, not mutex contention (that one refuses
+        # as gate_mutex_busy).
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
 
         runner = CliRunner()
         res = runner.invoke(
@@ -1097,8 +1103,10 @@ class TestRunGate:
             spawn_gate.run_gate("zai-1", "pane", route_provider="zai")
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
         refused = capsys.readouterr().err
-        assert "provider zai" in refused and "cap 2" in refused
-        assert "current count unavailable" in refused
+        assert "provider zai" in refused
+        assert "gate mutex unavailable" in refused
+        assert "registry denied" in refused
+        assert "provider_cap" not in refused
 
     def test_partial_forward_registry_refuses_instead_of_undercounting(
         self, monkeypatch
@@ -1344,7 +1352,7 @@ class TestRunGate:
 
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
         assert exc.value.receipt is not None
-        assert exc.value.receipt["reason"] != "provider_cap"
+        assert exc.value.receipt["reason"] == "gate_mutex_busy"
 
     def test_provider_count_requires_positive_liveness_and_skips_exited(
         self, monkeypatch
@@ -1452,8 +1460,10 @@ class TestRunGate:
             spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
         assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
         refused = capsys.readouterr().err
-        assert "provider zai" in refused and "cap 2" in refused
-        assert "current count unavailable" in refused
+        assert "provider zai" in refused
+        assert "gate mutex unavailable" in refused
+        assert "claim store denied" in refused
+        assert "provider_cap" not in refused
 
     def test_release_failures_are_loud_and_retain_retry_state(
         self, monkeypatch, capsys

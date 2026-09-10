@@ -134,6 +134,34 @@ def test_an_unwritable_journal_never_changes_the_refusal(
     assert excinfo.value.receipt["reason"] == "provider_cap"
 
 
+def test_mutex_fault_refusal_names_the_mutex_not_the_cap(journal: Path) -> None:
+    """AC: the claims-layer fault path gets its own reason. The old receipt
+    read `reason: provider_cap, count: null` for a fault that never read a
+    cap (2026-09-09, zai held 9 of 10 while the mutex was busy)."""
+    spawn_gate._CURRENT_SPAWN.set(("t-probe", "thread"))
+    fault = spawn_gate.ProviderCountUnavailable("spawn mutex is busy")
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate._refuse_gate_mutex("zai", fault)
+
+    assert excinfo.value.code == spawn_gate.EXIT_PROVIDER_CAP, (
+        "exit-code consumers are unaffected by the reason split"
+    )
+    rows = _refusals(journal)
+    assert len(rows) == 1, rows
+    assert rows[0]["reason"] == "gate_mutex_unavailable"
+    assert rows[0]["error"] == "spawn mutex is busy"
+    assert rows[0]["provider"] == "zai"
+    assert "count" not in rows[0] and "cap" not in rows[0]
+
+
+def test_a_provider_cap_receipt_cannot_carry_a_null_count() -> None:
+    """The type is the guard: `current` is a required positional, so no
+    provider_cap receipt can ever carry count: None again."""
+    with pytest.raises(TypeError):
+        spawn_gate._refuse_provider_cap("zai", 10)
+
+
 def test_the_load_refusal_keeps_its_cause_stated_marker(journal: Path) -> None:
     """The cause-stated contract survives routing through the emit seam.
 

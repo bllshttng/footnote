@@ -999,15 +999,15 @@ def _refuse(
 def _refuse_provider_cap(
     provider: str,
     cap: int,
-    *,
-    current: Optional[int] = None,
-    error: Optional[BaseException] = None,
+    current: int,
 ) -> NoReturn:
-    current_text = str(current) if current is not None else "unavailable"
-    detail = f" ({error})" if error is not None else ""
+    """The measured-count refusal. `current` is REQUIRED: a provider_cap
+    receipt that cannot state the count it measured is blaming a cap it
+    never read (2026-09-09: `reason: provider_cap, cap: 10, count: null`
+    fired while zai held 9 of 10, because the mutex was busy)."""
     _warn(
         f"spawn-gate: provider {provider}, cap {cap}, current count "
-        f"{current_text}{detail}; refusing immediately; no worker launched"
+        f"{current}; refusing; no worker launched"
     )
     receipt = {
         "status": "refused",
@@ -1016,6 +1016,23 @@ def _refuse_provider_cap(
         "cap": cap,
         "count": current,
         "current_count": current,
+    }
+    _refuse(EXIT_PROVIDER_CAP, receipt)
+
+
+def _refuse_gate_mutex(provider: Optional[str], error: BaseException) -> NoReturn:
+    """The claims-layer fault refusal: the gate could not serialize the
+    decision, so no count was measured and no cap may be named. Keeps
+    EXIT_PROVIDER_CAP so exit-code consumers are unaffected."""
+    _warn(
+        f"spawn-gate: provider {provider}, gate mutex unavailable ({error}); "
+        "refusing; no worker launched"
+    )
+    receipt = {
+        "status": "refused",
+        "reason": "gate_mutex_unavailable",
+        "provider": provider,
+        "error": str(error),
     }
     _refuse(EXIT_PROVIDER_CAP, receipt)
 
@@ -1542,7 +1559,7 @@ def _take_headless_slot(
         )
     except ProviderCountUnavailable as exc:
         guard.release()
-        _refuse_provider_cap(route_provider or "unknown", provider_cap or 0, error=exc)
+        _refuse_gate_mutex(route_provider or "unknown", exc)
     guard.release_gate_mutex()
 
 
@@ -1753,7 +1770,7 @@ def run_gate(
                 else _acquire_gate_mutex(holder)
             )
         except ProviderCountUnavailable as exc:
-            _refuse_provider_cap(route_provider or "unknown", provider_cap or 0, error=exc)
+            _refuse_gate_mutex(route_provider or "unknown", exc)
         if acquired:
             mutex_blocked_since = None
         else:
@@ -1812,15 +1829,13 @@ def run_gate(
                     provider_slots = provider_live_count(route_provider or "")
                 except ProviderCountUnavailable as exc:
                     guard.release_gate_mutex()
-                    _refuse_provider_cap(
-                        route_provider or "unknown", provider_cap, error=exc
-                    )
+                    _refuse_gate_mutex(route_provider or "unknown", exc)
                 if provider_slots >= provider_cap:
                     guard.release_gate_mutex()
                     _refuse_provider_cap(
                         route_provider or "unknown",
                         provider_cap,
-                        current=provider_slots,
+                        provider_slots,
                     )
             if force:
                 _warn(
@@ -1914,14 +1929,20 @@ def run_gate(
                 last_progress = now
 
         if time.monotonic() - started >= QUEUE_TIMEOUT_S:
+            # A timeout still blocked on the mutex names the mutex; a timeout
+            # that held and released it all along names the slot cap. The
+            # receipt carries the machine slug; the warn keeps the prose.
+            mutex_busy = mutex_blocked_since is not None
+            reason = "gate_mutex_busy" if mutex_busy else "queue_timeout"
             _warn(
-                f"spawn-gate: queue timeout after {int(QUEUE_TIMEOUT_S)}s at "
+                f"spawn-gate: {'gate mutex busy' if mutex_busy else 'queue timeout'} "
+                f"after {int(QUEUE_TIMEOUT_S)}s at "
                 f"max_live {cap}; inspect live workers with `fno agents top`, "
                 f"or retry with --no-wait/--force"
             )
             receipt = {
                 "status": "refused",
-                "reason": "queue_timeout",
+                "reason": reason,
                 "max_live": cap,
                 "count": slots,
                 "current_count": slots,
