@@ -91,6 +91,28 @@ def validate_portal_or_exit(portal: Optional[int], substrate: str) -> None:
         raise typer.Exit(code=2)
 
 
+def validate_monitor_or_exit(
+    monitor: Optional[str], substrate: str, *, once: bool, harness: str
+) -> None:
+    """The monitor gate: initial support is exactly claude+zai on a pane."""
+    if monitor is not None and monitor != "happy":
+        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if monitor == "happy" and (substrate != "pane" or once):
+        print(
+            "--monitor happy is pane-only; bg and headless workers do not pass "
+            "the happy launcher seam",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if monitor == "happy" and harness != "claude":
+        print(
+            f"--monitor happy requires the claude harness; got harness {harness!r}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+
 def place_thread_portal(name: str, portal: int) -> None:
     """Open a portal on a spawned thread (the two-call seam's second call).
 

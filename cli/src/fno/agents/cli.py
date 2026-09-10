@@ -1545,23 +1545,9 @@ def cmd_spawn(
         raise typer.Exit(code=2)
 
     validate_portal_or_exit(portal, substrate)
+    from fno.agents.spawn_portal import validate_monitor_or_exit
 
-    if monitor is not None and monitor != "happy":
-        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if monitor == "happy" and (substrate != "pane" or once):
-        print(
-            "--monitor happy is pane-only; bg and headless workers do not pass "
-            "the happy launcher seam",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if monitor == "happy" and harness != "claude":
-        print(
-            f"--monitor happy requires the claude harness; got harness {harness!r}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
+    validate_monitor_or_exit(monitor, substrate, once=once, harness=harness)
 
     if output_format is not None and (
         harness != "claude" or substrate != "headless" or output_format != "json"
