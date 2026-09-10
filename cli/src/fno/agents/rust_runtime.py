@@ -711,6 +711,24 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         raise SystemExit(2)
 
 
+def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
+    """Refuse a seed whose ``$fno:`` verb the calling shell ate, before any route.
+
+    Sits at the make_context seam beside the other pre-route refusals: a check
+    inside ``cmd_spawn`` never sees a spawn the Rust client execs (auto mode
+    with an installed binary), and the fleet's default ``--substrate thread``
+    spawn is exactly that shape.
+    """
+    from fno.agents.harness_map import lost_verb_refusal
+    from fno.agents.spawn_defaults import _seed_of
+
+    seed = _seed_of(list(args[1:]))
+    refusal = lost_verb_refusal(seed) if seed else None
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -1543,6 +1561,7 @@ def make_agents_group_cls() -> type:
                         args = inject_spawn_defaults(args)
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
+                        _refuse_lost_verb_payload(args)
                     _export_worker_dirs_at_seam(args)
                     if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)

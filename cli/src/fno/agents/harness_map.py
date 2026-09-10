@@ -681,6 +681,38 @@ def normalize_command(command: str, harness: str) -> str:
     return cmd
 
 
+# zsh reads the `:t` in "$fno:target" as a modifier on the empty `$fno`, so the
+# verb loses its first letter too. Measured: these letters vanish without an
+# error, `s` fails loudly, and every other letter survives as `:verb`.
+_ZSH_EATEN_LETTERS = frozenset("acelqrtu")
+
+
+def lost_verb_refusal(message: str) -> Optional[str]:
+    """The refusal for a payload whose ``$fno:`` prefix the calling shell ate,
+    or None when the payload is intact.
+
+    Inside double quotes a shell expands ``$fno`` to nothing before fno runs.
+    bash leaves ``:target``; zsh leaves ``arget``. The worker reads either as
+    prose, and the spawn still returns a live receipt, so the loss shows up
+    an hour later as a worker that did not run the verb.
+
+    The zsh shape is matched only for verbs longer than four letters: the
+    short remainders (``dd``, ``aw``) are ordinary words."""
+    verbs = set(footnote_verbs()) | {v[1:] for v in _TARGET_FAMILY_VERBS}
+    lost = {":" + v: v for v in verbs}
+    lost.update({v[1:]: v for v in verbs if len(v) > 4 and v[0] in _ZSH_EATEN_LETTERS})
+    for token in message.split():
+        verb = lost.get(token)
+        if verb is not None:
+            return (
+                f"the payload has {token!r} where '$fno:{verb}' belongs. The shell "
+                "expanded $fno to nothing inside double quotes, and zsh also drops "
+                "the first letter of the verb. Single-quote the payload: "
+                f"'$fno:{verb} ...'"
+            )
+    return None
+
+
 def _loop_extension_installed(harness: str) -> bool:
     """Whether this harness's shipped loop artifact is actually installed at
     the harness's own load surface - not merely shipped in the repo.
