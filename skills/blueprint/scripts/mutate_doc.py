@@ -15,8 +15,8 @@ Usage (script mode):
 
 Exit codes:
     0  success
-    1  doc already in ready (or higher) status without --rewrite; or path is
-       a feature description / nonexistent file (redirect to /think)
+    1  doc already in ready (or higher) status without --rewrite; or the
+       argument is not a path or names a missing file (remedy: fno do plan path)
     2  section ownership violation
     3  frontmatter status missing / invalid / unreadable
 """
