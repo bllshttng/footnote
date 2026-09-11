@@ -136,6 +136,7 @@ pub mod merge_reap;
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
 pub mod model_env_scrub;
+pub mod naming;
 pub mod needs;
 pub mod node_origin;
 pub mod node_route;
