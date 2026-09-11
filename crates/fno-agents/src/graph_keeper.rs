@@ -42,7 +42,7 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-use crate::graph_sqlite::Backend;
+use crate::backlog::Backend;
 
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
@@ -280,7 +280,7 @@ impl StoreState {
     /// the next request, no restart (AC5-EDGE). Unset or absent db reads as
     /// json.
     fn backend(&self) -> Backend {
-        crate::graph_sqlite::backend(&self.graph)
+        crate::backlog::backend(&self.graph)
     }
 }
 
@@ -377,6 +377,38 @@ fn flush_gate_metrics(state: &StoreState) {
             "retry_count": completed.retries,
         }),
     );
+}
+
+/// The soak sampler: each 5-minute window, when the backend is json
+/// (JSON authoritative) and the db version moved since the last
+/// sample, run one parity compare and journal it. A failed compare
+/// does not advance the sampler, so the window retries (AC13-HP).
+fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
+    if state.backend() != crate::backlog::Backend::Json {
+        return;
+    }
+    let Ok(version) = crate::backlog::version(&state.graph) else {
+        return;
+    };
+    if last_sampled.as_deref() == Some(version.as_str()) {
+        return;
+    }
+    let Ok(report) = crate::backlog::parity(&state.graph) else {
+        return;
+    };
+    *last_sampled = Some(version);
+    if let Some(events) = &state.events {
+        let emitter = crate::events::EventEmitter::new(events, "daemon");
+        let _ = emitter.emit(
+            "graph_parity_sample",
+            &json!({
+                "rows": report.rows,
+                "divergent": report.divergent,
+                "divergent_ids": report.divergent_ids,
+                "backend": "json",
+            }),
+        );
+    }
 }
 
 /// Exit code for a keeper that found its seat owned: the Python spawner
@@ -561,12 +593,18 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         let metrics_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
             .name("fno-store-metrics".into())
-            .spawn(move || loop {
-                std::thread::sleep(GATE_WINDOW);
-                if metrics_shutdown.load(Ordering::SeqCst) == 1 {
-                    break;
+            .spawn(move || {
+                // The parity sampler state: the last db version a
+                // sample covered, so an unmoved window samples nothing.
+                let mut last_sampled: Option<String> = None;
+                loop {
+                    std::thread::sleep(GATE_WINDOW);
+                    if metrics_shutdown.load(Ordering::SeqCst) == 1 {
+                        break;
+                    }
+                    flush_gate_metrics(&metrics_state);
+                    sample_parity(&metrics_state, &mut last_sampled);
                 }
-                flush_gate_metrics(&metrics_state);
             });
     }
     if state.backend() == Backend::Sqlite {
@@ -583,10 +621,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                     .gate
                     .write()
                     .unwrap_or_else(|error| error.into_inner());
-                let result = crate::graph_sqlite::export_if_due(
-                    &export_state.graph,
-                    Duration::from_secs(60),
-                );
+                let result =
+                    crate::backlog::export_if_due(&export_state.graph, Duration::from_secs(60));
                 drop(gate);
                 if let (Err(error), Some(path)) = (result, &export_state.events) {
                     let emitter = crate::events::EventEmitter::new(path, "daemon");
@@ -990,6 +1026,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
         "export_status" => handle_export_status(state),
+        "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
@@ -1242,9 +1279,9 @@ fn read_state(
         Backend::Json => {
             graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
         }
-        Backend::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
+        Backend::Sqlite => crate::backlog::read_entries(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1256,9 +1293,9 @@ fn read_state(
 fn state_version(state: &StoreState) -> Result<String, StoreError> {
     match state.backend() {
         Backend::Json => Ok(graph_store::file_content_version(&state.graph)),
-        Backend::Sqlite => crate::graph_sqlite::version(&state.graph).map_err(|error| {
+        Backend::Sqlite => crate::backlog::version(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1375,7 +1412,7 @@ fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
         .gate
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    let version = crate::graph_sqlite::export_now(&state.graph).map_err(StoreError::Sqlite)?;
+    let version = crate::backlog::export_now(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "version": version,
         "path": state.graph.display().to_string(),
@@ -1387,12 +1424,24 @@ fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
         return Ok(json!({"backend": "json", "stale": false}));
     }
     let (current, exported) =
-        crate::graph_sqlite::export_status(&state.graph).map_err(StoreError::Sqlite)?;
+        crate::backlog::export_status(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "backend": "sqlite",
         "stale": exported.as_deref() != Some(current.as_str()),
         "version": current,
         "exported_version": exported,
+    }))
+}
+
+/// The parity op: the thin wire face over the only compare
+/// implementation (backlog::parity); no second compare here.
+fn handle_parity(state: &StoreState) -> Result<Value, StoreError> {
+    let report = crate::backlog::parity(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "rows": report.rows,
+        "divergent": report.divergent,
+        "divergent_ids": report.divergent_ids,
+        "backend": state.backend().name(),
     }))
 }
 
@@ -3156,7 +3205,7 @@ mod tests {
             }
         };
         assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
-        crate::graph_sqlite::set_backend(&graph, Backend::Sqlite).unwrap();
+        crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
         assert_eq!(
             identify_backend(&mut stream),
             "sqlite",

@@ -106,7 +106,7 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
-pub mod graph_sqlite;
+
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -921,6 +921,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "state_reap",
     "graph_write_gate",
     "graph_export_failed",
+    // One 5-minute parity sample: relational export vs authoritative JSON
+    // while JSON is still the backend (the 7-day soak clock's input).
+    "graph_parity_sample",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

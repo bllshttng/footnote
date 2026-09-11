@@ -1125,6 +1125,124 @@ impl Node {
         }
         Value::Object(out)
     }
+
+    /// The typed aggregates with no wave-4 table, as JSON keyed by their
+    /// graph.json names. nodes.rs stores these in the extras column;
+    /// [`Node::apply_residual`] reverses it on load.
+    pub fn residual_json(&self) -> Map<String, Value> {
+        let mut out = Map::new();
+        let mut put = |key: &str, value: Option<Value>| {
+            if let Some(v) = value {
+                out.insert(key.to_string(), v);
+            }
+        };
+        if let Some(v) = &self.provenance.origin_evidence {
+            put("origin_evidence", Some(json!(v)));
+        }
+        if let Some(v) = &self.provenance.request_origin {
+            put("request_origin", Some(json!(v)));
+        }
+        if let Some(list) = &self.costs {
+            put(
+                "cost_sessions",
+                Some(Value::Array(list.iter().map(cost_to_json).collect())),
+            );
+        }
+        if let Some(list) = &self.difficulty_history {
+            put(
+                "difficulty_history",
+                Some(Value::Array(
+                    list.iter().map(field_change_to_json).collect(),
+                )),
+            );
+        }
+        if let Some(list) = &self.priority_history {
+            put(
+                "priority_history",
+                Some(Value::Array(
+                    list.iter().map(field_change_to_json).collect(),
+                )),
+            );
+        }
+        if let Some(list) = &self.tasks {
+            put(
+                "tasks",
+                Some(Value::Array(list.iter().map(task_to_json).collect())),
+            );
+        }
+        if let Some(list) = &self.labels {
+            put("tags", Some(json!(list)));
+        }
+        if let Some(list) = &self.collision_acks {
+            put("collisions_acknowledged", Some(json!(list)));
+        }
+        if let Some(list) = &self.decisions {
+            put(
+                "decisions",
+                Some(Value::Array(list.iter().map(decision_to_json).collect())),
+            );
+        }
+        out
+    }
+
+    /// Reverses [`Node::residual_json`]: parses the residual keys into their
+    /// typed fields and returns the remaining map (the node's unknown-key
+    /// extras) for the caller to store verbatim.
+    pub fn apply_residual(&mut self, residual: Map<String, Value>) -> Result<(), ModelError> {
+        let mut leftovers = Map::new();
+        let row = Value::Object(residual);
+        if let Some(v) = opt_str(&row, "origin_evidence")? {
+            self.provenance.origin_evidence = Some(v);
+        }
+        if let Some(v) = opt_str(&row, "request_origin")? {
+            self.provenance.request_origin = Some(v);
+        }
+        if let Some(v) = cost_list(&row)? {
+            self.costs = Some(v);
+        }
+        if let Some(v) = history_list(&row, "difficulty_history", false)? {
+            self.difficulty_history = Some(v);
+        }
+        if let Some(v) = history_list(&row, "priority_history", true)? {
+            self.priority_history = Some(v);
+        }
+        if let Some(v) = task_list(&row)? {
+            self.tasks = Some(v);
+        }
+        if let Some(v) = opt_str_list(&row, "tags")? {
+            self.labels = Some(v);
+        }
+        if let Some(v) = opt_str_list(&row, "collisions_acknowledged")? {
+            self.collision_acks = Some(v);
+        }
+        if let Some(v) = decision_list(&row)? {
+            self.decisions = Some(v);
+        }
+        if let Some(obj) = row.as_object() {
+            for (k, v) in obj {
+                if !is_residual_key(k) {
+                    leftovers.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        self.extras = leftovers;
+        Ok(())
+    }
+}
+
+fn is_residual_key(key: &str) -> bool {
+    matches!(
+        key,
+        "origin_evidence"
+            | "request_origin"
+            | "cost_sessions"
+            | "difficulty_history"
+            | "priority_history"
+            | "tasks"
+            | "tags"
+            | "collisions_acknowledged"
+            | "decisions"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,7 +1855,7 @@ fn is_known_key(key: &str) -> bool {
 
 /// Recursively remove null-valued object keys, the null-stripped export
 /// rule the parity compare shares.
-fn strip_nulls_value(value: &Value) -> Value {
+pub(crate) fn strip_nulls_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();

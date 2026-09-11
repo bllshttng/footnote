@@ -2100,10 +2100,10 @@ pub fn locked_mutate(
     // The store names its own backend in graph_meta; this cycle reads it
     // under the lock, so every caller (keeper, daemon settle, direct) agrees
     // by construction and a mid-flight flip lands on the next mutation.
-    let sqlite_backend = crate::graph_sqlite::backend(path) == crate::graph_sqlite::Backend::Sqlite;
+    let sqlite_backend = crate::backlog::backend(path) == crate::backlog::Backend::Sqlite;
     if let Some(expected) = &input.base_version {
         let current = if sqlite_backend {
-            crate::graph_sqlite::version(path).map_err(StoreError::Sqlite)?
+            crate::backlog::version(path).map_err(StoreError::Sqlite)?
         } else {
             file_content_version(path)
         };
@@ -2112,7 +2112,7 @@ pub fn locked_mutate(
         }
     }
     let raw_read = if sqlite_backend {
-        RawRead::Entries(crate::graph_sqlite::read_entries(path).map_err(StoreError::Sqlite)?)
+        RawRead::Entries(crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?)
     } else {
         read_raw(path)?
     };
@@ -2253,7 +2253,7 @@ pub fn locked_mutate(
     canonicalize_entries(&mut entries);
 
     let (backup, shadow_warning, version) = if sqlite_backend {
-        let version = crate::graph_sqlite::authoritative_sync(path, &shadow_before, &entries)
+        let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
             .map_err(StoreError::Sqlite)?;
         (None, None, version)
     } else {
@@ -2264,7 +2264,7 @@ pub fn locked_mutate(
             use sha2::Digest as _;
             format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
         };
-        let warning = crate::graph_sqlite::shadow_sync(path, &shadow_before, &entries, &version)
+        let warning = crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
             .err()
             .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
         (backup, warning, version)
