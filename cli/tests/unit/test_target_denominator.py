@@ -19,6 +19,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from cli.tests._init_space import install_state_path_stub
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _INIT_SCRIPT = _REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 
@@ -61,12 +63,14 @@ def _run_init_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.Co
     fno = bin_dir / "fno"
     fno.write_text(_FNO_STUB)
     fno.chmod(0o755)
+    stub_env = install_state_path_stub(bin_dir, tmp_path / "space")
     env = {
         "HOME": str(tmp_path),
         "PATH": f"{bin_dir}{os.pathsep}" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "TARGET_START": "1",
         "TARGET_INPUT": str(plan_file),
         "TARGET_AUTO_MERGE": "false",
+        **stub_env,
     }
     env.update(extra_env)
     return subprocess.run(
@@ -86,7 +90,7 @@ def test_deliverables_flag_stamps_the_manifest(tmp_path: Path):
     """AC1-DENOM: TARGET_DELIVERABLES=3 lands as `deliverables: 3`."""
     proc = _run_init_script(tmp_path, {"TARGET_DELIVERABLES": "3"})
     assert proc.returncode == 0, f"stderr: {proc.stderr[:500]}"
-    fm = _frontmatter(tmp_path / ".fno" / "target-state.md")
+    fm = _frontmatter(tmp_path / "space" / "target-state.md")
     assert fm.get("deliverables") == 3
 
 
@@ -95,7 +99,7 @@ def test_omitting_deliverables_leaves_the_field_absent(tmp_path: Path):
     the unmeasurable state the denominator gate and the ratio measurement key on."""
     proc = _run_init_script(tmp_path, {})
     assert proc.returncode == 0, f"stderr: {proc.stderr[:500]}"
-    fm = _frontmatter(tmp_path / ".fno" / "target-state.md")
+    fm = _frontmatter(tmp_path / "space" / "target-state.md")
     assert "deliverables" not in fm, fm
 
 
