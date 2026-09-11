@@ -1136,7 +1136,22 @@ async fn run(args: Vec<String>) -> i32 {
             }
         },
         Err(e) => {
-            eprintln!("fno-agents: {e}");
+            if verb_owned == "rm" && !agent_name.is_empty() {
+                // A dead connection does not prove the daemon skipped the
+                // removal; read the store rather than assert the outcome. An
+                // unread store reports unknown instead of absent.
+                let still_registered = match fno_agents::state::load_registry(&home.registry_json())
+                {
+                    Ok(reg) => Some(reg.find_name_or_full_session_id(&agent_name).is_some()),
+                    Err(_) => None,
+                };
+                eprintln!(
+                    "{}",
+                    rm_failure_line(&agent_name, &e.to_string(), still_registered)
+                );
+            } else {
+                eprintln!("fno-agents: {e}");
+            }
             1
         }
     }
@@ -3575,6 +3590,21 @@ fn str_arg(
     it.next()
         .map(Value::String)
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// The stderr line a transport-level `rm` failure prints. The pre-exec removal
+/// banner is past tense and the transport error alone reads like a completed
+/// removal, so the line names the row and answers from the registry: a dead
+/// connection does not prove the daemon skipped the write, and the store is
+/// the receipt. `None` means the store itself could not be read, and the line
+/// says so rather than wearing an absent verdict.
+fn rm_failure_line(name: &str, err: &str, still_registered: Option<bool>) -> String {
+    let verdict = match still_registered {
+        Some(true) => "nothing was removed - the row is still registered",
+        Some(false) => "the row is no longer registered",
+        None => "the registry could not be read to confirm whether anything was removed",
+    };
+    format!("fno-agents: rm {name}: {err}; {verdict}")
 }
 
 /// Format a successful daemon response for human-readable stdout.
