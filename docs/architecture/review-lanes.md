@@ -448,21 +448,33 @@ Two consequences are recorded rather than gated.
 
 It is recorded rather than gated because the native final-head review is the DEFAULT path, and refusing its attestation wedges every single-session PR.
 
-The `model` field records what the environment CLAIMED.
+The `model` field records the model that ANSWERED, stamped by the emit chokepoint from the attesting session's own transcript via `observed_model_for_session` (the platform provenance leaf).
 
-The producer refuses to record a claim it can prove false.
+The emitter passes no model of its own.
 
-A non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered.
+The routed-model environment names the model the session ASKED for.
 
-A refused claim stores the literal `unobserved`, never an empty string.
+A non-Anthropic name over an unset base URL silently falls back to the primary model.
 
-So a claim that was made and declined never reads the same as a field nobody set.
+An env read recorded asks as answers.
 
-A claim that is merely unverified still records as given, because nothing in a shell can check it.
+Four sessions in one day produced that wrong record.
 
-That refusal landed separately.
+The caller gets no vote: a `--data` model that disagrees with the transcript refuses the emit, the same rule `attester_session_id` follows.
 
-`tests/hooks/test_attest_model.sh` drives the hook and the emitter over one env matrix, so the two predicates cannot drift.
+An unresolvable transcript means not observable, so the field is absent, never a guess.
+
+Events emitted before this change can carry an env claim or the literal `unobserved`.
+
+Both are legacy values a reader must not treat as an observation.
+
+Even with no attestation ever emitted, `hooks/attest-model.sh` still warns at SessionStart that the ROUTE is misconfigured, a real config bug worth surfacing.
+
+`tests/hooks/test_attest_model.sh` drives that hook's env rule.
+
+The emitter's copy of the rule is gone.
+
+The harness pins one body where it once held two in parity.
 
 ## Attestation origin: whose process rendered the verdict
 
