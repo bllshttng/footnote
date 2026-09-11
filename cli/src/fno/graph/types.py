@@ -244,6 +244,10 @@ class Entry(BaseModel):
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
 
+    # Request origin: birth-time, never rewritten later.
+    request_origin: Optional[str] = None
+    origin_evidence: Optional[str] = None
+
     # Append-only lifecycle provenance (x-b6e4): one {phase, harness, session_id,
     # effort, at} record per phase boundary a session crossed. Unique per
     # (phase, harness, session_id); the same session may appear across phases and

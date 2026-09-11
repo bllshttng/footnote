@@ -86,6 +86,8 @@ def _default_create(
     def mutator(entries):
         new_id = mint_node_id({e.get("id") for e in entries})
         new_id_holder[0] = new_id
+        # A stale sentinel id dangles neither as an edge nor as origin evidence.
+        caused = caused_by if any(e.get("id") == caused_by for e in entries) else None
         node = _build_backlog_node(
             title=title,
             project=project,
@@ -95,14 +97,16 @@ def _default_create(
             difficulty_source="retro",
             domain=domain,
             details=details,
+            origin_channel="retro_land",
+            origin_evidence=caused,
             known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
         if queued:
             node["queued_at"] = datetime.now(timezone.utc).isoformat()
             node["queued_reason"] = "retro-triage (interactive): awaiting human ack"
-        if caused_by and any(e.get("id") == caused_by for e in entries):
-            node["caused_by"] = caused_by
+        if caused:
+            node["caused_by"] = caused
         entries.append(node)
         return entries
 

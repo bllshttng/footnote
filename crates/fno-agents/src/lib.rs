@@ -132,6 +132,7 @@ pub mod merge_reap;
 mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod needs;
+pub mod node_origin;
 pub mod node_route;
 pub mod nudge;
 pub mod opencode_ask;

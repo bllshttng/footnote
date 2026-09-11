@@ -30,6 +30,15 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
     _build_backlog_node,
     _session_provenance,
 )
+from fno.graph.node_builder import (
+    DESCRIPTION_HELP,
+    ENCOUNTER_EVIDENCE_HELP,
+    ORIGIN_EVIDENCE_HELP,
+    RELATED_HELP,
+    SOURCE_KIND_HELP,
+    SOURCE_NODE_HELP,
+    TAG_HELP,
+)
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
 
@@ -988,6 +997,7 @@ def _create_node_impl(
     source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
+    origin_evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1114,6 +1124,8 @@ def _create_node_impl(
             tags=resolved_tags,
             source_node=resolved_source_node,
             source_kind=source_kind,
+            origin_channel="idea",
+            origin_evidence=origin_evidence,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1295,47 +1307,23 @@ def cmd_add(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
 ) -> None:
     _create_node_impl(
@@ -1360,6 +1348,7 @@ def cmd_add(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1490,47 +1479,23 @@ def cmd_idea(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
@@ -1741,6 +1706,7 @@ def cmd_idea(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -2082,6 +2048,8 @@ def cmd_decompose(
                     difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    origin_channel="decompose",
+                    origin_evidence=f"parent:{epic_resolved_id}",
                     known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]
