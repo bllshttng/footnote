@@ -174,6 +174,38 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
     }
 
 
+def _plan_rulings_section(node_id: str | None, plans_dir: Path | None) -> dict[str, Any]:
+    """Sibling plans' ``consolidation.rejected`` rows naming this node.
+
+    The decision index cannot hold a plan's ruling (agent sessions cannot
+    write it), so this scan is the only surface the ruled-out node's readers
+    consult. Mirrors ``_decisions_section``: a scan that could not run shows
+    in status/detail, never folded into a clean "no ruling".
+    """
+    if not node_id or plans_dir is None:
+        return {
+            "plan_rulings": [],
+            "plan_rulings_status": "ok",
+            "plan_rulings_detail": None,
+        }
+    from fno.plan.rulings import plan_rulings
+
+    result = plan_rulings(node_id, plans_dir)
+    if result["status"] == "unavailable":
+        return {
+            "plan_rulings": [],
+            "plan_rulings_status": "error",
+            "plan_rulings_detail": (
+                f"plans directory unreadable: {result['dir']}: {result['detail']}"
+            ),
+        }
+    return {
+        "plan_rulings": result["rulings"],
+        "plan_rulings_status": "ok",
+        "plan_rulings_detail": None,
+    }
+
+
 def _graph_section(
     seed: str,
     entries: list[dict[str, Any]] | None,
@@ -468,6 +500,12 @@ def build_receipt(
         archive,
         graph_error,
         archive_error,
+    )
+    from fno.paths import plans_content_dir
+
+    graph |= _plan_rulings_section(
+        (graph.get("resolved") or {}).get("id"),
+        plans_path or plans_content_dir(repo),
     )
     repository = _repository(repo, run)
     resolved = graph.get("resolved") or {}

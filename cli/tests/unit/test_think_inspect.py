@@ -455,3 +455,106 @@ def test_cli_rejects_missing_repository(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "repository directory not found" in result.output
+
+
+# -- plan rulings on the receipt (x-6f98) --
+
+
+def _rulings_run(argv: list[str], cwd: Path | None = None, timeout: int = 10):
+    if argv[:2] == ["git", "rev-parse"]:
+        value = "feature/x-4007\n" if "--abbrev-ref" in argv else "abc123def456\n"
+        return subprocess.CompletedProcess(argv, 0, value, "")
+    if argv[:2] == ["git", "status"]:
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    if argv[:2] == ["git", "log"]:
+        return subprocess.CompletedProcess(argv, 0, "abc123\tprior\n", "")
+    if argv[:3] == ["gh", "pr", "list"]:
+        return subprocess.CompletedProcess(argv, 0, "[]", "")
+    raise AssertionError(f"unexpected argv: {argv}")
+
+
+def _ruled_out_graph() -> list[dict]:
+    return [
+        {
+            "id": "x-bbbb",
+            "slug": "ruled-out",
+            "title": "Ruled out node",
+            "details": "the node a sibling plan rejected",
+            "status": "ready",
+            "domain": "code",
+        },
+    ]
+
+
+def _rejecting_plan_text() -> str:
+    return (
+        "---\nclaims: x-aaaa\ntitle: T\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: x-bbbb\n"
+        "      reason: R\n"
+        "---\n\n# T\n"
+    )
+
+
+def test_receipt_carries_a_sibling_plan_rejection(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    plan = plans / "plan-x-aaaa.md"
+    plan.write_text(_rejecting_plan_text(), encoding="utf-8")
+
+    receipt = build_receipt(
+        "x-bbbb",
+        repo=repo,
+        graph_entries=_ruled_out_graph(),
+        archive_entries=[],
+        plans_path=plans,
+        home=tmp_path / "home",
+        run=_rulings_run,
+    )
+
+    graph = receipt["graph"]
+    assert graph["plan_rulings_status"] == "ok"
+    assert len(graph["plan_rulings"]) == 1
+    row = graph["plan_rulings"][0]
+    assert row["by"] == ["x-aaaa"]
+    assert row["plan_path"] == str(plan)
+    assert row["reason"] == "R"
+
+
+def test_receipt_reports_an_unreadable_plans_dir_as_error(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    missing = tmp_path / "no" / "such"
+
+    receipt = build_receipt(
+        "x-bbbb",
+        repo=repo,
+        graph_entries=_ruled_out_graph(),
+        archive_entries=[],
+        plans_path=missing,
+        home=tmp_path / "home",
+        run=_rulings_run,
+    )
+
+    graph = receipt["graph"]
+    assert graph["plan_rulings"] == []
+    assert graph["plan_rulings_status"] == "error"
+    assert str(missing) in graph["plan_rulings_detail"]
+
+
+def test_plan_rulings_section_ok_empty_for_an_unresolved_seed() -> None:
+    from fno.think_inspect import _plan_rulings_section
+
+    assert _plan_rulings_section(None, Path("/nope")) == {
+        "plan_rulings": [],
+        "plan_rulings_status": "ok",
+        "plan_rulings_detail": None,
+    }
