@@ -6,6 +6,8 @@ Your question spans several files and you do not yet know which ones, so a scope
 
 Not for: ordinary symbol lookups. When `graphify-out/graph.json` does not exist in the repo root there is nothing to query, so skip this page and use `rg` / Grep.
 
+Not for: a load-bearing sweep whose zero you intend to trust. That stays an `rg -uu` job under the [AGENTS.md search conventions](../AGENTS.md#conventions), because the graph is a snapshot and can be stale.
+
 ## Availability
 
 The index is generated and local, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool. Keep `graphify-out/` out of commits: `graph.json` runs to tens of megabytes, and one `graphify-out/` under `crates/` makes the rust build report a dirty tree.
