@@ -76,7 +76,10 @@ pub(super) fn uniform_ages(
 
 /// Build the injected graph seam from `(session, node, status)` triples and
 /// `(session, node)` open-do pairs.
-pub(super) fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<GraphRead> {
+pub(super) fn graph_read(
+    named: &[(&str, &str, &str)],
+    open_do: &[(&str, &str)],
+) -> Option<GraphRead> {
     let mut index: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
     let mut statuses: std::collections::HashMap<String, String> = std::collections::HashMap::new();

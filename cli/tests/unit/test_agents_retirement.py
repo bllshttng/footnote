@@ -110,3 +110,42 @@ def test_default_runner_shells_the_installed_binary(monkeypatch):
     out = retirement.verdicts([("x", None)])
     assert out["x"].retire is False
     assert "rust-reap-unreadable" in out["x"].reason
+
+
+def test_holds_rows_map_with_age_and_reason():
+    # x-e3cc AC5-HP: a row riding `holds` maps to a named, aged verdict.
+    summary = _summary()
+    summary["holds"] = [
+        {
+            "id": "w-conf",
+            "reason": "sources disagree",
+            "detail": "sessions x-84b2 vs registry x-5d79",
+            "age_s": 7200,
+            "age_basis": "row created",
+            "escalated": True,
+        }
+    ]
+    out = verdicts([("w-conf", None)], runner=_runner_with(summary))
+    v = out["w-conf"]
+    assert v.retire is False
+    assert v.reason.startswith("sources disagree:")
+    assert "held" in v.reason
+    assert "7200" in v.reason
+
+
+def test_a_bucket_mapped_row_keeps_its_richer_verdict():
+    # x-e3cc: `holds` never overwrites a verdict the bucket already gave.
+    summary = _summary()
+    summary["holds"] = [
+        {
+            "id": "w-done",
+            "reason": "sources disagree",
+            "detail": "x",
+            "age_s": 1,
+            "age_basis": "row created",
+            "escalated": False,
+        }
+    ]
+    out = verdicts([("w-done", None)], runner=_runner_with(summary))
+    assert out["w-done"].retire is True
+    assert out["w-done"].reason.startswith("every named node done")

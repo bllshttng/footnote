@@ -2,8 +2,8 @@
 //! release verb's rulings and refusals. Same-module helpers resolve through
 //! the parent glob; gc_receipts' fixtures are `pub(super)`.
 
-use super::*;
 use super::gc_receipts::*;
+use super::*;
 use crate::gc_sweep::{self, GcSummary};
 
 // ── x-e3cc: every hold carries an age, a basis and an escalation ─────────
@@ -386,7 +386,10 @@ fn ac3_edge_stop_release_issues_and_names_an_unconfirmed_stop() {
     })
     .unwrap();
 
-    let graph = graph_read(&[("stoprow-1111-2222-3333-444444444444", "N1", "done")], &[]);
+    let graph = graph_read(
+        &[("stoprow-1111-2222-3333-444444444444", "N1", "done")],
+        &[],
+    );
     let release = gc_sweep::Release {
         handle: "stoprow".to_string(),
         reason: "needs live stop".to_string(),
