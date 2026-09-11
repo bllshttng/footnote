@@ -424,7 +424,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::court_fold::run_court_fold(&args[1..]);
     }
 
-    // `king-history` (x-a238): the crown-scope reign_checkin readback for
+    // `king-history`: the crown-scope reign_checkin readback for
     // `fno agents king history`. Daemon-free read, `==` dispatch like
     // court-fold: Python resolves the caller's crown scope and pins the
     // journal path (identity and paths are Python-owned), the native side

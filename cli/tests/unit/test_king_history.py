@@ -67,7 +67,6 @@ def test_command_relays_the_native_read(tmp_path, monkeypatch) -> None:
 
     def fake_run(argv, **_kwargs):
         seen["argv"] = argv
-        seen["binary"] = argv[0]
 
         class Proc:
             returncode = 0

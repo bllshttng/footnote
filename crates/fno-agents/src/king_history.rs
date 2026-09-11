@@ -1,5 +1,5 @@
 //! `king-history`: the crown-scope `reign_checkin` readback behind
-//! `fno agents king history` (x-a238).
+//! `fno agents king history`.
 //!
 //! Python resolves the caller's crown scope (harness identity and registry
 //! rows are Python-owned), pins the space journal path, and relays here;
