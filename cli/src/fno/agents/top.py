@@ -628,9 +628,9 @@ def _sidecar_requests(cdir: Path, key: str) -> int:
 
 
 def long_hold_rows() -> dict:
-    """Single-flight holds older than LONG_HOLD_S across both claims roots
-    (x-9c91 change 7). Returns ``{"error": ...}`` instead of raising: a top
-    render must not die on a claims read.
+    """Single-flight holds older than LONG_HOLD_S across both claims roots;
+    returns ``{"error": ...}`` instead of raising (a top render never dies
+    on a claims read).
     """
     from fno.claims.core import list_claims
     from fno.claims.io import dedup_claims_roots, global_claims_root
@@ -708,8 +708,7 @@ def render_top(
             "warnings": list(c.warnings) + long_hold_warning,
         }
         if "error" in long_holds:
-            # long_holds stays absent: a reader must tell "read, none" from
-            # "not read" (x-9c91 change 7).
+            # long_holds stays absent: tell "read, none" from "not read".
             payload["long_holds_error"] = long_holds["error"]
         else:
             payload["long_holds"] = long_holds["rows"]

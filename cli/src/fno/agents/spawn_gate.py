@@ -1585,10 +1585,8 @@ def run_gate(
                 if provider_cap is not None:
                     # Contention is a peer or a corpse, never a full cap: the
                     # cap read is the thing the mutex protects. Takeover asks
-                    # THE single reap decision (sweep_verdict) about the gate
-                    # claim file (x-9c91): force only a provably-dead holder,
-                    # keep queueing past a live one or an unanswerable door,
-                    # and re-acquire on the next pass, still serialized.
+                    # THE single reap decision (x-9c91): force only a
+                    # provably-dead holder, keep queueing past anything else.
                     from fno.claims.core import (
                         ClaimGoneAway,
                         ClaimVerdictError,

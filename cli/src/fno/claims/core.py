@@ -1612,7 +1612,7 @@ def list_claims_with_counts(
 
 
 class ForceReleaseOutcome(NamedTuple):
-    """What a force-release found at the resolved path (x-9c91): archived=False means nothing was there."""
+    """What a force-release found at the path; archived=False means nothing was there."""
 
     path: Path
     archived: bool
@@ -1851,9 +1851,7 @@ def reap_dead_claims(
     ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
     ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
     ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
-    reason)``), ``apply``, ``roots``. The suspect buckets split what used to
-    be one number; a claim with no native verdict in the walked directory
-    counts under ``kept_unclassified``, never under the probe buckets. A ``claim_reap_swept`` event fires on every
+    reason)``), ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1868,8 +1866,8 @@ def reap_dead_claims(
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
-        # Verbatim: cdir is resolved, and root=cdir.parent.parent re-resolved
-        # it one level down, so space-root claims got no verdict (x-9c91).
+        # Verbatim: root=cdir.parent.parent re-resolved one level down, so
+        # space-root claims got no verdict (x-9c91).
         native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
 
     ts = now_ms()
@@ -1880,9 +1878,7 @@ def reap_dead_claims(
         "offhost": 0, "suspect": 0, "live": 0,
         "suspect_alive": 0, "suspect_unprobed": 0,
     }
-    # No verdict row in the walked dir is unclassified (never "unprobed");
-    # the per-dir count names the directory to fix. unprobed_by folds the
-    # probe's own reason tokens, one per None answer.
+    # No verdict row in the walked dir is unclassified, never "unprobed".
     kept_unclassified = 0
     unclassified_dirs: dict[str, int] = {}
     unprobed_by: dict[str, int] = {}

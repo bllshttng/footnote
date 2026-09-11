@@ -1552,10 +1552,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
        finding.
     """
     cache: dict = {}
-    # One token per None answer, keyed by claim key, folded by the sweep into
-    # kept_suspect_unprobed_by. "Roster not consulted" prints only beside the
-    # roster-read-degraded token: the label names a cause somebody measured
-    # (x-9c91 change 2), never an absence it inherited.
+    # One token per None answer, folded into kept_suspect_unprobed_by.
     reasons: dict = {}
 
     def _reading() -> RosterReading:
@@ -1809,9 +1806,8 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
-    naming the path read and, when the file exists in the other default root,
-    that path - the x-cff2 specimen printed `force-released` while the real
-    lock stayed byte-identical in the root this call did not resolve.
+    naming the path read and, when it exists in the other default root, that
+    path (the x-cff2 specimen released nothing while printing success).
     """
     try:
         outcome = _claims_core.force_release_claim(
