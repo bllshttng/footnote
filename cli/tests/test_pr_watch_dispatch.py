@@ -3020,6 +3020,11 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             watchdog, "run_sweep", lambda **kw: (sweep_payload, [])
         )
+        # fleet_rows probes the live roster by exec'ing the real `claude`
+        # binary; the provider-exec guard blocks that, and everything after
+        # it in the leg would be skipped. The leg's subject here is the
+        # refusal-event lane, not the roster.
+        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
         monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
         sweep_writes = []
         monkeypatch.setattr(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -247,24 +248,57 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         os.environ.pop("FNO_PYTEST_SHARD", None)
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _reap_store_keepers():
-    """Every spawned graph-store keeper dies with the test session.
+def _pytest_of_ancestor(basetemp) -> Path | None:
+    """The ``pytest-of-<user>`` directory above a basetemp, or None.
 
-    The store client spawns a detached ``fno-agents-worker --store-keeper``
-    per fixture graph on demand, and the keeper is immortal by design. A
-    session that touches many graphs therefore leaks one live worker per
-    graph unless the spawner reaps them (measured 2026-09-03: 6,855 live
-    keepers after one pytest pass, load 117, every fno call paying 4x
-    startup). Two layers here:
+    An explicit ``--basetemp`` sits wherever the caller pointed it and has no
+    such ancestor; the start-of-session garbage sweep then has no sane root
+    and must skip.
+    """
+    current = Path(basetemp)
+    for candidate in (current, *current.parents):
+        if candidate.name.startswith("pytest-of-"):
+            return candidate
+    return None
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _reap_session_processes(tmp_path_factory):
+    """Every process this session rooted in its tmp tree dies with it.
+
+    Two populations, one fixture, because both answer "what does this session
+    leave alive?".
+
+    Store keepers: the store client spawns a detached
+    ``fno-agents-worker --store-keeper`` per fixture graph on demand, and the
+    keeper is immortal by design. A session that touches many graphs leaks
+    one live worker per graph unless the spawner reaps them (measured
+    2026-09-03: 6,855 live keepers after one pytest pass, load 117, every
+    fno call paying 4x startup).
+
+    Rooted trees: a test that starts a real provider binary can leave a
+    ``claude daemon run`` behind - the daemon calls setsid, detaches to
+    ppid 1, and outlives every group cleanup (x-ec81 measured three, each
+    rooted in a deleted pytest garbage dir, each carrying its own bg-spare
+    pool, one pinning a merged worktree against cleanup). Ownership is the
+    path: a basetemp belongs to this one session, and pytest renames a
+    numbered dir to ``garbage-<uuid>`` only after its lock proved stale, so
+    no live session roots there. A live ``pytest-N`` dir from another
+    worktree is never touched.
+
+    Layers:
 
     - ``FNO_STORE_KEEPER_IDLE_SECS`` bounds every keeper this session spawns
       to a short self-exit, so even a keeper the reaper never hears about
       cannot outlive the run by long.
-    - The teardown SIGTERMs every keeper the client recorded and ASSERTS the
-      alive count returns to zero. The assert is the point: a teardown that
-      merely runs is decoration, and the positive signal is the count, not
-      the pass.
+    - Setup reaps trees under ``pytest-of-*/garbage-*`` - leaks of EARLIER
+      runs - and warns per hit; it does not fail, because this session did
+      not make them.
+    - Teardown drains the keeper ledger, then reaps trees under this
+      session's own basetemp, then ASSERTS both lists are empty. The assert
+      is the point: a teardown that merely runs is decoration, and the
+      positive signal is the count, not the pass. The cwd in the message
+      names the leaking test dir.
 
     Two measurement traps this assertion survived, recorded so the next
     counter does not re-learn them: a sandboxed shell sees a process jail,
@@ -275,13 +309,39 @@ def _reap_store_keepers():
     form ``-o pid=,args=`` and prove any filter with one live pid).
     """
     os.environ.setdefault("FNO_STORE_KEEPER_IDLE_SECS", "5")
+
+    from tests._leak_census import reap_rooted
+
+    basetemp = tmp_path_factory.getbasetemp()
+    ancestor = _pytest_of_ancestor(basetemp)
+    if ancestor is not None:
+        stale = reap_rooted([str(ancestor)], match_component="garbage-")
+        for hit in stale:
+            warnings.warn(
+                pytest.PytestWarning(
+                    f"reaped a process leaked by an EARLIER pytest run: "
+                    f"pid {hit['pid']} rooted at {hit['cwd']} "
+                    f"({(hit.get('cmdline') or [''])[0]!r})"
+                ),
+                stacklevel=1,
+            )
+
     yield
+
     from fno.graph.store import reap_spawned_keepers
 
     survivors = reap_spawned_keepers(timeout=15.0)
-    assert not survivors, (
+    rooted = reap_rooted([str(basetemp)])
+    assert not survivors and not rooted, (
         f"{len(survivors)} store keeper(s) outlived the test session "
-        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to zero"
+        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "
+        f"zero. {len(rooted)} process tree(s) stayed rooted in this "
+        f"session's tmp tree: "
+        + "; ".join(
+            f"pid {r['pid']} at {r['cwd']} "
+            f"({' '.join(r.get('cmdline') or [])[:120]!r})"
+            for r in rooted[:10]
+        )
     )
 
 
