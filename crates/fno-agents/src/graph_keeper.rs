@@ -1049,6 +1049,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "export_status" => handle_export_status(state),
         "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
+        "api" => handle_api(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
         "defaults" => handle_pure(&params, |mut entries, p| {
@@ -2751,8 +2752,249 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     }))
 }
 
+/// The typed backlog API over the wire: one keeper op per
+/// `backlog::api` function, same name, same JSON fields. Queries hold the
+/// read gate; mutations hold the write gate (the gate serializes api
+/// traffic against the legacy ops on this keeper; the store's own file
+/// lock serializes across processes).
+fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    let op = params
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("api needs an op".into()))?;
+    let store = crate::backlog::api::Store::new(&state.graph);
+    const READ_OPS: &[&str] = &["node", "nodes", "comments", "version"];
+    if READ_OPS.contains(&op) {
+        let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        return api_op(&store, op, params);
+    }
+    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    api_op(&store, op, params)
+}
+
+fn api_op(
+    store: &crate::backlog::api::Store,
+    op: &str,
+    params: &Value,
+) -> Result<Value, StoreError> {
+    use crate::backlog::api;
+    let node_row = |node: &api::Node| node.to_json();
+    match op {
+        "node" => {
+            let id = param_str(params, "id")?;
+            let found = api::node(store, id)?;
+            Ok(json!({
+                "node": found.map(|n| n.to_json()),
+                "version": api::version(store)?,
+            }))
+        }
+        "nodes" => {
+            let filter: api::NodeFilter = params
+                .get("filter")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| StoreError::Invalid(format!("bad filter: {e}").into()))?
+                .unwrap_or_default();
+            let page: api::Page = serde_json::from_value(params.clone())
+                .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
+            let connection = api::nodes(store, &filter, &page)?;
+            Ok(json!({
+                "nodes": connection.nodes.iter().map(node_row).collect::<Vec<_>>(),
+                "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
+                "version": api::version(store)?,
+            }))
+        }
+        "comments" => {
+            let id = param_str(params, "id")?;
+            let page: api::Page = serde_json::from_value(params.clone())
+                .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
+            let connection = api::comments(store, id, &page)?;
+            Ok(json!({
+                "nodes": connection
+                    .nodes
+                    .iter()
+                    .map(crate::backlog::model::comment_to_json)
+                    .collect::<Vec<_>>(),
+                "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
+                "version": api::version(store)?,
+            }))
+        }
+        "version" => Ok(json!({ "version": api::version(store)? })),
+        _ => api_mutation(store, op, params),
+    }
+}
+
+fn api_mutation(
+    store: &crate::backlog::api::Store,
+    op: &str,
+    params: &Value,
+) -> Result<Value, StoreError> {
+    use crate::backlog::api;
+    let id = params.get("id").and_then(Value::as_str);
+    match op {
+        "node_create" => {
+            let input: api::NodeCreateInput = input_of(params, "input")?;
+            let payload = api::node_create(store, input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_update" => {
+            let input: api::NodeUpdateInput = input_of(params, "input")?;
+            let payload = api::node_update(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_batch_update" => {
+            let ids: Vec<String> = input_of(params, "ids")?;
+            let input: api::NodeUpdateInput = input_of(params, "input")?;
+            let payload = api::node_batch_update(store, &ids, input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload
+                    .node
+                    .map(|list| list.iter().map(|n| n.to_json()).collect::<Vec<_>>()),
+                "version": payload.version,
+            }))
+        }
+        "node_archive" => {
+            let payload = api::node_archive(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_unarchive" => {
+            let payload = api::node_unarchive(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_delete" => {
+            let payload = api::node_delete(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "relation_create" | "relation_delete" => {
+            let related = param_str(params, "related")?;
+            let t: api::RelationType = match params.get("type") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| StoreError::Invalid(format!("bad type: {e}").into()))?,
+                None => api::RelationType::Related,
+            };
+            let payload = if op == "relation_create" {
+                api::relation_create(store, id.unwrap_or_default(), related, t)?
+            } else {
+                api::relation_delete(store, id.unwrap_or_default(), related, t)?
+            };
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "label_add" | "label_remove" => {
+            let name = param_str(params, "name")?;
+            let payload = if op == "label_add" {
+                api::label_add(store, id.unwrap_or_default(), name)?
+            } else {
+                api::label_remove(store, id.unwrap_or_default(), name)?
+            };
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "comment_create" => {
+            let input: api::CommentCreateInput = input_of(params, "input")?;
+            let payload = api::comment_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "pull_request_attach" => {
+            let input: api::PullRequestInput = input_of(params, "input")?;
+            let payload = api::pull_request_attach(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "session_append" => {
+            let row: api::SessionRecord = input_of(params, "row")?;
+            let payload = api::session_append(store, id.unwrap_or_default(), row)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "session_end" => {
+            let session_id = param_str(params, "session_id")?;
+            let ended_by = param_str(params, "ended_by")?;
+            let payload = api::session_end(store, id.unwrap_or_default(), session_id, ended_by)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "encounter_create" => {
+            let input: api::EncounterInput = input_of(params, "input")?;
+            let payload = api::encounter_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "dispatch_set" => {
+            let d: Option<api::Dispatch> = match params.get("dispatch") {
+                Some(v) if !v.is_null() => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| StoreError::Invalid(format!("bad dispatch: {e}").into()))?,
+                ),
+                _ => None,
+            };
+            let payload = api::dispatch_set(store, id.unwrap_or_default(), d)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        other => Err(StoreError::Invalid(
+            format!("unknown api op {other:?}").into(),
+        )),
+    }
+}
+
+fn input_of<T: serde::de::DeserializeOwned>(params: &Value, key: &str) -> Result<T, StoreError> {
+    serde_json::from_value(
+        params
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StoreError::Invalid(format!("api op needs {key}").into()))?,
+    )
+    .map_err(|e| StoreError::Invalid(format!("bad {key}: {e}").into()))
+}
 /// The socket path for a graph file: a sibling `<graph>.store.sock`, so the
-/// keeper's discovery needs no config and a tmp test graph never touches the
 /// operator's state root. When the sibling would overrun the unix-socket
 /// address limit (macOS binds 104 sun_path bytes, directory included), the
 /// socket moves to a uid-keyed root under the platform temp dir, named by

@@ -6,6 +6,7 @@
 //! relational shadow, and every mutation writes only the changed nodes'
 //! rows in one transaction.
 
+pub mod api;
 pub mod comments;
 pub mod encounters;
 pub mod model;
@@ -213,7 +214,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
             .execute("DROP TABLE entries", [])
             .map_err(|error| error.to_string())?;
     }
-    stamp_version(&transaction, &content_version(&rows))?;
+    stamp_version_fields(&transaction, &content_version(&rows))?;
     transaction
         .execute(
             "INSERT INTO graph_meta(key, value) VALUES('schema_version', ?1)
@@ -225,7 +226,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
     Ok(())
 }
 
-fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
+fn stamp_version_fields(connection: &Connection, version: &str) -> Result<(), String> {
     connection
         .execute(
             "INSERT INTO graph_meta(key, value) VALUES('version', ?1)
@@ -242,6 +243,53 @@ fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// The write finalizer: stamp the content digest AND move the typed API's
+/// mutation counter by one. The lazy import does NOT take this path (a
+/// backfill is not a user-visible write; AC15 counts one bump per
+/// mutation), so it stamps fields only.
+fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
+    stamp_version_fields(connection, version)?;
+    bump_api_version(connection)?;
+    Ok(())
+}
+
+/// Bump the typed API's mutation counter by one, in the caller's
+/// transaction, and return the new value. Every store write passes through
+/// `stamp_version`, so legacy writers (a note, an op) move the counter too:
+/// `fno backlog version` grows by one across any single write.
+fn bump_api_version(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO graph_meta(key, value) VALUES('api_version', '1')
+             ON CONFLICT(key) DO UPDATE SET
+             value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// The counter `backlog::api::version` serves. It lives in graph_meta of the
+/// relational shadow, which both backends write, so the counter survives the
+/// flip. Read-only probe: an absent db or key reads 0, never creates.
+pub fn api_version(graph: &Path) -> Result<i64, String> {
+    if !database_path(graph).exists() {
+        return Ok(0);
+    }
+    let connection = Connection::open_with_flags(
+        database_path(graph),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| error.to_string())?;
+    match meta(&connection, "api_version") {
+        Ok(Some(value)) => value
+            .parse::<i64>()
+            .map_err(|error| format!("api_version is not an integer: {error}")),
+        Ok(None) => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
