@@ -974,9 +974,7 @@ def _parse_wait_seconds(raw: str) -> float:
     match = _WAIT_DURATION_RE.fullmatch(raw.strip())
     if not match:
         raise ValueError(raw)
-    return float(match.group(1)) * {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}[
-        match.group(2).lower()
-    ]
+    return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
 
 
 @agents_app.command("spawn")
@@ -2083,11 +2081,6 @@ def cmd_spawn(
             print(
                 f"error: --wait wants a positive duration like 5m, 90s or 1h (got {wait!r})",
                 file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if wait_seconds <= 0:
-            print(
-                f"error: --wait wants a positive duration (got {wait!r})", file=sys.stderr
             )
             raise typer.Exit(code=2)
 
