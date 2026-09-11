@@ -1,7 +1,6 @@
 """``fno agents king history`` - scope resolution and native-read relay.
 
-The scan itself is the native ``king-history`` verb
-(crates/fno-agents/src/king_history.rs); contract: docs/architecture/reign.md.
+Scan owner: the native ``king-history`` verb; contract: docs/architecture/reign.md.
 """
 from __future__ import annotations
 
