@@ -656,11 +656,9 @@ def normalize_command(command: str, harness: str) -> str:
             return cmd
         return "$fno:" + verb + cmd[len(first_word):]
     if surface == _SLASH and cmd.startswith("$fno:"):
-        # The reverse rewrite (x-413d): a codex-authored seed rendered for a
-        # slash surface. The sigil says WHO WROTE the seed, never which
-        # harness runs it. Swap the sigil, keep the namespace, and let the
-        # /fno: handling below render it per surface (claude keeps fno:,
-        # agy strips it, opencode is idempotent).
+        # Reverse rewrite (x-413d): the sigil says who WROTE the seed, never
+        # which harness runs it. Swap the sigil, keep the namespace, and let
+        # the /fno: handling below render it per surface.
         cmd = "/fno:" + cmd[len("$fno:"):]
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
@@ -762,10 +760,8 @@ def verb_fired_marker(message: str) -> Optional[str]:
 
 
 def render_seed(message: str, harness: str) -> str:
-    """Prose verbatim; a verb-shaped seed gate-checked then normalized.
-
-    The gate is the one shared fire-test predicate (``is_verb_seed``, x-413d):
-    a first-token command over either sigil, not a second local startswith."""
+    """Prose verbatim; a verb-shaped seed gate-checked then normalized by the
+    one shared fire-test predicate (``is_verb_seed``, x-413d)."""
     from fno.agents.spawn_defaults import is_verb_seed
 
     if not is_verb_seed(message):

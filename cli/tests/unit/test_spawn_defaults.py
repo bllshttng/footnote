@@ -420,13 +420,16 @@ def test_prose_verb_resolves_profile_but_stays_a_conversation():
 
 
 def test_unresolvable_verb_token_is_the_third_outcome():
-    """x-413d: a verb-shaped token `known` rejects returns None - never a
-    profile, never crown. A path and a king seed keep the crown answer."""
+    """x-413d: an fno-namespaced verb-shaped token `known` rejects returns
+    None - never a profile, never crown. A path and a king seed keep the
+    crown answer, and so does a BARE unknown verb: a foreign command is not
+    an fno stage."""
     from fno.agents.spawn_defaults import _profile_key
 
     known = frozenset({"target", "blueprint"})
     assert _profile_key("/fno:taget x", known=known) is None
     assert _profile_key("$fno:taget x", known=known) is None
+    assert _profile_key("/taget x", known=known) == "crown"
     assert _profile_key("/absolute/path/to/thing", known=known) == "crown"
     assert _profile_key("king: shrink the board", known=known) == "crown"
 
@@ -437,6 +440,20 @@ def test_unknown_verb_seed_refuses_naming_the_token():
         _inject(["spawn", "--name", "w", "/fno:taget x-caf8"], err=err)
     assert exc.value.code == 2
     assert "taget" in err.getvalue()
+
+
+def test_bare_foreign_verb_seed_spawns_without_a_profile():
+    """/code-review ships in no fno roster and is still a real dispatch: a
+    bare unknown verb must deliver (no refusal) and must not fire an fno
+    stage profile. Regression for the CI smoke run that refused the
+    operator's review-dispatch vocabulary."""
+    out = _inject(
+        ["spawn", "--name", "w", "/code-review this diff"],
+        profiles={"target": {"model": "opus"}},
+    )
+    assert "--model" not in out
+    assert out[out.index("--permission-mode") + 1] == "bypassPermissions"  # fire-and-forget
+    assert "/code-review this diff" in out
 
 
 def test_dollar_seed_injects_target_profile_effort_not_crown():
