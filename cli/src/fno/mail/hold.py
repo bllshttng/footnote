@@ -673,7 +673,7 @@ def _emit_drain_marker(
 
 def cmd_notify_self() -> None:
     """Body of ``fno agents mail notify-self`` (hidden): one atomic
-    ``UserPromptSubmit`` mail payload, then acknowledge it. Moved from mail/cli.py.
+    ``UserPromptSubmit`` mail payload, then acknowledge it.
     """
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.bus.cursor import advance_cursor, scan_unread

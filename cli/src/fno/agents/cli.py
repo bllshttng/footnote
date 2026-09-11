@@ -4680,9 +4680,10 @@ def incident(ctx: typer.Context) -> None:
     """
     import subprocess
 
-    from fno.rust_binary import resolve_binary
+    from fno.rust_binary import find_dev_binary, resolve_binary
 
-    binary = resolve_binary()
+    # Dev build outranks a stale installed copy (mirrors verb_call).
+    binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.secho(
             "fno agents incident: fno-agents binary not found; `fno doctor update --rust` or set FNO_AGENTS_BIN",
