@@ -188,16 +188,9 @@ def keeper_thread_spawn(
         raise DispatchAskError(arm["once_refusal"], exit_code=2)
 
     carries = tuple(arm.get("carries") or ())
-    refused = next(
-        (flag for flag, axis in LAUNCH_AXES if axis not in carries and options.get(axis)),
-        None,
-    )
-    if refused is not None:
-        raise DispatchAskError(
-            f"{refused} is not supported on the {harness} thread lane; "
-            "drop it or use --substrate pane",
-            exit_code=2,
-        )
+    # The spawn front door demoted every axis this lane cannot carry to the
+    # pane, so whatever reaches here has a carrier; the row's `carries` only
+    # decides which kwargs the lane builder takes.
     resume_session_id = options.get("resume_session_id")
     if resume_session_id and arm.get("resume_refusal"):
         raise DispatchAskError(
@@ -212,6 +205,7 @@ def keeper_thread_spawn(
         harness=harness,
         cwd=cwd,
         lock_timeout=lock_timeout,
+        passthrough=options.get("passthrough"),
         **lane_kwargs,
     )
     session_id = receipt["session_id"]

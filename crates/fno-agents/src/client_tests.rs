@@ -2574,3 +2574,41 @@ fn place_thread_portal_after_spawn_routes_through_fno_bin() {
         "mux\nthread\nworker-a\n--portal\n1\n--workspace\nsq\n"
     );
 }
+
+#[test]
+fn harness_arg_parses_repeatable_into_params() {
+    let (_m, params) = build_request(
+        "spawn",
+        &[
+            "wk".into(),
+            "--harness".into(),
+            "codex".into(),
+            "--substrate".into(),
+            "thread".into(),
+            "--harness-arg=-c".into(),
+            "--harness-arg".into(),
+            "key=1".into(),
+        ],
+    )
+    .expect("harness args parse");
+    assert_eq!(
+        params["harness_args"],
+        serde_json::json!(["-c", "key=1"]),
+        "both spellings land in one array"
+    );
+}
+
+#[test]
+fn a_codex_thread_add_dir_leads_the_state_dirs() {
+    let mut params = serde_json::json!({"add_dir": "/tmp/x"});
+    attach_codex_thread_state_dirs(&mut params);
+    assert_eq!(
+        params["state_dirs"][0], "/tmp/x",
+        "the operator's add-dir leads the state-root grant"
+    );
+
+    // No add-dir and no published set: today's request, no key at all.
+    let mut bare = serde_json::json!({});
+    attach_codex_thread_state_dirs(&mut bare);
+    assert!(bare.get("state_dirs").is_none(), "{bare}");
+}

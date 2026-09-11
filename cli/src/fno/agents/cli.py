@@ -2474,6 +2474,7 @@ def cmd_spawn(
                 agent=agent,
                 tools=tools,
                 deny_tools=deny_tools,
+                passthrough=list(passthrough) if passthrough else None,
                 headless=substrate == "headless",
                 output_format=output_format,
                 resume_session_id=resume,

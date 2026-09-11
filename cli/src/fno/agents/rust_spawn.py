@@ -111,6 +111,10 @@ def _codex_thread_spawn(
     model: Optional[str],
     yolo: bool,
     node: Optional[str] = None,
+    effort: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    passthrough: Optional[list[str]] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
 ) -> str:
@@ -158,6 +162,18 @@ def _codex_thread_spawn(
         argv += [f"--model={model}"]
     if yolo:
         argv += ["--yolo"]
+    if effort:
+        argv += [f"--effort={effort}"]
+    if add_dir:
+        argv += [f"--add-dir={add_dir}"]
+    if permission_mode:
+        argv += [f"--permission-mode={permission_mode}"]
+    # Fenced tokens a thread lane maps ride as first-class flags. The equals
+    # form is load-bearing: a value token that itself starts with `-` would
+    # die as an unknown flag in the space form (the trap at the top of this
+    # module).
+    for token in passthrough or ():
+        argv += [f"--harness-arg={token}"]
     if node:
         argv += ["--node", node]
     argv += ["--", message]

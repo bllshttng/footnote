@@ -12,6 +12,17 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from fno.paths_testing import use_tmpdir
+
+
+def _setup_tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    for k in ("FNO_AGENT_SELF", "FNO_AGENT_HARNESS", "FNO_AGENT_SESSION"):
+        monkeypatch.delenv(k, raising=False)
+
 
 def _run(monkeypatch: pytest.MonkeyPatch, argv: list[str]):
     import fno.agents.cli as agents_cli
@@ -207,6 +218,134 @@ def test_dash_c_config_value_stops_before_launch(monkeypatch: pytest.MonkeyPatch
     assert "--cwd" in res.output, res.output
     assert "-- -c key=value" in res.output, res.output
     assert "no worker launched" in res.output, res.output
+
+
+# ---------------------------------------------------------------------------
+# The codex thread lane forwards what it carries (AC1)
+# ---------------------------------------------------------------------------
+
+
+def _capture_codex_thread_spawn(monkeypatch: pytest.MonkeyPatch) -> dict:
+    import fno.agents.dispatch as dispatch
+
+    sent: dict = {}
+
+    def fake_codex_thread_spawn(**kwargs):
+        sent.update(kwargs)
+        return "01a0aaaa-bbbb-cccc-dddd-eeeeffff0000"
+
+    monkeypatch.setattr(dispatch, "_codex_thread_spawn", fake_codex_thread_spawn)
+    return sent
+
+
+def test_operator_template_carries_effort_to_the_codex_thread_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The operator's template: effort, yolo and a model on a spawn with no
+    # substrate. It resolves thread and DELEGATES with the flags intact; the
+    # old refusal ("--effort is not supported on the codex thread lane") is
+    # retired.
+    _setup_tmp_home(tmp_path, monkeypatch)
+    sent = _capture_codex_thread_spawn(monkeypatch)
+    res = _run(
+        monkeypatch,
+        [
+            "spawn", "do the work", "--name", "w1",
+            "--harness", "codex", "--model", "gpt-5.6-sol",
+            "--effort", "high", "--yolo",
+        ],
+    )
+    assert sent.get("effort") == "high", res.output
+    assert sent.get("model") == "gpt-5.6-sol", res.output
+    assert sent.get("yolo") is True, res.output
+    assert "is not supported on the codex thread lane" not in res.output, res.output
+    assert res.exit_code == 0, res.output
+
+
+def test_explicit_thread_effort_carries_the_same_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    sent = _capture_codex_thread_spawn(monkeypatch)
+    res = _run(
+        monkeypatch,
+        [
+            "spawn", "do the work", "--name", "w1", "--harness", "codex",
+            "--substrate", "thread", "--effort", "high",
+        ],
+    )
+    assert sent.get("effort") == "high", res.output
+    assert res.exit_code == 0, res.output
+
+
+def test_gemini_effort_keeps_its_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gemini has no reasoning-effort surface on any lane: that refusal is a
+    # property of the harness, not of the substrate, and it stays.
+    res = _run(monkeypatch, ["spawn", "work", "--harness", "gemini", "--effort", "high"])
+    assert res.exit_code == 2, res.output
+    assert "reasoning-effort" in res.output, res.output
+
+
+# ---------------------------------------------------------------------------
+# The claude bg lane appends fenced tokens to its argv (AC5)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_bg_argv_carries_fenced_tokens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import fno.agents.harnesses.claude as claude_mod
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    captured: dict = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "deadbeef\n"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return _FakeResult()
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    res = _run(
+        monkeypatch,
+        [
+            "spawn", "work", "--name", "w2", "--harness", "claude",
+            "--substrate", "thread", "--", "--verbose",
+        ],
+    )
+    argv = captured.get("argv") or []
+    assert "--verbose" in argv, res.output
+    assert "no carrier" not in res.output, res.output
+
+
+def test_claude_bg_refuses_a_duplicate_fenced_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A token naming a flag fno itself emits is two sources for one value:
+    # the pane lane's named refusal, on the bg lane too.
+    import fno.agents.harnesses.claude as claude_mod
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        raise AssertionError("no launch expected")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    res = _run(
+        monkeypatch,
+        [
+            "spawn", "work", "--name", "w3", "--harness", "claude",
+            "--substrate", "thread", "--add-dir", "/tmp/d", "--", "--add-dir", "/tmp/e",
+        ],
+    )
+    assert res.exit_code == 2, res.output
+    assert "both sides" in res.output, res.output
+    assert not captured, "no launch expected"
 
 
 def test_dash_c_existing_directory_works_as_before(

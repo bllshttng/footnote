@@ -527,6 +527,7 @@ def bg_create(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     account_env: Optional[Mapping[str, str]] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> ProviderResult:
@@ -626,6 +627,10 @@ def bg_create(
         settings_path=settings_path,
         cwd=cwd,
     )
+    if passthrough:
+        from fno.agents.mux_spawn import pane_passthrough_tokens
+
+        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
     # from inside the spawned agent attribute back to this parent.
