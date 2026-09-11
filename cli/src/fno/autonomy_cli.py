@@ -392,34 +392,32 @@ def audit_dispatch_provenance() -> None:
     from fno.agents.naming import dispatch_sources, dispatch_verbs
 
     rows = dispatch_provenance()
-    sources_set, verbs_set = dispatch_sources(), dispatch_verbs()
+    sources = {row[1] for row in rows}
     problems: list[str] = []
     if len(rows) != 18:
         problems.append(f"expected 18 coded paths, found {len(rows)}")
     for site, source, verb in rows:
-        if source not in sources_set:
+        if source not in dispatch_sources():
             problems.append(f"{site}: unknown source {source!r}")
-        if verb not in verbs_set and verb != "resolved":
+        if verb not in dispatch_verbs() and verb != "resolved":
             problems.append(f"{site}: unknown verb {verb!r}")
     sites = [row[0] for row in rows]
     if len(set(sites)) != len(sites):
         problems.append("duplicate site labels in the inventory")
-    sources = {row[1] for row in rows}
     if {"sob", "ac"} - sources:
         problems.append("sob and ac must be distinct inventory rows")
     if sum(1 for row in rows if row[1] == "ab") != 2:
         problems.append("both active-backlog rows must carry ab")
     for site, source, verb in rows:
         typer.echo(f"{site}\t{source}\t{verb}")
+    for problem in problems:
+        typer.echo(f"error: {problem}", err=True)
     if problems:
-        for problem in problems:
-            typer.echo(f"error: {problem}", err=True)
         sys.exit(1)
     typer.echo("dispatch provenance: 18/18 coded")
 
 
 @autonomy_app.command("provenance", hidden=True)
 def provenance_command() -> None:
-    """Print every dispatch path with its source and verb codes, then the
-    completeness marker. Exit 1 when the inventory is incomplete."""
+    """Print every dispatch path with its codes, then the completeness marker."""
     audit_dispatch_provenance()
