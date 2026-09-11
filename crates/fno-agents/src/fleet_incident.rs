@@ -278,6 +278,23 @@ fn print_usage() {
     );
 }
 
+/// Strict flag parse for the read-only arms (status/check): only --json is
+/// accepted, so a mistyped flag refuses with usage instead of silently
+/// flipping the output format a caller is parsing.
+fn parse_read_flags(rest: &[String]) -> Result<bool, i32> {
+    let mut as_json = false;
+    for a in rest {
+        match a.as_str() {
+            "--json" => as_json = true,
+            other => {
+                eprintln!("fleet-incident: unrecognized argument {other:?}");
+                return Err(2);
+            }
+        }
+    }
+    Ok(as_json)
+}
+
 /// Binary entry: `fleet-incident stop|clear|status|check`.
 pub fn run_fleet_incident(args: &[String]) -> i32 {
     let Some(action) = args.first() else {
@@ -336,7 +353,10 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             }
         }
         "status" => {
-            let as_json = rest.iter().any(|a| a == "--json");
+            let as_json = match parse_read_flags(rest) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
             let path = fleet_stop_path(&crate::paths::AgentsHome::from_env());
             match read_at(&path) {
                 Verdict::Clear(record) | Verdict::Stopped(record) => {
@@ -381,7 +401,10 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
             // Python spawn gate). Exit 0 clear, 90 stopped, 91 unavailable -
             // and the JSON names which, so an exit code read alone can never
             // confuse "stopped" with "cannot tell".
-            let as_json = rest.iter().any(|a| a == "--json");
+            let as_json = match parse_read_flags(rest) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
             let v = verdict();
             if as_json {
                 let (state, generation, reason) = match &v {

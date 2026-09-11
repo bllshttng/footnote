@@ -4675,13 +4675,12 @@ def incident(ctx: typer.Context) -> None:
 
     stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
     Relays the native `fno-agents fleet-incident` verb and decides nothing:
-    the file is the authority. Mail is never gated.
+    the file is the authority.
     """
     import subprocess
 
     from fno.rust_binary import find_dev_binary, resolve_binary
 
-    # Dev build outranks a stale installed copy (mirrors verb_call).
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.secho(
@@ -4689,4 +4688,5 @@ def incident(ctx: typer.Context) -> None:
             err=True,
         )
         raise typer.Exit(code=1)
-    raise typer.Exit(code=subprocess.run([str(binary), "fleet-incident", *ctx.args]).returncode)
+    proc = subprocess.run([str(binary), "fleet-incident", *ctx.args])
+    raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
