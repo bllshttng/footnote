@@ -436,8 +436,8 @@ def running_components(
         from fno import rust_binary
 
         binary = rust_binary.resolve_installed_binary()
-    except Exception:  # noqa: BLE001 - the failure IS the empty result
-        return []
+    except Exception:  # noqa: BLE001
+        binary = None
     if binary is None:
         return []
     try:
@@ -637,9 +637,7 @@ def _build_update_guidance(
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
-    # "Up to date" used to report no action while stale processes ran
-    # (x-f1f4); when any are stale the line names what restart cycles and
-    # what it keeps instead.
+    # "Up to date" used to report no action while stale processes ran (x-f1f4).
     if not update_ready and (revs_known or not degraded_reason):
         if running_stale > 0:
             return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
