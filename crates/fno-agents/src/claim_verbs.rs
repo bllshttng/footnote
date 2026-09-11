@@ -402,7 +402,7 @@ fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
 /// The dispatcher-minted handover holder (mirrors `HANDOVER_HOLDER_PREFIX` in
 /// `fno.claims.cli`): the suffix is the launched WORKER's name, and the
 /// record's own `session_id` is the dispatcher's, not the worker's.
-const HANDOVER_HOLDER_PREFIX: &str = "spawn-handover:";
+pub(crate) const HANDOVER_HOLDER_PREFIX: &str = "spawn-handover:";
 
 /// The production session witness (x-a613). Resolution order for the record's
 /// resolved subject session (the worker a handover holder names, else the

@@ -36,6 +36,18 @@ pub(crate) fn decode_key(filename: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The requeue pseudo-holder (mirrors `TARGET_SESSION_HOLDER_PREFIX` in
+/// `fno.claims.core`): the invoking session that will take the node, not an
+/// agent. Both role prefixes mark workflow state, never a worker.
+const TARGET_SESSION_HOLDER_PREFIX: &str = "target-session:";
+
+/// A role-prefixed holder is workflow state (a launch window, a requeue
+/// reservation), not a worker driving the node.
+fn is_role_holder(holder: &str) -> bool {
+    holder.starts_with(crate::claim_verbs::HANDOVER_HOLDER_PREFIX)
+        || holder.starts_with(TARGET_SESSION_HOLDER_PREFIX)
+}
+
 /// One root's live + dead claim rows (core._list_claims_impl with
 /// include_stale=true): every `.lock` file, classified, dead states kept.
 pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
@@ -64,6 +76,16 @@ pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
             Ok(rec) => {
                 let state = crate::claims::classify(&rec, None);
                 let state = state.as_str();
+                // A role-prefixed row is the dispatcher's launch window or a
+                // requeue reservation, not a worker: live/suspect is its
+                // whole life by construction (the spawn pid is gone the
+                // moment the fork lands), so reading it as a stalled holder
+                // makes every king spawn flag itself within two minutes. An
+                // EXPIRED role holder stays in scope: a window that lapsed
+                // without a worker taking over IS a stall.
+                if matches!(state, "live" | "suspect") && is_role_holder(&rec.holder) {
+                    continue;
+                }
                 // The board consumes live/suspect (stalled_holder's locks,
                 // undriven_pr's driver read) and stale/corrupted (its own
                 // queue); `free` never has a file to scan.
@@ -132,6 +154,7 @@ pub(crate) fn read_claims(cwd: &Path) -> SourceRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn claim_keys_decode_from_filenames() {
         assert_eq!(
@@ -139,5 +162,49 @@ mod tests {
             "node:x-25b8"
         );
         assert_eq!(decode_key("node%3Ax%20sp"), "node:x sp");
+    }
+
+    fn handover_row(holder: &str, expires_in_ms: i64, key: &str) -> (String, String) {
+        let now = crate::claims::now_ms();
+        let expires_at = now + expires_in_ms;
+        // Handwritten YAML on purpose: the lock file is the artifact the
+        // scanner reads, so the fixture is the artifact the writer would
+        // have produced, not a private constructor.
+        let yaml = format!(
+            "schema_version: 1\nkey: \"{decoded}\"\nholder: \"{holder}\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {expires_at}\nreason: \"spawn handover window for {decoded}\"\n",
+            decoded = key.replace("%3A", ":"),
+        );
+        (format!("{key}.lock"), yaml)
+    }
+
+    #[test]
+    fn a_live_handover_row_never_reads_as_a_stalled_holder() {
+        let dir = std::env::temp_dir().join(format!("kb-claims-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-90fa");
+        std::fs::write(dir.join(name), yaml).expect("write handover claim");
+        let (tname, tyaml) =
+            handover_row("target-session:a6d2ce6a-1da0", 900_000, "node%3Ax-requeue");
+        std::fs::write(dir.join(tname), tyaml).expect("write requeue claim");
+        let rows = scan_claims_dir(&dir);
+        assert!(
+            rows.is_empty(),
+            "role-prefixed row leaked into the board: {rows:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_expired_handover_row_stays_in_scope() {
+        let dir = std::env::temp_dir().join(format!("kb-claims-exp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", -1, "node%3Ax-90fa");
+        std::fs::write(dir.join(name), yaml).expect("write expired handover claim");
+        let rows = scan_claims_dir(&dir);
+        assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
+        assert_eq!(rows[0]["state"], "stale");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
