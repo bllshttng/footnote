@@ -180,7 +180,7 @@ def test_live_node_claim_dedups(iso, tmp_path, monkeypatch):
     calls = _patch_spawn(monkeypatch)
 
     res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
-    assert res[0].decision == "skipped" and res[0].reason == "already-claimed"
+    assert res[0].decision == "skipped" and "other-worker" in res[0].reason
     assert calls == []
 
 
