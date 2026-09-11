@@ -241,23 +241,6 @@ def _wt_unpushed_count(path: str) -> tuple[int, bool]:
 # --- fleet input ---------------------------------------------------------
 
 
-def _load_registry() -> tuple[dict[str, str], bool]:
-    """cwd -> status, plus an ok flag.
-
-    Delegates to the packaged worktree-status module rather than a second copy
-    of the same best-row selection. That function returns cwd -> (name,
-    status); this drops the name, which only the display CLI needs.
-
-    The ok flag matters here in a way it does not for a display tool: a
-    missing registry is a legitimate empty fleet (nothing has ever
-    registered) and is ok, but a registry that exists and fails to parse is
-    a genuine read failure - reading it as empty would silently read every
-    live worker as absent, which is exactly the false STRANDED constraint 4
-    forbids."""
-    by_cwd, ok = _load_status_registry()
-    return {cwd: status for cwd, (_name, status) in by_cwd.items()}, ok
-
-
 # --- the sweep driver ------------------------------------------------------
 
 
@@ -273,7 +256,9 @@ def sweep(repo: Path) -> list[Row]:
     worktrees = _worktrees(repo)
 
     unpushed_by_path = _unpushed_batch(worktrees)
-    registry, registry_ok = _load_registry()
+    # cwd -> status, dropping the name: only the display CLI needs it.
+    by_cwd, registry_ok = _load_status_registry()
+    registry = {cwd: status for cwd, (_name, status) in by_cwd.items()}
 
     try:
         entries = read_graph_strict()

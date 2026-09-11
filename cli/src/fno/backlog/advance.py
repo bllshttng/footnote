@@ -5,38 +5,10 @@ backlog verb behind the shared external-backend refusal, so its direct graph
 reads are census-classified as guarded machinery
 (scripts/diagnostics/tracker-consumers.py --reads).
 
-Node ab-3cd195b6. When a backlog node's PR merges, a merge-detector
-(``fno backlog reconcile`` or the /pr merged skill) calls this verb after the
-node-close write commits. If auto-continue is armed for the project and no live
-walk owns it, advance dispatches a fresh background ``/target`` worker (with the
-merge posture from ``config.auto_merge.grant``, default ``none``) for the
-next now-unblocked node, so a merge-gated epic walks itself group-by-
-group across merges with no manual re-invocation.
-
-Locked Decisions this module embodies:
-  1. Decoupled from the loop driver - driven by the merge event, so megawalk /
-     /target / /megatron all inherit auto-continue (no driver-specific code).
-  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [--no-merge] <id>``
-     (the ``--no-merge`` flag is gated on ``config.auto_merge.grant``; x-4391/x-4be1).
-  5. Concurrency via ``fno agents claim``: honor ``walker:<root>`` (no double-dispatch
-     during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
-     that outlives this short-lived process until the worker owns ``node:<id>``,
-     LD#11 / AC1-CLAIM - mirrors handoff.sh + dispatch-node.sh).
-  6. advance never merges the PR itself - it dispatches a worker whose merge
-     posture comes from ``config.auto_merge.grant`` (default ``none``);
-     an actual merge, when enabled, is still gated by the worker's own
-     ``config.auto_merge.*`` review layer (x-4391, revisits epic LD#4).
-  7. Non-fatal: a failed spawn never wedges the host op (reconcile/post-merge).
- 12. Every code path emits EXACTLY ONE decision event before returning
-     (advance_dispatched | advance_skipped{reason} | advance_failed), so a
-     silent stall is impossible.
-
-The ``dispatch:<id>`` reservation uses a TTL claim (not PID-liveness) precisely
-so it survives advance's exit (AC1-CLAIM): the just-dispatched node stays
-"claimed" for the boot window, so a concurrent reconcile/post-merge sees it as
-already-being-worked. The spawned worker acquires ``node:<id>`` cleanly on its
-own ``fno do target init`` (free at that point); the reservation then expires by
-TTL once the worker owns the node.
+Merge-triggered auto-continue: after a node's PR merges, this verb dispatches
+a background ``/target`` worker on the next unblocked node. The flow, the
+locked decisions, and the ``dispatch:<id>`` reservation contract live in
+docs/architecture/advance-auto-continue.md.
 """
 
 from __future__ import annotations
@@ -2543,7 +2515,9 @@ def _transcript_recently_active(session_id: str) -> bool:
     The transcript is the last truth that outlives a dead daemon (liveness
     probes and stored status fields have both lied). "Moved" is the newest
     TIMESTAMPED entry, not the mtime that untimestamped trailing records keep
-    young (x-54cf). No timestamped entry falls back to the mtime; no
+    young (x-54cf). No timestamped entry is NO evidence, so that transcript
+    answers nothing and is skipped - the mtime fallback read a file touched
+    2h33m after its newest record as live (x-dead, measured 2026-09-11). No
     transcript at all is activity-nothing; an unreadable glob is
     activity-UNKNOWN and reads False, so the caller treats it as dead only
     when the harness store also went quiet - the transcript is the second
@@ -2558,7 +2532,7 @@ def _transcript_recently_active(session_id: str) -> bool:
         for transcript in projects.glob(f"*/{session_id}.jsonl"):
             epoch = newest_entry_epoch(transcript)
             if epoch is None:
-                epoch = transcript.stat().st_mtime
+                continue  # an undatable transcript is not a fresh one
             if time.time() - epoch <= _JOINER_IDLE_WINDOW:
                 return True
     except OSError:
@@ -3119,6 +3093,16 @@ def _observe_node_claim(
         occupied = True
         worker = ", ".join(workers)
     block_reason = "worked-authority-unavailable" if worked_error else None
+    if occupied and block_reason is None:
+        # x-dead task 2.2: `blocked`/`already-claimed` starved auto_continue
+        # for 97 minutes; name what was consulted and what it found.
+        parts = [
+            p for p in (
+                f"claim {claim_state} held by {holder}" if claim_state in ("live", "suspect") else "",
+                f"worked overlay: {worker}" if worker else "",
+            ) if p
+        ]
+        block_reason = "held: " + "; ".join(parts) if parts else None
     dead_action = (
         None
         if occupied or not enforce_failure_limit

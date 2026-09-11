@@ -252,7 +252,8 @@ def test_node_already_claimed(iso, monkeypatch):
 
     res = adv.advance(project="fno", events_path=iso)
 
-    assert res.decision == "skipped" and res.reason == "already-claimed"
+    assert res.decision == "skipped"
+    assert res.reason == "held: claim live held by test-holder"
 
 
 def test_dispatch_reservation_held(iso, monkeypatch):
@@ -294,7 +295,7 @@ def test_live_worked_node_refuses_and_names_worker(monkeypatch):
     observation = adv._observe_node_claim(NODE["id"])
 
     assert observation.blocks_dispatch is True
-    assert observation.refusal_reason == "already-claimed"
+    assert observation.refusal_reason == "held: worked overlay: bp-worker"
     assert observation.worker == "bp-worker"
     assert emitted[0][1]["worker"] == "bp-worker"
 
@@ -456,19 +457,20 @@ def test_node_claim_predispatch_is_family2_loud(
 
     assert adv._claim_is_live("node:x-a35a") is occupied
 
-    assert emitted == [
-        (
-            "dispatch_claim_observed",
-            {
-                "node_id": "x-a35a",
-                "claim_verdict": claim_verdict,
-                "claim_state": claim_state,
-                "holder": "target-session:prior",
-                "truth_status": truth_state,
-                "action": action,
-            },
+    expected_event = {
+        "node_id": "x-a35a",
+        "claim_verdict": claim_verdict,
+        "claim_state": claim_state,
+        "holder": "target-session:prior",
+        "truth_status": truth_state,
+        "action": action,
+    }
+    if occupied:
+        # x-dead task 2.2: the occupied refusal names what was consulted.
+        expected_event["block_reason"] = (
+            f"held: claim {claim_state} held by target-session:prior"
         )
-    ]
+    assert emitted == [("dispatch_claim_observed", expected_event)]
     assert notices and "target-session:prior" in notices[0][1]
     warning = capsys.readouterr().err
     assert claim_state in warning
@@ -2026,7 +2028,44 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
     )
-    assert results[0].decision == "skipped" and results[0].reason == "already-claimed"
+    assert results[0].decision == "skipped"
+    assert results[0].reason == "held: claim live held by test-holder"
+
+
+def test_xdead_undatable_transcript_is_not_fresh_activity(monkeypatch, tmp_path):
+    """Task 1.5, the 2h33m specimen: a transcript whose newest record is old
+    but whose mtime is fresh is NOT recently-active. The fallback that read
+    the mtime is deleted; no timestamped entry is no evidence."""
+    import os
+    import time
+
+    from pathlib import Path
+
+    projects = tmp_path / ".claude" / "projects" / "proj-abc"
+    projects.mkdir(parents=True)
+    sid = "0123abcd-0000-0000-0000-000000000000"
+    transcript = projects / f"{sid}.jsonl"
+    old = time.time() - 2 * 3600
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+    )
+    os.utime(transcript, (old, old))
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    # Positive control: the probe finds the file and reads it (it is the
+    # RECORD age, not the glob, that decides).
+    assert adv._transcript_recently_active(sid) is False
+
+    fresh = time.time()
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fresh - 120))
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+        + json.dumps({"timestamp": fresh_stamp, "message": {}}) + "\n"
+    )
+    os.utime(transcript, (fresh - 60, fresh - 60))
+    # A record INSIDE the idle window is the one thing that flips the answer.
+    assert adv._transcript_recently_active(sid) is True
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])

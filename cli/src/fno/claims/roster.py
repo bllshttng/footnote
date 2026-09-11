@@ -72,6 +72,9 @@ def read_roster(
             "state": r.state,
             "cwd": r.cwd,
             "row_id": str(r.row_id or ""),
+            "pid": getattr(r, "pid", None),
+            "pid_start_time": getattr(r, "pid_start_time", None),
+            "mux": getattr(r, "mux", None),
         }
         if r.node:
             index.setdefault(r.node, []).append(entry)
@@ -88,26 +91,76 @@ def _finished_row_states() -> frozenset:
     return _TERMINAL_STATES - _WAKE_STATES
 
 
-def _transcript_activity(session_id: str, cwd: str):
+def classify_workers(workers: list) -> tuple[list, list, dict]:
+    """(engaged, unmeasurable, verdicts-by-name) for one roster read."""
+    from fno.agents.reachability import REACHABLE, UNKNOWN
+
+    verdicts = {w.get("name") or "": _worker_reachability(w).verdict for w in workers}
+    return (
+        [w for w in workers if verdicts.get(w.get("name") or "") == REACHABLE],
+        [w for w in workers if verdicts.get(w.get("name") or "") == UNKNOWN],
+        verdicts,
+    )
+
+
+def _worker_reachability(worker: dict):
+    """One roster row through the ONE shared predicate (x-dead task 1.1).
+
+    REACHABLE engaged, UNREACHABLE finished, UNKNOWN its own arm - never
+    engaged-by-default. The transcript outranks the supervisor word for EVERY
+    row (a finished worker's row never leaves `working`); a terminal word
+    with no transcript stays positive evidence of the end.
+    """
+    from fno.agents.reachability import (
+        TRANSCRIPT_EVIDENCE_S,
+        classify_reachability,
+        pane_falsifier,
+        pid_falsifier,
+    )
+
+    state = worker.get("state")
     try:
         import time
 
-        from fno.agents.watchdog import (
-            QUIET_AFTER_S,
-            finished_with_the_tree,
-            harness_for_session,
-            tail_facts,
+        from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
+
+        facts = tail_facts(
+            worker.get("row_id") or "", worker.get("cwd") or "",
+            agent=harness_for_session(worker.get("row_id") or ""),
         )
-
-        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
-        if facts is None:
-            return None
-        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
-        return None
-
-
-def _really_finished(worker: dict) -> bool:
-    if worker.get("state") not in _finished_row_states():
-        return False
-    return _transcript_activity(worker.get("row_id") or "", worker.get("cwd") or "") is not False
+        facts = None
+    # The pid falsifier fires only on an INCARNATION-PROVEN pid (a recorded
+    # start token, the same bound the claims layer's hybrid arm uses): a bare
+    # stale pid on a live worker must never read as death. A FRESH tail is a
+    # resumed session's witness (x-a613) over even a proven corpse.
+    pid = worker.get("pid")
+    proven = pid is not None and worker.get("pid_start_time") is not None
+    falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None
+    if falsifier is None:
+        falsifier = pane_falsifier(worker.get("mux"))
+    if facts is None:
+        # No transcript: the supervisor word is the only evidence. An active
+        # word stays reachable; a terminal word positively ended the row.
+        if falsifier is not None:
+            return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
+        if state in ("working", "watching", "your-move"):
+            return classify_reachability(truth_state=state, age_s=None, falsifier=None)
+        finished = f"finished-state:{state}" if state in _finished_row_states() else None
+        return classify_reachability(truth_state=None, age_s=None, falsifier=finished)
+    if facts.last_event_epoch is None:
+        # A transcript PRESENT but undatable: the measured wrong answer read
+        # this as engaged. It is UNKNOWN - a verdict about the instrument -
+        # never engaged-by-default and never positively finished.
+        return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
+    age = int(max(0.0, time.time() - facts.last_event_epoch))
+    if falsifier is not None and age <= TRANSCRIPT_EVIDENCE_S:
+        falsifier = None
+    if falsifier is None and age > TRANSCRIPT_EVIDENCE_S and state in _finished_row_states():
+        # A terminal word with a silent tail is positive evidence of the end.
+        falsifier = f"finished-state:{state}"
+    return classify_reachability(
+        truth_state=classify_tail(facts.last_role, facts.last_text, age),
+        age_s=age,
+        falsifier=falsifier,
+    )

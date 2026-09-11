@@ -109,18 +109,43 @@ pub(crate) fn read_claimed_nodes(
     (SourceRead::ok(Value::Array(nodes)), holders, warnings)
 }
 
-/// Positive evidence the holder is doing something (board._holder_is_active):
-/// an absent reading is not a staffed lane.
-pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -> bool {
+/// The holder verdict, read off the probe the Python predicate already
+/// classified (x-dead task 1.3). `holder_is_active` re-derived liveness from
+/// `probe.state` + `probe.last_activity_age_s` and collapsed every UNKNOWN
+/// into not-active - the exact fold this node measured rendering a dead
+/// process live (state word `working`, process gone) and an unmeasurable
+/// holder dead (stale claim, undatable transcript). `TruthProbe` carries the
+/// shared verdict (`reachability` + `basis`); read it. Tri-state: Unmeasured
+/// is its own answer and never collapses into either pole.
+pub(crate) enum HolderReading {
+    Active,
+    Unmeasured,
+    Inactive,
+}
+
+pub(crate) fn holder_reading(probe: Option<&crate::truth_probe::TruthProbe>) -> HolderReading {
     let Some(probe) = probe else {
-        return false;
+        // A holder the probe never answered for is a hole in the evidence,
+        // not a verdict (x-db9c).
+        return HolderReading::Unmeasured;
     };
+    if let Some(reachability) = probe.reachability.as_deref() {
+        return match reachability {
+            "reachable" => HolderReading::Active,
+            "unreachable" => HolderReading::Inactive,
+            _ => HolderReading::Unmeasured,
+        };
+    }
+    // A truth build predating the field: fall back to the state+age mapping,
+    // which cannot see a dead process. Kept for a mixed-version fleet, not
+    // for new code: the probe field, not this arm, is the mechanism.
     if !ACTIVE_STATES.contains(&probe.state.as_str()) {
-        return false;
+        return HolderReading::Inactive;
     }
     match probe.last_activity_age_s {
-        None => false,
-        Some(age) => age <= STALLED_AFTER_S,
+        None => HolderReading::Unmeasured,
+        Some(age) if age <= STALLED_AFTER_S => HolderReading::Active,
+        Some(_) => HolderReading::Inactive,
     }
 }
 
@@ -166,9 +191,12 @@ pub(crate) fn holder_token(claim: &Value) -> String {
 /// under a worker that runs for hours, and the holder probe is the honest
 /// reading. Every board site that asks "is this lock dead?" asks here.
 ///
-/// A holder the probe never answered for reads NOT dead: absence of a
-/// measurement is not a measurement of absence, and requeueing on the missing
-/// entry is how a live worker loses its lock to a second dispatch.
+/// A holder the probe never answered for - or one the shared predicate could
+/// not classify - reads NOT dead: absence of a measurement is not a
+/// measurement of absence, and requeueing on the missing entry is how a live
+/// worker loses its lock to a second dispatch. The claims layer's own
+/// bounded grace (UNRESOLVED_GRACE_MS) is what eventually frees an
+/// unmeasurable holder, not this board's clock.
 pub(crate) fn claim_is_dead(
     claim: &Value,
     activity: &HashMap<String, crate::truth_probe::TruthProbe>,
@@ -179,7 +207,7 @@ pub(crate) fn claim_is_dead(
     let Some(probe) = activity.get(&holder_token(claim)) else {
         return false;
     };
-    !holder_is_active(Some(probe))
+    matches!(holder_reading(Some(probe)), HolderReading::Inactive)
 }
 
 /// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
@@ -208,6 +236,13 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
 /// that shape, and a PR needs a driver of its own. In-scope leaves stay
 /// claim-driven: a dead worker under a crown is still a dead handoff.
 ///
+/// A CONTAINED node never reads none (x-dead task 1.4b): `contained_in` set
+/// means an owner exists by definition and the node never dispatches alone,
+/// so `none` - the word that fills unheld_progress, undriven_pr and
+/// unreachable_worker - is not an available verdict for it. One check here
+/// drops the node from all three queues at once; per-queue guards would be
+/// three chances to drift.
+///
 /// The stalled arm asks for PROGRESS, never for a lease. A holder is stalled
 /// exactly when its probe carries no positive transcript evidence; lease
 /// presence or absence decides nothing. A fresh `spawn-handover` lease is not
@@ -217,27 +252,58 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
 /// `*_asks_for_progress_*` tests below; x-caf7 is the failure the obvious
 /// lease-keyed fix would have silenced.
 ///
-/// The UNMEASURED arm is the probe's own absence, which is a different thing
-/// from a probe that answered and found nothing: a holder the batch never
-/// measured is neither active nor stalled nor dead, and printing any of those
-/// three words is the timed-out-batch defect x-db9c exists to close. The
-/// board-level answer (the queue reads unreadable when the whole batch fails)
-/// lives in queues.rs; this arm covers the partial answer, where the batch
-/// answered for every holder but this one.
+/// The UNMEASURED arm is a measurement that did not happen: a probe the batch
+/// never answered (x-db9c), a probe the shared predicate could not classify
+/// (x-dead task 1.3), or - for a node with NO claim row - a worked feed that
+/// could not answer whether a driverless-looking node has a roster worker
+/// (x-dead task 1.4: a live worker with no claim row is not an undriven PR,
+/// and PR 1747 was measured wearing exactly that shape). None of these is
+/// `none`; `none` requires the worked feed to have answered and found
+/// nothing.
 pub(crate) fn node_driver<'a>(
     node: &Value,
     claim_by_node: &'a HashMap<String, Value>,
     activity: &'a HashMap<String, crate::truth_probe::TruthProbe>,
     crown_ids: Option<&HashSet<String>>,
+    worked: Option<&crate::king_board::SourceRead>,
 ) -> (&'static str, Option<&'a Value>) {
     let node_id = s_str(node, "id").unwrap_or("");
     let crowned = crown_ids.is_some_and(|ids| ids.contains(node_id))
         && s_str(node, "type") == Some("epic")
         && !node_has_pr(node);
+    // Before the claim lookup: a contained node with a stale claim edge is
+    // still owned by its container, never queue-fodder.
+    let contained = s_str(node, "contained_in").is_some_and(|c| !c.is_empty());
+    if contained && crowned {
+        return ("crowned", None);
+    }
+    if contained {
+        return ("active", None);
+    }
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
         if crowned {
             return ("crowned", None);
+        }
+        // No claim row: consult the worked feed before saying none. The feed
+        // answering "no worker" is the only path to a positive none; an
+        // unreadable feed is unmeasured, never none.
+        let Some(read) = worked else {
+            return ("unmeasured", None);
+        };
+        if !read.is_ok() {
+            return ("unmeasured", None);
+        }
+        let driven = read
+            .payload
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.get("id").and_then(Value::as_str) == Some(node_id))
+            });
+        if driven {
+            return ("active", None);
         }
         return ("none", None);
     };
@@ -252,10 +318,11 @@ pub(crate) fn node_driver<'a>(
         }
         return ("none", Some(claim));
     }
-    if holder_is_active(Some(probe)) {
-        return ("active", Some(claim));
+    match holder_reading(Some(probe)) {
+        HolderReading::Active => ("active", Some(claim)),
+        HolderReading::Unmeasured => ("unmeasured", Some(claim)),
+        HolderReading::Inactive => ("stalled", Some(claim)),
     }
-    ("stalled", Some(claim))
 }
 
 #[cfg(test)]
@@ -263,30 +330,54 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn ok_worked(ids: &[&str]) -> crate::king_board::SourceRead {
+        crate::king_board::SourceRead::ok(json!(ids
+            .iter()
+            .map(|id| json!({"id": id}))
+            .collect::<Vec<Value>>()))
+    }
+
     #[test]
-    fn holder_activity_reads_only_positive_evidence() {
-        let active = crate::truth_probe::TruthProbe {
+    fn holder_reading_maps_the_shared_verdict() {
+        // x-dead task 1.3: the board reads the Python predicate's verdict off
+        // the wire instead of re-deriving liveness from state+age. Each pole
+        // asserts its literal state word: a positive marker.
+        let mut probed = crate::truth_probe::TruthProbe {
             state: "working".to_string(),
             harness_title: None,
-            reachability: None,
-            basis: None,
+            reachability: Some("reachable".to_string()),
+            basis: Some("transcript".to_string()),
             last_activity_age_s: Some(30.0),
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
         };
-        assert!(holder_is_active(Some(&active)));
-        let old = crate::truth_probe::TruthProbe {
-            last_activity_age_s: Some(STALLED_AFTER_S + 1.0),
-            ..active.clone()
+        assert!(matches!(
+            holder_reading(Some(&probed)),
+            HolderReading::Active
+        ));
+        probed.reachability = Some("unknown".to_string());
+        assert!(matches!(
+            holder_reading(Some(&probed)),
+            HolderReading::Unmeasured
+        ));
+        probed.reachability = Some("unreachable".to_string());
+        assert!(matches!(
+            holder_reading(Some(&probed)),
+            HolderReading::Inactive
+        ));
+        // A probe the batch never answered for is unmeasured, not dead.
+        assert!(matches!(holder_reading(None), HolderReading::Unmeasured));
+        // A truth build predating the field keeps the legacy mapping.
+        let legacy = crate::truth_probe::TruthProbe {
+            state: "working".to_string(),
+            reachability: None,
+            ..probed
         };
-        assert!(!holder_is_active(Some(&old)));
-        let parked = crate::truth_probe::TruthProbe {
-            state: "your-move".to_string(),
-            ..active
-        };
-        assert!(holder_is_active(Some(&parked)));
-        assert!(!holder_is_active(None));
+        assert!(matches!(
+            holder_reading(Some(&legacy)),
+            HolderReading::Active
+        ));
     }
 
     #[test]
@@ -300,7 +391,7 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            node_driver(&epic, &claims, &activity, Some(&crown)).0,
+            node_driver(&epic, &claims, &activity, Some(&crown), None).0,
             "crowned"
         );
         // an epic bound to its own PR keeps reading none: undriven_pr owns
@@ -308,14 +399,31 @@ mod tests {
         // six graph epics carry a pr_number)
         let epic_pr = json!({"id": "x-epic", "type": "epic", "pr_number": 42});
         assert_eq!(
-            node_driver(&epic_pr, &claims, &activity, Some(&crown)).0,
+            node_driver(
+                &epic_pr,
+                &claims,
+                &activity,
+                Some(&crown),
+                Some(&ok_worked(&[]))
+            )
+            .0,
             "none"
         );
         // without the crown the same epic is an unheld dead handoff
-        assert_eq!(node_driver(&epic, &claims, &activity, None).0, "none");
+        assert_eq!(
+            node_driver(&epic, &claims, &activity, None, Some(&ok_worked(&[]))).0,
+            "none"
+        );
         // an in-scope leaf stays claim-driven
         assert_eq!(
-            node_driver(&leaf, &claims, &activity, Some(&crown)).0,
+            node_driver(
+                &leaf,
+                &claims,
+                &activity,
+                Some(&crown),
+                Some(&ok_worked(&[]))
+            )
+            .0,
             "none"
         );
         // a live claim outranks the crown; the probe ANSWERED for its holder
@@ -329,7 +437,7 @@ mod tests {
         let mut answered = HashMap::new();
         answered.insert("h".to_string(), probe("unknown", 30.0));
         assert_eq!(
-            node_driver(&epic, &held, &answered, Some(&crown)).0,
+            node_driver(&epic, &held, &answered, Some(&crown), None).0,
             "stalled"
         );
     }
@@ -363,7 +471,7 @@ mod tests {
         );
         let mut activity = HashMap::new();
         activity.insert("target-7471-worker".to_string(), probe("working", 30.0));
-        let (state, claim) = node_driver(&node, &claims, &activity, None);
+        let (state, claim) = node_driver(&node, &claims, &activity, None, None);
         assert_eq!(state, "active");
         assert!(claim.is_some());
     }
@@ -385,7 +493,7 @@ mod tests {
             "reaped-worker".to_string(),
             probe("unknown", STALLED_AFTER_S + 1.0),
         );
-        assert_eq!(node_driver(&node, &claims, &activity, None).0, "none");
+        assert_eq!(node_driver(&node, &claims, &activity, None, None).0, "none");
     }
 
     #[test]
@@ -411,7 +519,7 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("x-silent".to_string(), handover_claim("x-silent"));
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
-        let (state, claim) = node_driver(&node, &claims, &activity, None);
+        let (state, claim) = node_driver(&node, &claims, &activity, None, None);
         assert_eq!(state, "unmeasured");
         assert!(claim.is_some());
     }
@@ -502,7 +610,10 @@ mod tests {
         claims.insert("x-adv".to_string(), handover_claim("x-adv"));
         let mut activity = HashMap::new();
         activity.insert("t-x-adv-worker".to_string(), probe("working", 30.0));
-        assert_eq!(node_driver(&node, &claims, &activity, None).0, "active");
+        assert_eq!(
+            node_driver(&node, &claims, &activity, None, None).0,
+            "active"
+        );
     }
 
     #[test]
@@ -517,7 +628,10 @@ mod tests {
         claims.insert("x-quiet".to_string(), handover_claim("x-quiet"));
         let mut activity = HashMap::new();
         activity.insert("t-x-quiet-worker".to_string(), probe("unknown", 30.0));
-        assert_eq!(node_driver(&node, &claims, &activity, None).0, "stalled");
+        assert_eq!(
+            node_driver(&node, &claims, &activity, None, None).0,
+            "stalled"
+        );
     }
 
     #[test]
@@ -535,6 +649,63 @@ mod tests {
             "t-x-wedge-worker".to_string(),
             probe("working", STALLED_AFTER_S + 1.0),
         );
-        assert_eq!(node_driver(&node, &claims, &activity, None).0, "stalled");
+        assert_eq!(
+            node_driver(&node, &claims, &activity, None, None).0,
+            "stalled"
+        );
+    }
+
+    // --- x-dead: contained nodes and the no-claim arm ----------------------
+
+    #[test]
+    fn a_contained_node_never_reads_none() {
+        // x-dead task 1.4b (the x-58a5 shape): `contained_in` set means an
+        // owner exists by definition and the node never dispatches alone, so
+        // `none` - the word that fills the board queues - is not an available
+        // verdict for it, whatever its claim edge says.
+        let node = json!({"id": "x-58a5", "priority": "p1", "contained_in": "x-b7f8"});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let (state, claim) = node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[])));
+        assert_eq!(state, "active");
+        assert!(claim.is_none());
+    }
+
+    #[test]
+    fn a_no_claim_node_reads_what_the_worked_feed_answers() {
+        // x-dead task 1.4 (the PR 1747 shape): a live worker with no claim row
+        // is not an undriven PR. The worked feed answering is the only path to
+        // a positive none; an unreadable feed is unmeasured, never none.
+        let node = json!({"id": "x-1747", "priority": "p1"});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let (state, claim) = node_driver(
+            &node,
+            &claims,
+            &activity,
+            None,
+            Some(&ok_worked(&["x-1747"])),
+        );
+        assert_eq!(state, "active");
+        assert!(claim.is_none());
+        // The feed answered and found nothing: this is the one positive none.
+        assert_eq!(
+            node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[]))).0,
+            "none"
+        );
+        // The feed could not answer: unmeasured, not none.
+        assert_eq!(
+            node_driver(
+                &node,
+                &claims,
+                &activity,
+                None,
+                Some(&crate::king_board::SourceRead::err(
+                    "worked: reader panicked"
+                )),
+            )
+            .0,
+            "unmeasured"
+        );
     }
 }

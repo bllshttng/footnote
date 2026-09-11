@@ -123,6 +123,34 @@ def test_finished_node_attributed_worker_frees_the_node(monkeypatch):
     assert live_worked_node_ids(strict=True) == {}
 
 
+def test_xdead_a_closed_phase_row_skips_its_worker(monkeypatch):
+    """The x-6f98 close receipt: bp-6f98 closed its blueprint row at 16:00:54Z
+    and kept writing afterwards. The close receipt skips the worker ahead of
+    the predicate at both folds - a closed planner must not hold the node."""
+    entry = {
+        "id": "x-6f98",
+        "status": "in_progress",
+        "sessions": [
+            {
+                "phase": "blueprint",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-11T15:00:00Z",
+                "ended_at": "2026-09-11T16:00:54Z",
+            }
+        ],
+    }
+    row = {
+        "name": "bp-6f98-locked-decision", "state": "working",
+        "cwd": "/worktrees/x-6f98", "row_id": "session-1",
+    }
+    reading = RosterReading(True, 1, {"x-6f98": [row]}, "", {}, 0, ())
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
 def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
     """The producer's structured advisory line lands on the reading as node
     attribution, not as a blocking refusal."""

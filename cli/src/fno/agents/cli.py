@@ -434,13 +434,18 @@ def _spawn_guard_decision(
             # reader can tell a worker that is starting from one that never
             # started. `live-claim` and `suspect-claim` stay byte-identical
             # wherever init was reached, so no existing consumer branch moves.
-            # block_reason wins: an authority outage is not a claim state.
+            # block_reason wins only for the authority outage; an occupied
+            # node keeps the stable machine token, evidence rides the refusal.
+            block = observation.block_reason
+            reason = (
+                block if block and not block.startswith("held:")
+                else "suspect-claim" if wedged
+                else "live-claim" if common["init_reached"]
+                else "unproven-claim"
+            )
             return {
                 "verdict": "already-running",
-                "reason": observation.block_reason or (
-                    "suspect-claim" if wedged else "live-claim"
-                    if common["init_reached"] else "unproven-claim"
-                ),
+                "reason": reason,
                 **({"recovery": recovery} if recovery else {}),
                 **({"remedy": _remedy_for(node_key)}
                    if wedged and not no_reserve else {}),
