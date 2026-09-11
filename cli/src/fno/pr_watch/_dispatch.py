@@ -451,6 +451,36 @@ def current_tick_phase() -> str:
     return _tick_phase
 
 
+# The wall-clock deadline of the phase alarm the CLI's runner armed, as a
+# time.monotonic() stamp. Same shape as _tick_phase above: a module global a
+# record sets and deep legs read, so budget checks inside a phase (the
+# watchdog floors, the ritual verb timeout) see THEIR phase's remaining time
+# instead of re-deriving the tick ceiling. None when no phase alarm is armed.
+_phase_deadline: Optional[float] = None
+
+
+def set_phase_deadline(monotonic: Optional[float]) -> None:
+    global _phase_deadline
+    _phase_deadline = monotonic
+
+
+def phase_seconds_left() -> Optional[float]:
+    if _phase_deadline is None:
+        return None
+    return _phase_deadline - time.monotonic()
+
+
+def _ritual_timeout() -> float:
+    """Cold-ritual subprocess timeout: the sweep slice minus a 10s reserve so
+    the verb times out as an ordinary recorded failure BEFORE the phase alarm
+    fires - an alarm cut mid-subprocess would skip the caller's persist and
+    replay the same ritual every tick (x-c79d AC6)."""
+    left = phase_seconds_left()
+    if left is None:
+        return 300.0
+    return min(300.0, left - 10)
+
+
 def tick(
     *,
     # Graph / discovery
@@ -706,14 +736,14 @@ def _run_tick(
             if key not in batch_states:
                 failed.add(key)
         for key, current in batch_states.items():
-            if current in ("OPEN", "CLOSED", "MERGED"):
+            if current in ("OPEN", "CLOSED", "MERGED", "NOT_OPEN"):
                 swept.add(key)
             elif key in query_keys:
                 failed.add(key)
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
-            if current in ("MERGED", "CLOSED"):
+            if current in ("MERGED", "CLOSED", "NOT_OPEN"):
                 _drop_cached_terminal(state, dropped, key, current)
                 batch_terminal.add(key)
             else:
@@ -1238,7 +1268,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
     tick branch - but it stays on the signature so the tick's
     ``dispatch_ritual_fn`` protocol is uniform.
     """
-    from fno.post_merge_route import dispatch_post_merge_ritual
+    from fno.post_merge_route import _default_run_ritual_verb, dispatch_post_merge_ritual
 
     # Honor the post_merge.auto_run opt-in: a `ready` verdict means "configured +
     # active", NOT "operator armed automatic dispatch". Without this gate, enabling
@@ -1258,6 +1288,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
         dedup_key=getattr(obs, "merge_sha", None),
         auto_run=auto_run,
         node_cwd=str(cand.repo_dir) if cand.repo_dir else None,
+        run_verb=lambda pr, cwd: _default_run_ritual_verb(pr, cwd, timeout=_ritual_timeout()),
         ship_session_id=getattr(cand, "ship_session_id", None),
         ship_harness=getattr(cand, "ship_harness", None),
         source_session_id=getattr(cand, "source_session_id", None),

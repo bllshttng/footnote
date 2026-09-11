@@ -469,7 +469,7 @@ _GROOM_PLIST = """\
   <false/>
 
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <!-- A repo root, not $HOME: maintain's validity sweep resolves its git
        evidence root from the cwd, and from a non-repo it records every symbol
