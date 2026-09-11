@@ -915,8 +915,8 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
     if unmeasurable:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in unmeasurable)
         return (
-            f"{state}, no positively-live worker; {len(unmeasurable)} row(s) could "
-            f"not be dated and read UNKNOWN, never live: {rendered}. "
+            f"{state}, no positively-live worker; {len(unmeasurable)} row(s) "
+            f"undatable, UNKNOWN never live: {rendered}. "
             f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
         )
     unresolved = info.get("roster_rows_unresolved", 0)

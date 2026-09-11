@@ -308,8 +308,7 @@ def live_worked_node_ids(
             workers: list[str] = []
 
             def _admit(name, verdict):
-                # x-dead: an undatable row is listed marked, never vanished
-                # and never read as positively live.
+                # x-dead: undatable rows are listed marked, never vanished.
                 label = (
                     name if verdict == REACHABLE
                     else f"{name} (unmeasurable: transcript could not be dated)"

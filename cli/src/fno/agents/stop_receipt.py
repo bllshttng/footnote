@@ -1,9 +1,8 @@
 """The stop verb verifies its own receipt (x-dead task 3.1).
 
-Measured 2026-09-11: `claude stop` exited 0 over a row that never left the
-wake set and `stopped: <name>` printed beside it. The refusal also carries
-the citizen-vs-teammate fact: an fno-spawned citizen stops through this verb,
-an Agent-tool teammate needs `fno agents rm`.
+Measured: `claude stop` exited 0 over a row that never left the wake set,
+`stopped:` printed beside it; the refusal carries the citizen-vs-teammate
+split (an Agent-tool teammate needs `fno agents rm`).
 """
 from __future__ import annotations
 

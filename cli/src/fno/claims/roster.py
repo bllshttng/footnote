@@ -91,12 +91,11 @@ def _finished_row_states() -> frozenset:
 def _worker_reachability(worker: dict):
     """One roster row through the ONE shared predicate (x-dead task 1.1).
 
-    REACHABLE means engaged, UNREACHABLE finished, UNKNOWN its own arm at
-    every caller: an undatable transcript is a verdict about the instrument,
-    never engaged-by-default. The transcript outranks the supervisor word for
-    EVERY row - a finished worker's row never leaves `working` (measured live
-    2026-09-11 on t-b7f8-reaper-keep-rules) - and a terminal word with no
-    transcript at all stays positive evidence the row ended.
+    REACHABLE means engaged, UNREACHABLE finished, UNKNOWN its own arm: an
+    undatable transcript is a verdict about the instrument, never
+    engaged-by-default. The transcript outranks the supervisor word for EVERY
+    row (a finished worker's row never leaves `working`, measured live
+    2026-09-11); a terminal word with no transcript stays positive evidence.
     """
     from fno.agents.reachability import classify_reachability
 

@@ -3122,10 +3122,8 @@ def _observe_node_claim(
         worker = ", ".join(workers)
     block_reason = "worked-authority-unavailable" if worked_error else None
     if occupied and block_reason is None:
-        # x-dead task 2.2: the bare words `blocked`/`already-claimed` starved
-        # the auto_continue arm for 97 minutes because both read as ordinary
-        # conditions. Name what was consulted and what it found; an
-        # unmeasurable node and a genuinely held node must not share a string.
+        # x-dead task 2.2: `blocked`/`already-claimed` starved auto_continue
+        # for 97 minutes; name what was consulted and what it found.
         parts: list[str] = []
         if claim_state in ("live", "suspect"):
             parts.append(f"claim {claim_state} held by {holder}")
