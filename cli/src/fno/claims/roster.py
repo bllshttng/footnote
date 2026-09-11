@@ -21,8 +21,17 @@ class RosterReading(NamedTuple):
         return self.rows_by_session.get(session_id)
 
 
-def read_roster(timeout: float = 10.0) -> RosterReading:
-    """Read the fleet once and index it by resolved node id."""
+def read_roster(
+    timeout: float = 10.0, require_live_probe: bool = True
+) -> RosterReading:
+    """Read the fleet once and index it by resolved node id.
+
+    ``require_live_probe`` splits two consumers. Claim-status liveness must
+    refuse when the live probe never ran (a harness fallback is not an
+    answer about a specific holder). The worked overlay measures node
+    attribution, which the registry-only view still carries, so it passes
+    False and lets the promised fallback answer.
+    """
     try:
         from fno.agents.watchdog import fleet_rows
 
@@ -32,12 +41,16 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
 
     from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
 
+    # The harnesses' own wording for a degraded live probe; kept as a literal
+    # because a claims->harnesses import would be a new layering edge.
+    registry_only_mark = "falling back to registry-only view"
     unmeasurable: dict = {}
     blocking = []
     for w in warnings:
         idx = w.find(UNMEASURABLE_ROW_PREFIX)
         if idx == -1:
-            if not w.startswith(ADVISORY_WARNING_PREFIX):
+            degraded_probe = (not require_live_probe) and (registry_only_mark in w)
+            if not w.startswith(ADVISORY_WARNING_PREFIX) and not degraded_probe:
                 blocking.append(w)
             continue
         fields = {}

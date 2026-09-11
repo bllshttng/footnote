@@ -300,7 +300,7 @@ def live_worked_node_ids(
         if not any(isinstance(entry, dict) and entry.get("status") not in TERMINAL_RUNGS
                    for entry in entries):
             return {}
-        reading = read_roster()
+        reading = read_roster(require_live_probe=False)
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
 

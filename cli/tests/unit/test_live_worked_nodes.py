@@ -154,3 +154,26 @@ def test_all_terminal_graph_skips_the_roster_probe(monkeypatch):
     monkeypatch.setattr("fno.claims.roster.read_roster", _boom)
 
     assert live_worked_node_ids(strict=True) == {}
+
+
+def test_a_registry_only_fallback_answers_the_overlay(monkeypatch):
+    """On a machine with no claude binary the promised registry-only fallback
+    must actually answer the worked overlay, not refuse it (CI: undispatched
+    went dark). Claim-status liveness keeps its refusal by default."""
+    fallback = (
+        "claude agents --json: claude binary not found on PATH; "
+        "live_status unavailable, falling back to registry-only view"
+    )
+    monkeypatch.setattr(
+        "fno.agents.watchdog.fleet_rows", lambda **_kw: ([], [fallback])
+    )
+
+    from fno.claims.roster import read_roster
+
+    assert read_roster().consulted is False
+
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict",
+        lambda *_a, **_kw: [_entry("x-6d3c")],
+    )
+    assert live_worked_node_ids(strict=True) == {}
