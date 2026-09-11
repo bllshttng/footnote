@@ -350,6 +350,14 @@ class TestAskRefusedWhenLiveLawRules:
         )
         assert refused.exit_code == 2, refused.output
         assert "d-0fa92eb9" in refused.output
+        # The named match folds case: the law is recorded under one spelling
+        # and an agent types another, and both name the same subject.
+        drifted = runner.invoke(
+            outstanding_app,
+            ["ask", "what colour should the button be?", "--subject", "Review-Coverage"],
+        )
+        assert drifted.exit_code == 2, drifted.output
+        assert "review-coverage" in drifted.output
 
     def test_a_named_other_subject_asks_and_records_the_subject(
         self, root: Path, monkeypatch: pytest.MonkeyPatch

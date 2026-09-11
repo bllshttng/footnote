@@ -170,13 +170,13 @@ def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
     words = set(re.findall(r"[a-z0-9]+", question.lower()))
-    named = {s for s in (subject, node) if s}
+    named = {s.casefold() for s in (subject, node) if s}
     hits: dict[str, list[str]] = {}
     for row in rows:
         key = str(row.get("subject") or "").strip()
         tokens = set(key.lower().split("-"))
         by_text = not subject and len(tokens) >= 2 and tokens <= words
-        if key and (key in named or by_text):
+        if key and (key.casefold() in named or by_text):
             hits.setdefault(key, []).append(str(row.get("decision_id")))
     return hits
 
