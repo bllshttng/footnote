@@ -32,7 +32,7 @@ use std::path::PathBuf;
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|flight-acquire|flight-release"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
@@ -44,6 +44,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
     if op == "release-stopped" {
         return run_release_stopped(&args[1..]);
+    }
+    if op == "long-holds" {
+        return crate::claims::run_claim_long_holds(&args[1..]);
     }
     // The backlog one-in-flight gate's lock operations (x-ef2c): arguments of
     // this verb, never new leaves. The lock is held in the name of the

@@ -4989,6 +4989,10 @@ pub use release_stopped::{
     StoppedHolder,
 };
 
+#[path = "claims_long_holds.rs"]
+mod long_holds;
+pub use long_holds::{long_hold_rows, run_claim_long_holds, LongHoldRow};
+
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]
 mod reservation_tests;

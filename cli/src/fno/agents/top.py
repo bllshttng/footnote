@@ -11,7 +11,6 @@ slot-counted, observable, not addressable.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -599,64 +598,33 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
 LONG_HOLD_S = 12 * 60
 
 
-def _pid_observed(pid: object) -> str:
-    """present / absent / unreadable: name the probe, never infer from it."""
-    if pid is None:
-        return "unreadable"
-    try:
-        import psutil
-
-        psutil.Process(int(pid))  # noqa: BLE001
-        return "present"
-    except psutil.NoSuchProcess:
-        return "absent"
-    except Exception:  # noqa: BLE001 - denied or unprobeable stays unreadable
-        return "unreadable"
-
-
-def _sidecar_requests(cdir: Path, key: str) -> int:
-    """Lines in the flight gate's .held-requests sidecar (per-holder count)."""
-    from fno.claims.io import encode_key
-
-    try:
-        text = (cdir / f"{encode_key(key)}.held-requests").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return 0
-    return sum(1 for line in text.splitlines() if line.strip())
-
-
 def long_hold_rows() -> dict:
     """Single-flight holds older than LONG_HOLD_S across both claims roots;
     returns ``{"error": ...}`` instead of raising (a top render never dies
-    on a claims read).
-    """
-    from fno.claims.core import list_claims
-    from fno.claims.io import dedup_claims_roots, global_claims_root
+    on a claims read). The computation is the Rust runtime's ``claim
+    long-holds`` op; this wrapper is its client."""
+    import subprocess
 
+    from fno.claims.io import claims_dir, global_claims_dir
+    from fno.claims.verdict import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return {"error": "fno-agents binary not found"}
+    command = [str(binary), "claim", "long-holds", "--min-hold-s", str(LONG_HOLD_S)]
+    command.extend(("--claims-dir", str(global_claims_dir())))
+    command.extend(("--claims-dir", str(claims_dir(None))))
     try:
-        now_ms = int(time.time() * 1000)
-        rows: list[dict] = []
-        for raw_root, cdir in dedup_claims_roots([global_claims_root(), None]):
-            for claim in list_claims(prefix="flight:", root=raw_root, include_stale=True):
-                held_s = max(0, (now_ms - int(claim.get("acquired_at") or 0)) // 1000)
-                if held_s <= LONG_HOLD_S:
-                    continue
-                rows.append(
-                    {
-                        "key": claim.get("key"),
-                        "holder": claim.get("holder"),
-                        "pid": claim.get("pid"),
-                        "pid_observed": _pid_observed(claim.get("pid")),
-                        "held_s": held_s,
-                        "requests": _sidecar_requests(cdir, str(claim.get("key"))),
-                    }
-                )
-        rows.sort(key=lambda r: -r["held_s"])
-    except Exception as exc:  # noqa: BLE001 - see docstring
-        return {"error": f"{type(exc).__name__}: {exc}"}
-    return {"rows": rows}
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return {"error": f"OSError: {exc}"}
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or f"exit {proc.returncode}"}
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {"error": f"JSONDecodeError: {exc}"}
+
 
 
 def _render_long_hold_lines(long_holds: dict) -> list[str]:
