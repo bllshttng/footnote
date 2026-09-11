@@ -252,7 +252,8 @@ def test_node_already_claimed(iso, monkeypatch):
 
     res = adv.advance(project="fno", events_path=iso)
 
-    assert res.decision == "skipped" and res.reason == "already-claimed"
+    assert res.decision == "skipped"
+    assert res.reason == "held: claim live held by test-holder"
 
 
 def test_dispatch_reservation_held(iso, monkeypatch):
@@ -294,7 +295,7 @@ def test_live_worked_node_refuses_and_names_worker(monkeypatch):
     observation = adv._observe_node_claim(NODE["id"])
 
     assert observation.blocks_dispatch is True
-    assert observation.refusal_reason == "already-claimed"
+    assert observation.refusal_reason == "held: worked overlay: bp-worker"
     assert observation.worker == "bp-worker"
     assert emitted[0][1]["worker"] == "bp-worker"
 
@@ -456,19 +457,20 @@ def test_node_claim_predispatch_is_family2_loud(
 
     assert adv._claim_is_live("node:x-a35a") is occupied
 
-    assert emitted == [
-        (
-            "dispatch_claim_observed",
-            {
-                "node_id": "x-a35a",
-                "claim_verdict": claim_verdict,
-                "claim_state": claim_state,
-                "holder": "target-session:prior",
-                "truth_status": truth_state,
-                "action": action,
-            },
+    expected_event = {
+        "node_id": "x-a35a",
+        "claim_verdict": claim_verdict,
+        "claim_state": claim_state,
+        "holder": "target-session:prior",
+        "truth_status": truth_state,
+        "action": action,
+    }
+    if occupied:
+        # x-dead task 2.2: the occupied refusal names what was consulted.
+        expected_event["block_reason"] = (
+            f"held: claim {claim_state} held by target-session:prior"
         )
-    ]
+    assert emitted == [("dispatch_claim_observed", expected_event)]
     assert notices and "target-session:prior" in notices[0][1]
     warning = capsys.readouterr().err
     assert claim_state in warning
@@ -2026,7 +2028,8 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
     )
-    assert results[0].decision == "skipped" and results[0].reason == "already-claimed"
+    assert results[0].decision == "skipped"
+    assert results[0].reason == "held: claim live held by test-holder"
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
