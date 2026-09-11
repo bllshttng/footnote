@@ -3710,9 +3710,16 @@ fn format_success(
                     &filters,
                     fields_omitted,
                     &discovered,
+                    result["truth_probe_asked"].as_u64(),
+                    result["truth_probe_answered"].as_u64(),
                 ))
             } else {
-                Some(render_list_table(agents, &discovered))
+                Some(render_list_table(
+                    agents,
+                    &discovered,
+                    result["truth_probe_asked"].as_u64(),
+                    result["truth_probe_answered"].as_u64(),
+                ))
             }
         }
         "reconcile" => {
@@ -3780,6 +3787,8 @@ fn render_list_json(
     filters_applied: &Value,
     fields_omitted: &Value,
     discovered: &[Value],
+    truth_probe_asked: Option<u64>,
+    truth_probe_answered: Option<u64>,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     let payload = json!({
@@ -3789,6 +3798,8 @@ fn render_list_json(
         "discovered_count": discovered.len(),
         "fields_omitted": fields_omitted,
         "filters_applied": filters_applied,
+        "truth_probe_asked": truth_probe_asked,
+        "truth_probe_answered": truth_probe_answered,
         "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
@@ -3961,7 +3972,12 @@ fn truncate_cell(s: &str, width: usize) -> String {
 /// shows the disagreement instead of hiding it. This is a functional table;
 /// byte-exact match with Python is not required (Python's table is
 /// time-dependent via relative timestamps).
-fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
+fn render_list_table(
+    agents: &Value,
+    discovered: &[Value],
+    truth_probe_asked: Option<u64>,
+    truth_probe_answered: Option<u64>,
+) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
     // on claude. Same rename on the Python renderer.
@@ -4044,6 +4060,16 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     }
 
     let mut lines = Vec::new();
+    // The instrument's receipt, in the artifact itself (x-e3cc): a total
+    // outage must not read as a wall of `unknown` statuses the reader was
+    // meant to trust. The daemon's stderr WARN is write-only; this line is
+    // the one the operator actually sees.
+    if truth_probe_asked.unwrap_or(0) > 0 && truth_probe_answered == Some(0) {
+        lines.push(format!(
+            "truth probe failed: 0 of {} rows answered; every STATUS below is unmeasured, not healthy",
+            truth_probe_asked.unwrap_or(0)
+        ));
+    }
     // Header row
     let header_line = headers
         .iter()

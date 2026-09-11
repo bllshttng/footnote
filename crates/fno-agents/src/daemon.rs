@@ -39,7 +39,8 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 mod list_rows;
-use self::list_rows::{attention_sort_key, handle_list};
+use self::list_rows::{attention_sort_key, handle_list, rendered_status_from_truth};
+pub(crate) use self::list_rows::{progress_from_truth, registry_truth_handle};
 mod prune_outcome;
 pub(crate) use self::prune_outcome::PruneOutcome;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
@@ -5144,110 +5145,6 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
     }
 }
 
-/// The STATUS word `list` renders: SERVED ACTIVITY, never a `live` token
-/// (x-c672, AC7). Nothing decides on this word anymore - retirement reads the
-/// reverse join, the lanes read their own probes - so the column answers the
-/// operator's actual question, what is this session doing: `writing` (the
-/// transcript moved inside `STALE_ATTENTION_S`), `quiet` (older), `parked`
-/// (the tail closed a promise). A positively falsified row reads `orphaned`,
-/// and a probe that did not answer reads `unknown`. A confirmed-live pid does
-/// NOT lift an unanswered age to `quiet`: the word is activity, and a process
-/// being up says nothing about when it last wrote - the same row must render
-/// the same word through the Python list lane, which has no pid census.
-fn rendered_status_from_truth(probe: Option<&crate::truth_probe::TruthProbe>) -> &'static str {
-    if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
-        return "orphaned";
-    }
-    match probe.map(|p| p.state.as_str()) {
-        Some("done") => "parked",
-        Some(_) => match probe.and_then(|p| p.last_activity_age_s) {
-            Some(age) if age < STALE_ATTENTION_S => "writing",
-            Some(_) => "quiet",
-            None => "unknown",
-        },
-        None => "unknown",
-    }
-}
-
-/// True for a Claude model id or tier alias. Mirrors
-/// `fno.agents.model_routing.is_anthropic_model` (cli/src/fno/agents/model_routing.py) --
-/// duplicated rather than shelled out to because the daemon already pays one
-/// probe per row and a second process spawn per row would multiply that cost
-/// for a four-branch string check.
-fn is_anthropic_model(model: &str) -> bool {
-    let name = model.trim().to_ascii_lowercase();
-    name.starts_with("claude-") || matches!(name.as_str(), "opus" | "sonnet" | "haiku" | "fable")
-}
-
-/// Structural refusal predicate (Locked Decision 3). Mirrors
-/// `fno.agents.reachability._is_refused` -- never reads the transcript's
-/// prose, so a reworded refusal message cannot break it. Fails OPEN: a
-/// recorded `route_settings_path` records the INTENDED route, so a
-/// foreign-routed worker answering as a foreign model is healthy, not refused.
-fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option<&str>) -> bool {
-    if harness != "claude" {
-        return false;
-    }
-    if route_settings_path.is_some() {
-        return false;
-    }
-    if observed_model.get("kind").and_then(Value::as_str) != Some("observed") {
-        return false;
-    }
-    match observed_model.get("model").and_then(Value::as_str) {
-        Some(model) => !is_anthropic_model(model),
-        None => false,
-    }
-}
-
-/// Map a truth probe onto the progress axis `list` renders, mirroring Python's
-/// `classify_progress` (`fno/agents/reachability.py`). Reads the SAME probe
-/// `rendered_status_from_truth` reads, plus `harness` and
-/// `route_settings_path` off the registry entry -- no second probe is paid.
-///
-/// Precedence matches the Python classifier exactly: a falsified/unresolved
-/// row first (`reachability` absent or `unreachable` -- AC12-FR, the
-/// compatibility-fallback case included, since an unmeasured row has no
-/// progress state to report either), then the refusal predicate, then the
-/// truth-state arms plus the measured transcript age. A written `working`
-/// state is not progress evidence when its transcript stopped advancing.
-pub(crate) fn progress_from_truth(
-    probe: Option<&crate::truth_probe::TruthProbe>,
-    harness: &str,
-    route_settings_path: Option<&str>,
-) -> (&'static str, &'static str) {
-    match probe.and_then(|p| p.reachability.as_deref()) {
-        Some("unreachable") | None => return ("unknown", "no-evidence"),
-        _ => {}
-    }
-    let observed_model = probe.map(|p| &p.observed_model);
-    if observed_model.is_some_and(|om| is_refused(om, harness, route_settings_path)) {
-        return ("refused", "model-refused");
-    }
-    match probe.map(|p| p.state.as_str()) {
-        Some("working" | "watching") => match probe.and_then(|p| p.last_activity_age_s) {
-            None => ("unknown", "no-evidence"),
-            Some(age) if age >= STALE_ATTENTION_S => ("unknown", "silent"),
-            Some(_) => ("advancing", "transcript-turn"),
-        },
-        Some("your-move") => ("awaiting-operator", "operator-turn"),
-        Some("done") => ("parked", "promise"),
-        Some("stalled") => ("unknown", "silent"),
-        _ => ("unknown", "no-evidence"),
-    }
-}
-
-pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
-    if let Some(session_id) = entry.harness_session_id.as_deref() {
-        return session_id.to_string();
-    }
-    if !entry.short_id.is_empty() {
-        entry.short_id.clone()
-    } else {
-        entry.name.clone()
-    }
-}
-
 /// The attention window this surface orders by. Session-truth's stall window
 /// is 7200s and correct FOR REAPING; for display it is exactly the gap a
 /// dead-under-two-hours worker hides in, so the ordering window is ten
@@ -5399,6 +5296,12 @@ where
             .collect()
     };
     let truths = truth_fn(&handles);
+    // The instrument's own receipt (x-e3cc): a page where the probe answered
+    // nothing must be readable AS that, not as 43 rows confidently `unknown`.
+    // The rendered status word cannot carry the distinction (the vocabulary is
+    // frozen by the --status filter), so the envelope does.
+    let truth_probe_asked = handles.len();
+    let truth_probe_answered = handles.iter().filter(|h| truths.contains_key(*h)).count();
     let classified: Vec<_> = filtered
         .into_iter()
         .map(|e| {
@@ -5742,6 +5645,8 @@ where
             "agents": entries,
             "filters_applied": filters_applied,
             "fields_omitted": LIST_PROJECTION_OMISSIONS,
+            "truth_probe_asked": truth_probe_asked,
+            "truth_probe_answered": truth_probe_answered,
         }),
     )
 }
@@ -13918,6 +13823,27 @@ done
     ///
     /// `include_str!` is compile-time, so deleting or moving the contract file
     /// breaks the build rather than silently disarming the check.
+    /// x-e3cc: the envelope carries the instrument's receipt, so a page the
+    /// probe never answered is readable AS that, not as N confident
+    /// `unknown` statuses.
+    #[test]
+    fn list_envelope_carries_the_probe_receipt() {
+        let home = short_home("list-probe-receipt");
+        seed_stream_row(&home, "w1", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
+        let result = response.result().unwrap();
+        assert_eq!(result["truth_probe_asked"], 1);
+        assert_eq!(result["truth_probe_answered"], 0);
+
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
+        let result = response.result().unwrap();
+        assert_eq!(result["truth_probe_asked"], 1);
+        assert_eq!(result["truth_probe_answered"], 1);
+    }
+
     #[test]
     fn watch_serves_on_connect_and_only_on_change() {
         // The subscription contract: connect serves
