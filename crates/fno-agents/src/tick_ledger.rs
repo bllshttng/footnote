@@ -473,6 +473,24 @@ pub fn explain_with_trace(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: &
 }
 
 fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&TickTrace>) {
+    // Correct a masked merge row BEFORE pm_fresh_failure is read: the
+    // tick_timeout rule for the other launchd arms is only as honest as the
+    // merge row underneath it.
+    let pm_idx = rows.iter().position(|r| r.arm == "pr_watch_merge");
+    let mut pm_tick_hint: Option<String> = None;
+    if let (Some(i), Some(t)) = (pm_idx, trace) {
+        if merge_row_masked_by_tick_end(&rows[i], t) {
+            let outcome = t.end_outcome.as_deref().unwrap_or_default();
+            let phase = t.end_phase.as_deref().unwrap_or("unknown");
+            let pm = &mut rows[i];
+            pm.failing = true;
+            pm.cause = Some("tick_timeout".to_string());
+            pm_tick_hint = Some(format!(
+                "the tick containing this phase ended {outcome} in phase {phase}; \
+                 run fno do pr watch status"
+            ));
+        }
+    }
     // The cross-arm flip runs before anything reads `row.stale`, so
     // `pm_stale` below sees the tier's true state instead of a pr_watch_merge
     // row still reading fresh inside its own doubled grace.
@@ -489,10 +507,11 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     }
     let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
     let pm_fresh_failure = pm.is_some_and(|r| {
-        !r.stale
-            && r.skip_reason
-                .as_deref()
-                .is_some_and(|s| FAILURE_SKIPS.contains(&s))
+        r.failing
+            || (!r.stale
+                && r.skip_reason
+                    .as_deref()
+                    .is_some_and(|s| FAILURE_SKIPS.contains(&s)))
     });
     let pm_stale = pm.is_some_and(|r| r.stale);
     let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
@@ -520,7 +539,13 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
             line.push_str(&format!(" cause={cause} ({hint})"));
             row.line = line;
         } else {
-            row.line = render_row(row);
+            let mut line = render_row(row);
+            if let Some(hint) = pm_tick_hint.as_deref() {
+                if row.cause.as_deref() == Some("tick_timeout") {
+                    line.push_str(&format!(" cause=tick_timeout ({hint})"));
+                }
+            }
+            row.line = line;
         }
     }
 }
@@ -548,6 +573,30 @@ fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
         })
         .map(|(sched, _)| sched.to_string())
         .collect()
+}
+
+/// A completed sweep stamps pr_watch_merge ok at the sweep's own end, and the
+/// tick's finally block skips the corrective row once a sweep started, so the
+/// row's ok describes the sweep phase, not the tick. When the containing
+/// tick's end record landed newer and carries a failure token, the reader
+/// corrects the row instead of trusting it.
+fn merge_row_masked_by_tick_end(row: &ArmStatus, trace: &TickTrace) -> bool {
+    if row.stale || row.failing {
+        return false;
+    }
+    let Some(outcome) = trace.end_outcome.as_deref() else {
+        return false;
+    };
+    if !FAILURE_SKIPS.contains(&outcome) {
+        return false;
+    }
+    let Some(end_ts) = trace.end_ts_unix else {
+        return false;
+    };
+    let Some(row_ts) = row.last_ts.as_deref().and_then(parse_rfc3339_unix) else {
+        return false;
+    };
+    end_ts > row_ts
 }
 
 /// The first cause that holds for a stale row, in table order; `None` leaves
@@ -1054,6 +1103,97 @@ mod tests {
             "line: {}",
             kw.line
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explain_corrects_a_merge_ok_row_that_its_tick_ended_timeout() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // The sweep finished inside its cap and stamped the merge row ok; the
+        // tick then hit its wall in a later phase. The row's ok describes the
+        // phase, and the reader corrects it from the tick's end record.
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:58:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    3,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-04T09:33:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-04T11:59:30Z").unwrap()),
+            end_phase: Some("catchup".to_string()),
+            end_outcome: Some("timeout".to_string()),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(
+            pm.failing,
+            "the containing tick's timeout outranks the sweep's ok"
+        );
+        assert_eq!(pm.cause.as_deref(), Some("tick_timeout"));
+        assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
+        assert!(
+            pm.line.contains("ended timeout in phase catchup"),
+            "line: {}",
+            pm.line
+        );
+        // The downstream rule now sees an honest merge row: the stale arm
+        // blames the tick instead of reading unexplained.
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explain_keeps_a_merge_ok_row_when_the_tick_end_predates_it() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // An end record older than the row is the PREVIOUS tick's outcome;
+        // this row's own tick has not ended, so the fresh ok stands.
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
+                3,
+                json!(null),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-04T11:50:00Z").unwrap()),
+            end_phase: Some("catchup".to_string()),
+            end_outcome: Some("timeout".to_string()),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(!pm.failing, "line: {}", pm.line);
+        assert_eq!(pm.cause, None);
+        assert!(pm.line.contains("ok"), "line: {}", pm.line);
         std::fs::remove_dir_all(&dir).ok();
     }
 
