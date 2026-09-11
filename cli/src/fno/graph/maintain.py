@@ -2228,8 +2228,7 @@ def _validity_rg_search(symbol: str) -> Optional[int]:
     return sum(1 for line in proc.stdout.splitlines() if line.strip())
 
 
-# Retro enrichment bounds (Discretion #1/#2): a bounded merged-file region and
-# a truncated diff_hunk, both inside PACKET_MAX_BYTES beside the base packet.
+# Retro enrichment bounds (Discretion #1/#2): bounded region + truncated hunk.
 _RETRO_REGION_WINDOW = 8
 _RETRO_REGION_MAX_BYTES = 1200
 _RETRO_HUNK_MAX_BYTES = 400
@@ -2455,9 +2454,11 @@ def run_pass(
                 "duration_s": duration_s,
             }
         )
+        # The receipt divides only by legs this run could have completed.
+        leg_total = MAINTAIN_LEG_TOTAL - (1 if no_validity else 0)
         typer.echo(
             f"budget exceeded in leg '{exc.leg}' after {duration_s}s; "
-            f"{len(legs_done)}/{MAINTAIN_LEG_TOTAL} legs completed; "
+            f"{len(legs_done)}/{leg_total} legs completed; "
             f"results partial",
             err=True,
         )
