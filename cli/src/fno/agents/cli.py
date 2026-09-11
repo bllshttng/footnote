@@ -2068,6 +2068,10 @@ def cmd_spawn(
             "fleet_cpu_share",
             "provider_cap",
             "max_live",
+            # Under --wait each attempt runs no_wait, so the gate's own
+            # queueing refusals surface here and the CLI deadline bounds the wait.
+            "no_wait",
+            "no_wait_mutex_held",
         }
     )
     wait_deadline = time.monotonic() + wait_seconds if wait is not None else None
@@ -2078,7 +2082,7 @@ def cmd_spawn(
                 name,
                 "headless" if (once or substrate == "headless") else substrate,
                 force=force,
-                no_wait=no_wait,
+                no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
             )
             break

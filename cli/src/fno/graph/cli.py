@@ -3288,6 +3288,9 @@ def cmd_update(
     refuse_retired_model_tier(_model_tier_tombstone)
 
     details = read_text_arg(details, details_file, what="the details")
+    # The 'null' clear-sentinel is a COMMAND-LINE convention; a file's
+    # content is data and stores verbatim.
+    details_from_file = details_file is not None
 
     _require_node_id(task_id)
 
@@ -3741,7 +3744,11 @@ def cmd_update(
                 raise typer.Exit(code=1)
             node["title"] = new_title
         if details is not None:
-            node["details"] = None if details.lower() == "null" else details
+            node["details"] = (
+                None
+                if (not details_from_file and details.lower() == "null")
+                else details
+            )
         if domain is not None:
             node["domain"] = domain
         if size is not None:

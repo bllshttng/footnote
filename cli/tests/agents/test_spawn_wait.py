@@ -74,6 +74,16 @@ def test_wait_with_no_wait_refuses_usage(monkeypatch):
     assert "mutually exclusive" in result.stderr
 
 
+def test_wait_retries_the_gates_own_no_wait_refusal(monkeypatch):
+    """Under --wait every attempt runs no_wait, so the gate's queueing
+    refusals surface as no_wait receipts; the CLI deadline still bounds them."""
+    calls: list = []
+    monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "no_wait"))
+    result = _spawn("spawn", "-H", "claude", "--substrate", "bg", "--wait", "0.05s", "hi")
+    assert result.exit_code == EXIT_LOAD_REFUSED
+    assert len(calls) >= 2
+
+
 def test_wait_parses_durations():
     from fno.agents.cli import _parse_wait_seconds
 
