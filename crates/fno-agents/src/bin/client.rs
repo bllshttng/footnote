@@ -553,7 +553,10 @@ async fn run(args: Vec<String>) -> i32 {
     // status (in-process), a ps walk of keepers, and `fno mux ls --json`.
     if verb == "census" {
         let rows = fno_agents::census::census().await;
-        println!("{}", serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        println!(
+            "{}",
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+        );
         return 0;
     }
 
@@ -2716,7 +2719,42 @@ async fn run_restart(force: bool) -> i32 {
     if let Some(line) = err {
         eprintln!("{line}");
     }
-    code
+    if code != 0 {
+        return code;
+    }
+    // x-f188 change 6: cycle the stale store keepers. A store cycle ends
+    // nothing a person can see (the graph on disk survives; the next read
+    // respawns the keeper on this binary), so this leg is not behind
+    // --force/--mux gating. Spared keepers fail the verb: a spared keeper
+    // was NOT healed.
+    let (cycled, stale_panes) = fno_agents::census::cycle_stale_store_keepers().await;
+    for c in &cycled {
+        if c.result == "cycled" {
+            println!(
+                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.old_pid
+            );
+        } else {
+            eprintln!(
+                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.result
+            );
+        }
+    }
+    if stale_panes > 0 {
+        println!(
+            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
+        );
+    }
+    // Machine-readable summary; the LAST stdout line, so an orchestrator
+    // parses it without guessing.
+    let summary = json!({"store_keepers": cycled.iter().map(|c| serde_json::json!({
+            "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
+        })).collect::<Vec<_>>(), "pane_keepers_stale": stale_panes});
+    println!("fno agents restart: keepers {summary}");
+    u8::from(cycled.iter().any(|c| c.result != "cycled")) as i32
 }
 
 /// Mint a random UUID (RFC-4122 v4) to pin an interactive claude `--session-id`.

@@ -429,13 +429,10 @@ def _live_mux_sessions(
 def running_components(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> "list[dict]":
-    """One row per long-lived process, from ``fno-agents census --json``.
-
-    The walking and classifying live in ``crates/fno-agents/src/census.rs``
-    (x-f188); this adapter only carries rows across the binary boundary.
-    ``[]`` on any failure: an unavailable census is not an empty fleet's
-    verdict, so callers render nothing rather than a false all-clear.
-    """
+    """One row per long-lived process, from ``fno-agents census --json``
+    (x-f188; the walking and classifying live in
+    ``crates/fno-agents/src/census.rs``). ``[]`` on any failure: an
+    unavailable census is not an empty fleet's verdict."""
     try:
         from fno import rust_binary
 
@@ -445,24 +442,11 @@ def running_components(
     if binary is None:
         return []
     try:
-        proc = runner(
-            [str(binary), "census", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
+        proc = runner([str(binary), "census", "--json"], capture_output=True, text=True, check=False, timeout=30)
+        rows = json.loads(proc.stdout or "[]") if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return []
-    if proc.returncode != 0:
-        return []
-    try:
-        rows = json.loads(proc.stdout or "[]")
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(rows, list):
-        return []
-    return [r for r in rows if isinstance(r, dict)]
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
 def stale_mux_servers(
@@ -607,6 +591,14 @@ def _wire_label(wires: list[int]) -> str:
     return "/".join(f"v{w}" for w in wires) if wires else "unknown"
 
 
+def _current_but_stale(rev_label: str, stale: int, restartable: int, pane_kept: int) -> str:
+    return (
+        f"installed {rev_label} is current; {stale} running process(es) are older builds - "
+        f"restart cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build "
+        "until their panes end"
+    )
+
+
 def _build_update_guidance(
     *,
     update_ready: bool,
@@ -647,14 +639,9 @@ def _build_update_guidance(
     # an update actually is pending.
     if not update_ready and revs_known:
         if running_stale > 0:
-            # x-f188 change 7: "up to date" was the axis that reported no
-            # action while stale processes ran (x-f1f4). The branch no
-            # longer returns early on it.
-            return (
-                f"installed {rev_label} is current; {running_stale} running process(es) are "
-                f"older builds - restart cycles {restartable}, keeps {pane_kept} pane "
-                "keeper(s) on the old build until their panes end"
-            )
+            # x-f188 change 7: "up to date" reported no action while stale
+            # processes ran (x-f1f4); the branch no longer returns early.
+            return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if degraded_reason:
@@ -672,11 +659,7 @@ def _build_update_guidance(
 
     if not update_ready:
         if running_stale > 0:
-            return (
-                f"installed {rev_label} is current; {running_stale} running process(es) are "
-                f"older builds - restart cycles {restartable}, keeps {pane_kept} pane "
-                "keeper(s) on the old build until their panes end"
-            )
+            return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if wire_bump:
@@ -788,26 +771,16 @@ def update_readiness(
 
     # Running-process census (x-f188 change 7): the third axis. The TUI
     # renders these rows and computes nothing (Locked Decision 6).
-    census = running_components(runner)
     # running_rows, never `running`: that name is the python interpreter
     # string the python_tool field carries further down.
+    census = [r for r in running_components(runner) if r.get("verdict") == "stale"]
     running_rows = [
         {k: r.get(k) for k in ("component", "name", "verdict", "on_restart", "survives")}
         for r in census
     ]
-    running_stale = sum(1 for r in census if r.get("verdict") == "stale")
-    restartable = sum(
-        1
-        for r in census
-        if r.get("verdict") == "stale"
-        and str(r.get("on_restart", "")).startswith(("restarts", "cycles"))
-    )
-    pane_kept = sum(
-        1
-        for r in census
-        if r.get("verdict") == "stale"
-        and r.get("component") in ("pane-keeper", "thread-keeper")
-    )
+    running_stale = len(census)
+    restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in census)
+    pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in census)
 
     degraded_reason = "; ".join(degraded) if degraded else None
 

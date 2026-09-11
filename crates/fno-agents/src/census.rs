@@ -173,6 +173,7 @@ fn keeper_rows() -> Vec<Value> {
         let name = session
             .clone()
             .or_else(|| sock.as_ref().map(|s| s.display().to_string()));
+        let mut store_graph: Option<String> = None;
         let (verdict, evidence) = match sock.as_deref() {
             None => ("unknown", "argv declares no socket"),
             Some(sock) => {
@@ -182,21 +183,28 @@ fn keeper_rows() -> Vec<Value> {
                     TAG_IDENTIFY_PANE
                 };
                 match identify_reply(sock, tag) {
-                    Some(reply) => match reply.get("drift").and_then(Value::as_str) {
-                        Some("drifted") => ("stale", "build self-report"),
-                        Some("fresh") => ("current", "build self-report"),
-                        _ => {
-                            // A reply with no drift key is a keeper built
-                            // before the self-report; start time is the only
-                            // reading it gives.
-                            let exe = Path::new(argv0);
-                            if started_before_rewrite(started_epoch(etime_secs(pid)), Some(exe)) {
-                                ("stale", "predates build self-report")
-                            } else {
-                                ("current", "started at-or-after the binary was written")
+                    Some(reply) => {
+                        if component == "store-keeper" {
+                            store_graph =
+                                reply.get("graph").and_then(Value::as_str).map(String::from);
+                        }
+                        match reply.get("drift").and_then(Value::as_str) {
+                            Some("drifted") => ("stale", "build self-report"),
+                            Some("fresh") => ("current", "build self-report"),
+                            _ => {
+                                // A reply with no drift key is a keeper built
+                                // before the self-report; start time is the only
+                                // reading it gives.
+                                let exe = Path::new(argv0);
+                                if started_before_rewrite(started_epoch(etime_secs(pid)), Some(exe))
+                                {
+                                    ("stale", "predates build self-report")
+                                } else {
+                                    ("current", "started at-or-after the binary was written")
+                                }
                             }
                         }
-                    },
+                    }
                     None => ("unknown", "no Identify answer"),
                 }
             }
@@ -210,6 +218,9 @@ fn keeper_rows() -> Vec<Value> {
             verdict,
             evidence,
         );
+        if let Some(graph) = store_graph {
+            row["graph"] = json!(graph);
+        }
         if let Some(sock) = &sock {
             row["sock"] = json!(sock.display().to_string());
             if let Some(holder) = seen.get(&sock.display().to_string()) {
@@ -252,7 +263,10 @@ async fn daemon_row() -> Value {
                     ),
                 }
             }
-            None => ("unknown".to_string(), "status reply unparseable".to_string()),
+            None => (
+                "unknown".to_string(),
+                "status reply unparseable".to_string(),
+            ),
         },
         Err(ClientError::DaemonNotRunning) => ("current".to_string(), "no daemon running".into()),
         Err(e) => ("unknown".to_string(), format!("status call failed: {e}")),
@@ -375,4 +389,79 @@ pub fn census_blocking() -> Vec<Value> {
     rows.extend(keeper_rows());
     rows.extend(mux_rows());
     rows
+}
+
+/// One store keeper the restart verb cycled (or spared).
+pub struct CycledKeeper {
+    pub graph: Option<String>,
+    pub old_pid: Option<u32>,
+    pub result: String,
+}
+
+/// Shutdown the stale store keepers the census found (x-f188 change 6). No
+/// respawn is attempted here: the next read respawns each keeper on the
+/// installed binary - the same self-heal the fate text promises - and the
+/// Python client's spawner owns the launch flags (read_source, events).
+/// A keeper answering `busy` keeps its seat and is reported, not forced.
+pub async fn cycle_stale_store_keepers() -> (Vec<CycledKeeper>, usize) {
+    let rows = keeper_rows();
+    let stale_panes = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r["component"].as_str(),
+                Some("pane-keeper") | Some("thread-keeper")
+            ) && r["verdict"] == "stale"
+        })
+        .count();
+    let mut out = Vec::new();
+    for r in rows.iter() {
+        if r["component"] != "store-keeper" || r["verdict"] != "stale" {
+            continue;
+        }
+        let Some(sock) = r["sock"].as_str().map(PathBuf::from) else {
+            continue;
+        };
+        let result = match shutdown_reply(&sock) {
+            Some(reply) if reply.get("ok") == Some(&json!(true)) => {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline && sock.exists() {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                "cycled".to_string()
+            }
+            Some(reply) => format!(
+                "spared: {}",
+                reply
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mutation in flight")
+            ),
+            None => "spared: no shutdown answer".to_string(),
+        };
+        out.push(CycledKeeper {
+            graph: r["graph"].as_str().map(String::from),
+            old_pid: r["pid"].as_u64().map(|p| p as u32),
+            result,
+        });
+    }
+    (out, stale_panes)
+}
+
+/// Send one Shutdown frame and read the reply (tag 2 out, response tag 4).
+fn shutdown_reply(sock: &Path) -> Option<Value> {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    stream.set_read_timeout(Some(PROBE_BUDGET)).ok()?;
+    stream.set_write_timeout(Some(PROBE_BUDGET)).ok()?;
+    stream.write_all(&[2, 0, 0, 0, 0]).ok()?;
+    let mut header = [0u8; 5];
+    stream.read_exact(&mut header).ok()?;
+    if header[0] != 4 {
+        return None;
+    }
+    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len.min(1 << 20)];
+    stream.read_exact(&mut payload).ok()?;
+    serde_json::from_slice(&payload).ok()
 }

@@ -184,6 +184,34 @@ def _revive_orphans(
             )
 
 
+def _parse_keepers_line(stdout: str) -> Optional[dict]:
+    """The keeper summary from `fno-agents restart`'s last stdout line (an
+    older binary prints none, and the leg is then simply absent)."""
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith("fno agents restart: keepers "):
+            try:
+                payload = json.loads(line.removeprefix("fno agents restart: keepers "))
+            except ValueError:
+                return None
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _fold_keepers(keepers: dict, say, result: dict, failures: list) -> None:
+    """Echo the store-keeper cycle results and count kept pane keepers."""
+    result["store_keepers"] = keepers.get("store_keepers", [])
+    result["pane_keepers_stale"] = keepers.get("pane_keepers_stale", 0)
+    for c in result["store_keepers"]:
+        if c.get("result") == "cycled":
+            say(f"fno agents restart: store keeper {c.get('graph')} shut down (stale build; respawns on next read).")
+        else:
+            say(f"fno agents restart: store keeper {c.get('graph')} {c.get('result')}; it was NOT refreshed.", err=True)
+            failures.append(f"store keeper: {c.get('graph')} {c.get('result')}")
+    if result["pane_keepers_stale"]:
+        n = result["pane_keepers_stale"]
+        say(f"fno agents restart: {n} pane keeper(s) run an older build; kept with their panes, current when each pane ends.")
+
+
 def restart_command(
     force: bool = typer.Option(
         False,
@@ -250,15 +278,10 @@ def restart_command(
         say("fno agents restart: no installed fno-agents binary; skipping daemon restart", err=True)
     else:
         try:
-            daemon_cmd = [str(binary), "restart"]
+            daemon_cmd = [str(binary), "restart", "--json"]
             if force:
                 daemon_cmd.append("--force")
-            # stderr is captured so a failed restart's reason reaches the
-            # verdict line (x-f188 change 6): the failure must never sit on
-            # a stream the success-shaped output hides.
-            daemon_proc = subprocess.run(
-                daemon_cmd, capture_output=True, text=True, timeout=120
-            )
+            daemon_proc = subprocess.run(daemon_cmd, capture_output=True, text=True, timeout=120)
             rc = daemon_proc.returncode
         except (OSError, subprocess.SubprocessError) as exc:
             result["daemon"] = "failed"
@@ -267,60 +290,25 @@ def restart_command(
         else:
             if daemon_proc.stderr:
                 typer.echo(daemon_proc.stderr, err=True)
+            keepers = _parse_keepers_line(daemon_proc.stdout)
             if rc == 0:
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")
+                if keepers is not None:
+                    _fold_keepers(keepers, say, result, failures)
             else:
-                daemon_detail = (daemon_proc.stderr or daemon_proc.stdout or "").strip().splitlines()
-                detail = f": {daemon_detail[-1]}" if daemon_detail else ""
-                result["daemon"] = f"failed:{rc}"
-                say(
-                    f"fno agents restart: fno-agents restart exited {rc}{detail}",
-                    err=True,
-                )
-                failures.append(f"daemon: exit {rc}{detail}")
-
-    # 1b. Store keepers (x-f188 change 6): cycle the stale ones, then
-    # report stale pane keepers as KEPT (nothing can refresh one on demand).
-    # Socks and verdicts come from the census; a store cycle ends nothing a
-    # person can see, so this leg is NOT behind --mux.
-    try:
-        from fno import update as _update
-        from fno.graph import store as _store
-
-        census_rows = _update.running_components()
-        store_socks = [
-            Path(r["sock"])
-            for r in census_rows
-            if r.get("component") == "store-keeper"
-            and r.get("verdict") == "stale"
-            and r.get("sock")
-        ]
-        result["pane_keepers_stale"] = sum(
-            1
-            for r in census_rows
-            if r.get("component") in ("pane-keeper", "thread-keeper")
-            and r.get("verdict") == "stale"
-        )
-        cycled = _store.cycle_keepers(store_socks, only_stale=True)
-        result["store_keepers"] = cycled
-        for c in cycled:
-            if c["result"] == "current":
-                continue
-            if c["result"].startswith("spared"):
-                reason = c["result"].removeprefix("spared: ")
-                say(f"fno agents restart: store keeper {c['graph']} spared ({reason}); it was NOT refreshed.", err=True)
-                failures.append(f"store keeper: {c['graph']} spared ({reason})")
-            elif c["result"] == "cycled":
-                say(f"fno agents restart: store keeper {c['graph']} pid {c['old_pid']} -> {c['new_pid']} (stale build).")
-            else:
-                say(f"fno agents restart: store keeper {c['graph']} shut down but did not come back (graph file absent?).", err=True)
-                failures.append(f"store keeper: {c['graph']} did not respawn")
-    except Exception as exc:  # noqa: BLE001 - a census failure is advisory
-        say(f"fno agents restart: store keeper check failed ({exc}); skipped.", err=True)
-    if result.get("pane_keepers_stale"):
-        n = result["pane_keepers_stale"]
-        say(f"fno agents restart: {n} pane keeper(s) run an older build; kept with their panes, current when each pane ends.")
+                detail = (daemon_proc.stderr or daemon_proc.stdout or "").strip().splitlines()
+                suffix = f": {detail[-1]}" if detail else ""
+                if keepers is not None and any(
+                    c.get("result") != "cycled" for c in keepers.get("store_keepers", [])
+                ):
+                    # The nonzero exit IS the spared keeper, not the daemon.
+                    result["daemon"] = "restarted"
+                    _fold_keepers(keepers, say, result, failures)
+                else:
+                    result["daemon"] = f"failed:{rc}"
+                    say(f"fno agents restart: fno-agents restart exited {rc}{suffix}", err=True)
+                    failures.append(f"daemon: exit {rc}{suffix}")
 
     # 2. Mux servers. ONLY live sessions are restart targets; stale/unqueryable
     # rows are reported, never killed (killing a non-live socket is meaningless

@@ -46,7 +46,7 @@ import tempfile
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 from pathlib import Path
 
 from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched via store.GRAPH_MD
@@ -522,11 +522,8 @@ class _Keeper:
     def identify(self) -> dict:
         return json.loads(self._control(_TAG_IDENTIFY, _TAG_IDENTIFY_REPLY))
 
-    def shutdown(self) -> dict:
-        """Acknowledge a Shutdown request. The parsed reply lets the caller
-        tell a clean ack from a ``busy`` refusal (a mutation in flight,
-        x-f188 change 3)."""
-        return json.loads(self._control(_TAG_SHUTDOWN, _TAG_RESPONSE))
+    def shutdown(self) -> None:
+        self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
 
 
 def _recv_exact(stream: socket.socket, length: int) -> bytes:
@@ -572,9 +569,8 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
                     f"({proc.args!r}); is fno-agents-worker current? "
                     "`fno doctor` names lag",
                 ) from exc
-        # Exit code 3 (EXIT_SEAT_OWNED) is a healthy refusal: an incumbent
-        # holds the seat and its lock. Keep polling until the incumbent's
-        # socket answers; the request rides it. The seat is owned, not broken.
+        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep
+        # polling and the request rides it. The seat is owned, not broken.
         try:
             probe = keeper._connect()
             probe.close()
@@ -598,62 +594,21 @@ def identify_spawned_keepers() -> list[dict]:
     return rows
 
 
-def cycle_keepers(
-    socks: "Iterable[Path]", *, only_stale: bool = True
-) -> list[dict]:
-    """Shutdown + respawn the keepers behind ``socks`` (x-f188 change 6).
-
-    One dict per sock: ``{graph, old_pid, new_pid, result}`` with result
-    ``current`` (skipped: not stale, only possible when ``only_stale``),
-    ``spared: mutation in flight`` (the keeper refused Shutdown and keeps
-    the seat), ``cycled`` (old pid replaced by new_pid), or ``stopped``
-    (acked but no respawn - the graph file is gone).
-    """
-    out: list[dict] = []
-    for sock in socks:
-        try:
-            idrow = _Keeper(sock).identify()
-        except StoreUnavailable:
-            continue
-        old_pid = idrow.get("keeper_pid")
-        graph = idrow.get("graph")
-        row = {"graph": graph, "old_pid": old_pid, "new_pid": old_pid}
-        if only_stale and idrow.get("drift") != "drifted":
-            row["result"] = "current"
-            out.append(row)
-            continue
-        try:
-            reply = _Keeper(sock).shutdown()
-        except StoreUnavailable:
-            reply = None
-        if isinstance(reply, dict) and not reply.get("ok"):
-            kind = (reply.get("error") or {}).get("kind")
-            row["result"] = f"spared: {(reply.get('error') or {}).get('message') or kind}"
-            out.append(row)
-            continue
-        sock_path = store_socket_for(Path(graph)) if graph else sock
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and sock_path.exists():
-            time.sleep(0.05)
-        if graph:
-            graph_path = Path(graph)
-            if graph_path.exists():
-                try:
-                    _client_for(graph_path)
-                    new_row = _Keeper(store_socket_for(graph_path)).identify()
-                    row["new_pid"] = new_row.get("keeper_pid")
-                except StoreUnavailable:
-                    row["new_pid"] = None
-        row["result"] = "cycled" if row["new_pid"] else "stopped"
-        out.append(row)
-    return out
-
-
 def restart_spawned_keepers() -> list[dict]:
     """Restart identified keepers so a backend config flip takes effect."""
-    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
-    socks.add(store_socket_for(Path(GRAPH_JSON)))
-    cycle_keepers(socks, only_stale=False)
+    rows = identify_spawned_keepers()
+    for row in rows:
+        try:
+            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
+        except (KeyError, StoreUnavailable):
+            continue
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and any(
+        store_socket_for(Path(row["graph"])).exists() for row in rows
+    ):
+        time.sleep(0.05)
+    for row in rows:
+        _client_for(Path(row["graph"]))
     return identify_spawned_keepers()
 
 

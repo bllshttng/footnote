@@ -2909,7 +2909,7 @@ def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path
 
     assert result["update_ready"] is False
     assert result["running_stale"] == 2
-    assert len(result["running"]) == 3
+    assert len(result["running"]) == 2, "the payload carries the STALE rows"
     assert "installed aaa1111 is current" in result["guidance"]
     assert "2 running process(es) are older builds" in result["guidance"]
     assert "restart cycles 1" in result["guidance"]

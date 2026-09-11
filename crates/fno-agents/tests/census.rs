@@ -76,9 +76,7 @@ async fn census_finds_a_store_keeper_by_self_report() {
     let rows = fno_agents::census::census().await;
     let mine: Vec<&Value> = rows
         .iter()
-        .filter(|r| {
-            r["component"] == "store-keeper" && r["sock"] == sock.display().to_string()
-        })
+        .filter(|r| r["component"] == "store-keeper" && r["sock"] == sock.display().to_string())
         .collect();
     assert_eq!(
         mine.len(),
