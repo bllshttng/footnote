@@ -37,6 +37,19 @@ use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason,
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
+
+/// (x-1b90 change 3) How long a row has sat unresolved: now minus
+/// `last_message_at`, else `created_at`; a stamp that cannot parse names no
+/// age (0 keeps the line shape without inventing a number).
+fn unresolved_hold_secs(e: &state::RegistryEntry, now: i64) -> i64 {
+    let parsed = e
+        .last_message_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(state::rfc3339_like_to_secs)
+        .or_else(|| state::rfc3339_like_to_secs(&e.created_at));
+    parsed.map_or(0, |at| (now - at as i64).max(0))
+}
 use crate::receipt::{
     build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
 };
@@ -94,7 +107,9 @@ pub struct GcSummary {
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// The transcript could not be resolved through the row's own store.
-    pub kept_transcript_unresolved: Vec<String>,
+    /// (x-1b90 change 3) Rows of `{ id, held_s, nodes_done }`: the hold
+    /// names its age, and an old hold on done work asks for a decision.
+    pub kept_transcript_unresolved: Vec<UnresolvedHold>,
     /// The graph could not be read this pass. Never a retirement on a failed
     /// read.
     pub kept_graph_unreadable: Vec<String>,
@@ -171,6 +186,22 @@ pub struct StateReapEntry {
     pub bytes: u64,
     pub age_s: u64,
 }
+
+/// (x-1b90 change 3) One transcript-unresolved hold: the row, how long it
+/// has sat unresolved (now minus `last_message_at`, else `created_at`), and
+/// whether every node the row names reads done. The hold is right; what it
+/// lacked was a clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnresolvedHold {
+    pub id: String,
+    pub held_s: i64,
+    pub nodes_done: bool,
+}
+
+/// (x-1b90 change 3) When an unresolved hold is this old AND the row's work
+/// is all done, the render asks for a decision: `fno agents rm <name>` - an
+/// rm that, since change 1, proves the death it prints.
+pub(crate) const UNRESOLVED_HOLD_DECIDE_S: i64 = 6 * 3600;
 
 /// One state file retained because its safety proof was incomplete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1098,6 +1129,10 @@ pub(crate) fn run(
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let work = verdict.work.clone();
+        // (x-1b90 change 3) Every node the row names reads done - the exact
+        // condition under which an old unresolved hold may ask for a
+        // decision. Computed before `work` moves into the GcRow.
+        let nodes_done = matches!(work, WorkState::AllDone { .. });
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -1211,7 +1246,11 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
-                    summary.kept_transcript_unresolved.push(id)
+                    summary.kept_transcript_unresolved.push(UnresolvedHold {
+                        id,
+                        held_s: unresolved_hold_secs(e, now),
+                        nodes_done,
+                    })
                 }
                 Some(KeepReason::NodeConflict { a, b }) => {
                     summary.kept_node_conflict.push((id, a, b))
@@ -1576,15 +1615,31 @@ pub(crate) fn stage_session_retirement(
             "receipt did not persist: {err}"
         )));
     }
-    // Effect 1: the confirmed stop of the held process.
-    let stopped = stop_confirmed(e);
-    receipt
-        .effects
-        .push(crate::gc_native::stop_outcome_effect(stopped));
+    // Effect 1: the confirmed stop of the held process. Pane-substrate rows
+    // stop through the pid-proving helper (x-1b90 change 1): the roster and
+    // the worker socket never held the pane, so both today's arms confirm a
+    // stop that never happened. The detail is the receipt's measurement, so
+    // the routing decision lives here where the effect is built - never in
+    // the seam closure, whose bool answer cannot carry it.
+    let pane_stop = if e.substrate.as_deref() == Some("pane") {
+        Some(crate::pane_stop::stop_pane_process_confirmed(e))
+    } else {
+        None
+    };
+    let stopped = pane_stop
+        .as_ref()
+        .map(|s| s.confirmed)
+        .unwrap_or_else(|| stop_confirmed(e));
+    receipt.effects.push(crate::gc_native::stop_outcome_effect(
+        stopped,
+        pane_stop.as_ref().map(|s| s.detail.clone()),
+    ));
     if !stopped {
         let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
-            "the stop did not confirm; row kept for retry".into(),
+            pane_stop
+                .map(|s| s.detail)
+                .unwrap_or_else(|| "the stop did not confirm; row kept for retry".into()),
         ));
     }
     // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent

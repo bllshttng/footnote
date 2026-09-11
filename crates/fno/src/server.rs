@@ -3761,6 +3761,7 @@ impl Core {
                     .first()
                     .filter(|_| joined_rows.len() == 1)
                     .copied();
+                let orphan = self.orphaned_worker_for_pane(pid, agents, &evidence);
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
@@ -3783,7 +3784,8 @@ impl Core {
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
                     fno_id: self.fno_id_for_pane_with_agents(pid, agents),
-                    orphaned_worker: self.orphaned_worker_for_pane(pid, agents, &evidence),
+                    orphaned_worker: orphan.orphaned,
+                    release: orphan.release,
                     harness_session_id: joined_row.and_then(|a| a.harness_session_id.clone()),
                     predecessor_session_ids: joined_row
                         .map(|a| a.predecessor_session_ids.clone())
@@ -7885,14 +7887,14 @@ impl Core {
         // the operator asked for exactly that (AC4-EDGE).
         let hold_workers = policy == crate::digest_overlay::MuxRestorePolicy::Hold;
         let journal = scan_spawn_journal();
-        if let Some(error) = journal.error.as_deref() {
+        let receipt_store_error = journal.error;
+        if let Some(error) = receipt_store_error.as_deref() {
             self.notice_all(format!("restore: {error}"));
         }
         let SpawnJournal {
             receipts: spawn_receipts,
             never_bound,
-            spawned_names: _,
-            error: receipt_store_error,
+            ..
         } = journal;
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
@@ -24851,12 +24853,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             agents_read_ok: false,
-            journal: crate::spawn_journal::SpawnJournal {
-                receipts: HashMap::new(),
-                never_bound: HashMap::new(),
-                spawned_names: HashSet::new(),
-                error: None,
-            },
+            journal: crate::spawn_journal::SpawnJournal::default(),
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
             truth_by_name: HashMap::new(),

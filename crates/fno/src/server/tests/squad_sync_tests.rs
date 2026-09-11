@@ -237,6 +237,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
     let journal = crate::spawn_journal::SpawnJournal {
         receipts: HashMap::new(),
         never_bound: HashMap::new(),
+        reaped: HashMap::new(),
         spawned_names: ["w1".to_string()].into_iter().collect(),
         error: None,
     };

@@ -5,7 +5,7 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary, UnresolvedHold};
 use serde_json::{json, Value};
 
 /// Render the file-only reap receipt independently from row retirement.
@@ -255,9 +255,17 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  kept {id} (active: transcript written {age_s}s ago)\n"
         ));
     }
-    for id in &summary.kept_transcript_unresolved {
+    for hold in &summary.kept_transcript_unresolved {
+        let age = hold_age(hold.held_s);
+        let decide = hold.nodes_done && hold.held_s > crate::gc_sweep::UNRESOLVED_HOLD_DECIDE_S;
+        let suffix = if decide {
+            format!("; needs a decision: fno agents rm {}", hold.id)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "  kept {id} (transcript unresolved: absence is not quiet)\n"
+            "  kept {} (transcript unresolved for {}: absence is not quiet{suffix})\n",
+            hold.id, age
         ));
     }
     for id in &summary.kept_graph_unreadable {
@@ -470,6 +478,18 @@ pub fn mux_sweep_text_line(mux: &MuxSweep, dry_run: bool) -> String {
             None => format!("mux sweep (unread): {stderr_first}\n"),
         },
         MuxSweep::Skipped => "mux sweep (skipped by --no-mux)\n".to_string(),
+    }
+}
+
+/// (x-1b90 change 3) `i64` seconds as `16h31m`, `59m`, `59s`.
+fn hold_age(held_s: i64) -> String {
+    let s = held_s.max(0) as u64;
+    if s >= 3600 {
+        format!("{}h{}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
     }
 }
 
@@ -879,5 +899,54 @@ mod tests {
         assert!(lines[3].starts_with("pr_status_cache:"));
         assert!(lines[4].starts_with("total:"));
         assert_eq!(lines[5], "(dry-run: no changes made)");
+    }
+
+    /// (x-1b90 change 3) AC3-HP: a 17h hold on done work names its age and
+    /// ends with the decision. AC3-EDGE: a 2h hold carries no decision.
+    /// AC3-ERR: an old hold whose node is not done carries no decision.
+    #[test]
+    fn an_unresolved_hold_names_its_age_and_asks_for_a_decision_when_old_and_done() {
+        let hold = |held_s: i64, nodes_done: bool| UnresolvedHold {
+            id: "bp-ebd2-verb-law".into(),
+            held_s,
+            nodes_done,
+        };
+        // AC3-HP
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved
+            .push(hold(17 * 3600 + 31 * 60, true));
+        let text = render_reap(&s, false, true);
+        let line = text
+            .lines()
+            .find(|l| l.contains("bp-ebd2-verb-law"))
+            .expect("the hold line renders");
+        assert!(line.contains("transcript unresolved for 17h31m"), "{line}");
+        assert!(
+            line.ends_with("needs a decision: fno agents rm bp-ebd2-verb-law)"),
+            "{line}"
+        );
+
+        // AC3-EDGE
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(2 * 3600, true));
+        let line = render_reap(&s, false, true);
+        assert!(line.contains("transcript unresolved for 2h0m"), "{line}");
+        assert!(!line.contains("needs a decision"), "{line}");
+
+        // AC3-ERR
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(9 * 3600, false));
+        let line = render_reap(&s, false, true);
+        assert!(line.contains("transcript unresolved for 9h"), "{line}");
+        assert!(!line.contains("needs a decision"), "{line}");
+
+        // The JSON rows carry the fields the Python projection reads.
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(7 * 3600, true));
+        let v: Value = serde_json::from_str(render_reap(&s, true, true).trim()).unwrap();
+        let row = &v["kept_transcript_unresolved"][0];
+        assert_eq!(row["id"], "bp-ebd2-verb-law");
+        assert_eq!(row["held_s"], 7 * 3600);
+        assert_eq!(row["nodes_done"], true);
     }
 }

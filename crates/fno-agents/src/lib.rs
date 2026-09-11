@@ -142,6 +142,7 @@ pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;
+pub mod pane_stop;
 pub mod paths;
 pub mod pi;
 pub mod protocol;
