@@ -310,6 +310,9 @@ RUST_CLIENT_VERBS = frozenset(
         # queue arm all ask it, so no two merge paths can answer "may this head
         # merge?" differently. Python calls it via fno.rust_binary.verb_call.
         "authorized-merge",
+        # Running-process census (x-f188): one JSON row per long-lived process;
+        # the walker lives in crates/fno-agents/src/census.rs.
+        "census",
     }
 )
 
