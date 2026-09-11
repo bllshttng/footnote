@@ -13,7 +13,7 @@ from typing import Optional
 import pytest
 
 from fno.pr._proc import Result
-from fno.pr._sync_canonical import run_sync_canonical
+from fno.pr._sync_canonical import run_sync_canonical, sync_staleness
 
 
 @pytest.fixture(autouse=True)
@@ -325,3 +325,120 @@ def test_default_shell_runner_bounds_captured_output(tmp_path):
     assert "line1-END" not in res.stdout  # head discarded
     from fno.pr._sync_canonical import _CAPTURE_TAIL_CHARS
     assert len(res.stdout) <= _CAPTURE_TAIL_CHARS * 4  # bounded, not the full ~34KB
+
+
+# --- dirty-canonical gate (x-929f) ----------------------------------------
+
+
+def _dirty_runner(porcelain: str):
+    def runner(cmd, cwd=None, **kw):
+        if cmd[:2] == ["git", "status"]:
+            return Result(returncode=0, stdout=porcelain, stderr="")
+        return Result(returncode=0, stdout="git@github.com:owner/repo.git\n", stderr="")
+    return runner
+
+
+def test_dirty_canonical_overlap_refuses_with_recovery_line(tmp_path, capsys):
+    shell = _Shell()
+    rc = _run(
+        tmp_path,
+        gh_json=_gh_row(files=[{"path": "AGENTS.md"}]),
+        runner=_dirty_runner(" M AGENTS.md\n?? .candidate.50371\n"),
+        shell_runner=shell,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "canonical checkout is dirty" in err
+    assert f"checkout: {tmp_path}" in err
+    assert "AGENTS.md" in err  # the overlapping dirt is named
+    assert ".candidate.50371" not in err  # dirt the merge does not touch is not blocking
+    assert 'stash push -u -m "fno post-merge sync' in err  # attributed stash line
+    assert "-- AGENTS.md" in err  # pathspec carries only the blocking paths
+    assert "will retry" in err
+    assert shell.calls == []  # sync_command never ran
+    assert not (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
+
+
+def test_dirty_rename_new_side_blocks(tmp_path, capsys):
+    shell = _Shell()
+    rc = _run(
+        tmp_path,
+        gh_json=_gh_row(files=[{"path": "AGENTS.md"}]),
+        runner=_dirty_runner("R  docs/old.md -> AGENTS.md\n"),
+        shell_runner=shell,
+    )
+    assert rc == 1
+    assert "AGENTS.md" in capsys.readouterr().err
+
+
+def test_dirty_without_overlap_proceeds(tmp_path, capsys):
+    shell = _Shell(rc=0)
+    rc = _run(tmp_path, runner=_dirty_runner(" M OTHER.md\n"), shell_runner=shell)
+    assert rc == 0
+    assert "synced" in capsys.readouterr().out
+    assert len(shell.calls) == 1
+
+
+def test_dirty_probe_failure_fails_open(tmp_path, capsys):
+    def failing(cmd, cwd=None, **kw):
+        if cmd[:2] == ["git", "status"]:
+            return Result(returncode=128, stdout="", stderr="fatal: not a git repository")
+        return Result(returncode=0, stdout="git@github.com:owner/repo.git\n", stderr="")
+
+    shell = _Shell(rc=0)
+    rc = _run(tmp_path, runner=failing, shell_runner=shell)
+    assert rc == 0
+    assert len(shell.calls) == 1
+
+
+def test_dirty_blocking_list_capped_at_five_in_display(tmp_path, capsys):
+    porcelain = "".join(f" M merge{i}.py\n" for i in range(7))
+    shell = _Shell()
+    rc = _run(
+        tmp_path,
+        settings=_settings("git pull", paths=["*.py"]),
+        gh_json=_gh_row(files=[{"path": f"merge{i}.py"} for i in range(7)]),
+        runner=_dirty_runner(porcelain),
+        shell_runner=shell,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "merge0.py" in err and "merge4.py" in err
+    assert "(+2 more)" in err
+    assert "merge5.py --" not in err  # recovery pathspec still carries ALL paths
+    assert "-- merge0.py merge1.py merge2.py merge3.py merge4.py merge5.py merge6.py" in err
+
+
+def test_staleness_names_dirty_canonical_capped_at_five(tmp_path):
+    def runner(cmd, cwd=None, **kw):
+        if cmd[:2] == ["git", "status"]:
+            return Result(0, "".join(f" M f{i}.py\n" for i in range(7)), "")
+        if cmd[:3] == ["git", "symbolic-ref", "--short"]:
+            return Result(0, "origin/main\n", "")
+        return Result(0, "0\n", "")
+
+    settings = SimpleNamespace(
+        post_merge=SimpleNamespace(catchup_window_days=7, sync_stale_hours=24)
+    )
+    st = sync_staleness(
+        settings=settings, canonical_root=tmp_path, runner=runner,
+        gh_list=lambda c, w: [], fetch=False,
+    )
+    assert st.state == "fresh"  # dirt alone never flips the sync-currency verdict
+    assert "canonical dirty: f0.py, f1.py, f2.py, f3.py, f4.py (+2 more)" in st.detail
+
+
+def test_staleness_clean_canonical_adds_no_note(tmp_path):
+    def runner(cmd, cwd=None, **kw):
+        if cmd[:3] == ["git", "symbolic-ref", "--short"]:
+            return Result(0, "origin/main\n", "")
+        return Result(0, "0\n", "")
+
+    settings = SimpleNamespace(
+        post_merge=SimpleNamespace(catchup_window_days=7, sync_stale_hours=24)
+    )
+    st = sync_staleness(
+        settings=settings, canonical_root=tmp_path, runner=runner,
+        gh_list=lambda c, w: [], fetch=False,
+    )
+    assert st.detail == ""
