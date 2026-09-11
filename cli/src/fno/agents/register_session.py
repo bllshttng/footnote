@@ -571,21 +571,6 @@ def _report_observation(
     )
 
 
-def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
-    """x-dead task 0.1: the worker stamps the cwd it actually runs in."""
-    from fno.agents.registry import heal_own_cwd
-
-    try:
-        moved = heal_own_cwd(name=agent_self, harness=harness, cwd=cwd)
-    except Exception as exc:  # fail-open: never block session start (AC7-ERR)
-        events.emit("session_cwd_heal_failed", provider=harness, name=agent_self, error=str(exc))
-        return
-    if moved is not None:
-        events.emit(
-            "session_cwd_healed", provider=harness, name=agent_self, old=moved[0], new=moved[1]
-        )
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
     # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
@@ -624,7 +609,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rc = _restamp(
             args.agent_self, args.harness, args.session_id, source=args.source
         )
-        _heal_row_cwd(agent_self=args.agent_self, harness=args.harness, cwd=args.cwd)
+        # x-dead task 0.1: the worker stamps the cwd it actually runs in.
+        try:
+            from fno.agents.registry import heal_own_cwd
+
+            moved = heal_own_cwd(name=args.agent_self, harness=args.harness, cwd=args.cwd)
+        except Exception as exc:  # fail-open: never block session start (AC7-ERR)
+            events.emit(
+                "session_cwd_heal_failed", provider=args.harness, name=args.agent_self, error=str(exc)
+            )
+        else:
+            if moved is not None:
+                events.emit(
+                    "session_cwd_healed",
+                    provider=args.harness,
+                    name=args.agent_self,
+                    old=moved[0],
+                    new=moved[1],
+                )
         return rc
 
     try:
