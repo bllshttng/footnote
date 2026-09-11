@@ -546,6 +546,18 @@ pub fn space_dir(cwd: &Path) -> PathBuf {
     spaces_root_dir().join(space_slug(&root))
 }
 
+/// [`space_dir`] for best-effort callers: `None` instead of the hermetic
+/// refusal when a test process declared no state root, so a report-only path
+/// (the stop/rm claims release) skips the space arm rather than panicking
+/// the daemon mid-stop.
+pub fn space_dir_opt(cwd: &Path) -> Option<PathBuf> {
+    let pinned = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
+    if cfg!(test) && !test_root_declared() && !pinned("FNO_SPACES_DIR") && !pinned(HOME_ENV) {
+        return None;
+    }
+    Some(space_dir(cwd))
+}
+
 /// The per-worktree slice: `<space>/worktrees/<name>/` from a linked
 /// worktree, the space root itself from canonical. Session-keyed state
 /// (target-state.md, run-log.jsonl) resolves here; mirrors Python

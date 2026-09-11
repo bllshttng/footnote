@@ -861,6 +861,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     "agent_stopped",
+    // Stop/rm claims release (x-9c91): the receipt event for the claims a
+    // stopped or removed worker held; one emit per stop/rm that ran one.
+    "agent_stop_claims_released",
     // A stop the daemon REFUSED to claim: the interrupt never confirmed a
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",

@@ -6098,7 +6098,8 @@ fn release_stopped_claims_into(
     if let Some(space_claims) = cwd
         .as_deref()
         .filter(|c| !c.is_empty())
-        .map(|cwd| crate::paths::space_dir(std::path::Path::new(cwd)).join("claims"))
+        .and_then(|cwd| crate::paths::space_dir_opt(std::path::Path::new(cwd)))
+        .map(|dir| dir.join("claims"))
         .filter(|dir| !dirs.contains(dir))
     {
         dirs.push(space_claims);

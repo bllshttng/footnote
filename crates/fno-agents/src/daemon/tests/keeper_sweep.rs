@@ -235,6 +235,11 @@ async fn keeper_thread_stop_confirms_the_kill_and_stamps_the_row_exited() {
     // x-9c91: the stop now releases the stopped row's claims, which resolves
     // the row-cwd space dir, so the hermetic guard needs its pin.
     let home = keeper_sweep_home("kpstop");
+    // The env pins race every other test that resolves state roots; hold the
+    // shared lock for their whole lifetime.
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     std::env::set_var("FNO_SPACES_DIR", home.root().join("spaces"));
     std::env::set_var("FNO_CLAIMS_ROOT", home.root().join("claims-root"));
     let sock = lane_b_keeper_dir(&home).join("wk-stop.sock");
@@ -278,6 +283,8 @@ async fn keeper_thread_stop_confirms_the_kill_and_stamps_the_row_exited() {
                 .and_then(Value::as_str)
                 == Some("keeper-thread")
     }));
+    std::env::remove_var("FNO_SPACES_DIR");
+    std::env::remove_var("FNO_CLAIMS_ROOT");
     std::fs::remove_dir_all(home.root()).ok();
 }
 

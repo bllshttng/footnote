@@ -64,6 +64,7 @@ async fn a_stopped_false_response_releases_nothing() {
     );
     assert!(claim_path.exists(), "the claim file must stay in place");
     std::env::remove_var("FNO_CLAIMS_ROOT");
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -104,5 +105,6 @@ async fn a_confirmed_stop_releases_the_stopped_holders_dead_claims() {
     assert_eq!(released[0]["key"], "node:x-stop");
     assert!(!claim_path.exists(), "the dead claim file is gone");
     std::env::remove_var("FNO_CLAIMS_ROOT");
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
