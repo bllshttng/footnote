@@ -242,6 +242,10 @@ fn restore_builds_named_held_panes_without_resuming_workers() {
     core.clients[0].view = (sid, tid);
     set_resume_program(&["/bin/cat"]);
     let _resume_guard = ResumeProgramGuard;
+    // x-eb79: a held non-claude pane's resume resolves its argv off-loop,
+    // which needs a live reactor. The staged seam is what the resolution
+    // would deliver; /bin/cat keeps the spawn hermetic.
+    core.staged_resume_argv = Some(vec!["/bin/cat".into(), "codex-session-one".into()]);
     core.command(1, Command::FocusPane(held_pid));
     let resumed_pid = core.worker_pane["t-codex-one"][0];
     assert_ne!(resumed_pid, held_pid, "focus swaps in the harness process");
