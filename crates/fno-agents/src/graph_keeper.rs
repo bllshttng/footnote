@@ -1088,10 +1088,14 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             let normalized = graph_store::normalize_plan_path(opt_str(&params, "path"));
             Ok(json!({ "path": normalized }))
         }
-        // The canonical key order, for the ordering tests and any caller
-        // that documents the on-disk shape: one source of truth (the
-        // ported store's constant), never a re-typed copy.
+        // The canonical key order, for the ordering tests and one caller that
+        // documents the on-disk shape: one source of truth (the ported
+        // store's constant), never a re-typed copy.
         "canonical_field_order" => Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER })),
+        // The one delivery classifier (scoreboard.rs): graph nodes + ledger
+        // rows in, a per-node delivery classification out. Pure; the
+        // scoreboard views are the callers, so seven views read one decision.
+        "scoreboard_classify" => crate::scoreboard::classify(&params).map_err(StoreError::Invalid),
         // One named op applied over client-shipped rows, no file I/O and no
         // publish: `set_related`, `plan_path_owner_conflict`, and friends
         // run INSIDE a client mutator on an in-hand snapshot, where a full

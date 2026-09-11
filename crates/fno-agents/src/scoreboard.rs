@@ -1,0 +1,338 @@
+//! The one delivery classifier behind every scoreboard view.
+//!
+//! One decision about what a node's evidence means, so the main, provider,
+//! skill, efficiency, lane, calibration and fidelity views cannot drift into
+//! seven answers. The terminal vocabulary arrives from the caller (Python owns
+//! `fno.terminals`); the decision lives here:
+//!
+//! - a confirmed merge delivers the node, ledger row or not;
+//! - an explicit doc/delivery terminal delivers the node with its evidence;
+//! - a session terminal on a KNOWN node without a merge is never a delivery
+//!   (an in-review node cannot ship from DonePRGreen);
+//! - a session terminal on a node the graph lost stays a fallback, labeled
+//!   `inferred`, never equal to a confirmed merge.
+
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalVocabulary<'a> {
+    /// Terminals that deliver a document outright (DoneAdvisory).
+    pub doc: &'a [String],
+    /// Terminals that record an explicit delivery outcome (DoneDelivery).
+    pub delivery: &'a [String],
+    /// Ship terminals that prove delivery only via a merge (DonePRGreen,
+    /// DoneBatched) and otherwise are a session's last word, not evidence.
+    pub ship: &'a [String],
+}
+
+impl<'a> TerminalVocabulary<'a> {
+    fn class_of(&self, terminal: &str) -> Option<&'static str> {
+        if self.doc.iter().any(|t| t == terminal) {
+            Some("doc")
+        } else if self.delivery.iter().any(|t| t == terminal) {
+            Some("delivery")
+        } else if self.ship.iter().any(|t| t == terminal) {
+            Some("ship")
+        } else {
+            None
+        }
+    }
+}
+
+fn str_field<'a>(node: &'a Map<String, Value>, key: &'a str) -> Option<&'a str> {
+    node.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Classify one node from its graph row and its ledger rows.
+/// The returned shape is the wire contract the Python views consume.
+pub fn classify_node(
+    node: Option<&Map<String, Value>>,
+    node_id: &str,
+    rows: &[&Map<String, Value>],
+    vocab: &TerminalVocabulary,
+) -> Value {
+    let mut best_terminal: Option<(&'static str, &str)> = None;
+    let mut ship_ts: Option<&str> = None;
+    let mut cost = 0.0f64;
+    let mut cost_known = false;
+    for row in rows {
+        if let Some(terminal) = str_field(row, "termination_reason") {
+            let kind = vocab.class_of(terminal);
+            if let Some(kind) = kind {
+                if best_terminal.is_none() {
+                    best_terminal = Some((kind, terminal));
+                }
+                if let Some(ts) = str_field(row, "completed") {
+                    ship_ts = Some(ts);
+                }
+            }
+        }
+        if let Some(c) = row.get("cost_usd").and_then(Value::as_f64) {
+            if c.is_finite() && c >= 0.0 {
+                cost += c;
+                cost_known = true;
+            }
+        }
+    }
+
+    let node_ship_ts =
+        node.and_then(|n| str_field(n, "merged_at").or_else(|| str_field(n, "completed_at")));
+    let merged = node.is_some_and(|n| str_field(n, "merge_status") == Some("merged"));
+
+    let (class, delivered, confirmed, evidence) = if merged {
+        ("merged", true, true, "graph_merge")
+    } else if let Some(("doc", _)) = best_terminal {
+        ("delivered_doc", true, true, "doc_terminal")
+    } else if let Some(("delivery", _)) = best_terminal {
+        ("delivered_delivery", true, true, "delivery_terminal")
+    } else if node.is_some() && best_terminal.is_some() {
+        // Known node, no merge, but a session claims it shipped: the stop is
+        // recorded as evidence and nothing more. It can never promote to a
+        // delivery while the graph says unmerged.
+        ("unmerged", false, false, "session_terminal")
+    } else if node.is_none() && best_terminal.is_some() {
+        // The graph lost this node; the terminal is all that is left. Keep it,
+        // labeled, so the count survives without passing as a confirmed merge.
+        ("inferred", true, false, "session_terminal")
+    } else {
+        ("no_evidence", false, false, "none")
+    };
+
+    json!({
+        "node_id": node_id,
+        "class": class,
+        "delivered": delivered,
+        "confirmed": confirmed,
+        "evidence": evidence,
+        "ship_ts": node_ship_ts.or(ship_ts),
+        "node_known": node.is_some(),
+        "cost_usd": cost,
+        "cost_known": cost_known,
+        "rows": rows.len(),
+    })
+}
+
+/// Classify every node in `entries` plus every row-referenced node id the
+/// graph does not carry. Params: `entries` (graph nodes), `rows` (ledger
+/// rows), `doc_terminals` / `delivery_terminals` / `ship_terminals`.
+/// Returns `{"by_node": {...}, "coverage": {...}}`. Pure; no file I/O.
+pub fn classify(params: &Value) -> Result<Value, String> {
+    let empty = Vec::new();
+    let entries = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let rows = params
+        .get("rows")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let list = |key: &str| -> Vec<String> {
+        params
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let doc = list("doc_terminals");
+    let delivery = list("delivery_terminals");
+    let ship = list("ship_terminals");
+    let vocab = TerminalVocabulary {
+        doc: &doc,
+        delivery: &delivery,
+        ship: &ship,
+    };
+
+    let mut by_id: BTreeMap<String, &Map<String, Value>> = BTreeMap::new();
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(id) = str_field(obj, "id") else {
+            continue;
+        };
+        by_id.insert(id.to_string(), obj);
+    }
+
+    let mut rows_by_node: BTreeMap<String, Vec<&Map<String, Value>>> = BTreeMap::new();
+    let mut rowless: Vec<&Map<String, Value>> = Vec::new();
+    for row in rows {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        match str_field(obj, "graph_node_id") {
+            Some(nid) => rows_by_node.entry(nid.to_string()).or_default().push(obj),
+            None => rowless.push(obj),
+        }
+    }
+
+    let mut by_node = Map::new();
+    for (id, node) in &by_id {
+        let node_rows: Vec<&Map<String, Value>> = rows_by_node.remove(id).unwrap_or_default();
+        by_node.insert(
+            id.clone(),
+            classify_node(Some(node), id, &node_rows, &vocab),
+        );
+    }
+    // Row-referenced ids the graph does not carry: the inferred population.
+    for (id, node_rows) in &rows_by_node {
+        by_node.insert(id.clone(), classify_node(None, id, node_rows, &vocab));
+    }
+
+    let inferred = by_node
+        .values()
+        .filter(|c| c["class"] == "inferred")
+        .count();
+    Ok(json!({
+        "by_node": by_node,
+        "coverage": {
+            "nodes": by_id.len(),
+            "rows_with_node": rows.len() - rowless.len(),
+            "rows_without_node": rowless.len(),
+            "inferred_nodes": inferred,
+        },
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// One vocabulary builder shared by every test in this module. The String
+    /// vectors live in a local binding so the borrows stay valid for the call.
+    fn with_vocab<F: FnOnce(&TerminalVocabulary)>(f: F) {
+        let doc = vec!["DoneAdvisory".to_string()];
+        let delivery = vec!["DoneDelivery".to_string()];
+        let ship = vec!["DonePRGreen".to_string(), "DoneBatched".to_string()];
+        f(&TerminalVocabulary {
+            doc: &doc,
+            delivery: &delivery,
+            ship: &ship,
+        })
+    }
+
+    fn row(node: &str, terminal: &str) -> Map<String, Value> {
+        let r = json!({"graph_node_id": node, "termination_reason": terminal, "cost_usd": 1.5});
+        r.as_object().unwrap().clone()
+    }
+
+    fn node(id: &str, merge_status: Option<&str>) -> Map<String, Value> {
+        let n = json!({"id": id, "merge_status": merge_status});
+        n.as_object().unwrap().clone()
+    }
+
+    fn one(v: Map<String, Value>) -> Map<String, Value> {
+        v
+    }
+
+    #[test]
+    fn merge_delivers_without_any_ledger_row() {
+        with_vocab(|v| {
+            let n = one(node("x-1", Some("merged")));
+            let out = classify_node(Some(&n), "x-1", &[], v);
+            assert_eq!(out["class"], "merged");
+            assert_eq!(out["delivered"], true);
+            assert_eq!(out["confirmed"], true);
+            assert_eq!(out["cost_known"], false);
+        });
+    }
+
+    #[test]
+    fn in_review_node_cannot_ship_from_done_terminal() {
+        with_vocab(|v| {
+            let n = one(node("x-1", None));
+            let r = one(row("x-1", "DonePRGreen"));
+            let out = classify_node(Some(&n), "x-1", &[&r], v);
+            assert_eq!(out["class"], "unmerged");
+            assert_eq!(out["delivered"], false);
+            assert_eq!(out["evidence"], "session_terminal");
+        });
+    }
+
+    #[test]
+    fn advisory_terminal_delivers_a_document() {
+        with_vocab(|v| {
+            let n = one(node("d-1", None));
+            let r = one(row("d-1", "DoneAdvisory"));
+            let out = classify_node(Some(&n), "d-1", &[&r], v);
+            assert_eq!(out["class"], "delivered_doc");
+            assert_eq!(out["delivered"], true);
+            assert_eq!(out["evidence"], "doc_terminal");
+        });
+    }
+
+    #[test]
+    fn delivery_terminal_preserves_its_evidence() {
+        with_vocab(|v| {
+            let n = one(node("x-1", None));
+            let r = one(row("x-1", "DoneDelivery"));
+            let out = classify_node(Some(&n), "x-1", &[&r], v);
+            assert_eq!(out["class"], "delivered_delivery");
+            assert_eq!(out["delivered"], true);
+        });
+    }
+
+    #[test]
+    fn lost_node_ships_only_as_inferred() {
+        with_vocab(|v| {
+            let r = one(row("x-lost", "DonePRGreen"));
+            let out = classify_node(None, "x-lost", &[&r], v);
+            assert_eq!(out["class"], "inferred");
+            assert_eq!(out["delivered"], true);
+            assert_eq!(out["confirmed"], false);
+        });
+    }
+
+    #[test]
+    fn merge_outranks_a_stale_unmerged_row_history() {
+        with_vocab(|v| {
+            let mut n = one(node("x-1", Some("merged")));
+            n.insert("merged_at".into(), json!("2026-09-10T00:00:00Z"));
+            let r = one(row("x-1", "NoProgress"));
+            let out = classify_node(Some(&n), "x-1", &[&r], v);
+            assert_eq!(out["class"], "merged");
+            assert_eq!(out["ship_ts"], "2026-09-10T00:00:00Z");
+        });
+    }
+
+    #[test]
+    fn malformed_cost_reads_as_unknown_never_zero() {
+        with_vocab(|v| {
+            let n = one(node("x-1", Some("merged")));
+            let mut r = one(row("x-1", "DonePRGreen"));
+            r.insert("cost_usd".into(), json!("not-a-number"));
+            let out = classify_node(Some(&n), "x-1", &[&r], v);
+            assert_eq!(out["cost_known"], false);
+        });
+    }
+
+    #[test]
+    fn classify_separates_known_inferred_and_nodeless() {
+        let params = json!({
+            "entries": [node("x-1", Some("merged")), node("x-2", None)],
+            "rows": [
+                row("x-1", "DonePRGreen"),
+                row("x-lost", "DonePRGreen"),
+                {"completed": "2026-09-10T00:00:00Z", "termination_reason": "DonePRGreen"},
+                {"completed": "2026-09-10T00:00:00Z", "termination_reason": "Budget", "graph_node_id": "x-2"},
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+        });
+        let out = classify(&params).unwrap();
+        assert_eq!(out["by_node"]["x-1"]["class"], "merged");
+        assert_eq!(out["by_node"]["x-2"]["class"], "no_evidence");
+        assert_eq!(out["by_node"]["x-lost"]["class"], "inferred");
+        assert_eq!(out["coverage"]["rows_without_node"], 1);
+        assert_eq!(out["coverage"]["inferred_nodes"], 1);
+    }
+}

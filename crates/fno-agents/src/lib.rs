@@ -167,6 +167,7 @@ pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
+pub mod scoreboard;
 pub mod scrape;
 pub mod screen;
 pub(crate) mod served_liveness;
