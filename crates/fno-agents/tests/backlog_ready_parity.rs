@@ -913,7 +913,7 @@ fn rust_rows(ctx: &Ctx, case: &Case, dir: &Path) -> Value {
     let mut claimed = std::collections::BTreeSet::new();
     if !case.claims.is_empty() {
         let dirs = vec![dir.join("claims-root/.fno/claims")];
-        for rec in fno_agents::claims::list_in(&dirs, Some("node:"), false) {
+        for rec in fno_agents::claims::list_in(&dirs, Some("node:"), false).expect("claims read") {
             if let Some(id) = rec.key.strip_prefix("node:") {
                 claimed.insert(id.to_string());
             }

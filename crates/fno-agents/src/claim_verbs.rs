@@ -213,7 +213,13 @@ fn run_claim_list(args: &[String]) -> i32 {
         }
     }
     let local_root = root.or_else(|| std::env::current_dir().ok());
-    let rows = crate::claims::list(prefix.as_deref(), local_root.as_deref(), include_stale);
+    let rows = match crate::claims::list(prefix.as_deref(), local_root.as_deref(), include_stale) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("fno-agents: claim list: {e}");
+            return 1;
+        }
+    };
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
     let rows: Vec<Value> = rows
@@ -357,6 +363,13 @@ fn run_claim_sweep(args: &[String]) -> i32 {
     } else {
         let local_root = root.clone().or_else(|| std::env::current_dir().ok());
         crate::claims::list(None, local_root.as_deref(), true)
+    };
+    let records = match records {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("fno-agents: claim sweep: {e}");
+            return 1;
+        }
     };
     println!(
         "{}",

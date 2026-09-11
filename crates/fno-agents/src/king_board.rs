@@ -469,7 +469,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 // Strict claims read: an unreadable root is unknown claim
                 // state, surfaced as a source error rather than an empty
                 // set that would re-dispatch held work.
-                let claimed_records = crate::claims::list_strict(Some("node:"), None, false);
+                let claimed_records = crate::claims::list(Some("node:"), None, false);
                 let Ok(claim_records) = claimed_records else {
                     return SourceRead::err(format!(
                         "claims unreadable: {}",
