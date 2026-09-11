@@ -14,41 +14,8 @@ Exit codes:
 The structured output uses --json on each verb. Without --json, output is a
 human-friendly summary on stdout; errors always go to stderr.
 
-do provenance: why the claim verbs write it
--------------------------------------------
-A node's `do` lifecycle row used to be written only at a clean terminal
-(release --stamp-do, the finalize backstop, /execute Step 1.5). A session killed
-mid-phase reaches none of those, so the whole row was lost - including a
-started_at that sat in its claim file the entire time. A node finished to an
-open, green, attested PR read `sessions=[blueprint only]`, and a groom pass
-would have redone it.
-
-The claim is the one thing every worker touches at the start of work and again
-at its end, so the row is bound to the claim's own lifecycle:
-
-  acquire  -> OPEN the row (started_at = claim.acquired_at, no ended_at)
-  release  -> CLOSE it (--stamp-do fills ended_at on the same row)
-
-`append_session_record` completes a duplicate row by filling a timestamp the
-first write omitted and never overwrites one, so open-then-close collapses to a
-single row and a retried stamp is a no-op.
-
-Three constraints shape the rest:
-
-* Both reachable acquire paths must stamp. The CLI `acquire` verb (init's cold
-  start) and target-start's in-process `_reacquire_node_claim` takeover are
-  separate code paths; a stamp on one is decorative, since a session killed on
-  the other still loses its row.
-* The identity is the OWNED one, never the ambient env. `_owned_do_identity`
-  reads the harness the claim was pinned to (init passes the proven --harness)
-  and the session encoded in the holder, because ambient marker precedence would
-  launder an inherited foreign marker into the row. Acquire and release share it
-  so they always address the same row.
-* Acquiring is not doing. A caller that takes the claim as a serialization step
-  and only then validates can be refused after the row is open; it releases with
-  --rollback-do, which removes an open row whose started_at matches this claim.
-  A closed row, or one opened by an earlier real window under the same identity,
-  is never touched.
+The claim verbs also write the node's `do` provenance rows; that contract
+lives in docs/architecture/claim-verbs-do-provenance.md.
 """
 
 from __future__ import annotations
@@ -87,7 +54,7 @@ from fno.tombstones import tombstone_group_cls
 
 RosterReading = _roster.RosterReading
 _finished_row_states = _roster._finished_row_states
-_worker_reachability = _roster._worker_reachability
+classify_workers = _roster.classify_workers
 read_roster = _roster.read_roster
 
 
@@ -882,8 +849,6 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
     would train every reader to ignore the alarm; and rows the predicate
     could not date read UNKNOWN, never live-by-default (x-dead).
     """
-    from fno.agents.reachability import REACHABLE, UNKNOWN
-
     # The claim's OWN state, never the hardcoded word free. The cross-check runs
     # for every unheld state, and `stale` is one of them, so a line saying free
     # over a payload saying stale made stdout and stderr disagree about the same
@@ -894,11 +859,14 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
     workers = info.get("roster_workers") or []
 
     if worker_verdicts is None:
-        worker_verdicts = {
-            w.get("name") or "": _worker_reachability(w).verdict for w in workers
-        }
-    engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
-    unmeasurable = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
+        engaged, unmeasurable, worker_verdicts = classify_workers(workers)
+    else:
+        from fno.agents.reachability import REACHABLE, UNKNOWN
+
+        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
+        unmeasurable = [
+            w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN
+        ]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         line = f"UNCLAIMED but a live worker is on this node: {rendered}"
@@ -1016,13 +984,7 @@ def status(
         except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
             closed = set()
         workers = [w for w in workers if str(w.get("row_id") or "") not in closed]
-        from fno.agents.reachability import REACHABLE, UNKNOWN
-
-        worker_verdicts = {
-            w.get("name") or "": _worker_reachability(w).verdict for w in workers
-        }
-        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
-        undated = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
+        engaged, undated, worker_verdicts = classify_workers(workers)
         if engaged:
             info["worked_by"] = [worker["name"] for worker in engaged]
             # x-dead task 2.1: degraded coverage enters the verdict, not a

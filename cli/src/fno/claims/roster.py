@@ -91,14 +91,25 @@ def _finished_row_states() -> frozenset:
     return _TERMINAL_STATES - _WAKE_STATES
 
 
+def classify_workers(workers: list) -> tuple[list, list, dict]:
+    """(engaged, unmeasurable, verdicts-by-name) for one roster read."""
+    from fno.agents.reachability import REACHABLE, UNKNOWN
+
+    verdicts = {w.get("name") or "": _worker_reachability(w).verdict for w in workers}
+    return (
+        [w for w in workers if verdicts.get(w.get("name") or "") == REACHABLE],
+        [w for w in workers if verdicts.get(w.get("name") or "") == UNKNOWN],
+        verdicts,
+    )
+
+
 def _worker_reachability(worker: dict):
     """One roster row through the ONE shared predicate (x-dead task 1.1).
 
-    REACHABLE means engaged, UNREACHABLE finished, UNKNOWN its own arm: an
-    undatable transcript is a verdict about the instrument, never
+    REACHABLE engaged, UNREACHABLE finished, UNKNOWN its own arm - never
     engaged-by-default. The transcript outranks the supervisor word for EVERY
-    row (a finished worker's row never leaves `working`, measured live
-    2026-09-11); a terminal word with no transcript stays positive evidence.
+    row (a finished worker's row never leaves `working`); a terminal word
+    with no transcript stays positive evidence of the end.
     """
     from fno.agents.reachability import (
         TRANSCRIPT_EVIDENCE_S,
@@ -125,14 +136,13 @@ def _worker_reachability(worker: dict):
     )
     if facts is None:
         # No transcript: the supervisor word is the only evidence. An active
-        # word stays reachable; a terminal word positively ended the row (a
-        # killed worker with a rotated transcript must still free its node).
+        # word stays reachable; a terminal word positively ended the row.
         if falsifier is not None:
             return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
         if state in ("working", "watching", "your-move"):
             return classify_reachability(truth_state=state, age_s=None, falsifier=None)
-        falsifier = f"finished-state:{state}" if state in _finished_row_states() else None
-        return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
+        finished = f"finished-state:{state}" if state in _finished_row_states() else None
+        return classify_reachability(truth_state=None, age_s=None, falsifier=finished)
     if facts.last_event_epoch is None:
         # A transcript PRESENT but undatable: the measured wrong answer read
         # this as engaged. It is UNKNOWN - a verdict about the instrument -
