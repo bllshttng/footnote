@@ -1076,28 +1076,21 @@ def cmd_spawn(
         "--yolo",
         "-Y",
         help=(
-            "Provider-specific dangerous-mode bypass. For codex: passes "
-            "--dangerously-bypass-approvals-and-sandbox. "
-            "For claude: maps to --permission-mode bypassPermissions. "
-            "Mutually exclusive with --permission-mode (pass one; exit 2)."
+            "Provider dangerous-mode bypass: codex --dangerously-bypass-"
+            "approvals-and-sandbox; claude bypassPermissions. Conflicts with "
+            "--permission-mode."
         ),
     ),
     fresh: bool = typer.Option(
         False,
         "--fresh",
-        help=(
-            "Accepted no-op alias: the worker cwd already defaults to the "
-            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
-        ),
+        help="No-op alias: the worker cwd already defaults to the canonical root (x-85fe).",
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help=(
-            "Keep the worker in the caller's cwd instead of the canonical-root "
-            "default. The explicit opt-in for extending WIP right here."
-        ),
+        help="Keep the worker in the caller's cwd instead of the canonical-root default.",
     ),
     role: str | None = typer.Option(
         None,
@@ -1118,10 +1111,7 @@ def cmd_spawn(
     monitor: str | None = typer.Option(
         None,
         "--monitor",
-        help=(
-            "Expose this spawn through a monitor. Initial support is exactly "
-            "'happy' with --harness claude --provider zai on the pane substrate."
-        ),
+        help="Expose this spawn through a monitor; 'happy' only, claude+zai, pane.",
     ),
     account: str | None = typer.Option(
         None,
@@ -1144,10 +1134,7 @@ def cmd_spawn(
         None,
         "--model",
         "-m",
-        help=(
-            "Forwarded as --model <m> to the provider's own CLI (exact "
-            "passthrough). Unset = provider default."
-        ),
+        help="Forwarded as --model <m> to the provider's own CLI. Unset = provider default.",
     ),
     permission_mode: str | None = typer.Option(
         None,
@@ -1302,10 +1289,7 @@ def cmd_spawn(
         False,
         "--force",
         "-F",
-        help=(
-            "Bypass the max_live cap and the RAM floor; the worker is still "
-            "QoS-demoted and still counted."
-        ),
+        help="Bypass the max_live cap and the RAM floor; the worker is still counted.",
     ),
     no_wait: bool = typer.Option(
         False,
