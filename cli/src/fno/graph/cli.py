@@ -35,10 +35,6 @@ from fno.graph._verb_classification import (
     _TRACKER_OWNED_VERBS,
 )
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
-    _build_backlog_node,
-    _session_provenance,
-)
-from fno.graph.node_builder import (
     DESCRIPTION_HELP,
     ENCOUNTER_EVIDENCE_HELP,
     ORIGIN_EVIDENCE_HELP,
@@ -46,9 +42,12 @@ from fno.graph.node_builder import (
     SOURCE_KIND_HELP,
     SOURCE_NODE_HELP,
     TAG_HELP,
+    _build_backlog_node,
+    _session_provenance,
 )
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
+from fno.graph.api import cmd_version as _cmd_version
 
 cli = typer.Typer(
     name="graph",
@@ -74,6 +73,8 @@ _register_node_builder(cli)
 from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
 
 cli.command("worked", hidden=True)(_cmd_worked)
+
+cli.command("version", hidden=True)(_cmd_version)
 
 cli.add_typer(_triage_cli, name="triage")
 
