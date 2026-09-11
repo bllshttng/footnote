@@ -1,10 +1,10 @@
 """Unit tests for fno.graph.parity - the in-package JSON/SQLite parity compare.
 
-Ported off scripts/analysis/graph-parity.py (x-9a09 wave 1 task 1.1): the
-compare now runs in-process (no subprocess, no plugin-script lookup) and
-adds a race guard that reads graph_meta.exported_version (the sha256 of the
-JSON bytes the shadow write just published - graph_store.rs:2262-2268)
-before trusting a row-by-row compare.
+Ported off scripts/analysis/graph-parity.py: the compare now runs in-process
+(no subprocess, no plugin-script lookup) and adds a race guard that reads
+graph_meta.exported_version (the sha256 of the JSON bytes the shadow write
+just published - graph_store.rs:2262-2268) before trusting a row-by-row
+compare.
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from fno.graph import parity
 
 
 def _write_json(path: Path, entries: list[dict]) -> str:
-    body = json.dumps({"entries": entries})
-    path.write_text(body, encoding="utf-8")
-    return parity._json_sha256(path)
+    data = json.dumps({"entries": entries}).encode("utf-8")
+    path.write_bytes(data)
+    return parity._json_sha256(data)
 
 
 def _make_db(path: Path, entries: list[dict], exported_version: "str | None") -> None:

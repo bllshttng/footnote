@@ -19,8 +19,8 @@ def _canonical(row: dict[str, Any]) -> str:
     return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def _json_sha256(graph: Path) -> str:
-    return f"sha256:{hashlib.sha256(graph.read_bytes()).hexdigest()}"
+def _json_sha256(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
 def _exported_version(db: Path) -> "str | None":
@@ -31,25 +31,26 @@ def _exported_version(db: Path) -> "str | None":
     return row[0] if row else None
 
 
-def _stable_version(graph: Path, db: Path, retries: int) -> "tuple[str, str | None] | None":
-    """Hash graph.json and read graph_meta.exported_version until they agree
-    (the sqlite shadow write stamps exported_version with the sha256 of the
-    JSON bytes it just wrote - graph_store.rs:2262-2268, graph_sqlite.rs:174-189).
-    A mismatch means the shadow write is mid-flight or fell behind; retry up
-    to `retries` times before giving up so a real race reads as UNMEASURED
-    rather than a false content divergence."""
-    json_sha = ""
-    exported: "str | None" = None
+def _stable_version(graph: Path, db: Path, retries: int) -> "bytes | None":
+    """Read graph.json and its graph_meta.exported_version until the bytes'
+    hash agrees with the stamp (the sqlite shadow write stamps
+    exported_version with the sha256 of the JSON bytes it just wrote -
+    graph_store.rs:2262-2268, graph_sqlite.rs:174-189). A mismatch means the
+    shadow write is mid-flight or fell behind; retry up to `retries` times
+    before giving up so a real race reads as UNMEASURED rather than a false
+    content divergence. Returns the stable bytes so the caller can parse rows
+    from them without a second read of the file."""
+    data = b""
     for _ in range(retries):
-        json_sha = _json_sha256(graph)
+        data = graph.read_bytes()
         exported = _exported_version(db)
-        if exported is None or exported == json_sha:
-            return json_sha, exported
+        if exported is None or exported == _json_sha256(data):
+            return data
     return None
 
 
-def _json_rows(path: Path) -> tuple[dict[str, str], list[str], list[str]]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _json_rows(data: bytes) -> tuple[dict[str, str], list[str], list[str]]:
+    value = json.loads(data)
     entries = value.get("entries") if isinstance(value, dict) else None
     if not isinstance(entries, list):
         raise ValueError("JSON graph root has no entries list")
@@ -105,15 +106,15 @@ def compare(*, graph: "Path | None" = None, db: "Path | None" = None, retries: i
     graph = Path(graph)
     db = Path(db or graph.with_suffix(".db"))
     try:
-        stable = _stable_version(graph, db, retries)
+        graph_bytes = _stable_version(graph, db, retries)
     except (OSError, sqlite3.Error) as exc:
         print(f"graph-parity: UNMEASURED: {exc}")
         return 2
-    if stable is None:
+    if graph_bytes is None:
         print(f"graph-parity: UNMEASURED: exported_version race after {retries} attempts")
         return 2
     try:
-        json_rows, malformed, json_order = _json_rows(graph)
+        json_rows, malformed, json_order = _json_rows(graph_bytes)
         sqlite_rows, sqlite_malformed, sqlite_order = _sqlite_rows(db)
     except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as exc:
         print(f"graph-parity: UNMEASURED: {exc}")
