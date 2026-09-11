@@ -107,10 +107,10 @@ pub fn wait_for_event(
 ///
 /// The claim audit lands in a DIFFERENT journal than the event log this wait
 /// polls, and reports a failed append ONLY on the daemon's stderr
-/// (`emit_audit_event`). CI at 8fe7d556a2af: the wait panicked "event never
-/// appeared" for 30s while stderr printed "events.jsonl lock timeout" every
-/// two seconds - an absence verdict over a blocked writer, on a file the
-/// failing writer never touched. Pure (paths in, string out) so the units run
+/// (`emit_audit_event`). In CI the wait once panicked "event never appeared"
+/// for 30s while stderr printed "events.jsonl lock timeout" every two
+/// seconds - an absence verdict over a blocked writer, on a file the failing
+/// writer never touched. Pure (paths in, string out) so the units run
 /// without a daemon.
 pub fn absence_verdict(
     journal: &Path,
@@ -171,7 +171,7 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
     // The daemon's stderr is evidence, not noise: a failed claim-audit append
     // is reported ONLY on stderr (emit_audit_event), and an inherited stderr
     // sends those lines to the CI job log where no assertion can read them.
-    // A file, not a pipe: no reader thread for a chatty child (x-be1d).
+    // A file, not a pipe: no reader thread for a chatty child.
     let stderr =
         fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = std::process::Command::new(DAEMON_BIN);

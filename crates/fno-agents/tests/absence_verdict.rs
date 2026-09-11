@@ -1,4 +1,4 @@
-//! Units for the timed-out event wait's verdict builder (x-be1d): three
+//! Units for the timed-out event wait's verdict builder: three
 //! daemon.stderr inputs, three different verdicts, so the helper discriminates
 //! rather than merely emitting words.
 
