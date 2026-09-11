@@ -923,7 +923,7 @@ def main() -> None:
             and isinstance(exc.name, str)
             and _is_fno_module(exc.name)
         ):
-            exc.msg = f"{exc.msg}{_reinstall_hint(exc.name)}"
+            exc.msg = f"{exc.msg or ''}{_reinstall_hint(exc.name)}"
         raise
 
 
