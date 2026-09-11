@@ -11,11 +11,10 @@ Footguns this verb encodes (tribal knowledge made runtime behavior):
    `RTK_DISABLED=1` in the child env so nothing re-wraps it.
 3. `... | tail && echo OK` masks the real exit code (false green). We propagate
    the child's *actual* return code.
-4. Full test output in an agent transcript is re-read by every later request in
-   the session. Default mode therefore captures ALL output to
-   `<repo>/.fno/last-test.log` and prints only a summary: on failure, the TAIL
-   of the log (errors live at the end - read from the end, expand upward via
-   the log path). `--stream` restores inherited stdio for interactive runs.
+4. Full test output in an agent transcript is re-read by every later request in the session.
+   Default mode therefore captures ALL output to `<repo>/.fno/last-test.log` and prints only a
+   summary: on failure, the TAIL of the log (errors live at the end - read from the end,
+   expand upward via the log path). `--stream` restores inherited stdio for interactive runs.
 
 The interpreter is resolved worktree-venv -> canonical-venv -> the running
 interpreter, so a fresh worktree with no local `.venv` still runs.
@@ -2326,13 +2325,11 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "Run the Python suite (default), or a sub-suite: `rust` (crates) or "
-        "`smoke [flags]` (the full CI smoke). The real exit code is "
-        "propagated, rtk is bypassed, and PYTHONPATH is pinned to the "
-        "worktree's cli/src. Use this, never a bare `pytest` in a worktree: "
-        "that imports the canonical fno and masks the exit code. Bare runs "
-        "execute in parallel and capture to .fno/last-test.log; `--stream` "
-        "restores inherited stdio. --census-deferred refuses a quarantined "
-        "test that now passes."
+        "`smoke [flags]` (the full CI smoke). The real exit code is propagated, "
+        "rtk is bypassed, and PYTHONPATH is pinned to the worktree's cli/src. "
+        "Bare `fno doctor test` runs the Python suite in parallel and captures "
+        "to .fno/last-test.log; `--stream` restores inherited stdio. "
+        "--census-deferred refuses a quarantined test that now passes."
     ),
 )
 @click.option("--stream", is_flag=True, help="Stream full output (no capture/log).")
@@ -2343,8 +2340,7 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     default=None,
     help=(
         "Capture here instead of .fno/last-test.log; the file's last line is "
-        "always EXIT=<rc>. (Claims the token: pytest's passthrough has no "
-        "bare --log.)"
+        "always EXIT=<rc>. (Claims the token: pytest's passthrough has no bare --log.)"
     ),
 )
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)

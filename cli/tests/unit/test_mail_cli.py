@@ -323,9 +323,13 @@ def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
 
 
 def test_send_without_kind_reads_body_file(runner, mailbox):
-    """Rank 3: --body-file binds in EVERY mode, not only --kind."""
+    """Rank 3: --body-file binds in EVERY mode, not only --kind.
+
+    The blank line is load-bearing: a wrapped second line is a rule-6
+    refusal, so multiline content ships as two paragraphs.
+    """
     body_file = mailbox / "msg.md"
-    body_file.write_text('body with "quotes"\nand a newline\n', encoding="utf-8")
+    body_file.write_text('body with "quotes"\n\nand a newline\n', encoding="utf-8")
     sent = runner.invoke(
         app,
         ["agents", "mail", "send", "--to-project", "web", "--from-name", "etl",

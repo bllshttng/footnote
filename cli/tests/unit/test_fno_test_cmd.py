@@ -11,12 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from fno import test_cmd
+from fno import test_cmd, test_runner
 
 
 def _write(p: Path, body: str) -> Path:
     p.write_text(body, encoding="utf-8")
     return p
+
+
+def _no_native_owner(monkeypatch):
+    # A dev machine has the deployed fno-agents on PATH; the native test-run
+    # owner would wrap the argv and re-frame the spawn failures some tests pin.
+    monkeypatch.setattr(test_runner, "_native_owner_binary", lambda: None)
 
 
 def test_run_propagates_pass(tmp_path, monkeypatch):
@@ -35,6 +41,7 @@ def test_run_propagates_failure(tmp_path, monkeypatch):
 
 def test_run_missing_interpreter_is_127(monkeypatch):
     # A missing interpreter raises FileNotFoundError (an OSError) -> 127.
+    _no_native_owner(monkeypatch)
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: "/nonexistent/python")
     assert test_cmd._run(["-q"]) == 127
 
@@ -63,6 +70,7 @@ def test_captured_log_ends_with_real_exit_code(tmp_path, monkeypatch):
 def test_missing_interpreter_writes_exit_127(tmp_path, monkeypatch):
     # The 127 OSError return must leave the marker too: a log that just ends
     # mid-run reads as "still going", not "the interpreter never started".
+    _no_native_owner(monkeypatch)
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: "/nonexistent/python")
     log = tmp_path / "custom.log"
     rc = test_cmd._run(["-q"], log_override=log)
@@ -241,6 +249,7 @@ def test_quiet_contract_failure_tails_log(tmp_path, monkeypatch, capsys):
 
 def test_quiet_contract_success_is_terse(tmp_path, monkeypatch, capsys):
     f = _write(tmp_path / "test_pass.py", "def test_ok():\n    assert True\n")
+    _no_native_owner(monkeypatch)
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
@@ -345,6 +354,7 @@ def test_pythonpath_pins_worktree_src(tmp_path, monkeypatch):
         captured["env"] = env
         captured["cmd"] = cmd
 
+    _no_native_owner(monkeypatch)
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
     monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record))
     monkeypatch.chdir(tmp_path)
