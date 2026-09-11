@@ -412,13 +412,31 @@ fn keeper_holds_its_seat_lock() {
 #[test]
 fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket() {
     // AC2-ERR: when the path no longer names the inode this keeper bound,
-    // an idle keeper exits WITHOUT unlinking - the rebound socket (the new
-    // keeper's) stays in place.
+    // an idle keeper exits EXIT_SEAT_OWNED=3 - the same verdict the
+    // pre-bind ladder spells - WITHOUT unlinking: the rebound socket (the
+    // new listener's) stays in place.
     let home = short_home("rebound");
     let graph = home.join("graph.json");
     std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
     let sock = home.join("graph.json.store.sock");
-    let mut a = spawn_keeper("rebound-a", &graph, &sock);
+    let a_stderr = home.join("rebound-a.stderr");
+    let mut a = Keeper {
+        child: Command::new(WORKER_BIN)
+            .args([
+                "--store-keeper",
+                "--sock",
+                sock.to_str().unwrap(),
+                "--graph",
+                graph.to_str().unwrap(),
+                "--session",
+                "rebound-a",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(std::fs::File::create(&a_stderr).unwrap()))
+            .spawn()
+            .expect("spawn keeper A"),
+        sock: sock.to_path_buf(),
+    };
     wait_for_socket(&sock);
     use std::os::unix::fs::MetadataExt;
     let old_ino = std::fs::metadata(&sock).unwrap().ino();
@@ -437,9 +455,15 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
         assert!(Instant::now() < deadline, "stale keeper never exited");
         std::thread::sleep(Duration::from_millis(50));
     };
+    let stderr = std::fs::read_to_string(&a_stderr).unwrap_or_default();
+    assert_eq!(
+        exited.code(),
+        Some(3),
+        "seat loss exits EXIT_SEAT_OWNED=3, got {exited}: {stderr}"
+    );
     assert!(
-        exited.code().is_none() || exited.code() == Some(0),
-        "seat loss is a clean exit, got {exited}"
+        stderr.contains(&sock.display().to_string()),
+        "the seat-loss line names the socket: {stderr}"
     );
     // The rebound socket still has a live listener behind it: A never
     // unlinked what it does not own.

@@ -702,7 +702,16 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 {
                     last_seat_check = std::time::Instant::now();
                     if !seat_still_ours(&cfg.sock, sock_ino) {
-                        break;
+                        // The same verdict the pre-bind ladder spells 3, so
+                        // spell 3 here too: falling through reports a robbed
+                        // seat as success (the racer-0 exit-0 in the CI race).
+                        // The path is not ours; skip the inode-guarded
+                        // unlink below the loop as well.
+                        eprintln!(
+                            "store keeper: {} is owned by a live keeper (inode moved); exiting",
+                            cfg.sock.display()
+                        );
+                        std::process::exit(EXIT_SEAT_OWNED);
                     }
                 }
                 // Drift self-retire (x-f188 change 3): a keeper idling on a
