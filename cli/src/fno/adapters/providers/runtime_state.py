@@ -1393,12 +1393,15 @@ class Headroom:
     names which half of the signal drove it: ``lock`` (the authoritative
     provider-level ``rate_limited_until``), ``window`` (usage enrichment),
     ``stale``/``absent``/``empty`` (nothing usable), or ``""`` for callers that
-    construct a bare verdict.
+    construct a bare verdict. ``observed_at`` is when the evidence that spoke
+    was measured: the probe time for ``window``, the lock stamp for ``lock``,
+    and None when nothing was observed (stale/absent/empty).
     """
 
     state: HeadroomState
     resets_at: float | None = None
     source: str = ""
+    observed_at: float | None = None
 
 
 def headroom(
@@ -1522,7 +1525,9 @@ def _headroom_from(
     ):
         # A death recorded after the probe is the newer fact; the window cannot
         # speak for it. The lock decides until a newer probe replaces it.
-        return Headroom(HeadroomState.EXHAUSTED, rlu, source="lock")
+        return Headroom(
+            HeadroomState.EXHAUSTED, rlu, source="lock", observed_at=lock_at
+        )
     # A window with no reset can never be "already reset", so the check that
     # exempts a stale window cannot exempt it: it always binds, on percentage
     # alone. That is the whole point of retaining it (x-763a).
@@ -1543,23 +1548,34 @@ def _headroom_from(
                 HeadroomState.EXHAUSTED,
                 min(resets) if resets else None,
                 source="window",
+                observed_at=snap.probed_at,
             )
         if snap.partial:
             # A partial response has a missing window, so never answer OK from
             # it. The reset is the soonest one actually observed.
             soonest = [w.resets_at for w in binding if w.resets_at is not None]
             return Headroom(
-                HeadroomState.LOW, min(soonest) if soonest else None, source="window"
+                HeadroomState.LOW, min(soonest) if soonest else None, source="window",
+                observed_at=snap.probed_at,
             )
         if not binding:
-            return Headroom(HeadroomState.OK, None, source="window")
+            return Headroom(
+                HeadroomState.OK, None, source="window", observed_at=snap.probed_at
+            )
         worst = max(binding, key=lambda w: w.used_pct)
         if worst.used_pct >= threshold_pct:
-            return Headroom(HeadroomState.LOW, worst.resets_at, source="window")
-        return Headroom(HeadroomState.OK, None, source="window")
+            return Headroom(
+                HeadroomState.LOW, worst.resets_at, source="window",
+                observed_at=snap.probed_at,
+            )
+        return Headroom(
+            HeadroomState.OK, None, source="window", observed_at=snap.probed_at
+        )
     if rlu is not None:
         # A lock remains useful when no fresh usable usage read exists.
-        return Headroom(HeadroomState.EXHAUSTED, rlu, source="lock")
+        return Headroom(
+            HeadroomState.EXHAUSTED, rlu, source="lock", observed_at=lock_at
+        )
     if snap is None:
         # An absent or stale window contributes nothing: UNKNOWN never means
         # exhausted and remains a legal failover destination.

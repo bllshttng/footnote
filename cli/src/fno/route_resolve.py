@@ -723,8 +723,8 @@ def runtime_capacity(
 ) -> dict[str, object]:
     """Harness capacity: per-account headroom aggregated MAX (exhausted only
     if EVERY account is); a proven active slot account IS the aggregate. The
-    value is ``{state, window, accounts, evidence, resets}``. Never probes,
-    never touches the network.
+    value is ``{state, window, accounts, sources, observed_at, evidence,
+    resets}``. Never probes, never touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -738,12 +738,16 @@ def runtime_capacity(
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
             detail: dict[str, str] = {}
             resets: dict[str, object] = {}
+            sources: dict[str, str] = {}
+            observed_at: dict[str, object] = {}
             best: Optional[str] = None
             window = "absent"
             for account, verdict in headrooms(accounts).items():
                 state = verdict.state.value
                 detail[account] = state
                 resets[account] = verdict.resets_at
+                sources[account] = verdict.source or "unknown"
+                observed_at[account] = verdict.observed_at
                 if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
                     best = state
                     window = verdict.source or "unknown"
@@ -759,6 +763,8 @@ def runtime_capacity(
                 "state": best or "unknown",
                 "window": window,
                 "accounts": detail,
+                "sources": sources,
+                "observed_at": observed_at,
                 "evidence": evidence,
                 "resets": resets,
             }

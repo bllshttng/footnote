@@ -1494,3 +1494,41 @@ class TestLockAuthoritativeHeadroom:
         )
         assert "stale-acct" not in read_state(now=now).provider_health
         assert headroom("stale-acct", now=now).state is HeadroomState.UNKNOWN
+
+    def test_a_stale_window_is_unknown_never_exhausted(self, state_path):
+        """The 300s probe TTL already decays a stale 100% window: the verdict
+        is UNKNOWN with source=stale, never EXHAUSTED. Pinning this so a later
+        change cannot quietly remove the decay (x-a0c4)."""
+        now = time.time()
+        self._write(
+            state_path,
+            usage=(now - 30 * 86400,
+                   [{"label": "weekly", "used_pct": 100.0, "resets_at": now + 86400}]),
+        )
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.UNKNOWN
+        assert verdict.source == "stale"
+        assert verdict.observed_at is None
+
+    def test_the_verdict_carries_when_its_evidence_was_observed(self, state_path):
+        """observed_at travels with the verdict: the lock's stamp on a lock
+        verdict, the probe time on a window verdict, None when nothing was
+        observed. Without it the age is computed and thrown away."""
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        now = time.time()
+        update_provider_health(
+            "acct", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=now + 3600,
+        )
+        verdict = headroom("acct", now=now)
+        assert verdict.source == "lock"
+        assert verdict.observed_at == pytest.approx(now)
+        write_usage_snapshot(
+            UsageSnapshot("acct", (UsageWindow("5h", 9.0, now + 3600),), now + 1, "probe"),
+            now=now + 1,
+        )
+        verdict = headroom("acct", now=now + 1)
+        assert verdict.source == "window"
+        assert verdict.observed_at == pytest.approx(now + 1)
