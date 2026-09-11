@@ -997,19 +997,17 @@ def compare_and_rebind(
 #: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
-#: The requeue pseudo-holder (`backlog/requeue`): the invoking session that will
-#: take the node, not an agent. Role holders are workflow markers, not mail
-#: addresses - `holder_agent_name` is the one resolver for that.
+#: The requeue pseudo-holder (`backlog/requeue`): the invoking session that
+#: will take the node, not an agent. `holder_agent_name` is the one resolver.
 TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 
 
 def holder_agent_name(holder: Optional[str]) -> Optional[str]:
     """Resolve a claim holder to the agent behind it, or None.
 
-    Role-prefixed holders name a worker or a session, not an address; a
-    caller that would mail the holder resolves here first. None means the
-    named worker or session has no registry row, so there is nobody to
-    reach - a skip, not a failure. An unprefixed holder passes through.
+    Role holders name a worker or a session, not an address; None means no
+    registry row stands behind the name, so there is nobody to reach - a
+    skip, not a failure. An unprefixed holder passes through.
     """
     if not holder:
         return None

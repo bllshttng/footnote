@@ -97,11 +97,9 @@ def note_recipients(
     def add(address: Optional[str], why: str) -> None:
         if not address or address in seen:
             return
-        # A claim holder is role-prefixed (`spawn-handover:<worker>`,
-        # `target-session:<sid>`): a workflow marker, not a mail address.
-        # Resolve it to the agent behind it here, where the address is born;
-        # None means the named worker/session has no registry row, so the
-        # note skips instead of failing to mail a role marker.
+        # A role holder (`spawn-handover:<worker>`, `target-session:<sid>`)
+        # is a workflow marker, not an address: resolve it where the address
+        # is born; None means nobody stands behind it, a skip not a failure.
         raw = address
         address = holder_agent_name(address)
         if not address or address in seen:

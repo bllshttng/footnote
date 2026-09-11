@@ -279,16 +279,12 @@ def live_worked_node_ids(
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose roster workers are live.
 
-    Three sources per node, all named in the worker list: the session-row
-    join (graph session id to roster row), the node-attributed fold (a live
-    registry worker whose graph session row was never written - the
-    spawn-time skip in spawn_lineage), and the unmeasurable fold (a live row
-    with no harness session id, attributed to its node by fleet_rows). An
-    unmeasurable row the roster CANNOT attribute to a node still refuses the
-    whole overlay: unknowable liveness fails closed. Attributable ones skip
-    themselves, so one worker never blanks the measure for every node.
-    The roster read is the price of attribution; only a graph with no
-    non-terminal node skips it.
+    Three sources per node: the session-row join, the node-attributed fold
+    (a registry worker whose graph session row was never written), and the
+    unmeasurable fold (a live row with no session id, attributed by
+    fleet_rows). An unattributable unmeasurable row still refuses: unknown
+    liveness fails closed, so one worker never blanks the measure. Only a
+    graph with no non-terminal node skips the roster read.
     """
     try:
         from fno.claims.roster import _really_finished, read_roster

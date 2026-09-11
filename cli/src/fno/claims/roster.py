@@ -26,11 +26,10 @@ def read_roster(
 ) -> RosterReading:
     """Read the fleet once and index it by resolved node id.
 
-    ``require_live_probe`` splits two consumers. Claim-status liveness must
-    refuse when the live probe never ran (a harness fallback is not an
-    answer about a specific holder). The worked overlay measures node
-    attribution, which the registry-only view still carries, so it passes
-    False and lets the promised fallback answer.
+    ``require_live_probe`` splits two consumers: claim-status liveness must
+    refuse when the live probe never ran (a fallback is not an answer about
+    a specific holder); the worked overlay measures node attribution, which
+    the registry-only view still carries, so it passes False.
     """
     try:
         from fno.agents.watchdog import fleet_rows
@@ -41,8 +40,8 @@ def read_roster(
 
     from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
 
-    # The harnesses' own wording for a degraded live probe; kept as a literal
-    # because a claims->harnesses import would be a new layering edge.
+    # The harnesses' degraded-probe wording, as a literal: an import would be
+    # a new layering edge.
     registry_only_mark = "falling back to registry-only view"
     unmeasurable: dict = {}
     blocking = []
@@ -53,11 +52,11 @@ def read_roster(
             if not w.startswith(ADVISORY_WARNING_PREFIX) and not degraded_probe:
                 blocking.append(w)
             continue
-        fields = {}
-        for tok in w[idx + len(UNMEASURABLE_ROW_PREFIX):].split():
-            if "=" in tok:
-                key, _, value = tok.partition("=")
-                fields[key] = value
+        fields = dict(
+            tok.split("=", 1)
+            for tok in w[idx + len(UNMEASURABLE_ROW_PREFIX):].split()
+            if "=" in tok
+        )
         if fields.get("node"):
             unmeasurable.setdefault(fields["node"], []).append(fields.get("name") or "unknown")
 
