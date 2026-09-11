@@ -2526,6 +2526,8 @@ def registry_rows_by_cwd(
     import json
     import os
 
+    from fno.paths import agents_registry_path
+
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
     target = Path(override) if override else (path or agents_registry_path())
     if not target.exists():

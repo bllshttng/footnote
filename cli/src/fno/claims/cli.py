@@ -902,7 +902,17 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
     unmeasurable = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
-        return f"UNCLAIMED but a live worker is on this node: {rendered}"
+        line = f"UNCLAIMED but a live worker is on this node: {rendered}"
+        unresolved = info.get("roster_rows_unresolved", 0)
+        if unresolved or unmeasurable:
+            # x-dead task 2.1: the verdict is only as good as its coverage,
+            # so the engaged line names the fraction too.
+            scanned = info.get("roster_rows_scanned", 0)
+            line += (
+                f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
+                + (f", {len(unmeasurable)} undated" if unmeasurable else "")
+            )
+        return line
     if unmeasurable:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in unmeasurable)
         return (
