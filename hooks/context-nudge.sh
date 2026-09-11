@@ -115,12 +115,18 @@ TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
 GENERAL_TRIGGER="50"
 KING_TRIGGER="40"
 if command -v fno >/dev/null 2>&1; then
-    _t=$(with_timeout 3 fno config get target.handoff.used_pct_trigger 2>/dev/null || true)
+    # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
+    # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
+    # hook that wants two numbers from one block asks for the block.
+    # stdout is `{"enabled":...,"used_pct_trigger":50,"king_used_pct_trigger":40}`;
+    # provenance goes to stderr. sed, not jq: jq is optional in this hook.
+    _blk=$(with_timeout 3 fno config get target.handoff 2>/dev/null || true)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
         *) GENERAL_TRIGGER="$_t" ;;
     esac
-    _t=$(with_timeout 3 fno config get target.handoff.king_used_pct_trigger 2>/dev/null || true)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"king_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 40
         *) KING_TRIGGER="$_t" ;;
