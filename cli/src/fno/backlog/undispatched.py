@@ -115,6 +115,10 @@ def classify_planned_unclaimed(
             "has_pr": _has_pr(entry),
             "batch_owner": bool(entry.get("batch")),
             "blocked": _blocked(entry, by_id),
+            # Containment folds a node into its owner's dispatch ("never
+            # dispatch alone"): it ships inside the owner's PR, so a free
+            # claim of its own does not make it offerable here.
+            "contained": bool(entry.get("contained_in")),
             "claim_state": claim_state,
         }
         if not (
@@ -125,6 +129,7 @@ def classify_planned_unclaimed(
             and not facts["has_pr"]
             and not facts["batch_owner"]
             and not facts["blocked"]
+            and not facts["contained"]
             and claim_state is None
         ):
             continue
