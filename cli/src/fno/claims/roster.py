@@ -91,22 +91,12 @@ def _finished_row_states() -> frozenset:
 def _worker_reachability(worker: dict):
     """One roster row through the ONE shared predicate (x-dead task 1.1).
 
-    Replaces ``_really_finished``'s two-state collapse, where a transcript
-    that could not be dated read as ENGAGED - the measured wrong answer that
-    rendered "UNCLAIMED but a live worker is on this node" over a done row.
-    The mapping: REACHABLE means engaged, UNREACHABLE means finished, and
-    UNKNOWN (no transcript, no readable epoch) is its own arm at every
-    caller - an undatable transcript is a verdict about the INSTRUMENT, not
-    about the worker.
-
-    The transcript outranks the supervisor's word for EVERY row, not only
-    terminal ones: a finished worker's row never leaves `working` (measured
-    live 2026-09-11 15:1xZ on t-b7f8-reaper-keep-rules - `fno agents list`
-    said parked while this reader said live from the same row), so an active
-    word beside a `done` tail is the stale word, not the worker. An
-    UNDATABLE transcript falls back to the supervisor word for a non-terminal
-    row (an unknowable age never demotes), and reads UNKNOWN for a terminal
-    one - never engaged-by-default.
+    REACHABLE means engaged, UNREACHABLE finished, UNKNOWN its own arm at
+    every caller: an undatable transcript is a verdict about the instrument,
+    never engaged-by-default. The transcript outranks the supervisor word for
+    EVERY row - a finished worker's row never leaves `working` (measured live
+    2026-09-11 on t-b7f8-reaper-keep-rules) - and a terminal word with no
+    transcript at all stays positive evidence the row ended.
     """
     from fno.agents.reachability import classify_reachability
 

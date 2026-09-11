@@ -209,24 +209,15 @@ def classify_reachability(
     """Pure classifier. ``falsifier`` is a basis string, or None for "did not fire".
 
     A probe that could not read its evidence must arrive here as ``None``, the
-    same as a probe that read it and found the agent healthy. That collapse is
-    deliberate and it is the most dangerous line in this module: if an unreadable
-    pid were allowed to falsify, every permission error would become a death
-    sentence and the reaping hazard would return through the back door.
-
-    ``pid_alive is True`` is positive process evidence (basis ``process``): the
-    owner question ("does a live worker hold this tree") may answer from a live
-    pid alone, because a parked worker between turns holds its tree while its
-    transcript is quiet. The NEGATIVE never rides this parameter - a dead pid
-    arrives as a ``falsifier`` (``pid_falsifier``), keeping every verdict
-    monotone: falsifier first, then positive evidence, then absence.
-
-    ``last_activity_basis="mtime"`` refuses positive evidence (x-dead, measured
-    2026-09-11): a transcript mtime moved 2h33m past its newest record because
-    the file is touched with no record appended. An active-looking state whose
-    only age is a file stamp lands UNKNOWN with basis ``mtime-only``; only a
-    parsed record can certify liveness. A live pid outranks it (process evidence
-    is not transcript evidence).
+    same as a probe that read it and found the agent healthy: an unreadable pid
+    must never falsify. ``pid_alive is True`` is positive process evidence
+    (basis ``process``) - a parked worker between turns holds its tree while
+    its transcript is quiet; the NEGATIVE never rides this parameter, a dead
+    pid arrives as a ``falsifier`` (``pid_falsifier``). Monotone order:
+    falsifier, then positive evidence, then absence.
+    ``last_activity_basis="mtime"`` is never positive (x-dead: a file stamp
+    moved 2h33m past its newest record); only a parsed record certifies
+    liveness, so an active-looking state with an mtime age lands UNKNOWN.
     """
     if falsifier is not None:
         return Reachability(UNREACHABLE, falsifier, age_s)

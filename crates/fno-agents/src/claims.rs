@@ -825,6 +825,31 @@ pub fn classify_with_basis(
 /// result for the record being classified. `session_witness` is the
 /// session-keyed liveness reader (x-a613); `None` keeps the pid-only
 /// verdicts legacy records were characterized under.
+/// The pid verdict for a claim whose holder is one short-lived process, at
+/// TTL expiry. Live keeps the claim; any pid cause except a refused probe
+/// frees it (Stale, reapable); a refusal falls through to the witness path -
+/// a refusal is not proof of death. None = no verdict; off-host records,
+/// pid-less records, and refused probes keep today's witness/grace path.
+fn pid_verdict_on_expiry(
+    rec: &ClaimRecord,
+    probe: &dyn Fn(i32) -> PidProbe,
+) -> Option<(ClaimState, &'static str)> {
+    if !is_same_machine(&rec.host, rec.machine_id.as_deref())
+        || rec.pid_unavailable
+        || rec.pid.is_none()
+    {
+        return None;
+    }
+    let (live, cause) = liveness_reading(rec, probe);
+    if live {
+        return Some((ClaimState::Live, cause));
+    }
+    if cause != basis::ACCESS_DENIED {
+        return Some((ClaimState::Stale, cause));
+    }
+    None
+}
+
 pub fn classify_with_basis_and_exclusivity(
     rec: &ClaimRecord,
     now: Option<i64>,
@@ -845,57 +870,14 @@ pub fn classify_with_basis_and_exclusivity(
             })
     };
     if is_expired(rec, now) {
-        // A review hold is a lease on the review; the holder's session answers another question.
-        if rec.key.starts_with("review:branch:") {
-            return (ClaimState::Stale, basis::TTL_EXPIRED);
-        }
-        // Boot-window reservation (x-41f7): every `dispatch:` record names the
-        // DISPATCHING process in its holder and carries that process's pid, so
-        // the recorded pid IS the verdict. The session witness is never
-        // consulted for these records - the recorded session belongs to the
-        // dispatcher and answers a different question, and its liveness kept
-        // ten dead reservations bucket-live while their long-lived king ran
-        // (10 of 10 named a dead pid, all 10 read live, measured 2026-09-07).
-        // The spawn CLI exits at launch by design, so a correctly-read
-        // reservation is short-lived after expiry; that is what a boot window
-        // is. Only the expired arm changes - the unexpired arm below keeps its
-        // Suspect. A refused probe is not a proof of death, so it falls
-        // through to the witness/grace path rather than freeing on pid
-        // evidence we were refused.
-        if rec.key.starts_with("dispatch:")
-            && is_same_machine(&rec.host, rec.machine_id.as_deref())
-            && !rec.pid_unavailable
-            && rec.pid.is_some()
-        {
-            let (live, cause) = liveness_reading(rec, probe);
-            if live {
-                return (ClaimState::Live, cause);
-            }
-            if cause != basis::ACCESS_DENIED {
-                return (ClaimState::Stale, cause);
-            }
-        }
-        // The spawn-gate mutex (x-dead direction three, 2026-09-11): a `gate:`
-        // record names the SHORT-LIVED process that held the machine-wide
-        // mutex in its holder string and carries that process's pid, so the
-        // pid IS the verdict. The session witness asks whether the SPAWNING
-        // session lives, and the spawning session outlives the gate hold by
-        // minutes - which is how a dead holder read `live` by `transcript-live`
-        // for seven minutes and queued every spawner on the machine behind it.
-        // A refused probe falls through to the witness path (a refusal is not
-        // proof of death). The unexpired arm keeps its Suspect, matching the
-        // dispatch: boot-window precedent (x-41f7).
-        if rec.key.starts_with("gate:")
-            && is_same_machine(&rec.host, rec.machine_id.as_deref())
-            && !rec.pid_unavailable
-            && rec.pid.is_some()
-        {
-            let (live, cause) = liveness_reading(rec, probe);
-            if live {
-                return (ClaimState::Live, cause);
-            }
-            if cause != basis::ACCESS_DENIED {
-                return (ClaimState::Stale, cause);
+        // A key whose holder is ONE SHORT-LIVED PROCESS reads its recorded
+        // pid as the verdict: `dispatch:` reservations (x-41f7) and the
+        // `gate:` spawn mutex (x-dead direction three). The session witness
+        // asks about the SPAWNING session, which outlives the process and
+        // used to heal both past their process's death.
+        if rec.key.starts_with("dispatch:") || rec.key.starts_with("gate:") {
+            if let Some(verdict) = pid_verdict_on_expiry(rec, probe) {
+                return verdict;
             }
         }
         // Corroborated hybrid: the pid keeps the claim Live only when it was
@@ -3769,7 +3751,6 @@ mod tests {
             metadata: Map::new(),
         }
     }
-
 
     #[test]
     fn liveness_matches_python_classify_including_hybrid_arm() {

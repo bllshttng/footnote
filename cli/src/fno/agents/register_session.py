@@ -585,10 +585,8 @@ def _report_observation(
 def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
     """x-dead task 0.1: the worker stamps the cwd it actually runs in.
 
-    The spawner mints the row with the spawn directory; this heal makes the
-    registry's cwd field answer "where does this worker work" for every
-    reader that joins on it. Fail-soft by contract: any failure emits a
-    ``session_cwd_heal_failed`` warning event and never blocks session start.
+    Fail-soft by contract: any failure emits ``session_cwd_heal_failed`` and
+    never blocks session start.
     """
     from fno.agents.registry import heal_own_cwd
 

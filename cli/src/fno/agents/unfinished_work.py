@@ -151,18 +151,14 @@ OWNER_UNKNOWN = "unknown"
 def owner_verdict(
     probe: OwnerProbe, *, live_activity_s: float = DEFAULT_LIVE_ACTIVITY_S
 ) -> str:
-    """``live`` | ``gone`` | ``unknown`` for one owner candidate.
+    """``live`` | ``gone`` | ``unknown``, through the ONE shared predicate
+    (``classify_reachability``), never a private vocabulary (x-dead).
 
-    Derived through the ONE shared liveness predicate
-    (``classify_reachability``), never a private vocabulary (x-dead):
-    falsifiers first (a positively dead pid, the confirmed-exit stamp - but
-    never while the transcript is fresh, because a harness resume kills the
-    pid while the session keeps writing), then positive evidence (a live pid,
-    or transcript activity inside the owner window). Everything else,
-    including every unreadable read, is unknown, and unknown never reads as
-    ownerless. The one clock-word outside the predicate is a STALE claim:
-    only TTL expiry proves a lease dead (suspect keeps TTL protection, and
-    the claims machinery itself refuses to steal it)."""
+    Falsifiers first (dead pid, exit stamp - never while the transcript is
+    fresh: a harness resume kills the pid while the session keeps writing),
+    then positive evidence. Unknown never reads as ownerless. The one
+    clock-word outside the predicate is a STALE claim: only TTL expiry proves
+    a lease dead."""
     from fno.agents.reachability import REACHABLE, UNREACHABLE, classify_reachability
 
     fresh = probe.transcript_age_s is not None and probe.transcript_age_s <= live_activity_s
@@ -721,10 +717,10 @@ def report_roots() -> "list[Path]":
 
 
 def _default_truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
-    """One truth resolution, age AND basis (x-dead: an mtime-derived age must
-    reach the classifier labelled, or the 2h33m stat lie reads as positive
-    transcript evidence). The injectable ``truth_resolver`` contract keeps
-    returning a bare age, so injected probes carry no basis."""
+    """One truth resolution, age AND basis (an mtime-derived age must reach
+    the classifier labelled, or the stat lie reads as positive evidence).
+    The injected ``truth_resolver`` contract keeps returning a bare age, so
+    injected probes carry no basis."""
     from fno.agents.session_truth import resolve_session_truth
 
     result = resolve_session_truth(handle)
