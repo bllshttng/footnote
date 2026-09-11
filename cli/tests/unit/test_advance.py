@@ -1618,13 +1618,6 @@ def test_worker_agent_name_carries_verb_id_and_slug():
     ) == "ab-bp-ab-2222aaaa-cargo-bootstrapper"
 
 
-def test_verb_qualifier_derives_bare_declared_verb():
-    # RETIRED with x-84b2: the verb rides the name as a code. The retirement is
-    # loud, so a stale caller fails here instead of minting an unqualified name.
-    with pytest.raises(NotImplementedError):
-        adv._verb_qualifier("blueprint")
-
-
 def test_worker_agent_name_qualifier_keeps_prefix_contract():
     # x-84b2: the verb code replaced the qualifier slot. The blueprint verb
     # lands as bp; the bare default is t.

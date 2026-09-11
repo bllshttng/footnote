@@ -1113,14 +1113,6 @@ def schedule_shadow(
     }
 
 
-def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
-    """RETIRED: the verb rides the dispatch name as a code, loud for stale callers."""
-    raise NotImplementedError(
-        "_verb_qualifier retired: the verb rides the dispatch name as a code "
-        "(fno.agents.naming.verb_code_for); the receipt carries the word."
-    )
-
-
 def _node_effective_verb(node: dict) -> Optional[str]:
     """The effective workflow verb for a node dict, or None when the
     lifecycle table abstains. One wrapper so every advance door derives ONE
