@@ -592,6 +592,10 @@ _WHY_PHRASES = {
 }
 
 
+#: "the tick broke" - lock_held, quota_skip and disabled are benign.
+_BROKEN_OUTCOMES = ("timeout", "error")
+
+
 def tick_end_bits(end: dict) -> list[str]:
     """The parenthesised detail bits after a tick outcome: duration, sweep
     failures, and the phase name only when the tick broke (timeout or error).
@@ -604,7 +608,7 @@ def tick_end_bits(end: dict) -> list[str]:
         bits.append(f"{end['sweep_failures']} sweep failures")
     if end.get("why"):
         bits.append(_WHY_PHRASES.get(end["why"], end["why"]))
-    if end.get("phase") and end.get("outcome") in ("timeout", "error"):
+    if end.get("phase") and end.get("outcome") in _BROKEN_OUTCOMES:
         bits.append(f"phase: {end['phase']}")
     return bits
 
@@ -904,6 +908,7 @@ def liveness_report(
     plist_exists: bool,
     plist_mtime: Optional[float],
     now: float,
+    last_end: Optional[dict] = None,
 ) -> dict:
     """Pure verdict: is an enabled pr-watch actually running?  (fully injectable)
 
@@ -912,8 +917,29 @@ def liveness_report(
     #4).  A freshly-installed agent with no tick yet reads ``healthy-pending``,
     not ``dead`` (AC1-UI boundary); enabled-but-not-loaded, or a stale/absent
     tick past 2x the interval, reads ``dead`` with a fix command.
+    A post-install tick that ended broken (``last_end``, outcome timeout or
+    error, newer than the plist) defeats that grace: the watcher HAD its tick
+    and it died, so the verdict reads ``dead`` naming ``fno agents status``.
     """
     threshold = 2 * max(interval_seconds, 1)
+
+    # The post-install grace must not cover a tick that already ran and broke:
+    # an end newer than the plist IS the first post-install tick's outcome.
+    broke = None
+    if (
+        plist_mtime is not None
+        and isinstance(last_end, dict)
+        and last_end.get("outcome") in _BROKEN_OUTCOMES
+    ):
+        end_epoch = _parse_ts(last_end.get("ts"))
+        if end_epoch is not None and end_epoch > plist_mtime:
+            broke = last_end
+
+    def broke_suffix() -> str:
+        return (
+            f"post-install tick ended {broke.get('outcome')} "
+            f"({', '.join(tick_end_bits(broke))}) without completing"
+        )
 
     def verdict(v: str, detail: str, fix: Optional[str] = None) -> dict:
         return {
@@ -938,13 +964,19 @@ def liveness_report(
     # before it fires). Grace it regardless of whether an OLD tick predates the
     # (re)install - otherwise a re-enabled watcher reads a transient false
     # "dead" until the next tick.
-    if plist_mtime is not None and (now - plist_mtime) < threshold:
+    if broke is None and plist_mtime is not None and (now - plist_mtime) < threshold:
         tick_epoch = _parse_ts(last_tick_ts)
         if tick_epoch is None or plist_mtime > tick_epoch:
             return verdict("healthy-pending", "installed recently; awaiting first tick")
 
     tick_epoch = _parse_ts(last_tick_ts)
     if tick_epoch is None:
+        if broke is not None:
+            return verdict(
+                "dead",
+                f"installed {int(now - plist_mtime)}s ago; {broke_suffix()}",
+                "fno agents status",
+            )
         return verdict(
             "dead",
             f"no tick recorded and installed more than 2x interval ({threshold}s) ago",
@@ -953,6 +985,12 @@ def liveness_report(
 
     age = now - tick_epoch
     if age > threshold:
+        if broke is not None:
+            return verdict(
+                "dead",
+                f"last tick {int(age)}s ago (> 2x interval {threshold}s); {broke_suffix()}",
+                "fno agents status",
+            )
         return verdict(
             "dead",
             f"last tick {int(age)}s ago (> 2x interval {threshold}s)",
@@ -992,6 +1030,7 @@ def liveness_report_live(
         plist_exists=plist_exists,
         plist_mtime=plist_mtime,
         now=time.time(),
+        last_end=marks.get("last_end"),
     )
     # The last completed grant scan rides the same report the liveness verdict
     # uses: a done-probe can then assert "a healthy watcher completed a scan

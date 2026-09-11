@@ -1273,6 +1273,118 @@ def test_liveness_old_tick_and_old_plist_still_dead():
 
 
 # ---------------------------------------------------------------------------
+# x-0635: a broken post-install tick end defeats the fresh-install grace
+# ---------------------------------------------------------------------------
+
+
+def _end_at(epoch, outcome="timeout", phase="recovery", duration_s=484.6):
+    """A pr_watch_tick_end watermark shaped like _tick_watermarks writes it."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    ts = _dt.fromtimestamp(epoch, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"ts": ts, "outcome": outcome, "phase": phase,
+            "duration_s": duration_s, "sweep_failures": None}
+
+
+def test_liveness_broken_post_install_end_defeats_grace():
+    # AC1-HP: plist 600s old and newer than the last tick (3300s old) - a
+    # bare grace read - but the post-install tick ended timeout -> dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+
+
+def test_liveness_benign_or_old_end_keeps_grace():
+    # AC1-EDGE: ok/lock_held/quota_skip never defeat the grace; neither does
+    # a broken end OLDER than the plist (it predates this install).
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    now = tick + 3300
+    for outcome in ("ok", "lock_held", "quota_skip"):
+        v = _live(plist_mtime=plist, now=now,
+                  last_end=_end_at(plist + 595, outcome=outcome))
+        assert v["verdict"] == "healthy-pending", outcome
+    v = _live(plist_mtime=plist, now=now, last_end=_end_at(tick + 10))
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_malformed_last_end_keeps_grace():
+    # AC1-ERR: None, not a dict, or an unparseable/absent ts -> no raise,
+    # and the same verdict as today.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    now = tick + 3300
+    for bad in (None, "timeout", {"outcome": "timeout", "ts": "not-a-ts"},
+                {"outcome": "timeout"}):
+        v = _live(plist_mtime=plist, now=now, last_end=bad)
+        assert v["verdict"] == "healthy-pending", bad
+
+
+def test_liveness_defeated_grace_no_tick_names_broken_end():
+    # AC2-HP: grace defeated with no completed tick -> the dead detail names
+    # the broken end and never advises a reinstall.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(last_tick_ts=None, plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+    assert "installed 600s ago" in v["detail"]
+    assert "timeout" in v["detail"]
+    assert "phase: recovery" in v["detail"]
+    assert "more than 2x interval" not in v["detail"]
+    assert v["fix"] == "fno agents status"
+
+
+def test_liveness_no_tick_old_install_unchanged_without_last_end():
+    # AC2-EDGE: no last_end -> the legacy no-tick detail and fix are unchanged.
+    v = _live(last_tick_ts=None, plist_mtime=0.0, now=5000.0)
+    assert v["detail"] == "no tick recorded and installed more than 2x interval (1200s) ago"
+    assert v["fix"] == "fno do pr watch install"
+
+
+def test_liveness_broken_end_stale_tick_detail_gets_suffix():
+    # The stale-tick dead arm carries the same broken-end suffix and fix.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+    assert v["detail"].endswith("without completing")
+    assert v["fix"] == "fno agents status"
+
+
+def test_liveness_live_passes_last_end_to_the_verdict(tmp_path, monkeypatch):
+    # AC2-LIVE: liveness_report_live feeds marks["last_end"] into the verdict,
+    # so a broken post-install end can no longer read healthy-pending.
+    import os as _os
+    import time as _time
+    import types
+
+    m = _install()
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            pr_watch=types.SimpleNamespace(enabled=True, interval_seconds=600),
+        ),
+    )
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    plist = tmp_path / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    now = _time.time()
+    _os.utime(plist, (now - 100, now - 100))  # fresh: inside the grace window
+
+    report = m.liveness_report_live(
+        launch_agents_dir=tmp_path,
+        marks={"last_tick": None, "last_attempt": None,
+               "last_end": _end_at(now - 50), "completed_tick": None},
+    )
+    assert report["verdict"] == "dead"
+    assert report["fix"] == "fno agents status"
+
+
+# ---------------------------------------------------------------------------
 # The completed-merge-scan receipt on the status surface
 # ---------------------------------------------------------------------------
 
