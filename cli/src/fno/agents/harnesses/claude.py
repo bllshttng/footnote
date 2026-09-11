@@ -1479,26 +1479,6 @@ def claude_stop(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
     return (result.returncode, result.stderr or "")
 
 
-def claude_rm(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
-    """Run ``claude rm`` on the short id, with a wall-clock timeout.
-
-    Returns ``(exit_code, stderr_text)``. Non-zero exits do NOT raise; the
-    caller (``dispatch.rm_agent``) inspects exit_code to decide whether
-    ``--force`` should override the refusal.
-
-    Raises:
-        FileNotFoundError: claude not on PATH (caller maps to exit 14).
-        subprocess.TimeoutExpired: wall-clock exceeded (caller maps to 15).
-    """
-    result = _subprocess_run(
-        ["claude", "rm", short_id],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    return (result.returncode, result.stderr or "")
-
-
 def claude_attach(
     short_id: str,
     *,

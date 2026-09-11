@@ -3,7 +3,7 @@
 Wave-1 coverage (US4-lifecycle):
 
 - ``stop_agent`` (AC1-* in the design doc)
-- ``rm_agent`` (AC2-*)
+- the Python rm twin (deleted; Rust owns rm)
 - ``reconcile_agents`` (AC3-*)
 
 ``attach`` has no Python leg: the Rust client verb owns it, and its refusals
@@ -201,11 +201,8 @@ def test_stop_agent_not_found(tmp_path: Path, monkeypatch) -> None:
     assert spawn_called is False
 
 
-@pytest.mark.parametrize("verb", ["stop", "rm"])
 def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
-    tmp_path: Path,
-    monkeypatch,
-    verb: str,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     """Unreadable identity stores cannot degrade into exact-name selection."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -230,16 +227,8 @@ def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
         "claude_stop",
         lambda *_args, **_kwargs: shellouts.append("stop") or (0, ""),
     )
-    monkeypatch.setattr(
-        claude_mod,
-        "claude_rm",
-        lambda *_args, **_kwargs: shellouts.append("rm") or (0, ""),
-    )
 
-    action = {
-        "stop": dispatch.stop_agent,
-        "rm": dispatch.rm_agent,
-    }[verb]
+    action = dispatch.stop_agent
     with pytest.raises(dispatch.DispatchAskError, match="identity evidence unavailable") as exc:
         action("victim")
 
@@ -248,11 +237,8 @@ def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
     assert [entry.name for entry in registry_mod.load_registry()] == ["victim"]
 
 
-@pytest.mark.parametrize("verb", ["stop", "rm"])
 def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
-    tmp_path: Path,
-    monkeypatch,
-    verb: str,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     """A full id cannot be collapsed back to a corrupt shared registry name."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -285,13 +271,8 @@ def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
         "claude_stop",
         lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
     )
-    monkeypatch.setattr(
-        claude_mod,
-        "claude_rm",
-        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
-    )
 
-    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    action = dispatch.stop_agent
     with pytest.raises(dispatch.DispatchAskError, match="ambiguous") as exc:
         action(second.harness_session_id)
 
@@ -299,11 +280,8 @@ def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
     assert shellouts == []
 
 
-@pytest.mark.parametrize("verb", ["stop", "rm"])
 def test_destructive_lifecycle_pins_full_id_across_name_lock(
-    tmp_path: Path,
-    monkeypatch,
-    verb: str,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     """A same-name replacement cannot inherit a full-id lifecycle request."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -356,144 +334,13 @@ def test_destructive_lifecycle_pins_full_id_across_name_lock(
         "claude_stop",
         lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
     )
-    monkeypatch.setattr(
-        claude_mod,
-        "claude_rm",
-        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
-    )
 
-    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    action = dispatch.stop_agent
     with pytest.raises(dispatch.DispatchAskError, match="recipient identity changed"):
         action(original.harness_session_id)
 
     assert reads["count"] == 2
     assert shellouts == []
-
-
-@pytest.mark.parametrize("address_by_name", [False, True])
-def test_rm_retains_row_restamped_during_shellout(
-    tmp_path: Path,
-    monkeypatch,
-    address_by_name: bool,
-) -> None:
-    """A restamp after rm's side effect cannot make a replacement inherit deletion."""
-    use_tmpdir(monkeypatch, tmp_path)
-    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
-    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
-    _seed_registry(
-        dict(
-            name="victim",
-            provider="claude",
-            harness_session_id=original_id,
-            short_id="transportA",
-        ),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents import registry as registry_mod
-    from fno.agents.harnesses import claude as claude_mod
-
-    def restamp_during_rm(*_args, **_kwargs):
-        registry_mod.restamp_harness_session_id(
-            name="victim",
-            harness="claude",
-            session_id=replacement_id,
-        )
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", restamp_during_rm)
-
-    with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm") as exc:
-        dispatch.rm_agent("victim" if address_by_name else original_id)
-
-    assert exc.value.exit_code == 12
-    rows = registry_mod.load_registry()
-    assert len(rows) == 1
-    assert rows[0].harness_session_id == replacement_id
-
-
-def test_rm_codex_declined_write_restores_session_index_bytes(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The removal invariant: a removal that does not succeed leaves every
-    store unchanged. The teardown rewrote the index, the registry write
-    declined, and the captured entry lines go back -- so the refusal's
-    "nothing was removed" is true of the harness store too. Asserted on
-    the FILE BYTES, positive marker, not on the absence of an error."""
-    use_tmpdir(monkeypatch, tmp_path)
-    session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    _seed_registry(
-        dict(
-            name="victim-codex",
-            provider="codex",
-            harness_session_id=session_id,
-            codex_session_id=session_id,
-            status="live",
-        ),
-    )
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import codex as codex_mod
-
-    index = tmp_path / "session_index.jsonl"
-    index_line = json.dumps({"id": session_id, "threadName": "t"}) + "\n"
-    index.write_text(index_line)
-    monkeypatch.setattr(
-        codex_mod, "default_session_index_path", lambda: index
-    )
-
-    # Force the registry write to decline after a successful teardown,
-    # exactly the ghost shape that stranded a torn-down record behind a
-    # "nothing was removed" error.
-    monkeypatch.setattr(
-        dispatch,
-        "_update_registry_if_recipient_unchanged",
-        lambda *args, **kwargs: False,
-    )
-
-    with pytest.raises(dispatch.DispatchAskError, match="nothing was removed"):
-        dispatch.rm_agent("victim-codex")
-
-    assert index.read_text() == index_line
-
-
-def test_rm_refuses_when_row_is_removed_entirely_during_shellout(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """AC1-NEG (silent-no-op mode): the row is gone entirely by write time,
-    not just replaced. rm must not report success on a no-op removal."""
-    use_tmpdir(monkeypatch, tmp_path)
-    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
-    _seed_registry(
-        dict(
-            name="victim",
-            harness="claude",
-            harness_session_id=original_id,
-            short_id="transportA",
-        ),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents import registry as registry_mod
-    from fno.agents.harnesses import claude as claude_mod
-
-    def remove_during_rm(*_args, **_kwargs):
-        registry_mod.update_registry(
-            lambda entries: [e for e in entries if e.name != "victim"]
-        )
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", remove_during_rm)
-
-    with pytest.raises(dispatch.DispatchAskError, match="nothing was removed") as exc:
-        dispatch.rm_agent("victim")
-
-    assert exc.value.exit_code == 12
-    rows = registry_mod.load_registry()
-    assert len(rows) == 0
 
 
 @pytest.mark.parametrize("address_by_name", [False, True])
@@ -545,11 +392,8 @@ def test_stop_does_not_stamp_row_restamped_during_shellout(
     )
 
 
-@pytest.mark.parametrize("verb", ["stop", "rm"])
 def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
-    tmp_path: Path,
-    monkeypatch,
-    verb: str,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     """A newly ambiguous name cannot inherit a selected row's lifecycle write."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -582,13 +426,8 @@ def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
 
     monkeypatch.setattr(dispatch, "update_registry", update_with_duplicate)
     monkeypatch.setattr(claude_mod, "claude_stop", lambda *_a, **_k: (0, ""))
-    monkeypatch.setattr(claude_mod, "claude_rm", lambda *_a, **_k: (0, ""))
 
-    if verb == "rm":
-        with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm"):
-            dispatch.rm_agent("victim")
-    else:
-        assert dispatch.stop_agent("victim").claude_exit == 0
+    assert dispatch.stop_agent("victim").claude_exit == 0
 
     assert len(persisted) == 2
     assert {entry.status for entry in persisted} == {"live"}
@@ -964,220 +803,6 @@ def test_ac4_neg_a_healthy_stop_sends_no_signal(
 
 
 # ---------------------------------------------------------------------------
-# rm_agent — AC2-*
-# ---------------------------------------------------------------------------
-
-
-def test_rm_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
-    """AC2-HP: claude rm exits 0, registry row removed."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    monkeypatch.setattr(
-        claude_mod, "claude_rm",
-        lambda short_id, *, timeout=30.0: (0, ""),
-    )
-
-    result = dispatch.rm_agent("worker-claude")
-
-    assert result.registry_changed is True
-    assert result.claude_exit == 0
-    assert load_registry() == []
-    assert "removed: worker-claude" in capsys.readouterr().out
-
-    # AC2-HP forensic contract: agent_removed event with claude_exit=0,
-    # force=false, registry_changed=true.
-    events = _read_events(tmp_path)
-    rm_events = [e for e in events if e.get("kind") == "agent_removed"]
-    assert len(rm_events) == 1
-    assert rm_events[0]["claude_exit"] == 0
-    assert rm_events[0]["force"] is False
-    assert rm_events[0]["registry_changed"] is True
-
-
-def test_rm_crowned_agent_cleans_its_scope_manifest_best_effort(
-    tmp_path: Path, monkeypatch
-) -> None:
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(
-            name="worker-claude",
-            provider="claude",
-            short_id="7c5dcf5d",
-            harness_session_id="session-worker",
-            cwd=str(tmp_path),
-            crown_level=1,
-            crown_scope="alpha",
-            crown_grantor="human",
-        ),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.king.state import king_manifest_path, write_manifest
-    from fno.paths import space_dir
-
-    manifest = king_manifest_path("alpha", state_root=space_dir(tmp_path))
-    write_manifest(manifest, scope="alpha", harness_session_id="session-worker")
-    monkeypatch.setattr(claude_mod, "claude_rm", lambda short_id, *, timeout=30.0: (0, ""))
-
-    dispatch.rm_agent("worker-claude")
-
-    assert not manifest.exists()
-
-
-def test_rm_claude_refusal_leaves_registry_unchanged(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """AC2-ERR: non-forceful claude refusal -> stderr passthrough, registry unchanged."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    monkeypatch.setattr(
-        claude_mod, "claude_rm",
-        lambda short_id, *, timeout=30.0: (
-            1,
-            "session has uncommitted changes; commit or stash first\n",
-        ),
-    )
-
-    with pytest.raises(dispatch.DispatchAskError) as exc_info:
-        dispatch.rm_agent("worker-claude")
-
-    assert exc_info.value.exit_code == 1
-    # Registry preserved.
-    entries = load_registry()
-    assert len(entries) == 1
-    assert entries[0].name == "worker-claude"
-    err = capsys.readouterr().err
-    assert "uncommitted changes" in err
-
-    # AC2-ERR forensic contract: refusal event with registry_changed=false
-    # is what external `fno agents list` vs claude-supervisor diff
-    # reconciliation depends on. Drop this emit and the chain breaks
-    # silently.
-    events = _read_events(tmp_path)
-    rm_events = [e for e in events if e.get("kind") == "agent_removed"]
-    assert len(rm_events) == 1
-    assert rm_events[0]["claude_exit"] == 1
-    assert rm_events[0]["force"] is False
-    assert rm_events[0]["registry_changed"] is False
-
-
-def test_rm_force_overrides_claude_refusal(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """AC2-UI: --force removes the registry row even when claude rm fails."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    monkeypatch.setattr(
-        claude_mod, "claude_rm",
-        lambda short_id, *, timeout=30.0: (
-            1,
-            "session has uncommitted changes\n",
-        ),
-    )
-
-    result = dispatch.rm_agent("worker-claude", force=True)
-
-    assert result.force is True
-    assert result.claude_exit == 1
-    assert result.registry_changed is True
-    assert load_registry() == []
-    err = capsys.readouterr().err
-    assert "WARN: claude rm failed but --force given" in err
-
-    # AC2-UI: --force override emits with both claude_exit (preserved) and
-    # registry_changed=true so post-hoc forensics can see "operator chose
-    # to drop the row despite claude's refusal".
-    events = _read_events(tmp_path)
-    rm_events = [e for e in events if e.get("kind") == "agent_removed"]
-    assert len(rm_events) == 1
-    assert rm_events[0]["claude_exit"] == 1
-    assert rm_events[0]["force"] is True
-    assert rm_events[0]["registry_changed"] is True
-
-
-def test_rm_codex_is_registry_only(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """AC2-EDGE: codex rm removes registry row; no subprocess spawned."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(
-            name="worker-codex",
-            provider="codex",
-            codex_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        ),
-    )
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    spawn_called = False
-
-    def fake_rm(*args, **kwargs):
-        nonlocal spawn_called
-        spawn_called = True
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", fake_rm)
-
-    result = dispatch.rm_agent("worker-codex")
-
-    assert spawn_called is False
-    assert load_registry() == []
-    assert result.registry_changed is True
-    assert "removed: worker-codex" in capsys.readouterr().out
-
-
-def test_rm_claude_not_on_path(tmp_path: Path, monkeypatch) -> None:
-    """AC2-FR: claude not on PATH exits 14, registry unchanged."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    monkeypatch.setenv("PATH", "/nonexistent")
-
-    from fno.agents import dispatch
-    from fno.agents.registry import load_registry
-
-    with pytest.raises(dispatch.DispatchAskError) as exc_info:
-        dispatch.rm_agent("worker-claude")
-
-    assert exc_info.value.exit_code == 14
-    entries = load_registry()
-    assert len(entries) == 1  # registry untouched
-
-
-# ---------------------------------------------------------------------------
-# reconcile_agents — AC3-*
-# ---------------------------------------------------------------------------
-
-
 def test_reconcile_orphan_detection(tmp_path: Path, monkeypatch) -> None:
     """AC3-HP: live claude agent flips to orphaned when logs probe fails."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -2200,88 +1825,6 @@ def test_reconcile_orphans_a_pending_codex_pane_after_process_exit(
 # ---------------------------------------------------------------------------
 
 
-def test_rm_claude_timeout_preserves_registry(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Sigma #3: rm timeout must NOT mutate the registry.
-
-    Atomicity invariant (Locked Decision 6): claude shellout FIRST,
-    registry mutation AFTER. A timeout in the shellout layer must leave
-    the registry untouched and emit the agent_removed event with
-    timed_out=true + registry_changed=false.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    def fake_rm(short_id, *, timeout=30.0):
-        raise subprocess.TimeoutExpired(
-            cmd=["claude", "rm", short_id], timeout=timeout
-        )
-
-    monkeypatch.setattr(claude_mod, "claude_rm", fake_rm)
-
-    with pytest.raises(dispatch.DispatchAskError) as exc_info:
-        dispatch.rm_agent("worker-claude")
-
-    assert exc_info.value.exit_code == 15
-    entries = load_registry()
-    assert len(entries) == 1, "registry must stay intact on timeout"
-
-    events = _read_events(tmp_path)
-    rm_events = [e for e in events if e.get("kind") == "agent_removed"]
-    assert len(rm_events) == 1
-    assert rm_events[0].get("timed_out") is True
-    assert rm_events[0]["registry_changed"] is False
-    assert rm_events[0]["claude_exit"] is None
-
-
-def test_rm_print_lands_after_registry_write(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Sigma C3: 'removed:' confirmation must NOT print until update_registry succeeds.
-
-    Forces update_registry to raise OSError; the operator must see the
-    claude shellout already happened (event emitted) but must NOT see a
-    'removed:' confirmation in stdout — that print is now gated on
-    registry write success.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.harnesses import claude as claude_mod
-
-    monkeypatch.setattr(
-        claude_mod, "claude_rm",
-        lambda short_id, *, timeout=30.0: (0, ""),
-    )
-
-    def boom(*args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(dispatch_mod, "update_registry", boom)
-
-    with pytest.raises(dispatch.DispatchAskError) as exc_info:
-        dispatch.rm_agent("worker-claude")
-
-    assert exc_info.value.exit_code == 12
-    out = capsys.readouterr().out
-    assert "removed: worker-claude" not in out, (
-        "stdout must not lie about removal when the registry write fails"
-    )
-
-
 def test_reconcile_skips_claude_when_cli_missing(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2336,133 +1879,6 @@ def test_reconcile_skips_claude_when_cli_missing(
         assert entry.status == "live"
     err = capsys.readouterr().err
     assert "claude CLI not on PATH" in err
-
-
-def test_rm_force_removes_orphan_row_without_short_id(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Codex P1: rm --force on a corrupted claude row (no short_id) must
-    drop the registry entry instead of refusing.
-
-    The pre-fix code raised DispatchAskError(exit_code=12) before checking
-    --force. Help text told the operator to retry with --force, but --force
-    was never honored — the row stayed forever.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude"),
-    )
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import load_registry
-
-    spawn_called = False
-
-    def fake_rm(*args, **kwargs):
-        nonlocal spawn_called
-        spawn_called = True
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", fake_rm)
-
-    result = dispatch.rm_agent("worker-claude", force=True)
-
-    assert result.registry_changed is True
-    assert result.force is True
-    assert result.claude_exit is None
-    assert load_registry() == []
-    # No subprocess fired - we can't shell out without a short_id.
-    assert spawn_called is False
-    err = capsys.readouterr().err
-    assert "registry entry has no short id" in err
-
-
-def test_rm_without_force_on_orphan_row_still_refuses(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The non-force path on a corrupted row keeps the legacy refusal so
-    operators see the diagnostic and choose to add --force explicitly."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_registry(
-        dict(name="worker-claude", provider="claude"),
-    )
-
-    from fno.agents import dispatch
-    from fno.agents.registry import load_registry
-
-    with pytest.raises(dispatch.DispatchAskError) as exc_info:
-        dispatch.rm_agent("worker-claude")  # default force=False
-
-    assert exc_info.value.exit_code == 12
-    assert "no short id" in str(exc_info.value)
-    # Registry untouched.
-    assert len(load_registry()) == 1
-
-
-def test_rm_uses_locked_short_id_after_concurrent_recreate(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """Codex P1 round-3: rm must re-resolve the registry entry UNDER the lock.
-
-    Scenario: Process A enters rm_agent, resolves the pre-flock entry
-    (short_id=A). Before A acquires the flock, Process B removes and
-    recreates the same agent name with short_id=B. When A acquires the
-    flock, it MUST shell out `claude rm B` (current truth), NOT
-    `claude rm A` (stale pre-flock snapshot).
-
-    Simulated via monkeypatching _resolve_registry_entry to return
-    different entries on its two call-sites (pre-flock vs locked).
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    # Seed with the LATER (post-recreate) short_id so the locked re-resolve
-    # picks it up via the real load_registry path.
-    _seed_registry(
-        dict(name="racy", provider="claude", short_id="bbbbbbbb"),
-    )
-    _force_claude_on_path(monkeypatch, tmp_path)
-
-    from fno.agents import dispatch
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import AgentEntry
-
-    # Patch _resolve_registry_entry to return a STALE entry on the first
-    # call (pre-flock fast-fail) and fall through to the real resolver
-    # for subsequent calls (the locked re-resolve will read the seeded
-    # registry).
-    real_resolve = dispatch._resolve_registry_entry
-    call_count = {"n": 0}
-
-    def staged_resolve(name: str, **kwargs):
-        # kwargs absorbs registry_path forwarding from
-        # with_agent_lock_and_entry (Codex P2 on PR #317).
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            # Stale entry — pretends short_id was aaaaaaaa pre-flock.
-            return AgentEntry(
-                name=name, harness="claude", cwd="/tmp", log_path="/tmp/x",
-                short_id="aaaaaaaa",
-            )
-        return real_resolve(name, **kwargs)
-
-    monkeypatch.setattr(dispatch, "_resolve_registry_entry", staged_resolve)
-
-    received: list[str] = []
-
-    def fake_rm(short_id, *, timeout=30.0):
-        received.append(short_id)
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", fake_rm)
-
-    dispatch.rm_agent("racy")
-
-    # The shellout must target the locked-resolve short_id, NOT the stale
-    # pre-flock one. If the bug regressed, received would equal ["aaaaaaaa"].
-    assert received == ["bbbbbbbb"], (
-        f"rm_agent shelled out with stale short_id: {received!r}"
-    )
-    assert call_count["n"] >= 2, "expected at least 2 _resolve calls (pre-flock + locked)"
 
 
 def test_reconcile_preserves_claude_status_on_probe_error(

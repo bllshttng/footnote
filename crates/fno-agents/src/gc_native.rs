@@ -12,11 +12,10 @@
 //! history-preserving by construction.
 //!
 //! opencode is the one arm that does NOT run through the shared cascade. The
-//! cascade is also the `rm` verb's, and `rm` has a Python twin
-//! (`fno.agents.dispatch.rm_agent`) that leaves an opencode record alone on
-//! purpose. Archiving inside the cascade would move one of those two legs and
-//! not the other, so the arm lives here, in the retirement lane, which has no
-//! twin.
+//! cascade is also the `rm` verb's, and the deleted Python rm twin left an
+//! opencode record alone on purpose. Archiving inside the cascade would move
+//! one of those two legs and not the other, so the arm lives here, in the
+//! retirement lane, which has no twin.
 //!
 //! Absence is only accepted after a complete enumeration of the exact
 //! identity; a failed read is `Unverified` or `Failed`, never absence.

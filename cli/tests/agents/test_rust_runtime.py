@@ -944,6 +944,79 @@ def test_python_mode_refuses_ask(monkeypatch, tmp_path, binary_present) -> None:
     assert rr.RUNTIME_ENV in result.stderr
 
 
+def test_rm_runtime_without_installed_binary_refuses(monkeypatch) -> None:
+    """With no installed binary, `rm` refuses legibly: the Python rm twin was
+    deleted (one verb, one implementation), so there is no dispatch to fall
+    back to."""
+    from fno.cli import app
+
+    called: list = []
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    result = CliRunner().invoke(app, ["agents", "rm", "ghost"])
+    assert called == []
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert "ported" in result.stderr
+
+
+@pytest.mark.parametrize("binary_present", [True, False])
+def test_rm_runtime_python_mode_refuses(monkeypatch, tmp_path, binary_present) -> None:
+    """`FNO_AGENTS_RUNTIME=python` cannot force rm onto Python anymore: the
+    twin was deleted. The refusal names the flag so the operator learns the
+    contract changed rather than staring at a missing command."""
+    from fno.cli import app
+
+    called: list = []
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "python")
+    if binary_present:
+        monkeypatch.setattr(
+            rust_binary, "resolve_installed_binary", lambda: tmp_path / "bin"
+        )
+    else:
+        monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    result = CliRunner().invoke(app, ["agents", "rm", "any"])
+    assert called == []
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert rr.RUNTIME_ENV in result.stderr
+
+
+def test_rm_runtime_routes_to_binary_when_installed(monkeypatch, tmp_path) -> None:
+    """With an installed binary in auto mode, rm execs the binary exactly as
+    before the Python twin was deleted: the installed path is unchanged."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
+    captured: list = []
+
+    def fake_route(args, **kw):
+        captured.append((list(args), kw.get("binary")))
+        raise SystemExit(99)
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(app, ["agents", "rm", "ghost"])
+    assert result.exit_code == 99
+    assert captured == [(["rm", "ghost"], binary)]
+
+
+def test_rm_runtime_help_names_the_runtime_requirement(monkeypatch) -> None:
+    """`fno agents rm --help` must say rm runs on the Rust runtime only. The
+    help is the one surface that reaches a developer with no binary installed,
+    exactly the person the no-binary refusal also addresses."""
+    from fno.cli import app
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    result = CliRunner().invoke(app, ["agents", "rm", "--help"])
+    assert result.exit_code == 0
+    assert "Rust runtime only" in result.output
+
+
 def test_anycast_ask_resolves_in_python_before_routing(monkeypatch, tmp_path) -> None:
     """`ask --to-project` falls through to cmd_ask even with a binary (the
     client has no --to-project flag), resolves the recipient from the
