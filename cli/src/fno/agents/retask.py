@@ -170,6 +170,45 @@ def _flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     return None
 
 
+_TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+
+
+def _live_permission_mode(entry: AgentEntry) -> Optional[str]:
+    """The live worker's permission mode, read from its own transcript.
+
+    The registry row does not record the mode. Every mode change a claude
+    worker makes writes a ``permission-mode`` record, so the last one in the
+    transcript is the live mode. Anything else - another harness, a missing
+    transcript, no record - returns None, and the caller must fail closed.
+    """
+    if entry.harness != "claude":
+        return None
+    from fno.agents.dispatch import _mux_recipient_transcript
+
+    transcript = _mux_recipient_transcript(entry)
+    if transcript is None:
+        return None
+    try:
+        with transcript.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    mode: Optional[str] = None
+    for line in tail.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "permission-mode":
+            value = record.get("permissionMode")
+            if isinstance(value, str) and value:
+                mode = value
+    return mode
+
+
 def resolve_thread_viewport(
     entry: AgentEntry,
     *,
@@ -288,6 +327,7 @@ def detect_retask(
     target: RetaskCoordinate,
     *,
     node: str,
+    live_permission_mode: Optional[str] = None,
 ) -> dict:
     if entry.status != "live":
         return {"outcome": "refused", "reason": "worker_not_live"}
@@ -308,9 +348,15 @@ def detect_retask(
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 
+    # Compare the live worker, never presence: [agents.defaults] always
+    # resolves a permission_mode, so a presence test refused every retask
+    # (x-4d4d). A mode the transcript cannot confirm fails closed.
     if target.permission_mode is not None:
-        return {"outcome": "spawn_required", "reason": "permission_mode"}
-    if target.account is not None:
+        if live_permission_mode is None:
+            return {"outcome": "spawn_required", "reason": "permission_mode_unobserved"}
+        if live_permission_mode != target.permission_mode:
+            return {"outcome": "spawn_required", "reason": "permission_mode"}
+    if target.account is not None and target.account != entry.launch_account:
         return {"outcome": "spawn_required", "reason": "account"}
     current_axes = {
         "harness": entry.harness,
@@ -429,6 +475,7 @@ def execute_retask(
     ready_frame: Optional[Callable[[str], Mapping[str, object]]] = None,
     settle: Callable[[], None] = lambda: None,
     source_preflight: Optional[Callable[[AgentEntry], Mapping[str, object]]] = None,
+    live_permission_mode: Optional[str] = None,
 ) -> dict:
     """Run the bounded retask transaction through injected pane seams."""
 
@@ -453,7 +500,9 @@ def execute_retask(
         source = source_preflight(entry)
         if source.get("status") != "ready":
             return {**refusal, **source}
-    planned = detect_retask(entry, target, node=node)
+    planned = detect_retask(
+        entry, target, node=node, live_permission_mode=live_permission_mode
+    )
     if planned["outcome"] in {"spawn_required", "refused"}:
         return {**refusal, "reason": planned.get("reason", planned["outcome"])}
     initial_frame = read_frame()
@@ -844,6 +893,7 @@ def run_retask(
             ready_frame=ready_frame,
             settle=settle,
             source_preflight=_source_preflight,
+            live_permission_mode=_live_permission_mode(entry),
         )
     except RetaskTransportError as exc:
         # Preserve the partial transaction state in the refusal receipt.
@@ -883,4 +933,6 @@ def plan_retask(
         effort=effort,
         env=env,
     )
-    return detect_retask(entry, target, node=node)
+    return detect_retask(
+        entry, target, node=node, live_permission_mode=_live_permission_mode(entry)
+    )

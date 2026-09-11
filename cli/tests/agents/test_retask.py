@@ -110,25 +110,87 @@ def test_default_target_vendor_preserves_the_registry_vendor_axis():
 
 
 @pytest.mark.parametrize(
-    ("target_override", "reason"),
+    ("target_override", "reason", "live_mode"),
     [
-        ({"harness": "claude"}, "harness"),
-        ({"provider": "zai", "route": "zai/glm-5.3", "model": "glm-5.3"}, "provider"),
-        ({"substrate": "bg"}, "substrate"),
-        ({"permission_mode": "yolo"}, "permission_mode"),
-        ({"account": "work"}, "account"),
+        ({"harness": "claude"}, "harness", None),
+        ({"provider": "zai", "route": "zai/glm-5.3", "model": "glm-5.3"}, "provider", None),
+        ({"substrate": "bg"}, "substrate", None),
+        ({"permission_mode": "yolo"}, "permission_mode", "bypassPermissions"),
+        ({"permission_mode": "bypassPermissions"}, "permission_mode_unobserved", None),
+        ({"account": "work"}, "account", None),
     ],
 )
-def test_incompatible_axis_requires_spawn_before_any_payload(target_override, reason):
+def test_incompatible_axis_requires_spawn_before_any_payload(target_override, reason, live_mode):
+    """AC2-ERR: the mode compare is against the live worker, and an
+    unobservable mode fails closed; a legacy None launch_account counts as
+    different."""
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
     target = resolve_target_coordinate(
         "x-bdb9", settings=_settings(provider="codex"), env={}
     )
     target = replace(target, **target_override)
-    receipt = detect_retask(_row(), target, node="x-bdb9")
+    receipt = detect_retask(
+        _row(), target, node="x-bdb9", live_permission_mode=live_mode
+    )
 
     assert receipt == {"outcome": "spawn_required", "reason": reason}
+
+
+def test_matching_live_permission_and_account_retasks_ready() -> None:
+    """AC2-HP: equal live mode and account clear the compare the presence
+    test always failed."""
+    from fno.agents.retask import detect_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    target = replace(
+        target,
+        harness="claude",
+        provider=None,
+        permission_mode="bypassPermissions",
+        account="zai",
+    )
+    receipt = detect_retask(
+        _row(
+            harness="claude",
+            substrate="thread",
+            mux=None,
+            fno_id="F",
+            provider="anthropic",
+            launch_account="zai",
+        ),
+        target,
+        node="x-bdb9",
+        live_permission_mode="bypassPermissions",
+    )
+
+    assert receipt["outcome"] == "retask_ready"
+
+
+def test_live_permission_mode_reads_the_last_transcript_record(tmp_path, monkeypatch):
+    from fno.agents.retask import _live_permission_mode
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": "hi"})
+        + "\n"
+        + json.dumps({"type": "permission-mode", "permissionMode": "default"})
+        + "\nnot json\n"
+        + json.dumps({"type": "permission-mode", "permissionMode": "bypassPermissions"})
+        + "\n"
+        + json.dumps({"type": "user", "message": "go"})
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mux_recipient_transcript", lambda _entry: transcript
+    )
+    claude_row = _row(harness="claude", substrate="thread", mux=None, fno_id="F")
+
+    assert _live_permission_mode(claude_row) == "bypassPermissions"
+    # Another harness never reads a transcript at all.
+    assert _live_permission_mode(_row()) is None
 
 
 def test_non_mux_worker_is_refused_without_a_target_payload():
