@@ -745,11 +745,7 @@ def live_registry_rows() -> tuple[list | None, str | None]:
 
 
 def _gap_row_count(gap: str | None) -> int | None:
-    """The row count a gap sentence opens with, when it names one.
-
-    ``AttributionGap.text`` leads with the number of unattributed rows
-    (``8 pidless row(s) ...``); sentences assembled from only a timeout note
-    carry no leading count."""
+    """The row count a gap sentence opens with, when it names one."""
     if not gap:
         return None
     match = re.match(r"(\d+)", gap)
@@ -759,8 +755,7 @@ def _gap_row_count(gap: str | None) -> int | None:
 def _share_segment(
     share_low: float, share_high: float, bound: str, gap: str | None
 ) -> str:
-    """The ``(41.1%[, up to ...])`` bracket shared by the reason sentences and
-    the ``cpu admission:`` line, so the two cannot disagree."""
+    """The ``(41.1%[, up to ...])`` bracket shared by reasons and the line."""
     seg = f"{share_low * 100:.1f}%"
     if bound == "upper":
         rows = _gap_row_count(gap)
@@ -773,10 +768,7 @@ def _share_segment(
 
 
 def _admission_config() -> tuple[float, float]:
-    """``(max_fleet_cpu_share, hard_max_load_per_cpu)``, degraded to defaults.
-
-    The same getattr pattern as the gate's own read: a missing threshold has
-    a safe default, and a broken settings load must not kill the diagnostic."""
+    """``(max_fleet_cpu_share, hard_max_load_per_cpu)``, degraded to defaults."""
     try:
         from fno.config import load_settings
 
@@ -790,8 +782,8 @@ def _admission_config() -> tuple[float, float]:
 
 
 def _compute_admission(reading: Footprint, load_snapshot: Any) -> Admission:
-    """Feed :func:`cpu_admission` from one load snapshot. The single seam the
-    verb payload and the exit decision share, so the two cannot disagree."""
+    """Feed :func:`cpu_admission` from one snapshot; the seam the payload
+    and the exit decision share."""
     share_ceiling, hard_max = _admission_config()
     return cpu_admission(
         reading,
@@ -813,18 +805,11 @@ def cpu_admission(
     cpus: int,
 ) -> Admission:
     """The one CPU-axis decider, consumed by both gates and every readout
-    (x-7783 LD1/LD3).
-
-    The fleet's attributed share of capacity decides. An attribution gap
-    widens the share to an interval bounded above by the whole machine's
-    measured CPU, because the unattributed rows cannot hold more than
-    everything not attributed: a ceiling above the interval admits (the
-    reading was an upper bound), a ceiling below its floor is the fleet over
-    by its own work and holds, a ceiling inside it is undecidable and
-    refuses. The fifteen-minute load is the absolute backstop and refuses
-    first; a disabled backstop (``hard_max_load_per_cpu <= 0``) or an
-    unreadable one (``load_15m is None``) passes onward. Pure: no clocks, no
-    subprocesses, no config reads."""
+    (x-7783 LD1/LD3). The fleet's attributed share decides; a gap widens it
+    to an interval bounded above by the machine's measured CPU, so a ceiling
+    above the interval admits, below its floor holds, and inside it refuses.
+    The 15-minute load is the absolute backstop and refuses first; disabled
+    or unreadable passes onward. Pure: no clocks, no subprocesses, no config."""
     backstop = hard_max_load_per_cpu * cpus
     if load_15m is not None and hard_max_load_per_cpu > 0 and load_15m > backstop:
         return Admission(
