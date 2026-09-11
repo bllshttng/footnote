@@ -200,6 +200,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
             truth_state=truth_state,
             age_s=reach.age_s,
             reachability=reach.verdict,
+            provider_refusal=truth.get("provider_refusal"),
         )
         if entry is None:
             out[w.name] = RowTruth(None, activity, reach.age_s, reach.verdict, reach.basis)
@@ -211,6 +212,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
             harness=w.harness,
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
+            provider_refusal=truth.get("provider_refusal"),
         )
         out[w.name] = RowTruth(
             prog.verdict, activity, reach.age_s, reach.verdict, reach.basis

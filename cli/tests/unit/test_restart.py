@@ -540,3 +540,15 @@ def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
     assert "spared: a mutation is in flight" in result.output
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
     assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
+
+
+def test_ac5_a_refused_row_is_revivable():
+    """x-e594 AC5: a usage-capped worker reads `refused` and is live - its
+    process just cannot get a turn until the reset. It must survive a restart
+    and resume afterwards, so the shared revivable scope includes it and the
+    per-row predicate accepts it. update.py counts through the same constant
+    (one scope, three sites), so pinning it pins every collector."""
+    assert "refused" in restart.REVIVABLE_STATUSES
+    assert restart.is_revivable(
+        {"harness": "claude", "session_id": "sess-1", "status": "refused"}
+    )

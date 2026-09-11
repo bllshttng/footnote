@@ -190,15 +190,18 @@ def list_agents(
             harness=entry.harness,
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
+            provider_refusal=truth.get("provider_refusal"),
         )
         # x-c672 (AC7): the STATUS word is served activity (writing | quiet |
-        # parked, + orphaned for a falsified row, unknown for an unanswered
-        # probe), rendered from the same single truth reading above. The old
-        # `live` token is gone; `--status` filters on these words.
+        # parked, + orphaned for a falsified row, refused for a provider-
+        # refused row, unknown for an unanswered probe), rendered from the same
+        # single truth reading above. The old `live` token is gone; `--status`
+        # filters on these words.
         rendered_status = rendered_activity(
             truth_state=truth_state,
             age_s=reach.age_s,
             reachability=reach.verdict,
+            provider_refusal=truth.get("provider_refusal"),
         )
         if status is not None and rendered_status != status:
             continue

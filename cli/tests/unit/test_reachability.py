@@ -33,13 +33,21 @@ from fno.agents.session_truth import STALLED_AFTER_S
 
 # The module under test does not exist yet. Importing it is the red.
 from fno.agents.reachability import (
+    MODEL_REFUSED,
     NO_EVIDENCE,
+    PARKED,
+    PROMISE,
+    PROVIDER_REFUSED,
+    REFUSED,
     REACHABLE,
+    TRANSCRIPT_TURN,
     UNKNOWN,
     UNREACHABLE,
     WIRE_STATUS,
     Reachability,
+    classify_progress,
     classify_reachability,
+    rendered_activity,
 )
 
 
@@ -610,3 +618,76 @@ def test_the_freshness_bound_never_condemns() -> None:
     for state in ("working", "watching", "your-move"):
         got = classify_reachability(truth_state=state, age_s=10**6, falsifier=None)
         assert got.verdict != UNREACHABLE
+
+
+# ---------------------------------------------------------------------------
+# provider_refusal: the shared AC3/AC4 case table (x-e594)
+#
+# One table, two lanes: every row here is copied verbatim into the Rust test
+# in crates/fno-agents/src/daemon/list_rows.rs. The lanes do not link, so the
+# copy is the only thing keeping them from drifting apart on a corpse that
+# used to read `writing` at 469 s.
+# ---------------------------------------------------------------------------
+
+_QUOTA = "provider_4xx_quota"
+
+# (truth_state, age_s, reachability, provider_refusal)
+#   -> (status, progress verdict, progress basis)
+_PROVIDER_REFUSAL_CASES = [
+    # AC3-HP: the measured corpse - dead 469 s, still reading writing before.
+    ("working", 469, REACHABLE, _QUOTA, ("refused", "refused", PROVIDER_REFUSED)),
+    # refusal wins over the quiet/silent demotion at any age
+    ("working", 16446, REACHABLE, _QUOTA, ("refused", "refused", PROVIDER_REFUSED)),
+    # and over an unknowable age
+    ("working", None, REACHABLE, _QUOTA, ("refused", "refused", PROVIDER_REFUSED)),
+    # and over parked: a done tail plus a refusal is still a refusal
+    ("done", 10, REACHABLE, _QUOTA, ("refused", "refused", PROVIDER_REFUSED)),
+    # AC4-ERR: a positively falsified row stays orphaned - reachability first
+    ("working", 469, UNREACHABLE, _QUOTA, ("orphaned", "unknown", NO_EVIDENCE)),
+    # AC4-ERR: no refusal renders exactly as today
+    ("working", 469, REACHABLE, None, ("writing", "advancing", TRANSCRIPT_TURN)),
+    # control: an ordinary finished row
+    ("done", 10, REACHABLE, None, ("parked", "parked", PROMISE)),
+]
+
+
+@pytest.mark.parametrize(
+    "truth_state,age_s,reach,refusal,expected", _PROVIDER_REFUSAL_CASES
+)
+def test_provider_refusal_case_table(truth_state, age_s, reach, refusal, expected):
+    status = rendered_activity(
+        truth_state=truth_state, age_s=age_s, reachability=reach,
+        provider_refusal=refusal,
+    )
+    prog = classify_progress(
+        truth_state=truth_state,
+        reachability=reach,
+        observed_model=None,
+        harness="claude",
+        route_settings_path=None,
+        last_activity_age_s=age_s,
+        provider_refusal=refusal,
+    )
+    assert (status, prog.verdict, prog.basis) == expected
+
+
+def test_provider_refusal_sits_beside_the_model_refusal_arm() -> None:
+    """The structural model-refused arm keeps precedence (Locked Decision 3):
+    provider-refused is the transcript-text arm BELOW it, never a replacement."""
+    prog = classify_progress(
+        truth_state="working",
+        reachability=REACHABLE,
+        observed_model={"kind": "observed", "model": "glm-5.2[1m]"},
+        harness="claude",
+        route_settings_path=None,
+        last_activity_age_s=469,
+        provider_refusal=_QUOTA,
+    )
+    assert (prog.verdict, prog.basis) == (REFUSED, MODEL_REFUSED)
+
+
+def test_status_filter_enum_accepts_refused() -> None:
+    """AC5-HP: `--status refused` parses on both lanes' shared filter enum."""
+    from fno.agents.cli import AgentStatusFilter
+
+    assert AgentStatusFilter("refused") is AgentStatusFilter.refused

@@ -122,6 +122,13 @@ def is_revivable(row: dict[str, Any]) -> bool:
     return row.get("harness") == "claude" and bool(row.get("session_id"))
 
 
+#: Served-activity words a restart orphans into `--revive`: a row still live
+#: when the kill landed. `refused` rides along (x-e594): a usage-capped worker
+#: is live, its process just cannot get a turn until the reset, so a restart
+#: must resume it afterwards rather than leave it unrecorded.
+REVIVABLE_STATUSES = ("writing", "quiet", "parked", "refused")
+
+
 def _revive_orphans(
     pre_live: dict[str, dict[str, Any]],
     say: Callable[..., None],
@@ -142,7 +149,7 @@ def _revive_orphans(
     now_live = {
         r.get("name")
         for r in _agents_rows()
-        if r.get("status") in ("writing", "quiet", "parked")
+        if r.get("status") in REVIVABLE_STATUSES
     }
     for name, row in pre_live.items():
         if name in now_live:
@@ -417,7 +424,7 @@ def restart_command(
             pre_live = {
                 r["name"]: r
                 for r in _agents_rows()
-                if r.get("name") and r.get("status") in ("writing", "quiet", "parked")
+                if r.get("name") and r.get("status") in REVIVABLE_STATUSES
             }
         if to_restart:
             fno = shutil.which("fno")

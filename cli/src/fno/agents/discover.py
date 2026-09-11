@@ -1062,6 +1062,9 @@ class DiscoveredSession:
     #: set alongside ``truth_state`` from the same truth probe. Feeds
     #: ``classify_progress``; ``None`` before that probe has run.
     observed_model: Optional[dict] = None
+    #: The provider refusal the truth probe classified off the last assistant
+    #: turn (x-e594). Feeds both renderers; ``None`` before that probe has run.
+    provider_refusal: Optional[str] = None
 
     def _reachability(self) -> Reachability:
         """This session's verdict from the one shared derivation.
@@ -1131,6 +1134,7 @@ class DiscoveredSession:
             harness=self.agent,
             route_settings_path=None,
             last_activity_age_s=self.last_activity_age_s,
+            provider_refusal=self.provider_refusal,
         )
         return {
             "handle": self.handle,
@@ -1151,6 +1155,7 @@ class DiscoveredSession:
                 truth_state=self.truth_state,
                 age_s=reach.age_s,
                 reachability=reach.verdict,
+                provider_refusal=self.provider_refusal,
             ),
             # The evidence, not just the word derived from it. Reducing the
             # verdict to a bare `status` here left this lane unable to say
@@ -2808,6 +2813,7 @@ def discover_live_sessions(
         age = truth.get("last_activity_age_s")
         session.last_activity_age_s = int(age) if isinstance(age, (int, float)) else None
         session.observed_model = truth.get("observed_model")
+        session.provider_refusal = truth.get("provider_refusal")
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions

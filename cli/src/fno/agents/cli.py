@@ -47,6 +47,7 @@ class AgentStatusFilter(str, enum.Enum):
     writing = "writing"
     quiet = "quiet"
     parked = "parked"
+    refused = "refused"
     orphaned = "orphaned"
     unknown = "unknown"
 
@@ -2897,7 +2898,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); process liveness is the liveness field on fno agents list --json."
+        None, "--status", help="Filter by served activity (writing | quiet | parked | refused | orphaned | unknown); process liveness is the liveness field on fno agents list --json."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
@@ -3799,6 +3800,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
             "last_activity_age_s",
             "last_event_at", "last_activity_basis",
             "last_message",
+            "provider_refusal",
             "session_id",
             "observed_model",
             "harness_title",

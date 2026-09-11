@@ -679,7 +679,7 @@ def update_readiness(
     than raising, so a broken environment still gets a non-empty, honest
     guidance line (AC4-EDGE)."""
     from fno import doctor
-    from fno.restart import is_revivable
+    from fno.restart import REVIVABLE_STATUSES, is_revivable
 
     degraded: list[str] = []
 
@@ -754,7 +754,7 @@ def update_readiness(
     revivable = sum(
         1
         for r in agent_rows
-        if r.get("status") in ("writing", "quiet", "parked") and is_revivable(r)
+        if r.get("status") in REVIVABLE_STATUSES and is_revivable(r)
     )
 
     changelog: list[str] = []
