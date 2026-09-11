@@ -4183,6 +4183,21 @@ def _spawn_headroom(provider: Optional[str] = None) -> int:
         bound = [fleet_remaining]
         if provider_remaining is not None:
             bound.append(provider_remaining)
+        # x-7783 AC10: the CPU axis bounds the width too. A hold or
+        # undecidable verdict means the gate would queue or refuse every
+        # spawn this width dispatches, so the drain must not manufacture N
+        # queued spawns behind it. One sample, through the same seam the
+        # gate and the explain rows read.
+        from fno.agents.spawn_gate import _cpu_axis
+
+        admission = _cpu_axis()
+        if admission.verdict != "admit":
+            _LOG.warning(
+                "cpu axis %s, dispatch width 0: %s",
+                admission.verdict,
+                admission.reason,
+            )
+            return 0
         return max(0, min(bound))
     except Exception as exc:  # noqa: BLE001 - degrade to the conservative lane, loudly
         _LOG.warning("spawn headroom unreadable, degrading to 1 lane: %s", exc)

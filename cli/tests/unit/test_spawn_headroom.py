@@ -37,6 +37,7 @@ def _wire(
     live: dict | None = None,
     cap_fn=None,
     fail: bool = False,
+    cpu_verdict: str = "admit",
 ) -> None:
     limits = limits if limits is not None else {"zai": 7, "claude": None}
     live = live if live is not None else {}
@@ -48,6 +49,7 @@ def _wire(
 
     monkeypatch.setattr("fno.config.load_settings", fake_load_settings)
     from fno.agents import spawn_gate
+    from fno.footprint import Admission
 
     monkeypatch.setattr(
         spawn_gate, "census", lambda: SimpleNamespace(slot_count=slots)
@@ -60,6 +62,24 @@ def _wire(
         "provider_lanes_cap",
         cap_fn if cap_fn is not None else spawn_gate.provider_lanes_cap,
     )
+    # x-7783: the CPU axis bounds the width; pinned admitting unless a test
+    # asks for a hold, so no test reads the real machine.
+    admission = Admission(
+        verdict=cpu_verdict,
+        axis="fleet_cpu_share",
+        reason=f"test {cpu_verdict}",
+        share_low=0.1,
+        share_high=0.1,
+        bound="exact",
+        fleet_cores=1.2,
+        machine_cores=6.0,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap=None,
+        load_15m=1.0,
+        backstop=480.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
 
 
 def test_width_is_the_minimum_of_fleet_and_provider_headroom(monkeypatch):
@@ -95,6 +115,14 @@ def test_a_provider_pin_reads_only_that_provider(monkeypatch):
 def test_an_uncapped_provider_cannot_bound_the_width(monkeypatch):
     _wire(monkeypatch, max_live=12, slots=2, limits={"zai": None}, live={"zai": 99})
     assert _spawn_headroom() == 10
+
+
+def test_a_non_admit_cpu_verdict_zeroes_the_width(monkeypatch):
+    """x-7783 AC10: the gate would queue (hold) or refuse (undecidable) every
+    spawn this width dispatches, so the drain returns 0 and names the axis
+    instead of manufacturing N queued spawns."""
+    _wire(monkeypatch, max_live=30, slots=0, cpu_verdict="hold")
+    assert _spawn_headroom() == 0
 
 
 def test_zero_headroom_means_full_not_error(monkeypatch):
