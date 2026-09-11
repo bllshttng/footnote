@@ -43,7 +43,7 @@ Issues = "https://github.com/bllshttng/footnote/issues"
 # fno-<component> binary family (fno-agents*, fno-py) and is never typed by a
 # user - they type `fno`, which routes. See crates/fno/src/bootstrap.rs::forward.
 [project.scripts]
-fno-py = "fno.cli:app"
+fno-py = "fno.cli:main"
 fno-gh-loopcheck = "fno.pr._internal_gh:discretionary_main"
 fno-gh-coverage = "fno.pr._internal_gh:coverage_main"
 fno-gh-proxy = "fno.pr.gh_proxy:main"

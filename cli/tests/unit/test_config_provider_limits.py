@@ -48,6 +48,38 @@ def test_modern_spelling_is_silent(capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_retired_trigger_parses_warns_once_and_is_ignored(caplog):
+    """AC7-HP (x-7783): agents.max_load_per_cpu still parses, prints ONE
+    deprecation line naming the decider, and nothing coerces the value - the
+    key is ignored, not clamped."""
+    import logging
+
+    from fno import config as config_mod
+    from fno.config import AgentsBlock
+
+    # The once-guard is process-global: an earlier test in the same run may
+    # have consumed this key's single warning. Reset it for determinism.
+    config_mod._DEPRECATED_WARNED.discard("agents.max_load_per_cpu")
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        block = AgentsBlock(max_load_per_cpu=10.0)
+    assert block.max_load_per_cpu == 10.0
+    warnings = [r.message for r in caplog.records if "max_load_per_cpu" in str(r.message)]
+    assert len(warnings) == 1
+    assert "max_fleet_cpu_share" in warnings[0]
+    assert "delete the key" in warnings[0]
+
+
+def test_pair_coercion_is_gone():
+    """x-7783 LD2: the trigger/backstop pair validator is deleted. An
+    incoherent-looking pair keeps BOTH values as written, because the trigger
+    is ignored and the backstop is the only load knob left."""
+    from fno.config import AgentsBlock
+
+    block = AgentsBlock(max_load_per_cpu=2.0, hard_max_load_per_cpu=1.0)
+    assert block.max_load_per_cpu == 2.0
+    assert block.hard_max_load_per_cpu == 1.0
+
+
 def test_provider_limits_table_reads_both_spellings():
     # The ONE accessor every reader routes through: new spelling wins, the
     # legacy one still reads (a pre-rename embedded settings object), and a

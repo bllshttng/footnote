@@ -199,56 +199,65 @@ def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
     assert asked["dropped_by"] == "max-dispatch"
 
 
-def test_load_gate_row_reports_refuse_from_the_shared_decision(monkeypatch):
-    """The load row renders the gate's own verdict with its numbers.
-    The old "over trigger; attribution decides" text never predicted an exit
-    79, and a king was sent looking at the wrong symptom because of it."""
-    from types import SimpleNamespace
-
+def test_cpu_share_row_reports_refuse_from_the_shared_decision(monkeypatch):
+    """The cpu-share row renders the gate's own admission with its numbers
+    and the backstop row sits beside it (x-7783: two axes, two rows)."""
     from fno.agents import spawn_gate
     from fno.backlog import explain
+    from fno.footprint import Admission
 
-    monkeypatch.setattr(
-        spawn_gate,
-        "load_gate_decision",
-        lambda *a, **k: (
-            "fleet_cpu_share",
-            "the fleet holds 96.20/12.00 cores; refusing to spawn (--force to bypass)",
-            {"share": 8.017},
+    admission = Admission(
+        verdict="undecidable",
+        axis="fleet_cpu_share",
+        reason=(
+            "spawn-gate: the fleet's CPU share cannot be decided: attributed "
+            "17.5% of capacity, up to 60.0% with rows unattributed"
         ),
+        share_low=0.175,
+        share_high=0.6,
+        bound="upper",
+        fleet_cores=2.1,
+        machine_cores=7.2,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap="3 pidless row(s)",
+        load_15m=45.0,
+        backstop=480.0,
     )
-    monkeypatch.setattr(
-        spawn_gate,
-        "_load_snapshot",
-        lambda per_cpu: SimpleNamespace(
-            spawn_load_status="exceeded",
-            load_1m=255.3,
-            load_cpu_count=12,
-            load_ceiling=per_cpu * 12,
-            max_load_per_cpu=per_cpu,
-        ),
-    )
-    row = {g.name: g for g in explain._machine_gates()}["load-trigger"]
-    assert row.verdict == "refuse"
-    assert "refusing to spawn" in (row.note or "")
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
+    rows = {g.name: g for g in explain._machine_gates()}
+    assert rows["cpu-share"].verdict == "refuse"
+    assert "cannot be decided" in (rows["cpu-share"].note or "")
+    assert rows["cpu-share"].measured == "2.10/12.00 cores"
+    assert rows["load-backstop"].measured == "45.0"
+    assert rows["load-backstop"].threshold == "480.0"
+    assert rows["load-backstop"].verdict == "pass"
 
 
-def test_preview_stops_when_the_load_gate_would_refuse(monkeypatch):
-    """The dry run passed every gate at load 255/120 while the real
-    spawn exited 79. The preview now reads the gate's own decision."""
+def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
+    """The dry run passes no gate the real spawn would refuse on. The
+    preview reads the gate's own admission."""
     _lane_fill_world(monkeypatch, [_ready_node("x-win")])
     from fno.agents import spawn_gate
     from fno.backlog.explain import build_lane_fill_report
+    from fno.footprint import Admission
 
-    monkeypatch.setattr(
-        spawn_gate,
-        "load_gate_decision",
-        lambda *a, **k: (
-            "fleet_cpu_share",
-            "the fleet holds 9.00/12.00 cores; refusing to spawn",
-            {"share": 0.75},
-        ),
+    admission = Admission(
+        verdict="undecidable",
+        axis="fleet_cpu_share",
+        reason="spawn-gate: cannot decide",
+        share_low=0.175,
+        share_high=0.6,
+        bound="upper",
+        fleet_cores=2.1,
+        machine_cores=7.2,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap="3 pidless row(s)",
+        load_15m=45.0,
+        backstop=480.0,
     )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
     report = build_lane_fill_report(epic="x-epic")
     assert report["selection"]["stop"] == "load-refused"
     assert report["decision"]["would_dispatch"] == ["x-win"]

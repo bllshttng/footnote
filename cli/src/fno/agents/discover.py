@@ -1167,19 +1167,6 @@ class DiscoveredSession:
         }
 
 
-def _session_handle_matches(
-    token: Optional[str], sessions: Iterable[DiscoveredSession]
-) -> list[DiscoveredSession]:
-    """Every session matching the full, canonical, or legacy identity token."""
-    if not token:
-        return []
-    return [
-        session
-        for session in sessions
-        if session_handle_tier(token, session.session_id) is not None
-    ]
-
-
 def _exact_address_matches(
     token: Optional[str], sessions: Iterable[DiscoveredSession]
 ) -> list[DiscoveredSession]:
@@ -1277,10 +1264,6 @@ def _read_registry_file(path: Path) -> Optional[dict]:
 # Whether a given CC version preserves ``_`` is version-specific, so we try both
 # the underscore-collapsing and underscore-preserving forms and use whichever
 # directory actually exists (the common no-underscore path yields one name).
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
-
-
 def _candidate_dir_names(cwd: str) -> list[str]:
     names: list[str] = []
     for pat in (r"[^a-zA-Z0-9]", r"[^a-zA-Z0-9_]"):

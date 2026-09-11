@@ -997,6 +997,40 @@ def compare_and_rebind(
 #: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
+#: The requeue pseudo-holder (`backlog/requeue`): the session that takes the
+#: node, not an agent. `holder_agent_name` is the one resolver.
+TARGET_SESSION_HOLDER_PREFIX = "target-session:"
+
+
+def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
+    """Resolve a claim holder to the agent behind it, or None.
+
+    None means no row in ``rows`` stands behind the name: a skip, not a
+    failure. ``rows`` is the caller's read; no agents import here.
+    """
+    if not holder:
+        return None
+
+    if holder.startswith(HANDOVER_HOLDER_PREFIX):
+        name = holder[len(HANDOVER_HOLDER_PREFIX):]
+        return name if any(row.name == name for row in rows) else None
+    if holder.startswith(TARGET_SESSION_HOLDER_PREFIX):
+        sid = holder[len(TARGET_SESSION_HOLDER_PREFIX):]
+        row = next(
+            (
+                r
+                for r in rows
+                if sid in {
+                    r.harness_session_id,
+                    getattr(r, "session_id", None),
+                    getattr(r, "cc_session_id", None),
+                }
+            ),
+            None,
+        )
+        return row.name if row else None
+    return holder
+
 #: Suffix of the per-claim recovery mutex directory. One definition: this
 #: string was written out at six call sites, and a seventh (the dispatch
 #: guard's targeted recovery) is what made the duplication worth collapsing.

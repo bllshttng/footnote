@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+from pathlib import Path
+
 import pytest
 
 
@@ -966,10 +968,10 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
 
     For `from fno.pkg import submodule`, `_handle_fromlist` swallows a
     ModuleNotFoundError matching the fromlist entry and raises `cannot import
-    name ... from ...` instead, so the dual-cause text never reaches the reader.
-    The retry is untouched: it happens inside find_spec, before that exception
-    exists. Both halves are asserted here because the claim in the docs is about
-    the retry, not the message.
+    name ... from ...` instead, so the dual-cause text never reaches the reader
+    at the import layer. The retry is untouched: it happens inside find_spec,
+    before that exception exists. The message's last hop is the console
+    entrypoint (`main` in cli.py), which the tests below pin.
     """
     proc = _run_py(
         "import fno, importlib.machinery\n"
@@ -993,3 +995,91 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
     # And CPython, not us, wrote the message the reader sees.
     assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
     assert "is part of fno itself" not in proc.stdout, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# AC-ENTRY: the console entrypoint carries the hint the import layer drops
+# ---------------------------------------------------------------------------
+
+# Both live specimens of 2026-09-04, verbatim shapes.
+_FROMLIST_SWALLOW = (
+    "cannot import name '_subprocess_util' from 'fno'",
+    "fno",
+)
+_ALREADY_IMPORTED = (
+    "cannot import name 'CLAIM_UNAVAILABLE' from 'fno.claims' (unknown location)",
+    "fno.claims",
+)
+
+
+def _run_main_with_raising_app(exc_type: str, msg: str, name: str) -> subprocess.CompletedProcess[str]:
+    """Call `main()` through a stubbed app raising `exc_type(msg, name=name)`."""
+    return _run_py(
+        "import fno.cli\n"
+        f"def boom(): raise {exc_type}({msg!r}, name={name!r})\n"
+        "fno.cli.app = boom\n"
+        "try:\n"
+        "    fno.cli.main()\n"
+        "except ImportError as e:\n"
+        "    print('MSG', e)\n"
+    )
+
+
+def test_entrypoint_carries_reinstall_hint_on_fromlist_swallow():
+    """Specimen 1: `from fno import _subprocess_util` mid-reinstall. The finder is
+    never consulted, so the operator saw a bare ImportError. `main()` is the one
+    layer that can read it."""
+    msg, name = _FROMLIST_SWALLOW
+    proc = _run_main_with_raising_app("ImportError", msg, name)
+    assert proc.returncode == 0, proc.stderr
+    assert msg in proc.stdout, proc.stdout
+    assert "is part of fno itself" in proc.stdout, proc.stdout
+    assert "fno doctor update" in proc.stdout, proc.stdout
+
+
+def test_entrypoint_carries_reinstall_hint_on_already_imported_shape():
+    """Specimen 2: fno.claims already in sys.modules with no spec origin. No
+    finder runs on an already-imported module; the entrypoint is the only site
+    left that sees the failure."""
+    msg, name = _ALREADY_IMPORTED
+    proc = _run_main_with_raising_app("ImportError", msg, name)
+    assert proc.returncode == 0, proc.stderr
+    assert msg in proc.stdout, proc.stdout
+    assert "is part of fno itself" in proc.stdout, proc.stdout
+
+
+def test_entrypoint_leaves_third_party_import_error_untouched():
+    """A genuinely broken third-party install collects no reinstall speculation,
+    and a package merely starting with the letters 'fno' is not ours."""
+    for msg, name in [
+        ("cannot import name 'x' from 'requests'", "requests"),
+        ("cannot import name 'x' from 'fnord'", "fnord"),
+    ]:
+        proc = _run_main_with_raising_app("ImportError", msg, name)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == f"MSG {msg}", proc.stdout
+
+
+def test_entrypoint_never_doubles_the_finder_hint():
+    """A ModuleNotFoundError already carries the finder's hint; appending again
+    would print it twice on one line."""
+    finder_msg = (
+        "No module named 'fno.graph'"
+        " (fno.graph is part of fno itself: either this package was being"
+        " reinstalled underneath the running process, in which case retry, or"
+        " the install is stale, in which case run `fno doctor update` then"
+        " `fno doctor`)"
+    )
+    proc = _run_main_with_raising_app("ModuleNotFoundError", finder_msg, "fno.graph")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.count("is part of fno itself") == 1, proc.stdout
+
+
+def test_fno_py_entrypoint_is_main():
+    """The console script must name `main`, not `app`: the shim is regenerated
+    from this line on every reinstall, and a bare `app` target is what left the
+    hint undelivered."""
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'fno-py = "fno.cli:main"' in pyproject, pyproject

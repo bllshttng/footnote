@@ -175,6 +175,10 @@ What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno
 
 The message reaches one shape less than the retry does. For `from fno.pkg import submodule`, CPython's `_handle_fromlist` swallows our ModuleNotFoundError and raises `cannot import name ... from ...` in its place. Nothing at this layer can reach that decision. The retry still runs, because it happens inside `find_spec` before the exception exists. The in-body imports are written as `from fno.pkg.submodule import name`, which keeps the message. Raising from a finder also inverts one stdlib contract: `importlib.util.find_spec` on an absent `fno.*` module raises rather than returning None. No caller in this repo probes an fno module that way, and the error stays an ImportError subclass.
 
+**The console entrypoint owns the decision.** `main` in `cli.py` targets the `fno-py` console script. When `exc.name` names an `fno` module, it catches the plain ImportError and appends the same `_reinstall_hint`. Both blind shapes arrive that way. One is the fromlist swallow above. The other is a module already in `sys.modules` with no spec origin, which no finder is ever consulted for. The live text was `cannot import name 'CLAIM_UNAVAILABLE' from 'fno.claims' (unknown location)`. Both specimens hit on 2026-09-04. Not being the import layer, it can read the exception instead of shaping it, and it touches no import machinery. ModuleNotFoundError is skipped there because the finder already stamped its hint, so the text can never double. The failure path first-imports nothing, the reason `typer`'s own reporter is disabled in that module.
+
+One asymmetry the error text used to hide, named here so it stays visible: `update.py` refuses concurrent updates, so updaters protect each other. Nothing protects a reader mid-import from an updater. That is why this node's fix is the message and not a lock - the doc above already measured and rejected the lock.
+
 Not fixed, and unfixable at this layer: the window itself. A process whose import
 lands while the file is genuinely still absent still fails. Closing that would
 require quiescing running `fno` processes or new cross-process state, both of
@@ -208,5 +212,6 @@ A future refactor must preserve:
 5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
 6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
 7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
+8. A plain ImportError naming an `fno` module leaves the console entrypoint carrying the dual-cause hint. `fno-py` stays wired to `main`. A third-party ImportError leaves untouched. Tests: `test_entrypoint_carries_reinstall_hint_on_fromlist_swallow`, `test_entrypoint_carries_reinstall_hint_on_already_imported_shape`, `test_entrypoint_leaves_third_party_import_error_untouched`, `test_entrypoint_never_doubles_the_finder_hint`, `test_fno_py_entrypoint_is_main`.
 
 Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` are required for a normal sub-app addition.
