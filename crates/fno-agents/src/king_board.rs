@@ -419,7 +419,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         outstanding,
         needs,
         holder_activity,
-        truth_panicked,
+        holder_activity_error,
     ) = std::thread::scope(|s| {
         // The worked read is a full fno-py cold start plus fleet roster read,
         // so it rides the concurrent section too: its join waits below, after
@@ -526,7 +526,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         .unwrap_or_else(|| h.clone())
                 })
                 .collect();
-            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many(&tokens)))
+            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_checked(&tokens)))
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
@@ -608,14 +608,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .map(|items| SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([]))))
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
-        let (holder_activity, truth_panicked): (
+        let (holder_activity, holder_activity_error): (
             HashMap<String, crate::truth_probe::TruthProbe>,
-            bool,
+            Option<String>,
         ) = match t_truth {
-            None => (HashMap::new(), false),
+            None => (HashMap::new(), None),
             Some(h) => match h.join() {
-                Ok(map) => (map, false),
-                Err(_) => (HashMap::new(), true),
+                Ok(Ok(map)) => (map, None),
+                // A timed-out batch is UNREADABLE, not empty: an empty map
+                // read as "every holder answered nothing" is how live workers
+                // rendered stalled (x-db9c).
+                Ok(Err(e)) => (HashMap::new(), Some(e)),
+                Err(_) => (
+                    HashMap::new(),
+                    Some("truth probe: reader panicked".to_string()),
+                ),
             },
         };
         (
@@ -628,7 +635,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             outstanding,
             needs,
             holder_activity,
-            truth_panicked,
+            holder_activity_error,
         )
     });
     warnings.extend(pr_warnings);
@@ -639,9 +646,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     sources.insert(
         "holder_activity".to_string(),
         json!({
-            "ok": !truth_panicked,
+            "ok": holder_activity_error.is_none(),
             "truncated": false,
-            "error": if truth_panicked { "truth probe: reader panicked" } else { "" },
+            "error": holder_activity_error.clone().unwrap_or_default(),
         }),
     );
 
@@ -847,6 +854,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         worked,
         claimed_nodes,
         holder_activity,
+        holder_activity_error,
         prs,
         pr_nodes,
         outstanding,
@@ -898,6 +906,7 @@ mod tests {
             worked: ok_read(Value::Array(Vec::new())),
             claimed_nodes: ok_read(claimed_nodes),
             holder_activity: HashMap::new(),
+            holder_activity_error: None,
             prs: ok_read(Value::Array(Vec::new())),
             pr_nodes: ok_read(Value::Array(Vec::new())),
             outstanding: ok_read(json!({})),
@@ -1016,7 +1025,24 @@ mod tests {
     fn stalled_holder_still_names_a_live_open_node() {
         let node = json!({"id": "x-open", "priority": "p0", "status": "in_progress"});
         let claims = json!([{"key": "node:x-open", "state": "live", "holder": "h"}]);
-        let inputs = inputs_with(json!([]), claims, json!([node]));
+        let mut inputs = inputs_with(json!([]), claims, json!([node]));
+        // The probe ANSWERED for the holder - `unknown` is the batch's
+        // per-handle "resolves to nothing" shape - so the row reads stalled.
+        // With no entry at all the holder reads unmeasured, and an unmeasured
+        // holder belongs to no row.
+        inputs.holder_activity.insert(
+            "h".to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "unknown".to_string(),
+                harness_title: None,
+                reachability: None,
+                basis: None,
+                last_activity_age_s: Some(30.0),
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+            },
+        );
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let stalled = queues
@@ -1030,6 +1056,15 @@ mod tests {
             .filter_map(|r| r["id"].as_str())
             .collect();
         assert_eq!(ids, vec!["x-open"]);
+        // AC8-HP: the row names the worker behind the marker, and the source
+        // hands the reader the peek verb for THAT worker, not the raw holder
+        // string no resolver accepts.
+        let row = &stalled["rows"].as_array().unwrap()[0];
+        assert_eq!(row["worker"], "h");
+        assert!(stalled["source"]
+            .as_str()
+            .unwrap()
+            .contains("peek <worker>"));
     }
 
     #[test]
@@ -1178,6 +1213,108 @@ mod tests {
         .collect();
         let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None);
         assert_eq!(state, "active");
+    }
+
+    #[test]
+    fn a_failed_truth_batch_reads_the_five_queues_unreadable() {
+        // AC5-ERR: the batch's Err must arrive as an unreadable queue, never
+        // as rows about workers nobody measured. One Err, five queues blind,
+        // exit code 1: the king is told the board cannot see, which is the
+        // honest answer.
+        let node = json!({"id": "x-blind", "priority": "p0", "status": "in_progress"});
+        let claims = json!([{"key": "node:x-blind", "state": "live", "holder": "h"}]);
+        let mut inputs = inputs_with(json!([]), claims, json!([node]));
+        inputs.holder_activity_error =
+            Some("truth probe: batch of 19 handles timed out".to_string());
+        let board = build_board(&inputs);
+        assert_eq!(board["exit_code"], 1);
+        let queues = board["queues"].as_array().unwrap();
+        for name in [
+            "stalled_holder",
+            "stale_claim",
+            "unheld_progress",
+            "undriven_pr",
+            "unplanned",
+        ] {
+            let q = queues.iter().find(|q| q["name"] == name).expect(name);
+            assert_eq!(q["status"], "unreadable", "{name}");
+            assert_eq!(q["rows"].as_array().unwrap().len(), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_partially_answered_batch_names_its_unmeasured_holders() {
+        // AC6-EDGE: the batch answered but skipped one holder. Its node lands
+        // in no queue row, and the payload warnings name the hole so a
+        // partial answer cannot pass for a full one.
+        let node = json!({"id": "x-half", "priority": "p0", "status": "in_progress"});
+        let claims = json!([{"key": "node:x-half", "state": "live", "holder": "h"}]);
+        let mut inputs = inputs_with(json!([]), claims, json!([node]));
+        inputs.entries = Some(vec![node]);
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        for name in [
+            "stalled_holder",
+            "stale_claim",
+            "unheld_progress",
+            "undriven_pr",
+            "unplanned",
+        ] {
+            let q = queues.iter().find(|q| q["name"] == name).expect(name);
+            assert_eq!(
+                q["rows"].as_array().unwrap().len(),
+                0,
+                "{name} must not row an unmeasured holder"
+            );
+        }
+        let warnings = board["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w
+                .as_str()
+                .map(|s| s.contains("unmeasured: h"))
+                .unwrap_or(false)),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_working_handover_holder_keeps_its_node_out_of_unplanned_and_stale() {
+        // AC7-HP: the ready feed cannot see a stale launch-window lease
+        // (include_stale=false excludes it, worked ids too), so the old
+        // `!dead` filter left a node under an advancing worker listed as
+        // unplanned forever. The driver join drops it; a dead claim still
+        // belongs to stale_claim alone.
+        let mut inputs = inputs_with(
+            json!([{"id": "x-hold", "priority": "p1", "title": "underway"}]),
+            json!([{
+                "key": "node:x-hold", "state": "stale",
+                "holder": "spawn-handover:t-w",
+            }]),
+            json!([]),
+        );
+        inputs.holder_activity.insert(
+            "t-w".to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                harness_title: None,
+                reachability: None,
+                basis: None,
+                last_activity_age_s: Some(30.0),
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+            },
+        );
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        let unplanned = queues.iter().find(|q| q["name"] == "unplanned").unwrap();
+        assert_eq!(
+            unplanned["rows"].as_array().unwrap().len(),
+            0,
+            "{unplanned}"
+        );
+        let stale = queues.iter().find(|q| q["name"] == "stale_claim").unwrap();
+        assert_eq!(stale["rows"].as_array().unwrap().len(), 0, "{stale}");
     }
 
     #[test]
