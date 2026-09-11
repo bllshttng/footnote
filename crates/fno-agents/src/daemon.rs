@@ -6044,9 +6044,13 @@ async fn attach_stopped_claims_release(
 ) {
     let confirmed = match response.result() {
         Some(result) => {
-            matches!(result.get("stopped"), Some(Value::Bool(true)))
-                || matches!(result.get("already_exited"), Some(Value::Bool(true)))
-                || matches!(result.get("removed"), Some(Value::Bool(true)))
+            // A no-op stop (a synchronous provider with nothing to stop)
+            // reports stopped:true but stopped nothing, so it releases
+            // nothing - the same contract the Python no-op arm holds.
+            !matches!(result.get("no_op"), Some(Value::Bool(true)))
+                && (matches!(result.get("stopped"), Some(Value::Bool(true)))
+                    || matches!(result.get("already_exited"), Some(Value::Bool(true)))
+                    || matches!(result.get("removed"), Some(Value::Bool(true))))
         }
         None => false,
     };
