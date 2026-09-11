@@ -149,6 +149,14 @@ fn proto_v4_control_replies_roundtrip() {
         ServerMsg::SessionRetired {
             retired: 2,
             panes_closed: 1,
+            closed_panes: vec!["t-r-one".into()],
+            tabs_removed: vec!["targets/lanes".into()],
+        },
+        ServerMsg::SessionRetired {
+            retired: 0,
+            panes_closed: 0,
+            closed_panes: Vec::new(),
+            tabs_removed: Vec::new(),
         },
     ] {
         let bytes = encode(&msg).unwrap();
