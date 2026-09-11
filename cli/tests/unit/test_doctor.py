@@ -1406,6 +1406,45 @@ def test_fix_heals_dead_pr_watch_on_fresh_binary(monkeypatch: pytest.MonkeyPatch
     assert "pr-watch heal" in result.stderr
 
 
+def _wedged_pr_watch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "_pr_watch_liveness",
+        lambda: {
+            "enabled": True, "verdict": "wedged",
+            "detail": "last tick 25s ago but each of the last 3 ticks ended broken",
+            "fix": "fno do pr watch refresh", "loaded": True,
+            "last_tick": "2026-09-11T00:00:00Z", "interval_seconds": 600,
+        },
+    )
+
+
+def test_fix_refreshes_wedged_pr_watch_instead_of_healing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged watermark is fresh, so the tick already runs: the cure is the
+    plist re-render (refresh_watcher), never the plain bounce."""
+    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
+                  capture_present="present")
+    _wedged_pr_watch(monkeypatch)
+    import fno.pr_watch._install as pw
+    refresh_calls: list = []
+
+    def _fail_heal(**kw):
+        raise AssertionError("wedged must re-render the plist, not bounce it")
+
+    monkeypatch.setattr(
+        pw, "refresh_watcher",
+        lambda **kw: refresh_calls.append(kw) or ("re-rendered and bounced x", 0),
+    )
+    monkeypatch.setattr(pw, "heal_watcher", _fail_heal)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 0  # advisory: never flips the exit
+    assert len(refresh_calls) == 1
+    assert "pr-watch refresh" in result.stderr
+
+
 def test_fix_json_skips_pr_watch_heal(monkeypatch: pytest.MonkeyPatch) -> None:
     """--json preserves the single-JSON-object stdout contract: no heal side-effect."""
     _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",

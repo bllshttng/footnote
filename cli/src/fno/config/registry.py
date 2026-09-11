@@ -497,6 +497,11 @@ FIELD_META: dict[str, Meta] = {
         "Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below"
         " this floor.",
     ),
+    "pr_watch.wedged_after_ticks": Meta(
+        "never",
+        "Consecutive broken tick ends (timeout/error) at a fresh watermark before the watcher"
+        " reads `wedged` and auto-heal re-renders its plist via `fno do pr watch refresh`.",
+    ),
     # --- config.groom.* ---
     "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
     # --- config.restart.* ---

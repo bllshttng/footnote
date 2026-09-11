@@ -2850,6 +2850,35 @@ async fn run_restart(force: bool) -> i32 {
             "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
         );
     }
+    // The pr-watch LaunchAgent embeds an absolute binary path that a daemon
+    // swap never re-renders (`fno agents restart` reaches no launchd job);
+    // re-render and bounce it, the same tail `fno doctor update` appends.
+    // The verb self-gates on pr_watch.enabled and prints its own skip line
+    // then, so this is not behind --force, matching the keeper cycle above.
+    // Receipt lands BEFORE the summary, which stays the last stdout line.
+    match std::process::Command::new(fno_agents::scrape::fno_bin())
+        .args(["do", "pr", "watch", "refresh"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let said = if out.stderr.is_empty() {
+                String::from_utf8_lossy(&out.stdout)
+            } else {
+                String::from_utf8_lossy(&out.stderr)
+            };
+            let said = said.trim();
+            if said.is_empty() {
+                println!("fno agents restart: pr-watch refreshed.");
+            } else {
+                println!("fno agents restart: {said}");
+            }
+        }
+        Ok(out) => eprintln!(
+            "fno agents restart: pr-watch refresh failed (rc={}); run `fno do pr watch refresh` by hand.",
+            out.status.code().unwrap_or(-1)
+        ),
+        Err(e) => eprintln!("fno agents restart: pr-watch refresh not run: {e}."),
+    }
     // Machine-readable summary; the LAST stdout line, so an orchestrator
     // parses it without guessing.
     let summary = json!({"store_keepers": cycled.iter().map(|c| serde_json::json!({
