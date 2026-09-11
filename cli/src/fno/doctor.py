@@ -2329,19 +2329,15 @@ def _emit_human(
             "add `--mux` to also end servers with live panes)."
         )
 
-    # Running-process census (x-f188): one line per stale row, naming what a
-    # restart does and what survives. Advisory only.
+    # Running-process census (x-f188): one line per stale row. Advisory only.
     for row in result.get("running_components") or []:
-        if not isinstance(row, dict) or row.get("verdict") != "stale":
-            continue
-        name = row.get("name") or "unnamed"
-        pid = row.get("pid")
-        pid_text = f" pid {pid}" if pid else ""
-        out(
-            f"fno doctor: {row.get('component')} '{name}'{pid_text} is running an older "
-            f"build ({row.get('evidence')}); on restart: {row.get('on_restart')}; "
-            f"keeps {row.get('survives')}."
-        )
+        if isinstance(row, dict) and row.get("verdict") == "stale":
+            pid = f" pid {row['pid']}" if row.get("pid") else ""
+            out(
+                f"fno doctor: {row.get('component')} '{row.get('name') or 'unnamed'}'{pid} "
+                f"is an older build ({row.get('evidence')}); on restart: "
+                f"{row.get('on_restart')}; keeps {row.get('survives')}."
+            )
 
     # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.
     orphans = result.get("orphan_files") or []

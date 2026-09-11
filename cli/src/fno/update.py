@@ -614,9 +614,7 @@ def _build_update_guidance(
     revivable: int,
     revivable_known: bool,
     degraded_reason: Optional[str],
-    running_stale: int = 0,
-    restartable: int = 0,
-    pane_kept: int = 0,
+    stale_rows: "list[dict]" | None = None,
 ) -> str:
     """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
@@ -631,6 +629,10 @@ def _build_update_guidance(
     operator a restart is destructive (P2, codex on PR #881)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
+    stale_rows = stale_rows or []
+    running_stale = len(stale_rows)
+    restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in stale_rows)
+    pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in stale_rows)
 
     # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
     # known not-ready state - if both revs were read and match, there is no update
@@ -773,14 +775,11 @@ def update_readiness(
     # renders these rows and computes nothing (Locked Decision 6).
     # running_rows, never `running`: that name is the python interpreter
     # string the python_tool field carries further down.
-    census = [r for r in running_components(runner) if r.get("verdict") == "stale"]
     running_rows = [
         {k: r.get(k) for k in ("component", "name", "verdict", "on_restart", "survives")}
-        for r in census
+        for r in running_components(runner)
+        if r.get("verdict") == "stale"
     ]
-    running_stale = len(census)
-    restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in census)
-    pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in census)
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
@@ -798,9 +797,7 @@ def update_readiness(
         revivable=revivable,
         revivable_known=revivable_known,
         degraded_reason=degraded_reason,
-        running_stale=running_stale,
-        restartable=restartable,
-        pane_kept=pane_kept,
+        stale_rows=running_rows,
     )
 
     # None (not 0) when the underlying fetch never happened - a count fno never
@@ -843,7 +840,7 @@ def update_readiness(
         "guidance": guidance,
         "degraded": degraded_reason,
         "running": running_rows,
-        "running_stale": running_stale,
+        "running_stale": len(running_rows),
     }
 
 
