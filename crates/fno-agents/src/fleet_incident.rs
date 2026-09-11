@@ -219,6 +219,30 @@ fn write_transition(
     reason: Option<&str>,
     by: Option<&str>,
 ) -> Result<IncidentRecord, String> {
+    // Read-modify-write under an exclusive sidecar lock: two concurrent stops
+    // must not both read generation N and both claim N+1 in their receipts.
+    // The lock file is a sidecar because the state file itself is replaced by
+    // rename, which would drop the lock mid-write.
+    let lock_path = path.with_extension("json.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
+    let out = write_transition_locked(path, state, reason, by);
+    let _ = lock.unlock();
+    out
+}
+
+fn write_transition_locked(
+    path: &Path,
+    state: &str,
+    reason: Option<&str>,
+    by: Option<&str>,
+) -> Result<IncidentRecord, String> {
     let reason = require_reason(reason)?;
     let generation = current_generation(path)? + 1;
     let record = IncidentRecord {

@@ -4363,17 +4363,21 @@ def cmd_send(
 def _team_recipients(scope: str) -> list[tuple[str, str]]:
     """Snapshot a fleet scope: sorted (name, identity), deduped by identity.
 
-    ``all``/``kings`` are live-row filters; else crown scope via resolve_to_king.
+    ``all``/``kings`` are live-row filters; else crown scope via the readers'
+    own crown_scope_matches territory equality.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
     from fno.harness_identity import session_identity_key
 
     rows = load_registry()
     if scope not in ("all", "kings"):
-        from fno.agents.crown import resolve_to_king
+        from fno.agents.crown import crown_scope_matches
 
-        wanted = set(resolve_to_king(scope))
-        rows = [row for row in rows if row.name in wanted]
+        rows = [
+            row
+            for row in rows
+            if crown_scope_matches(getattr(row, "crown_scope", None), scope)
+        ]
     pairs: dict[str, str] = {}
     for row in rows:
         if getattr(row, "status", None) in TERMINAL_STATUSES or not getattr(row, "session_id", None):

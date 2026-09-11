@@ -51,20 +51,25 @@ def _fleet_incident_gate() -> None:
     from fno.rust_binary import find_dev_binary, resolve_binary
 
     binary = find_dev_binary() or resolve_binary()
-    proc = (
-        subprocess.run(
-            [str(binary), "fleet-incident", "check", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+    try:
+        proc = (
+            subprocess.run(
+                [str(binary), "fleet-incident", "check", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if binary
+            else None
         )
-        if binary
-        else None
-    )
+    except subprocess.TimeoutExpired:
+        proc = None
     try:
         verdict = json.loads(proc.stdout) if proc else {}
     except ValueError:
         verdict = {}
+    if proc is None:
+        verdict.setdefault("reason", "check unavailable (no binary, or timed out)")
     if verdict.get("state") == "stopped":
         _refuse(
             EXIT_FLEET_STOP,
