@@ -7,7 +7,7 @@ status: accepted
 
 ## Is this page for you?
 
-You want to know from the plan file alone whether a plan shipped, when, and where the PR lives. This page owns the frontmatter stamp and the prose completion log the ship gate writes. Misreading it sends you into `ledger.json` and `git log` for an answer the plan already carries.
+You want to know from the plan file alone whether a plan shipped, where the PR lives, and which sessions ran it. This page owns the frontmatter stamp and the prose completion log the ship gate writes. Misreading it sends you into `ledger.json` and `git log` for an answer the plan already carries.
 
 Not for: how completion is decided from the world (PR + CI + review). That is [control-plane-loop.md](control-plane-loop.md).
 

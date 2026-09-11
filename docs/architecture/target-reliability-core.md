@@ -6,7 +6,7 @@ non-code failure modes before they burn iterations: the
 
 ## Is this page for you?
 
-Your target run burns iterations on environment or context failures, not code bugs: a dirty tree, expired auth, lost phase context. This page owns the two improvements aimed at that. Misreading it sends you debugging the plan when the working tree was the fault.
+Your target run burns iterations on environment or context failures, not code bugs: a dirty tree, expired auth, lost phase context. This page owns the two improvements aimed at that. Misreading it sends you debugging the plan. The working tree was the fault.
 
 Not for: how completion is decided (PR + CI + review). That is [control-plane-loop.md](control-plane-loop.md). Preflight is opt-in by default, and CI stays the gate.
 

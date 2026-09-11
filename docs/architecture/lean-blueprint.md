@@ -4,7 +4,7 @@
 
 You design or review the plan format, or you wonder why `/blueprint` edited your design doc instead of creating a plan folder. This page owns the single-doc architecture and its measured redundancy case. Misreading it makes you look for a folder plan that new plans never write.
 
-Not for: how a plan gets executed wave by wave, or how the stop gate reads the world. Execution lives in the execute skill; completion is [control-plane-loop.md](control-plane-loop.md).
+Not for: how a plan gets executed wave by wave, or how the stop gate reads the world. Execution lives in the execute skill. Completion is [control-plane-loop.md](control-plane-loop.md).
 
 ## What it is
 
