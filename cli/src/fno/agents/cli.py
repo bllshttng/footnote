@@ -261,6 +261,11 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
         return False
 
 
+def _claim_refused(action: str, common: dict[str, object]) -> dict[str, object]:
+    """The shared refusal verdict shape for an auto-deferred node."""
+    return {"verdict": "refused", "reason": action, **common}
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -328,11 +333,7 @@ def _spawn_guard_decision(
         "init_reached": _init_reached(node_id, observation.holder, cwd),
     }
     if observation.action in ("auto-deferred", "defer-failed"):
-        return {
-            "verdict": "refused",
-            "reason": observation.action,
-            **common,
-        }, 0
+        return _claim_refused(observation.action, common), 0
     if observation.blocks_dispatch:
         # A LIVE claim is benign dedup: somebody is genuinely building this and
         # a batch sweep must keep going. A SUSPECT one is a wedge - dead pid,
@@ -396,11 +397,7 @@ def _spawn_guard_decision(
                 # auto-deferred node `already-running` and hand back a
                 # force-release remedy that does nothing for it.
                 if observation.action in ("auto-deferred", "defer-failed"):
-                    return {
-                        "verdict": "refused",
-                        "reason": observation.action,
-                        **common,
-                    }, 0
+                    return _claim_refused(observation.action, common), 0
         if observation.blocks_dispatch:
             # A launch-window holder is NOT a wedge. Its claim carries the pid of
             # the `fno agents spawn` process, which exits the moment it has
@@ -737,9 +734,7 @@ def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
     return canonical
 
 
-# ---------------------------------------------------------------------------
 # Group 2, Task 4.3: `fno agents watch` — observe a held stream-json thread
-# ---------------------------------------------------------------------------
 
 
 def _agents_home_dir() -> Path:
@@ -979,6 +974,7 @@ def _parse_wait_seconds(raw: str) -> float:
 
 # Shared option types for the spawn/ask pair: declared once so the two
 # commands cannot drift apart on the flags they both carry.
+CwdOpt = Annotated[Optional[str], typer.Option("--cwd", "-c", help="Working directory for the agent subprocess.")]
 FreshOpt = Annotated[
     bool,
     typer.Option(
@@ -1073,9 +1069,7 @@ def cmd_spawn(
             "--settings file beside the hook deny_edit list. Pane refuses."
         ),
     ),
-    cwd: str | None = typer.Option(
-        None, "--cwd", "-c", help="Working directory for the agent subprocess."
-    ),
+    cwd: CwdOpt = None,
     timeout: int | None = typer.Option(
         None,
         "--timeout",
@@ -4564,9 +4558,7 @@ def cmd_attach(
     refuse_without_binary("attach")
 
 
-# ---------------------------------------------------------------------------
 # Observability verbs: trace + resume (Tasks 3.3 / 3.4 / 3.5)
-# ---------------------------------------------------------------------------
 # Both commands live in their own modules so this CLI file stays focused
 # on shape + wiring. The cmd_<verb> functions are re-bound here as
 # Typer subcommands; tests can still monkeypatch cli.cmd_<verb> for
@@ -4583,9 +4575,7 @@ agents_app.command("resume")(_cmd_resume)
 agents_app.command("history")(history_command)
 
 
-# ---------------------------------------------------------------------------
 # Gate verb (Task 2.3): per-provider injection verification gate management
-# ---------------------------------------------------------------------------
 
 
 @agents_app.command("gate", hidden=True)
@@ -4667,10 +4657,10 @@ def yard(
 # harness against the (config-merged) row. Four verdicts and UNKNOWN never
 # acts: a missing binary or a timeout is UNKNOWN with its reason, never a
 # disagreement, because an absent instrument is not a measurement.
-# Moved to fno.agents.harness_probe_cli (file budget); the composition stays.
-from fno.agents.harness_probe_cli import harness_app  # noqa: E402
+# Moved to fno.agents.capability_probe (file budget); the composition stays.
+from fno.agents.capability_probe import register_harness_commands  # noqa: E402
 
-agents_app.add_typer(harness_app, name="harness", hidden=True)
+register_harness_commands(agents_app)
 
 from fno.agents import (  # noqa: E402,F401
     ask_cli,

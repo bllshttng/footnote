@@ -300,6 +300,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Messaging verbs are not direct agents actions. They live below the
     # Python-owned `fno agents mail` subgroup and therefore never auto-route as
     # direct send, inbox, or ack Rust verbs.
+    # Fleet incident adapter (x-77db): a thin argv relay to the native
+    # `fleet-incident` verb, which is binary-direct like `test-run` and never
+    # auto-routed under this name.
+    "incident",
     # Epic ab-d3a1ae3e G2 Task 4.3: the stream-json observe surface. Pure Python;
     # polls the worker's stream.read_frames directly. No Rust client port (the
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
