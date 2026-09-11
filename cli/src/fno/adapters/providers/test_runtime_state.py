@@ -1498,7 +1498,7 @@ class TestLockAuthoritativeHeadroom:
     def test_a_stale_window_is_unknown_never_exhausted(self, state_path):
         """The 300s probe TTL already decays a stale 100% window: the verdict
         is UNKNOWN with source=stale, never EXHAUSTED. Pinning this so a later
-        change cannot quietly remove the decay (x-a0c4)."""
+        change cannot quietly remove the decay."""
         now = time.time()
         self._write(
             state_path,

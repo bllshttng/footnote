@@ -2986,7 +2986,7 @@ mod tests {
         assert!(out["would_take"].as_str().unwrap().contains("exhausted"));
     }
 
-    // --- the capacity verdict carries its age (x-a0c4) --------------------- //
+    // --- the capacity verdict carries its age ------------------------------ //
 
     fn now_epoch() -> f64 {
         std::time::SystemTime::now()

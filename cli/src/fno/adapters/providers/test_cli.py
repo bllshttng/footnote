@@ -257,7 +257,7 @@ class TestListUsageColumn:
         assert row["usage_ttl_seconds"] == 300
 
     def test_lock_line_names_the_lock_and_the_credential_snapshot(self, tmp_path: Path):
-        """x-a0c4, the misread that filed the node: `headroom=exhausted` and
+        """The misread that filed the node: `headroom=exhausted` and
         `snapshot=15d` rendered as one sentence, so the credential blob age
         read as the verdict's provenance. The headroom now names its own
         source, and the credential column can no longer be read as it."""

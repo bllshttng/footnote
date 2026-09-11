@@ -505,8 +505,8 @@ def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):
 
 
 def test_runtime_capacity_keeps_per_account_sources_and_observed_at(monkeypatch):
-    """x-a0c4: the payload keeps each account's provenance beside its state, so
-    a named row never has to guess whose evidence the harness window named.
+    """The payload keeps each account's provenance beside its state, so a
+    named row never has to guess whose evidence the harness window named.
     The fields the Rust walk already reads stay byte-compatible."""
     import fno.adapters.providers.runtime_state as rs
     from fno.adapters.providers.runtime_state import Headroom, HeadroomState
