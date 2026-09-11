@@ -1236,50 +1236,37 @@ def tick() -> None:
             set_tick_phase("catchup")
             quota_skipped = result is not None and bool(getattr(result, "quota_skip", False))
             if not quota_skipped:
-                # Scoped to this leg (x-d211): the sync shell a tick spawns
-                # inherits the marker, and the child `fno update` it runs skips
-                # its trailing `do pr watch refresh` - that refresh bootouts
-                # THIS job mid-tick. Restored on every exit so a later
-                # interactive update stays ordinary.
-                prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
-                os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
                 try:
-                    try:
-                        from fno.pr._sync_canonical import run_sync_catchup
+                    from fno.pr._sync_canonical import run_sync_catchup
 
-                        for root in _catchup_roots():
-                            try:
-                                res = run_sync_catchup(
-                                    settings=load_settings_for_repo(root), canonical_root=root
-                                )
-                            except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
-                                log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
-                                continue
-                            if res.outcome == "disabled":
-                                continue
-                            typer.echo(
-                                f"sync catch-up [{root.name}]: {res.outcome}"
-                                + (f" ({res.detail})" if res.detail else "")
+                    for root in _catchup_roots():
+                        try:
+                            res = run_sync_catchup(
+                                settings=load_settings_for_repo(root), canonical_root=root
                             )
-                            # Detected AND unresolved. Keying on a failed sync alone would alarm
-                            # on a merge from two minutes ago whose retry is seconds away, and
-                            # stay silent on a canonical proven behind with every marker present
-                            # - the state where there is nothing to sweep and the markers lie.
-                            if res.stale and res.outcome != "synced":
-                                typer.echo(
-                                    f"ALARM: {root.name} canonical sync is stale and the catch-up "
-                                    f"did not resolve it ({res.detail}). That checkout and its "
-                                    f"installed tooling are behind; sync it by hand.",
-                                    err=True,
-                                )
-                                _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
-                    except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
-                        log.warning("pr-watch: sync catch-up failed: %s", exc)
-                finally:
-                    if prior_marker is None:
-                        os.environ.pop(_ENV_ACTIVE_TICK, None)
-                    else:
-                        os.environ[_ENV_ACTIVE_TICK] = prior_marker
+                        except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                            log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
+                            continue
+                        if res.outcome == "disabled":
+                            continue
+                        typer.echo(
+                            f"sync catch-up [{root.name}]: {res.outcome}"
+                            + (f" ({res.detail})" if res.detail else "")
+                        )
+                        # Detected AND unresolved. Keying on a failed sync alone would alarm
+                        # on a merge from two minutes ago whose retry is seconds away, and
+                        # stay silent on a canonical proven behind with every marker present
+                        # - the state where there is nothing to sweep and the markers lie.
+                        if res.stale and res.outcome != "synced":
+                            typer.echo(
+                                f"ALARM: {root.name} canonical sync is stale and the catch-up "
+                                f"did not resolve it ({res.detail}). That checkout and its "
+                                f"installed tooling are behind; sync it by hand.",
+                                err=True,
+                            )
+                            _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
+                except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
+                    log.warning("pr-watch: sync catch-up failed: %s", exc)
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
@@ -1288,7 +1275,18 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
-        _run_phase("catchup", _phase_catchup)
+        # Scoped to the catch-up phase (x-d211): the sync shell it spawns
+        # inherits the marker, and the child `fno update` skips its trailing
+        # `do pr watch refresh` - that refresh bootouts THIS job mid-tick.
+        prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
+        os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
+        try:
+            _run_phase("catchup", _phase_catchup)
+        finally:
+            if prior_marker is None:
+                os.environ.pop(_ENV_ACTIVE_TICK, None)
+            else:
+                os.environ[_ENV_ACTIVE_TICK] = prior_marker
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.
