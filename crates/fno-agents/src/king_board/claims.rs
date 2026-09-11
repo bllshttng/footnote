@@ -1,42 +1,12 @@
 //! The merged both-roots claim scan (claims.cli._merge_claims_across_roots).
-use super::{s_str, SourceRead};
+use super::SourceRead;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Claims: the merged both-roots scan (claims.cli._merge_claims_across_roots)
 // ---------------------------------------------------------------------------
 
-/// Percent-decode a claim filename back to its key (io.decode_key /
-/// `urllib.parse.unquote`); `%` escapes are the only ones the encoder writes.
-pub(crate) fn decode_key(filename: &str) -> String {
-    let bytes = filename.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = |b: u8| -> Option<u8> {
-                match b {
-                    b'0'..=b'9' => Some(b - b'0'),
-                    b'a'..=b'f' => Some(b - b'a' + 10),
-                    b'A'..=b'F' => Some(b - b'A' + 10),
-                    _ => None,
-                }
-            };
-            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The requeue pseudo-holder (mirrors `TARGET_SESSION_HOLDER_PREFIX` in
 /// One root's live + dead claim rows (core._list_claims_impl with
 /// include_stale=true): every `.lock` file, classified, dead states kept.
 ///
@@ -48,56 +18,38 @@ pub(crate) fn decode_key(filename: &str) -> String {
 /// commissioned this fix minted its own handover claim on the very node being
 /// fixed). A role row whose window lapsed with no worker taking over is the
 /// stale row `stale_claim` exists to name.
-pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
-    let mut rows: Vec<Value> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return rows;
+///
+/// An unreadable directory is an ERR, never an empty row list: empty means
+/// "nobody holds anything", and a failed read must not say that (x-636f).
+pub(crate) fn read_claims_in(dirs: &[PathBuf]) -> SourceRead {
+    let records = match crate::claims::list_in(dirs, Some("node:"), true) {
+        Ok(records) => records,
+        Err(e) => return SourceRead::err(format!("claims unreadable: {e}")),
     };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for path in paths {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".lock") {
-            continue;
-        }
-        if path.is_dir() {
-            continue; // the .expired archive dir and any future subdirs
-        }
-        let key = decode_key(name.trim_end_matches(".lock"));
-        if !key.starts_with("node:") {
-            continue;
-        }
-        match crate::claims::read_claim_file(&path) {
-            Err(_) => continue, // gone between list and read: not a state
-            Ok(rec) => {
-                let state = crate::claims::classify(&rec, None);
-                let state = state.as_str();
-                // The board consumes live/suspect (stalled_holder's locks,
-                // undriven_pr's driver read) and stale/corrupted (its own
-                // queue); `free` never has a file to scan.
-                if matches!(state, "live" | "suspect" | "stale" | "corrupted") {
-                    rows.push(json!({
-                        "key": rec.key,
-                        "state": state,
-                        "holder": rec.holder,
-                        "host": rec.host,
-                        "pid": rec.pid,
-                    }));
-                }
-            }
-        }
-    }
-    rows
+    SourceRead::ok(Value::Array(
+        records
+            .iter()
+            .map(|rec| {
+                json!({
+                    "key": rec.key,
+                    "state": crate::claims::classify(rec, None).as_str(),
+                    "holder": rec.holder,
+                    "host": rec.host,
+                    "pid": rec.pid,
+                })
+            })
+            .collect(),
+    ))
 }
 
-/// Both roots, best-state-wins merged into one view (the Python merge's
-/// priority order: live beats suspect beats stale beats corrupted).
+/// Both roots (the global claims root, then the canonical checkout's own),
+/// deduped by canonicalized path, read through [`read_claims_in`].
 pub(crate) fn read_claims(cwd: &Path) -> SourceRead {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let push = |dir: Option<PathBuf>, seen: &mut HashSet<PathBuf>, dirs: &mut Vec<PathBuf>| {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let push = |dir: Option<PathBuf>,
+                seen: &mut std::collections::HashSet<PathBuf>,
+                dirs: &mut Vec<PathBuf>| {
         if let Some(d) = dir {
             let resolved = d.canonicalize().unwrap_or_else(|_| d.clone());
             if seen.insert(resolved) {
@@ -117,40 +69,13 @@ pub(crate) fn read_claims(cwd: &Path) -> SourceRead {
     if dirs.is_empty() {
         return SourceRead::err("agents claim list: no claims root resolves");
     }
-    const PRIORITY: [&str; 5] = ["live", "suspect", "stale", "corrupted", "free"];
-    let prio = |state: &str| PRIORITY.iter().position(|s| *s == state).unwrap_or(5);
-    let mut best: BTreeMap<String, Value> = BTreeMap::new();
-    for dir in &dirs {
-        for row in scan_claims_dir(dir) {
-            let key = s_str(&row, "key").unwrap_or_default().to_string();
-            let state = s_str(&row, "state").unwrap_or_default().to_string();
-            match best.get(&key) {
-                Some(existing)
-                    if prio(s_str(existing, "state").unwrap_or("free")) <= prio(&state) =>
-                {
-                    continue;
-                }
-                _ => {
-                    best.insert(key, row);
-                }
-            }
-        }
-    }
-    SourceRead::ok(Value::Array(best.into_values().collect()))
+    read_claims_in(&dirs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn claim_keys_decode_from_filenames() {
-        assert_eq!(
-            decode_key("node%3Ax-25b8.lock".trim_end_matches(".lock")),
-            "node:x-25b8"
-        );
-        assert_eq!(decode_key("node%3Ax%20sp"), "node:x sp");
-    }
+    use std::os::unix::fs::PermissionsExt;
 
     fn handover_row(holder: &str, expires_in_ms: i64, key: &str) -> (String, String) {
         let now = crate::claims::now_ms();
@@ -165,6 +90,13 @@ mod tests {
         (format!("{key}.lock"), yaml)
     }
 
+    fn scan_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kb-claims-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
     #[test]
     fn a_live_handover_row_stays_in_the_scan() {
         // The regression guard task 4 exists to pin: a live launch-window
@@ -173,15 +105,13 @@ mod tests {
         // pre-classification, so an in_progress node in its launch window
         // read driver-none and landed in unheld_progress - the exact
         // silence the scan-level skip manufactured.
-        let dir = std::env::temp_dir().join(format!("kb-claims-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = scan_dir("live");
         let (name, yaml) = handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-90fa");
         std::fs::write(dir.join(name), yaml).expect("write handover claim");
         let (tname, tyaml) =
             handover_row("target-session:a6d2ce6a-1da0", 900_000, "node%3Ax-requeue");
         std::fs::write(dir.join(tname), tyaml).expect("write requeue claim");
-        let rows = scan_claims_dir(&dir);
+        let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 2, "role rows stay in scope: {rows:?}");
         assert!(
             rows.iter()
@@ -193,14 +123,33 @@ mod tests {
 
     #[test]
     fn an_expired_handover_row_stays_in_scope() {
-        let dir = std::env::temp_dir().join(format!("kb-claims-exp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = scan_dir("exp");
         let (name, yaml) = handover_row("spawn-handover:t-90fa-port", -1, "node%3Ax-90fa");
         std::fs::write(dir.join(name), yaml).expect("write expired handover claim");
-        let rows = scan_claims_dir(&dir);
+        let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
         assert_eq!(rows[0]["state"], "stale");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_dir_reads_unreadable_not_empty() {
+        // x-636f: the scan's old `read_dir` failure returned zero rows, and
+        // zero rows means nobody holds anything. The read must say it failed.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads through mode 000; the assertion cannot fire
+        }
+        let dir = scan_dir("mode000");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let read = read_claims_in(&[dir.clone()]);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod restore");
+        assert!(!read.is_ok(), "mode-000 dir must not read ok: {read:?}");
+        let error = read.error.expect("error names the fault");
+        assert!(
+            error.contains(&dir.display().to_string()),
+            "error names the unreadable dir: {error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
