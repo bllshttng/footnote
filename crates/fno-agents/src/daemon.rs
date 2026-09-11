@@ -2392,10 +2392,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::merge_reap::consume_merge_cleanup_requests(
                             &home, &roots, &emitter, grace_secs,
                         );
-                        // Daily machine janitor (x-7ca7): plugin-cache build
-                        // copies, leaked test HOMEs, stale scratch. The gate
-                        // and its receipt live in crate::reclaim; the daemon
-                        // only asks whether today's run is owed.
+                        // Daily janitor (x-7ca7); gate and receipt in reclaim.rs.
                         crate::reclaim::maybe_run_daily(&home);
                     });
                 }
@@ -13786,12 +13783,10 @@ done
         sock
     }
 
-    /// Locate the cargo-built `fno-agents-worker` (target/debug/fno-agents-worker,
-    /// via this crate's manifest dir). `None` if it is not built, so the e2e
-    /// adopt test SKIPS rather than failing in an environment where only the lib
-    /// test target was compiled. Final binaries stay in the checkout's target/
-    /// under build.build-dir, and CARGO_MANIFEST_DIR is worktree-local, so the
-    /// manifest-relative path holds from any test binary location.
+    /// Locate the cargo-built `fno-agents-worker` via this crate's manifest
+    /// dir (final binaries stay in the checkout's target/ under
+    /// build.build-dir, and the manifest path is worktree-local). `None` if
+    /// it is not built, so the e2e adopt test SKIPS rather than failing.
     fn built_worker_bin() -> Option<PathBuf> {
         let cand = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/fno-agents-worker");
         cand.exists().then_some(cand)

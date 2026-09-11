@@ -72,6 +72,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "roster-reap",
     "reconcile",
     "reclaim",
+    "plugin-install",
     "recover",
     "reentry-plan",
     "rename",
@@ -463,6 +464,13 @@ async fn run(args: Vec<String>) -> i32 {
     // in-process.
     if verb == "reclaim" {
         return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
+    }
+    // `plugin-install` (x-7ca7): the filtered-stage installer for the plugin
+    // harnesses, daemon-free. The Python surface `fno config plugin install`
+    // shells HERE for claude, opencode and agy; codex stays on the Python
+    // converge engine per the ship-phase ruling.
+    if verb == "plugin-install" {
+        return fno_agents::plugin_install::run_plugin_install(&args[1..]);
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);

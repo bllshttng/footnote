@@ -150,6 +150,7 @@ pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
 pub mod pi;
+pub mod plugin_install;
 pub mod protocol;
 pub mod provider;
 pub mod readiness;

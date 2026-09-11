@@ -1832,6 +1832,19 @@ def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:
     assert len(caught.value.detail) == 500
 
 
+class _FakeStageRun:
+    """Stands in for the fno-agents plugin-install child: ``--stage-only``
+    prints a stage path, anything else is a no-op success."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.returncode = 0
+        self.stdout = (
+            "/tmp/plugin-stage-fno\n" if argv[1:2] == ["--stage-only"] else "fake\n"
+        )
+        self.stderr = ""
+
+
 def test_public_cli_reports_verified_release_and_restart_posture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1840,19 +1853,16 @@ def test_public_cli_reports_verified_release_and_restart_posture(
     from fno.plugin_install_cli import plugin_app
 
     monkeypatch.setattr(
-        "fno.plugin_install_cli._build_stage",
-        lambda: Path("/tmp/plugin-stage-fno"),
+        "fno.plugin_install_cli.subprocess.run",
+        lambda argv, **_kw: _FakeStageRun(argv),
     )
     monkeypatch.setattr(
         "fno.setup.codex_plugin.converge",
         lambda **_kwargs: ConvergenceResult("dev", "refreshed", "fno@footnote", "0.3.2"),
     )
-    monkeypatch.setattr("fno.plugin_install_cli._export_env_everywhere", lambda: "envs")
-    monkeypatch.setattr("fno.plugin_install_cli._remove_stale_copies", lambda: [])
     result = CliRunner().invoke(plugin_app, ["codex", "--force"])
     assert result.exit_code == 0, result.output
     assert "converged fno@footnote 0.3.2 (action=refreshed)" in result.output
-    assert "build-dir env exported to" in result.output
 
 
 def test_public_cli_exits_nonzero_without_success_on_stage_failure(
@@ -1863,10 +1873,11 @@ def test_public_cli_exits_nonzero_without_success_on_stage_failure(
     def fail(**_kwargs: object) -> ConvergenceResult:
         raise CodexPluginError("plugin-add", "network unavailable")
 
-    monkeypatch.setattr("fno.plugin_install_cli._build_stage", lambda: Path("/tmp/plugin-stage-fno"))
+    monkeypatch.setattr(
+        "fno.plugin_install_cli.subprocess.run",
+        lambda argv, **_kw: _FakeStageRun(argv),
+    )
     monkeypatch.setattr("fno.setup.codex_plugin.converge", fail)
-    monkeypatch.setattr("fno.plugin_install_cli._export_env_everywhere", lambda: "envs")
-    monkeypatch.setattr("fno.plugin_install_cli._remove_stale_copies", lambda: [])
     result = CliRunner().invoke(plugin_app, ["codex"])
     assert result.exit_code == 1
     assert "plugin-add: network unavailable" in result.output
