@@ -211,14 +211,9 @@ def graph_parity(
     db: Optional[Path] = None,
 ) -> None:
     """Compare the JSON export with every row in the SQLite graph store."""
-    import sys
+    from fno.graph.parity import compare
 
-    from fno.paths import resolve_plugin_script
-
-    argv = [sys.executable, str(resolve_plugin_script("scripts/analysis/graph-parity.py")),
-            *([] if graph is None else ["--graph", str(graph)]),
-            *([] if db is None else ["--db", str(db)])]
-    raise typer.Exit(subprocess.call(argv))
+    raise typer.Exit(compare(graph=graph, db=db))
 
 
 
