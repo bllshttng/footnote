@@ -150,6 +150,37 @@ def test_start_exits_124_naming_the_init_stage_and_claim_recovery(
     assert "fno do target start x-0b3f" in result.output
 
 
+def test_start_codex_native_bounds_its_own_init_call_too(monkeypatch):
+    """`_start_codex_native` runs a second, separate `target init` subprocess
+    for a Codex Desktop-owned worktree -- a sibling of the ensure/init calls
+    bounded above, missed by the plan's own answerer count. Given a deadline
+    (always supplied by its one real caller, `_start_body`), it must exit 124
+    the same way instead of leaving an unbounded, unkillable orphan."""
+
+    def fake_run_bounded(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run_bounded)
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
+    monkeypatch.setattr(target_cli, "_prepare_codex_native_branch", lambda *a: "main")
+
+    with pytest.raises(target_cli.typer.Exit) as excinfo:
+        target_cli._start_codex_native(
+            canonical=Path("/repo"),
+            cwd=Path("/repo/wt"),
+            node="x-1",
+            plan_path=None,
+            size=None,
+            model=None,
+            harness=None,
+            beastmode=False,
+            no_merge=False,
+            deadline=time.monotonic() + 100,
+        )
+    assert excinfo.value.exit_code == 124
+
+
 # --------------------------------------------------------------------------
 # AC4: the end-to-end faulthandler watchdog.
 # --------------------------------------------------------------------------

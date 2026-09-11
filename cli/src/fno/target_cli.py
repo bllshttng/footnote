@@ -31,7 +31,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, NoReturn, Optional, Tuple
 
 import typer
 
@@ -39,14 +39,33 @@ from fno._subprocess_util import propagate_returncode, run_bounded
 from fno.paths import resolve_plugin_script
 from fno.tombstones import tombstone_group_cls
 
-# The Claude Bash tool caps a call at 600s; 540s gives `start` its own exit
-# under that cap and well below the 10+ minute stalls this bound targets.
+# Below the Claude Bash tool's 600s call cap, well below the 10+ minute stalls this bound targets.
 _START_DEADLINE_S = 540
 _STAGE_GRACE_S = 15  # a stage's process group dies this long before the watchdog would
 
 
 def _stage_timeout(deadline: float) -> float:
     return max(1.0, deadline - time.monotonic() - _STAGE_GRACE_S)
+
+
+def _stage_timeout_exit(step: str, extra: str) -> NoReturn:
+    typer.echo(
+        f"fno do target start: step: {step} exceeded the {_START_DEADLINE_S}s start "
+        f"bound; its process group was killed. {extra}",
+        err=True,
+    )
+    raise typer.Exit(code=124)
+
+
+def _run_bounded_init(cmd: list[str], cwd: Path, deadline: float, node: str) -> subprocess.CompletedProcess:
+    try:
+        return run_bounded(cmd, timeout=_stage_timeout(deadline), cwd=str(cwd))
+    except subprocess.TimeoutExpired:
+        _stage_timeout_exit(
+            "init",
+            f"Claim state is unknown: check fno agents claim status node:{node}. "
+            f"A rerun of fno do target start {node} resumes idempotently.",
+        )
 
 
 target_app = typer.Typer(
@@ -2853,6 +2872,7 @@ def _start_codex_native(
     beastmode: bool,
     no_merge: bool,
     deliverables: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> None:
     """Finish target bootstrap inside a worktree Codex Desktop already owns."""
     base = _prepare_codex_native_branch(cwd, node)
@@ -2948,7 +2968,9 @@ def _start_codex_native(
         cmd += ["--no-merge"]
     if deliverables is not None:
         cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(cmd, cwd=str(cwd))
+    init = subprocess.run(cmd, cwd=str(cwd)) if deadline is None else _run_bounded_init(
+        cmd, cwd, deadline, node
+    )
     if init.returncode != 0:
         typer.echo(
             f"fno do target start: target init failed in app-owned worktree "
@@ -3359,10 +3381,6 @@ def start(
     HEAD) -> link shared non-fno state -> ``fno do target init`` (writes the
     manifest into the worktree's space slice, claims the node exactly once) -> receipt.
     Run from INSIDE a valid worktree it is a no-op.
-
-    Bounded at ``_START_DEADLINE_S``: a ``faulthandler`` watchdog dumps the
-    stalled frame if the body itself hangs; each subprocess stage is bounded
-    by ``run_bounded`` so it cannot outlive that same deadline.
     """
     deadline = time.monotonic() + _START_DEADLINE_S
     faulthandler.dump_traceback_later(
@@ -3410,6 +3428,7 @@ def _start_body(
                 beastmode=beastmode,
                 no_merge=no_merge,
                 deliverables=deliverables,
+                deadline=deadline,
             )
             return
         if _under_codex_worktrees(cwd):
@@ -3508,12 +3527,7 @@ def _start_body(
     try:
         ens = run_bounded(ensure_cmd, timeout=_stage_timeout(deadline), capture_output=True, text=True)
     except subprocess.TimeoutExpired:
-        typer.echo(
-            f"fno do target start: step: ensure exceeded the {_START_DEADLINE_S}s start "
-            f"bound; its process group was killed. Nothing was claimed.",
-            err=True,
-        )
-        raise typer.Exit(code=124)
+        _stage_timeout_exit("ensure", "Nothing was claimed.")
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
@@ -3691,17 +3705,7 @@ def _start_body(
         init_cmd += ["--beastmode"]
     if deliverables is not None:
         init_cmd += ["--deliverables", str(deliverables)]
-    try:
-        init = run_bounded(init_cmd, timeout=_stage_timeout(deadline), cwd=str(wt_path))
-    except subprocess.TimeoutExpired:
-        typer.echo(
-            f"fno do target start: step: init exceeded the {_START_DEADLINE_S}s start "
-            f"bound; its process group was killed. Claim state is unknown: check "
-            f"fno agents claim status node:{node}. A rerun of fno do target start "
-            f"{node} resumes idempotently.",
-            err=True,
-        )
-        raise typer.Exit(code=124)
+    init = _run_bounded_init(init_cmd, wt_path, deadline, node)
     if init.returncode != 0:
         if created_this_run and not in_place:
             # One receipt line the run currently lacks: the refused init

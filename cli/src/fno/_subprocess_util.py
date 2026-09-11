@@ -61,11 +61,7 @@ def propagate_returncode(returncode: int) -> int:
 
 
 def run_bounded(
-    cmd: list[str],
-    *,
-    timeout: float,
-    capture_output: bool = False,
-    text: bool = False,
+    cmd: list[str], *, timeout: float, capture_output: bool = False, text: bool = False,
     **popen_kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Like ``subprocess.run(cmd, timeout=timeout)``, but on timeout or
