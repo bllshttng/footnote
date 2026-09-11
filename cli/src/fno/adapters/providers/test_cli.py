@@ -157,7 +157,7 @@ class TestListWithRecords:
 
 
 # ---------------------------------------------------------------------------
-# The usage=<age> column (distinct from snapshot=<age>, the
+# The usage=<age> column (distinct from cred-snapshot=<age>, the
 # credential blob age) and the DISARMED footer.
 # ---------------------------------------------------------------------------
 
@@ -255,6 +255,45 @@ class TestListUsageColumn:
         assert row["usage_age_s"] is None
         assert row["usage_stale"] is False
         assert row["usage_ttl_seconds"] == 300
+
+    def test_lock_line_names_the_lock_and_the_credential_snapshot(self, tmp_path: Path):
+        """x-a0c4, the misread that filed the node: `headroom=exhausted` and
+        `snapshot=15d` rendered as one sentence, so the credential blob age
+        read as the verdict's provenance. The headroom now names its own
+        source, and the credential column can no longer be read as it."""
+        import json as _json
+        import time
+
+        settings_path = tmp_path / ".fno" / "config.toml"
+        config = _two_record_config()
+        # only a managed record prints the credential-snapshot column
+        config["config"]["providers"]["records"] = [
+            {"id": "makers", "name": "Makers", "harness": "claude",
+             "auth": "managed", "priority": 100},
+        ]
+        config["config"]["providers"]["active"] = "makers"
+        _write_settings(settings_path, config)
+        state_path = tmp_path / "provider-runtime-state.json"
+        now = time.time()
+        state_path.write_text(_json.dumps({
+            "schema_version": 2,
+            "provider_health": {"makers": {
+                "provider_id": "makers", "backoff_level": 1,
+                "rate_limited_until": now + 3600, "last_error_at": now - 47 * 60,
+                "model_locks": {}}},
+        }), encoding="utf-8")
+
+        result = runner.invoke(
+            providers_app, ["list"],
+            env={"HOME": str(tmp_path), "PWD": str(tmp_path),
+                 "FNO_RUNTIME_STATE_PATH": str(state_path)},
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if "makers" in ln)
+        assert "headroom=exhausted(lock" in line
+        assert "cred-snapshot=" in line
+        assert "headroom=exhausted  snapshot=" not in line
 
 
 class TestListDisarmedFooter:
@@ -1111,7 +1150,7 @@ class TestListJson:
         assert cp["priority"] == 10
         assert cp["active"] is True
         assert "headroom" in cp        # 'unknown' allowed; the key must exist
-        assert "snapshot" in cp        # None for non-managed; key present
+        assert "cred-snapshot" in cp   # None for non-managed; key present
         assert by_id["gemini-backup"]["active"] is False
 
 

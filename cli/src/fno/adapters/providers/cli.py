@@ -115,7 +115,7 @@ def list_providers(
                 "priority": record.priority,
                 "active": _is_active(record),
                 "headroom": _headroom_label(record.id),
-                "snapshot": (
+                "cred-snapshot": (
                     managed.snapshot_age_label(record.id)
                     if record.auth == "managed"
                     else None
@@ -140,7 +140,7 @@ def list_providers(
             f"priority={record.priority}  headroom={headroom_col}"
         )
         if record.auth == "managed":
-            line += f"  snapshot={managed.snapshot_age_label(record.id)}"
+            line += f"  cred-snapshot={managed.snapshot_age_label(record.id)}"
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
         typer.echo(line)
 
@@ -170,11 +170,31 @@ def list_providers(
 
 
 def _headroom_label(provider_id: str) -> str:
-    """Compact headroom string for the list column. Fail-open to 'unknown'."""
+    """Compact headroom string with its own provenance for the list column.
+
+    The bare state name sat next to the credential-snapshot age on the same
+    line and read as one fact, so an operator took the snapshot age for the
+    verdict's provenance. The source (and the observation age when there was
+    one) keeps the two claims apart. Fail-open to 'unknown'.
+    """
     try:
         from fno.adapters.providers.runtime_state import headroom
 
-        return headroom(provider_id).state.name.lower()
+        h = headroom(provider_id)
+        detail = h.source
+        if detail:
+            if h.observed_at is not None:
+                age = max(0.0, time_module.time() - h.observed_at)
+                if age < 60:
+                    detail += f" {int(age)}s"
+                elif age < 3600:
+                    detail += f" {int(age // 60)}m"
+                elif age < 86400:
+                    detail += f" {int(age // 3600)}h"
+                else:
+                    detail += f" {int(age // 86400)}d"
+            detail = f"({detail})"
+        return f"{h.state.name.lower()}{detail}"
     except Exception:  # noqa: BLE001 - a display read must never break `list`
         return "unknown"
 
