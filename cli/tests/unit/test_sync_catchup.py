@@ -607,6 +607,86 @@ def test_tick_continues_after_one_project_raises(monkeypatch, tmp_path):
     assert "sync catch-up [good]: synced" in res.output
 
 
+def _tick_stub(monkeypatch, roots):
+    from types import SimpleNamespace as NS
+
+    from fno.pr_watch import cli as pw
+
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _r: _tick_settings())
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: roots)
+    monkeypatch.setattr(pw, "_notify_parked", lambda _m: None)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: NS(
+            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0,
+            disabled=False, sweep_failures=0, quota_skip=False,
+            quota_remaining=None, quota_reset=None,
+        ),
+    )
+
+
+def test_tick_marks_the_child_update_as_watcher_owned(monkeypatch, tmp_path):
+    """AC1-HP: the sync shell a tick spawns inherits FNO_PR_WATCH_ACTIVE_TICK.
+
+    A child `fno update` that sees the marker skips its trailing
+    `do pr watch refresh` - without the marker that refresh bootouts THIS job
+    mid-tick, and the tick dies before writing its marker or tick_end
+    (observed 2026-09-11: two ticks died 7s and 18s after a binary rewrite).
+    """
+    import os
+
+    from typer.testing import CliRunner
+
+    from fno.pr import _sync_canonical as sc_mod
+    from fno.pr_watch import cli as pw
+
+    root = tmp_path / "alpha"
+    root.mkdir()
+    _tick_stub(monkeypatch, [root])
+
+    seen: list = []
+    def catchup(**_kw):
+        seen.append(os.environ.get(pw._ENV_ACTIVE_TICK))
+        return sc.CatchupResult("synced", 1)
+
+    monkeypatch.setattr(sc_mod, "run_sync_catchup", catchup)
+    res = CliRunner().invoke(pw.cli, ["tick"])
+    assert res.exit_code == 0
+    assert seen == [seen[0]], "one root, one catch-up call"
+    assert seen[0], "marker must be non-empty inside catch-up"
+    assert pw._ENV_ACTIVE_TICK not in os.environ, "marker must not leak past the tick"
+
+
+def test_tick_restores_the_marker_after_a_failing_root(monkeypatch, tmp_path):
+    """AC1-ERR: a raising root still restores the prior environment, so a
+    later interactive `fno update` is never mislabeled as watcher-owned."""
+    import os
+
+    from typer.testing import CliRunner
+
+    from fno.pr import _sync_canonical as sc_mod
+    from fno.pr_watch import cli as pw
+
+    bad, good = tmp_path / "bad", tmp_path / "good"
+    bad.mkdir()
+    good.mkdir()
+    _tick_stub(monkeypatch, [bad, good])
+
+    seen: list = []
+    def catchup(*, canonical_root=None, **_kw):
+        seen.append(os.environ.get(pw._ENV_ACTIVE_TICK))
+        if canonical_root == bad:
+            raise RuntimeError("boom")
+        return sc.CatchupResult("synced", 1)
+
+    monkeypatch.setattr(sc_mod, "run_sync_catchup", catchup)
+    res = CliRunner().invoke(pw.cli, ["tick"])
+    assert res.exit_code == 0
+    assert seen[0] and seen[1], "every root's sync sees the marker"
+    assert pw._ENV_ACTIVE_TICK not in os.environ, "finally must restore on failure"
+
+
 def test_tick_alarms_on_detected_and_unresolved(monkeypatch):  # AC8-HP
     res, notes = _run_tick(
         monkeypatch,

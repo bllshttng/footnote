@@ -583,6 +583,15 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: x-d211: which timeout mechanism fired; the self-kill is not a budget outcome.
+_WHY_PHRASES = {
+    "deadline_exceeded": "deadline exceeded",
+    "slice_starved": "phase slice starved",
+    "self_killed": "killed mid-sync (update bounce probable)",
+    "killed": "killed by a signal",
+}
+
+
 def tick_end_bits(end: dict) -> list[str]:
     """The parenthesised detail bits after a tick outcome: duration, sweep
     failures, and the phase name only when the tick broke (timeout or error).
@@ -593,6 +602,8 @@ def tick_end_bits(end: dict) -> list[str]:
         bits.append(f"{end['duration_s']:.1f}s")
     if end.get("sweep_failures"):
         bits.append(f"{end['sweep_failures']} sweep failures")
+    if end.get("why"):
+        bits.append(_WHY_PHRASES.get(end["why"], end["why"]))
     if end.get("phase") and end.get("outcome") in ("timeout", "error"):
         bits.append(f"phase: {end['phase']}")
     return bits

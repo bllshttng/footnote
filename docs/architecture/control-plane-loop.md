@@ -31,7 +31,7 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
 - `daemon_down`: The daemon is not running.
 - `tick_timeout`: The pr-watch tick broke (timeout or error) before this arm ran. See `pr_watch_merge`.
-- `scheduler_silent`: No pr-watch tick inside 2x interval. Run `fno do pr watch status`.
+- `tick_overdue`: No completed pr-watch tick stamp inside 2x interval. When the tick's attempt/end records show a tick started and did not complete, the cause names the phase. Run `fno do pr watch status`.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
 ## What was deleted
