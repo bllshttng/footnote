@@ -10,10 +10,12 @@ from typing import Any, Optional
 import typer
 
 from fno.decide import READ_HELP
-from fno.graph.cli import _graph_path, cli
+from fno.graph import cli as graph_cli
 
 
-@cli.command("note")
+# Route the graph path through graph_cli's namespace so the tests' existing
+# `monkeypatch.setattr("fno.graph.cli._graph_path", ...)` seam keeps working.
+@graph_cli.cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: Optional[str] = typer.Argument(None, help="Progress note text (one line)."),
@@ -74,7 +76,7 @@ def cmd_note(
     if identity is not None and identity.harness:
         note["source_harness"] = identity.harness
     entries: list[dict] = []
-    found, _ = append_progress_note(_graph_path(), task_id, note, entries_out=entries)
+    found, _ = append_progress_note(graph_cli._graph_path(), task_id, note, entries_out=entries)
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
@@ -89,7 +91,7 @@ def cmd_note(
         try:
             from fno.backlog.note_notify import deliver_note
 
-            receipts = deliver_note(task_id, text, _graph_path(), entries or None)
+            receipts = deliver_note(task_id, text, graph_cli._graph_path(), entries or None)
         except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
             receipts = [(f"notify FAILED {task_id}: {exc}", True)]
         for line, undelivered in receipts:

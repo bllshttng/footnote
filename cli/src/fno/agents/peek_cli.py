@@ -33,6 +33,7 @@ def cmd_peek(
     all_sessions: bool = typer.Option(
         False,
         "--all",
+        "-A",
         help="Search every registry session with a transcript instead of one handle.",
     ),
     json_out: bool = typer.Option(

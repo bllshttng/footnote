@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from fno import test_cmd
 
 
@@ -35,6 +37,62 @@ def test_run_missing_interpreter_is_127(monkeypatch):
     # A missing interpreter raises FileNotFoundError (an OSError) -> 127.
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: "/nonexistent/python")
     assert test_cmd._run(["-q"]) == 127
+
+
+def _run_captured_to(tmp_path, monkeypatch, body: str):
+    """Run one captured pytest over `body`; return (rc, log text)."""
+    f = _write(tmp_path / "test_case.py", body)
+    monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
+    log = tmp_path / "custom.log"
+    rc = test_cmd._run([str(f)], log_override=log)
+    return rc, log.read_text(encoding="utf-8")
+
+
+def test_captured_log_ends_with_exit_zero(tmp_path, monkeypatch):
+    rc, log = _run_captured_to(tmp_path, monkeypatch, "def test_ok():\n    assert True\n")
+    assert rc == 0
+    assert log.rstrip().endswith("EXIT=0")
+
+
+def test_captured_log_ends_with_real_exit_code(tmp_path, monkeypatch):
+    rc, log = _run_captured_to(tmp_path, monkeypatch, "def test_bad():\n    assert False\n")
+    assert rc == 1
+    assert log.rstrip().endswith("EXIT=1")
+
+
+def test_missing_interpreter_writes_exit_127(tmp_path, monkeypatch):
+    # The 127 OSError return must leave the marker too: a log that just ends
+    # mid-run reads as "still going", not "the interpreter never started".
+    monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: "/nonexistent/python")
+    log = tmp_path / "custom.log"
+    rc = test_cmd._run(["-q"], log_override=log)
+    assert rc == 127
+    assert log.read_text(encoding="utf-8").rstrip().endswith("EXIT=127")
+
+
+def test_log_override_bypasses_last_test_log(tmp_path, monkeypatch):
+    f = _write(tmp_path / "test_ok2.py", "def test_ok():\n    assert True\n")
+    monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
+    chdir = tmp_path / "root"
+    chdir.mkdir()
+    log = tmp_path / "elsewhere.log"
+    monkeypatch.setattr(test_cmd, "_repo_root", lambda cwd: chdir)
+    monkeypatch.chdir(tmp_path)
+    rc = test_cmd._run([str(f)], log_override=log)
+    assert rc == 0
+    assert log.exists()
+    assert not (chdir / ".fno" / "last-test.log").exists()
+
+
+def test_stream_with_log_refuses(tmp_path, capsys):
+    # Direct callback call: the verb is a bare click Command, and the runner
+    # surface differs across click versions in this environment.
+    with pytest.raises(SystemExit) as exc:
+        test_cmd.test_command.callback(
+            stream=True, log_override=tmp_path / "x.log", runner_args=()
+        )
+    assert exc.value.code == 2
+    assert "--stream" in capsys.readouterr().err
 
 
 def _popen_fake(recorder, returncode: int = 0):

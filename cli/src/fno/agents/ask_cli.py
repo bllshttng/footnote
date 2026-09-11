@@ -6,7 +6,7 @@ from typing import Optional
 
 import typer
 
-from fno.agents.cli import agents_app
+from fno.agents.cli import _resolve_dispatch_workdir, agents_app
 
 
 @agents_app.command("ask", hidden=True)

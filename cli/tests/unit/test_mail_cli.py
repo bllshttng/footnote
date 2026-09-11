@@ -322,6 +322,37 @@ def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
     assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
 
 
+def test_send_without_kind_reads_body_file(runner, mailbox):
+    """Rank 3: --body-file binds in EVERY mode, not only --kind."""
+    body_file = mailbox / "msg.md"
+    body_file.write_text('body with "quotes"\nand a newline\n', encoding="utf-8")
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "--to-project", "web", "--from-name", "etl",
+         "--body-file", str(body_file)],
+    )
+    assert sent.exit_code == 0, sent.output
+
+    listing = runner.invoke(app, ["agents", "mail", "unread", "--name", "web", "--json"])
+    assert listing.exit_code == 0, listing.output
+    msgs = json.loads(listing.stdout.strip().splitlines()[-1])
+    assert msgs, "the file-fed body never landed"
+    assert 'body with "quotes"' in msgs[0]["body"]
+    assert "and a newline" in msgs[0]["body"]
+
+
+def test_send_body_and_body_file_refused(runner, mailbox):
+    body_file = mailbox / "msg.md"
+    body_file.write_text("from the file\n", encoding="utf-8")
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "--to-project", "web", "--from-name", "etl",
+         "--body", "inline", "--body-file", str(body_file)],
+    )
+    assert sent.exit_code == 1
+    assert "not both" in sent.stderr
+
+
 @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
 def test_project_kind_known_failure_releases_the_reservation(
     runner,
