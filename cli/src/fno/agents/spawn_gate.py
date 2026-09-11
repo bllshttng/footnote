@@ -47,44 +47,35 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 
 
 def _fleet_incident_gate() -> None:
-    """First admission boundary of the pane gate (x-77db): the native verdict
-    is consulted before the FNO_SPAWN_GATE=0 bypass below. This side owns no
-    state and no JSON interpretation beyond the verdict's own `state` field -
-    the file and its schema stay in fleet_incident.rs."""
+    """The pane gate's first admission boundary: the native verdict, BEFORE
+    the FNO_SPAWN_GATE=0 bypass. This side owns no state interpretation."""
     import subprocess
 
     from fno.rust_binary import find_dev_binary, resolve_binary
 
     binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        _warn(
-            "spawn-gate: fno-agents binary not found; incident state cannot be"
-            " read and admission fails closed (fleet-stop-unavailable)"
+    proc = (
+        subprocess.run(
+            [str(binary), "fleet-incident", "check", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        _refuse(
-            EXIT_FLEET_STOP_UNAVAILABLE,
-            reason="fleet-stop-unavailable",
-            detail="fno-agents binary not found",
-        )
-    proc = subprocess.run(
-        [str(binary), "fleet-incident", "check", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=10,
+        if binary
+        else None
     )
     try:
-        verdict = json.loads(proc.stdout or "{}")
+        verdict = json.loads(proc.stdout) if proc else {}
     except ValueError:
-        verdict = {"state": "unavailable", "reason": f"bad verdict payload: {proc.stdout!r}"}
-    state = verdict.get("state")
-    if state == "stopped":
+        verdict = {}
+    if verdict.get("state") == "stopped":
         _refuse(
             EXIT_FLEET_STOP,
             reason="fleet-stop",
             generation=verdict.get("generation"),
             detail=verdict.get("reason"),
         )
-    if state != "clear":
+    if verdict.get("state") != "clear":
         _refuse(
             EXIT_FLEET_STOP_UNAVAILABLE,
             reason="fleet-stop-unavailable",

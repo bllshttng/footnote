@@ -2781,27 +2781,25 @@ def _codex_default_review_base(cwd: str | None) -> str | None:
     """Return the repository-declared origin default branch, never a guessed name."""
     if not cwd:
         return None
+    return _git_out(
+        cwd, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+    ) or None
+
+
+def _git_out(cwd: str | None, *args: str) -> str | None:
+    """One bounded `git -C <cwd>` read: stripped stdout on 0, None on failure."""
     import subprocess
 
     try:
         proc = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
+            ["git", "-C", cwd or ".", *args],
             capture_output=True,
             text=True,
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    ref = proc.stdout.strip()
-    return ref if proc.returncode == 0 and ref else None
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool, str]:
@@ -2833,16 +2831,7 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
         )
 
     def _git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", "-C", cwd, *args],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
+        return _git_out(cwd, *args)
 
     head = _git("rev-parse", "HEAD")
     if not head:
