@@ -8,7 +8,7 @@ machinery:
 - selection: ``advance._next_node`` (the same board order ``fno backlog next`` uses)
 - admission: the SHARED family-2 guard (``_spawn_guard_decision``) plus the
   spawn gate (``run_gate`` over ``agents.max_live`` / ``min_free_gb`` /
-  ``max_load_per_cpu``), the same gate every ``fno agents spawn`` passes -
+  ``max_fleet_cpu_share``), the same gate every ``fno agents spawn`` passes -
   exactly one fleet ceiling, not two disjoint caps each blind to the other's
   workers (x-3f84 W5)
 - spawn: ``dispatch_spawn_bounded_pane`` (pane substrate, into THIS session,
