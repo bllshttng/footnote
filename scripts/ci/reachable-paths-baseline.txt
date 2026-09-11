@@ -55,7 +55,7 @@ A	empty supported {action}	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-ag
 A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
-A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests.rs	# msg-twin
+A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests/update_modal_tests.rs	# msg-twin
 A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/king_board/prs.rs|crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included; the board port's prs source reuses the same coverage tag
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno-agents/src/claude_roster.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol

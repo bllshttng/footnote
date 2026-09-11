@@ -2929,6 +2929,12 @@ def test_running_components_adapter_carries_rows(monkeypatch) -> None:
         {"component": "store-keeper", "verdict": "current", "sock": "/tmp/g.store.sock"},
     ]
 
+    # The binary gate must not decide the outcome: a runner without an
+    # installed fno still gets the adapter verdict from its own stub.
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: "/usr/bin/true")
+
     def _run(cmd, **kwargs):
         assert cmd[1:2] == ["census"]
         return types.SimpleNamespace(returncode=0, stdout=json.dumps(rows_payload), stderr="")
@@ -2938,5 +2944,10 @@ def test_running_components_adapter_carries_rows(monkeypatch) -> None:
     def _fail(cmd, **kwargs):
         return types.SimpleNamespace(returncode=9, stdout="", stderr="boom")
 
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: "/usr/bin/true")
     assert update.running_components(runner=_fail) is None
     assert update.running_components(runner=lambda *a, **k: (_ for _ in ()).throw(OSError("no"))) is None
+
+    # No installed binary is the dark-census arm, independent of the runner.
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    assert update.running_components(runner=_run) is None
