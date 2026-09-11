@@ -644,6 +644,11 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
         cmd = list(cmd)
         if cmd and cmd[0] == "git":
             return real_run(cmd, *a, **k)
+        seen["init"] = True  # target init
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def _dispatch_bounded(cmd, **k):
+        cmd = list(cmd)
         if "ensure" in cmd:  # simulate policy=never: repo root on stdout, exit 0
             seen["ensure"] = cmd
             return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
@@ -651,6 +656,7 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
         return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(target_cli, "run_bounded", _dispatch_bounded)
     monkeypatch.setattr(
         "fno.harness_identity.resolve_harness_identity",
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
@@ -696,12 +702,18 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
         cmd = list(cmd)
         if cmd and cmd[0] == "git":
             return real_run(cmd, *a, **k)
+        seen["init_cmd"] = cmd
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def _dispatch_bounded(cmd, **k):
+        cmd = list(cmd)
         if "ensure" in cmd:
             return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
         seen["init_cmd"] = cmd
         return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(target_cli, "run_bounded", _dispatch_bounded)
     monkeypatch.setattr(
         "fno.harness_identity.resolve_harness_identity",
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
@@ -896,12 +908,18 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
         cmd = list(cmd)
         if cmd and cmd[0] == "git":
             return real_run(cmd, *a, **k)
+        seen["init"] = True
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def _dispatch_bounded(cmd, **k):
+        cmd = list(cmd)
         if "ensure" in cmd:  # never -> repo root
             return _real_subprocess.CompletedProcess(cmd, 0, stdout=f"{repo.resolve()}\n", stderr="")
         seen["init"] = True
         return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(target_cli, "run_bounded", _dispatch_bounded)
     monkeypatch.setattr(
         "fno.harness_identity.resolve_harness_identity",
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),

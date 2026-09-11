@@ -264,6 +264,7 @@ def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
 
     result = runner.invoke(target_app, ["start", "x-0b3f"])
 
@@ -532,6 +533,7 @@ def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_p
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     monkeypatch.setattr(
         target_cli, "_classify_node_claim", lambda node: ("ours", {"state": "live"})
     )
@@ -942,6 +944,7 @@ def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     return init_calls
 
 
@@ -979,6 +982,7 @@ def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     result = runner.invoke(
         target_app, ["start", "x-d91b", "--model", "glm-4.7", "--harness", "codex"]
     )
@@ -1042,6 +1046,7 @@ def test_receipt_base_line_marks_an_unmeasured_distance_when_fetch_fails(
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 0, result.stdout
     assert "behind=unmeasured:fetch-failed" in result.stdout
@@ -1086,6 +1091,7 @@ def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 1
     assert init_calls == []  # never proceed past a failed ensure
@@ -1113,6 +1119,7 @@ def _wire_start(monkeypatch, wt: Path):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     return init_args
 
 
