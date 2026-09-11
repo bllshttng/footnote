@@ -2445,6 +2445,7 @@ def test_proven_account_owns_the_harness_aggregate(monkeypatch):
             self.state = type("S", (), {"value": state})()
             self.resets_at = None
             self.source = "window"
+            self.observed_at = None
 
     monkeypatch.setattr(
         "fno.adapters.providers.runtime_state.headrooms",
