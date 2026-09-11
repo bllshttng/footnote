@@ -194,6 +194,22 @@ if [[ -f "$_REMOVAL_EVENT_LIB" ]]; then
   source "$_REMOVAL_EVENT_LIB"
 fi
 
+# The occupancy classifier bridge (x-0396). A partial deploy that dropped it
+# reads every pid as holds, which keeps today's confirm-or-decline path.
+_OCCUPANCY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-occupancy.sh"
+if [[ -f "$_OCCUPANCY_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$_OCCUPANCY_LIB"
+else
+  wt_classify_pids() {
+    local pid
+    while IFS= read -r pid; do
+      [[ -z "$pid" ]] && continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" holds keep - "classifier unavailable" -
+    done <<< "$2"
+  }
+fi
+
 measure_strict_state() {
   FORCE_DIRTY_STATUS=""
   FORCE_DIRTY_STATUS_RC=0
@@ -507,19 +523,37 @@ if [[ "$CWD_SNAPSHOT_OK" -ne 1 ]]; then
   exit 2
 fi
 
+# Removal-time classification (x-0396). The sweep's step-4 read is a moment
+# old; this re-enumeration is authoritative. All-inert rows release the tree:
+# only terminate rows are signalled here, retire rows are the sweep's claude
+# rm business. Any holds row - including a classifier that cannot answer,
+# which reads all holds - keeps today's confirm-or-decline path. --yes keeps
+# its meaning: signal every pid.
+OCC_ROWS=""
+N_HELD=0
+if [[ -n "$ALL_PIDS" ]]; then
+  OCC_ROWS="$(wt_classify_pids "$TARGET" "$ALL_PIDS")"
+  N_HELD="$(printf '%s\n' "$OCC_ROWS" | awk -F '\t' '$2 == "holds" { c++ } END { print c + 0 }')"
+fi
+
 if [[ -n "$ALL_PIDS" ]]; then
   echo "    Processes rooted in $TARGET:" >&2
   while IFS= read -r pid; do
     [[ -z "$pid" ]] && continue
+    ROW_INFO="$(printf '%s\n' "$OCC_ROWS" | awk -F '\t' -v p="$pid" '$1 == p { print $2 " " $5; exit }')"
     CMD="$(ps -p "$pid" -o command= 2>/dev/null || echo '(gone)')"
-    echo "      $pid  $CMD" >&2
+    echo "      $pid  ${ROW_INFO:-unclassified}  $CMD" >&2
   done <<< "$ALL_PIDS"
 
-  if [[ "$ASSUME_YES" -ne 1 ]]; then
+  KILL_ALL=0
+  if [[ "$ASSUME_YES" -eq 1 ]]; then
+    KILL_ALL=1
+  elif [[ "$N_HELD" -gt 0 ]]; then
     # No controlling tty (a non-interactive sweep): decline cleanly with one
     # line instead of letting `read </dev/tty` spew "/dev/tty: Device not
-    # configured" and decline anyway. Same rc=3; SIGTERMing live processes
-    # stays opt-in via --yes / --kill-orphans, never a headless default.
+    # configured" and decline anyway. Same rc=3; signalling unclassified live
+    # processes stays opt-in via --yes or an interactive confirmation, never
+    # a headless default. Inert rows released the tree above this prompt.
     # `-r /dev/tty` only tests the perm bits, so actually open it - on macOS a
     # session with no controlling terminal fails the open, not the test.
     # Probe the open in a SUBSHELL first: `exec` is a POSIX special built-in and
@@ -537,9 +571,15 @@ if [[ -n "$ALL_PIDS" ]]; then
     read -r REPLY <&3 || REPLY="n"
     exec 3<&-
     case "$REPLY" in
-      y|Y|yes|YES) ;;
+      y|Y|yes|YES) KILL_ALL=1 ;;
       *) echo "archive-worktree: declined; not archiving." >&2; exit 3 ;;
     esac
+  fi
+
+  if [[ "$KILL_ALL" -eq 1 ]]; then
+    TERM_PIDS="$ALL_PIDS"
+  else
+    TERM_PIDS="$(printf '%s\n' "$OCC_ROWS" | awk -F '\t' '$3 == "terminate" { print $1 }')"
   fi
 
   # SIGTERM first, then SIGKILL on holdouts after 5 seconds. SIGTERM gives
@@ -548,7 +588,7 @@ if [[ -n "$ALL_PIDS" ]]; then
   while IFS= read -r pid; do
     [[ -z "$pid" ]] && continue
     kill -TERM "$pid" 2>/dev/null || true
-  done <<< "$ALL_PIDS"
+  done <<< "$TERM_PIDS"
   sleep 5
   HOLDOUTS=""
   while IFS= read -r pid; do
@@ -556,7 +596,7 @@ if [[ -n "$ALL_PIDS" ]]; then
     if kill -0 "$pid" 2>/dev/null; then
       HOLDOUTS+="$pid"$'\n'
     fi
-  done <<< "$ALL_PIDS"
+  done <<< "$TERM_PIDS"
   if [[ -n "$HOLDOUTS" ]]; then
     echo "    SIGKILL holdouts: $(echo "$HOLDOUTS" | tr '\n' ' ')" >&2
     while IFS= read -r pid; do
