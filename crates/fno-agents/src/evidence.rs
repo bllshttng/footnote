@@ -561,9 +561,9 @@ mod tests {
     #[test]
     fn bare_basename_in_prose_is_not_a_claim() {
         let dir = tempfile::tempdir().expect("tmp");
-        write_file(dir.path(), "advance.py", 200);
-        assert!(find_code_claims("port advance.py out of the tree").is_empty());
-        assert!(check_citations("port advance.py out of the tree", dir.path()).is_empty());
+        write_file(dir.path(), "sample.py", 200);
+        assert!(find_code_claims("port sample.py out of the tree").is_empty());
+        assert!(check_citations("port sample.py out of the tree", dir.path()).is_empty());
     }
 
     #[test]
@@ -696,17 +696,17 @@ mod tests {
         assert_eq!(rows[0]["out_head"], "3");
     }
 
-    fn tmp_repo_with_advance(root: &Path) {
-        write_file(root, "cli/src/fno/backlog/advance.py", 300);
+    fn tmp_repo_with_sample(root: &Path) {
+        write_file(root, "ruling-scope/sample.py", 300);
     }
 
     #[test]
     fn ruling_lane_citation_failure_outranks_missing_read() {
         let dir = tempfile::tempdir().expect("tmp");
-        tmp_repo_with_advance(dir.path());
+        tmp_repo_with_sample(dir.path());
         let mut runner = |_cmd: &str, _root: &Path| ok_run("1\n", 0);
         let err = check_ruling_evidence(
-            "advance.py:99999 is the territory resolver",
+            "sample.py:99999 is the territory resolver",
             &[],
             dir.path(),
             &mut runner,
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn ruling_lane_unmeasured_claim_refuses_with_example() {
         let dir = tempfile::tempdir().expect("tmp");
-        tmp_repo_with_advance(dir.path());
+        tmp_repo_with_sample(dir.path());
         let mut runner = |_cmd: &str, _root: &Path| ok_run("1\n", 0);
         let err = check_ruling_evidence(
             "the territory resolver is 167 lines",
@@ -745,11 +745,11 @@ mod tests {
     #[test]
     fn ruling_lane_reads_run_and_store_rows() {
         let dir = tempfile::tempdir().expect("tmp");
-        tmp_repo_with_advance(dir.path());
+        tmp_repo_with_sample(dir.path());
         let mut runner = |_cmd: &str, _root: &Path| ok_run("17\n", 0);
         let rows = check_ruling_evidence(
             "the territory resolver is 167 lines",
-            &["git diff main HEAD -- advance.py | grep -c territory".to_string()],
+            &["git diff main HEAD -- sample.py | grep -c territory".to_string()],
             dir.path(),
             &mut runner,
         )
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn note_lane_unread_claim_reports_without_refusing() {
         let dir = tempfile::tempdir().expect("tmp");
-        tmp_repo_with_advance(dir.path());
+        tmp_repo_with_sample(dir.path());
         let mut runner = |_cmd: &str, _root: &Path| ok_run("1\n", 0);
         let (rows, claims) =
             note_evidence("the resolver is 159 lines", &[], dir.path(), &mut runner)
@@ -783,18 +783,18 @@ mod tests {
     #[test]
     fn note_lane_reads_store_rows() {
         let dir = tempfile::tempdir().expect("tmp");
-        tmp_repo_with_advance(dir.path());
+        tmp_repo_with_sample(dir.path());
         let mut runner = |_cmd: &str, _root: &Path| ok_run("head line\n", 0);
         let (rows, claims) = note_evidence(
             "the resolver is 159 lines",
-            &["head -5 advance.py".to_string()],
+            &["head -5 sample.py".to_string()],
             dir.path(),
             &mut runner,
         )
         .expect("rows");
         assert!(claims.is_none());
         let rows = rows.expect("some rows");
-        assert_eq!(rows[0]["cmd"], "head -5 advance.py");
+        assert_eq!(rows[0]["cmd"], "head -5 sample.py");
         assert_eq!(rows[0]["out_head"], "head line");
     }
 
