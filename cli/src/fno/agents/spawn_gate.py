@@ -956,8 +956,8 @@ _CURRENT_SPAWN: "contextvars.ContextVar[tuple[Optional[str], Optional[str]]]" = 
     contextvars.ContextVar("fno_spawn_gate_current", default=(None, None))
 )
 
-#: x-7783 AC13: the axes read so far (one-word verdicts) and the axis being
-#: decided, stamped onto refusals that carry no explicit axis fields.
+#: x-7783 AC13: axes read so far plus the axis being decided, stamped onto
+#: refusals that carry no explicit axis fields.
 _CURRENT_AXES_READ: "contextvars.ContextVar[dict[str, str]]" = (
     contextvars.ContextVar("fno_spawn_gate_axes_read", default={})
 )
@@ -1154,9 +1154,8 @@ def _check_ram_floor(floor_gb: float) -> None:
         _refuse(EXIT_RAM_REFUSED, receipt)
 
 
-#: `_cpu_axis` takes its own attribution reading when the caller has not
-#: already taken one. `(None, "error")` is a real reading ("unreadable"), so
-#: the "not supplied" case needs a value that cannot be confused with it.
+#: `(None, "error")` is a real reading ("unreadable"), so the "not supplied"
+#: case needs a value that cannot be confused with it.
 _NOT_PREFETCHED: object = object()
 
 
@@ -1732,6 +1731,9 @@ def run_gate(
                             f"{admission.share_low * 100:.1f}% under the ceiling "
                             f"for {under_streak} consecutive samples; admitting"
                         )
+                        # Hold served: later timeouts name the real queue.
+                        held_on_cpu = False
+                        under_streak = 0
                 if not hold_pause:
                     if not sock_scanned:
                         from fno.agents.session_procs import bg_socket_pid_map
@@ -1750,30 +1752,33 @@ def run_gate(
                     for w in c.warnings:
                         _warn(w)
                     slots = c.slot_count
-                    _CURRENT_AXIS.set("king_share")
                     if slots < cap:
                         axes_read["slots"] = f"{slots}/{cap} ok"
-                        axes_read["king_share"] = "ok"
                         try:
                             # Re-checked on dequeue for the same reason the RAM floor is
                             # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
                             # up to QUEUE_TIMEOUT_S, and another process can raise the
                             # shared schema inside that window. The entry check above owns
                             # the force path; this one owns the queue window.
+                            _CURRENT_AXIS.set(None)  # the schema is no axis
                             _check_registry_schema()
                         except GateRefused:
                             guard.release()
                             raise
+                        _CURRENT_AXIS.set("ram")
                         try:
                             _check_ram_floor(floor_gb)
                         except GateRefused:
                             guard.release()
                             raise
+                        axes_read["ram"] = "ok"
+                        _CURRENT_AXIS.set("king_share")
                         try:
                             _check_king_share(c, cap, caller_session=caller_session)
                         except GateRefused:
                             guard.release()
                             raise
+                        axes_read["king_share"] = "ok"
                         _CURRENT_AXIS.set("max_live")
                         if substrate == "headless":
                             _take_headless_slot(guard, name, holder, route_provider, provider_cap)

@@ -511,6 +511,9 @@ pub fn run_gate(
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
     let mut mutex_blocked_since: Option<Instant> = None;
+    // Axes read so far, accumulating across passes exactly like the Python
+    // twin's dict, so the timeout receipt can name what was read (AC13).
+    let mut axes_read = serde_json::Map::new();
 
     loop {
         let mut pause = QUEUE_POLL;
@@ -587,8 +590,6 @@ pub fn run_gate(
             // backstop behind it (LD1).
             let cpu = check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
             let admission = &cpu.payload;
-            let mut axes_read = serde_json::Map::new();
-            axes_read.insert("ram".into(), serde_json::json!("ok"));
             if admission.axis == "load_15m" && admission.verdict == "refuse" {
                 axes_read.insert("load_15m".into(), serde_json::json!("over"));
                 axes_read.insert("cpu".into(), serde_json::json!("not-read"));
@@ -626,7 +627,7 @@ pub fn run_gate(
                     let mut receipt = serde_json::json!({
                         "status": "refused",
                         "reason": cpu.token,
-                        "axes_read": axes_read,
+                        "axes_read": axes_read.clone(),
                     });
                     for (k, v) in receipt_fields.as_object().into_iter().flatten() {
                         receipt[k] = v.clone();
@@ -650,7 +651,7 @@ pub fn run_gate(
                             "reason": "fleet_cpu_share",
                             "samples": 1,
                             "held_on": "fleet_cpu_share",
-                            "axes_read": axes_read,
+                            "axes_read": axes_read.clone(),
                         });
                         for (k, v) in receipt_fields.as_object().into_iter().flatten() {
                             receipt[k] = v.clone();
@@ -692,6 +693,11 @@ pub fn run_gate(
                                  {under_streak} consecutive samples; admitting",
                                 admission.share_low * 100.0
                             );
+                            // The hold is served. Clear it so a later timeout
+                            // names the queue actually eating the budget and
+                            // queued passes do not reprint the admit line.
+                            held_on_cpu = false;
+                            under_streak = 0;
                         }
                     }
                     if !hold_pause {
@@ -708,6 +714,9 @@ pub fn run_gate(
                                 guard.release();
                                 return Err(code);
                             }
+                            // Stamped only once the floor actually answered, so a
+                            // receipt never claims an axis it did not read.
+                            axes_read.insert("ram".into(), serde_json::json!("ok"));
                             if substrate == "headless" {
                                 acquire_worker_slot(&mut guard, name, &holder);
                                 // Slot claim is visible to concurrent gates: the mutex has
@@ -737,7 +746,7 @@ pub fn run_gate(
                                     "status": "refused",
                                     "reason": "no_wait",
                                     "axis": "max_live",
-                                    "axes_read": axes_read,
+                                    "axes_read": axes_read.clone(),
                                     "held_on": "max_live",
                                     "max_live": cap,
                                     "count": slots,
@@ -779,7 +788,7 @@ pub fn run_gate(
                             "status": "refused",
                             "reason": "cpu_instrument_unreadable",
                             "axis": "cpu_instrument",
-                            "axes_read": axes_read,
+                            "axes_read": axes_read.clone(),
                         })
                     );
                     use std::io::Write;
@@ -814,6 +823,7 @@ pub fn run_gate(
                     "reason": reason,
                     "held_on": held_on,
                     "axis": held_on,
+                    "axes_read": axes_read.clone(),
                     "max_live": cap,
                     "count": last_slots,
                     "current_count": last_slots,

@@ -36,10 +36,18 @@ def _no_live_cpu_axis(monkeypatch):
 
     Since x-7783 every spawn takes the footprint reading, and that read is a
     ps snapshot against the real machine. Left unstubbed these tests refuse
-    or hold according to what the developer's box happens to be doing.
+    or hold according to what the developer's box happens to be doing. The
+    prefetch is pinned too: run_gate takes the read before the decider, and
+    an unpinned read would price a real ps snapshot per pass.
     """
-    from fno.footprint import Admission
+    from fno import doctor_footprint
+    from fno.footprint import Admission, Footprint
 
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
     admit = Admission(
         verdict="admit",
         axis="fleet_cpu_share",

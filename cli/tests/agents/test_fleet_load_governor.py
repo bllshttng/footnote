@@ -63,10 +63,6 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
     class _S:
         agents = a
 
-    class _S:
-        agents = _A()
-
-    _S.agents = a
     monkeypatch.setattr("fno.config.load_settings", lambda: _S())
 
 
@@ -86,8 +82,17 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
-    # Hermetic defaults: the real lsof scan reads this box (38 sockets,
-    # seconds under load) and the real census reads the live registry.
+    # Hermetic defaults: the real footprint read is a ps snapshot against this
+    # box (seconds under load), the real lsof scan reads 38 sockets, and the
+    # real census reads the live registry. All three are pinned idle.
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
     monkeypatch.setattr(
         "fno.agents.session_procs.bg_socket_pid_map", lambda **k: {}
     )
@@ -331,6 +336,27 @@ def test_cpu_hold_timeout_names_fleet_cpu_share(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _drive(monkeypatch, [hold] * 50, max_live=3)
     assert exc.value.receipt["held_on"] == "fleet_cpu_share"
+
+
+def test_after_admission_the_timeout_names_the_slot_cap(tmp_path, monkeypatch, capsys):
+    """A drained hold must not keep blaming the CPU axis: once admitted past
+    it, a slot wait reads as held_on max_live, and the admit line prints once,
+    not on every queue pass."""
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        spawn_gate,
+        "census",
+        lambda socket_map=None: spawn_gate.LiveCensus(workers=[], fno_slot_workers=99),
+    )
+    monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+    with pytest.raises(SystemExit) as exc:
+        _drive(
+            monkeypatch,
+            [_adm("hold", share_low=0.9)] + [_adm("admit")] * 50,
+            max_live=1,
+        )
+    assert exc.value.receipt["held_on"] == "max_live"
+    assert capsys.readouterr().err.count("consecutive samples; admitting") == 1
 
 
 def test_rust_probe_budget_exceeds_the_python_measurement_budget():
