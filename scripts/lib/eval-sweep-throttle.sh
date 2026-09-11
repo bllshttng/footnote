@@ -109,6 +109,9 @@ _eval_sweep_run_stages() {
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor observer sweep  --skill review
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill blueprint
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill review
+    # Stage five (x-caf8): the scratch-shape sweep files at most one node per
+    # run, so a daily cadence drains a backlog of shapes one at a time.
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor scratch sweep
     [[ -n "$claim_key" ]] && "$fno_cmd" agents claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }

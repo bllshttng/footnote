@@ -1313,8 +1313,15 @@ pub fn run_cli(args: &[String]) -> i32 {
             let emit = (!opts.dry_run)
                 .then(|| crate::events::EventEmitter::new(paths.journal.clone(), "agents"));
             let lines = run_sweep(&paths, &opts, emit.as_ref(), &mut fno);
-            for line in &lines {
-                println!("{line}");
+            if has_flag(args, "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                for line in &lines {
+                    println!("{line}");
+                }
             }
             0
         }

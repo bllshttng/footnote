@@ -387,7 +387,9 @@ doctor lint	T1	doctor lint	39
 doctor observer replay	T1	doctor observer replay	2
 doctor observer sweep	T1	doctor observer sweep	4
 doctor plugin-file	T1	doctor plugin-file	2
-doctor route	T1	doctor route	6	
+doctor route	T1	doctor route	6
+doctor scratch report	T1	doctor scratch report	0
+doctor scratch sweep	T1	doctor scratch sweep	1
 doctor skill-diff reconcile	T1	doctor skill-diff reconcile	1
 doctor skill-diff tick	T1	doctor skill-diff tick	4
 doctor test	T1	doctor test	107

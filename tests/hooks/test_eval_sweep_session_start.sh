@@ -146,7 +146,7 @@ cat > "$SLOWBIN/slowsweep" <<'SLOW'
 #!/usr/bin/env bash
 case "$1 $2 $3" in
     "doctor observer sweep") sleep 30 ;;
-    *) : ;;
+    *) echo "stage-ran: $1 $2 $3" ;;
 esac
 exit 0
 SLOW
@@ -158,14 +158,28 @@ EVAL_SWEEP_STAGE_TIMEOUT=1
 start=$(date +%s)
 _eval_sweep_run_stages "$CANON" "$SLOWBIN/slowsweep" "$LOG" "" ""
 elapsed=$(( $(date +%s) - start ))
-# Two slow `doctor observer sweep` stages, each bounded to 1s, plus two instant ticks:
-# well under the unbounded 60s. Generous ceiling to avoid CI flake.
+# Two slow `doctor observer sweep` stages, each bounded to 1s, plus the instant
+# ticks and the scratch sweep: well under the unbounded 60s. Generous ceiling
+# to avoid CI flake.
 (( elapsed < 15 )) || fail "stages not bounded: elapsed ${elapsed}s (expected < 15)"
 # Floor too: a ceiling alone is satisfied by stages that never RAN, which is what
 # a refused bound or a broken stub looks like. Two 1s-bounded slow stages cannot
 # finish in under a second.
 (( elapsed >= 1 )) || fail "stages returned in ${elapsed}s, too fast to have run the slow stub - they were skipped and this case tested nothing"
 pass "US3: a wedged stage is killed at the bound (elapsed ${elapsed}s)"
+
+# Five stages fire per run (x-caf8 added the fifth): two wedged observer
+# sweeps (their rc lines are the marker), two skill-diff ticks, one scratch
+# sweep. The instant stages echo a marker; the scratch sweep is the LAST
+# stage, so its marker is the last one in the log.
+tick_markers=$(grep -c 'stage-ran: doctor skill-diff tick' "$LOG")
+(( tick_markers == 2 )) || fail "expected 2 skill-diff tick markers, got ${tick_markers}"
+marker_count=$(grep -c 'stage-ran: doctor ' "$LOG")
+(( marker_count == 3 )) || fail "expected 3 instant-stage markers, got ${marker_count}"
+last_marker=$(grep 'stage-ran: doctor ' "$LOG" | tail -1)
+[[ "$last_marker" == *"doctor scratch sweep"* ]] \
+    || fail "the fifth (last) stage is doctor scratch sweep, got: ${last_marker}"
+pass "US3: five stage invocations fire and doctor scratch sweep is the fifth"
 
 [[ -f "$LOG" ]] || fail "log file not written"
 grep -q '=== eval-sweep run ' "$LOG" || fail "run header missing from log"
