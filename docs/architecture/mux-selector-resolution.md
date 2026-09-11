@@ -2,6 +2,12 @@
 
 The contract between the Python name minter and the Rust pane resolver. Two languages, no shared type: this file is the type. The registry row carries no node field. The agent NAME is the only carrier of which node a worker serves. That makes the name format load-bearing in both directions.
 
+## Is this page for you?
+
+You mint or resolve a worker pane name, or you chase a pane that cannot be found. This page owns that name format and its resolution rules. Misreading it mints a name that resolves to no pane, or to the wrong one.
+
+Not for: restore, held panes, or what survives a restart. Those are [workspace-restore.md](workspace-restore.md) and [pane-worker-relaunch.md](pane-worker-relaunch.md).
+
 ## The name format
 
 A node-driven spawn mints `t-<node-id>-<slug>-<model>`. The prefix `t` marks target workers.

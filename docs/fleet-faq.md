@@ -4,6 +4,12 @@ Questions a king or an orchestrating agent hits while running workers, and the a
 
 This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
 
+## Is this page for you?
+
+You run workers and hit a receipt, a lane, or a liveness answer that says one thing and means another. This list owns the questions real sessions paid for, each with a specimen and a retirement contract. Misreading it costs the same session twice: yours, then the next reader's.
+
+Not for: verb syntax and run-level failure triage. Those are `fno agents --help` and [troubleshooting.md](troubleshooting.md).
+
 ## What this list is for
 
 Every entry is a workaround, and a workaround is a gap in the machinery. So this doubles as a standing gap list. Each line is something a human or an agent must know because the tool does not yet say it, refuse it, or do it.
@@ -92,7 +98,7 @@ A subagent fails the same way and gives you less to read. One finished at 23:13 
 
 Two channels, and they answer different questions.
 
-`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the instruction arrived. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
+`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the text reached the pane, not that the agent read it. A `queued` result also prints hosted (`cli/src/fno/mail/cli.py:3139`). The message can sit until the agent looks up, or until a human presses ESC. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
 
 `fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 

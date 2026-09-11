@@ -2,6 +2,12 @@
 
 A review written by the model family that wrote the code shares the implementer's blind spots. Cross-model review is the answer: route the review to a **different provider** (codex on a claude diff, claude on a codex diff) so a second model family reads the change. The panel that once embedded this as per-agent routing is retired; the live surfaces are below.
 
+## Is this page for you?
+
+You want a second model family to read a diff its sibling wrote, or you configure which reviewers gate the ship. This page owns the live cross-model surfaces and their switches. Misreading it leaves one family reviewing its own work, blind spots included.
+
+Not for: the external bot reviewers and the review ledger that decides "reviewed". That is the ship gate's, in [control-plane-loop.md](control-plane-loop.md).
+
 ## The live surfaces
 
 | Surface | What it does | Switch |
