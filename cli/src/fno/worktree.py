@@ -22,10 +22,7 @@ from typing import Optional
 
 from fno._subprocess_util import run_bounded
 
-# The Bash-tool cap on a Claude worker's own subprocess.run(...) is 600s; a
-# stalled cargo-target-cleanup leg (this hook's last leg) has been observed
-# sitting for 10+ minutes on an overloaded box. 120s bounds the whole hook
-# well below both without starving a legitimately slow cleanup.
+# 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
 _SETUP_HOOK_TIMEOUT_S = 120
 
 
@@ -214,11 +211,9 @@ def _run_setup_worktree_hook(
     canonical .fno/ state, so target gates can't see backlog mutations
     from sibling worktrees, codemap goes stale, and inbox drain breaks.
 
-    Returns (returncode, stderr_tail). returncode == -1 indicates the script
-    was not found (silently tolerated). returncode == 124 means it exceeded
-    ``timeout`` and its whole process group was killed. Any other non-zero
-    is logged via stderr but never raised - the worktree itself is still
-    usable.
+    Returns (returncode, stderr_tail). -1 means the script was not found
+    (silently tolerated); 124 means it exceeded ``timeout`` and its process
+    group was killed. Any other non-zero is logged but never raised.
     """
     script = repo_root / "scripts" / "setup" / "setup-worktree.sh"
     if not script.exists():

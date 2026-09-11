@@ -67,16 +67,10 @@ def run_bounded(
     text: bool = False,
     **popen_kwargs: object,
 ) -> subprocess.CompletedProcess:
-    """Like ``subprocess.run(cmd, timeout=timeout)``, but kills the whole
-    process group on timeout or interrupt, not just the direct child.
-
-    ``subprocess.run(timeout=)`` only kills the child it spawned. A bash
-    script's grandchildren (e.g. a nested ``fno ... --apply`` leg) survive
-    it and can keep acting after the caller has already reported failure.
-    Starting a new session (``start_new_session=True``) puts the whole tree
-    in its own process group so ``os.killpg`` reaches all of it -- and
-    because that group is detached from the terminal, Ctrl-C never reaches
-    it either, so the ``BaseException`` arm below has to kill it too.
+    """Like ``subprocess.run(cmd, timeout=timeout)``, but on timeout or
+    interrupt kills the whole process group, not just the direct child --
+    a plain timeout lets a bash script's grandchildren (e.g. a nested
+    cleanup leg) outlive the caller's own failure report.
     """
     proc = subprocess.Popen(
         cmd,
@@ -88,19 +82,11 @@ def run_bounded(
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _killpg_quiet(proc.pid)
-        proc.communicate()
-        raise
     except BaseException:
-        _killpg_quiet(proc.pid)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
         proc.communicate()
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-
-
-def _killpg_quiet(pid: int) -> None:
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
