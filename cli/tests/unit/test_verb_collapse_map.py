@@ -160,8 +160,11 @@ def test_map_covers_current_surface_once():
     # one install verb for every harness allocates `config plugin` and
     # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
     # from the merged file, 602 -> 603. `agents autonomy
-    # provenance`, the dispatch-source inventory read: 603 -> 604.
-    assert len(mapped) == 604, (
+    # provenance`, the dispatch-source inventory read: 603 -> 604. This
+    # branch allocates `backlog version`, the typed API's counter read
+    # (hidden verb, 19 corpus callers): counted from the merged file,
+    # 604 -> 605.
+    assert len(mapped) == 605, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -73,7 +73,6 @@ _register_node_builder(cli)
 from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
 
 cli.command("worked", hidden=True)(_cmd_worked)
-
 cli.command("version", hidden=True)(_cmd_version)
 
 cli.add_typer(_triage_cli, name="triage")

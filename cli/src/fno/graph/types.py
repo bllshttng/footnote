@@ -181,18 +181,6 @@ class NodeFilter(BaseModel):
     session_id: Optional[str] = None
 
 
-class NodeCreateInput(BaseModel):
-    id: str
-    title: str
-    description: Optional[str] = None
-    status: Optional[str] = None
-    priority: Optional[str] = None
-    project: Optional[str] = None
-    parent: Optional[str] = None
-    plan_path: Optional[str] = None
-    estimate: Optional[str] = None
-
-
 class NodeUpdateInput(BaseModel):
     title: Optional[str] = None
     status: Optional[str] = None
@@ -208,17 +196,6 @@ class CommentCreateInput(BaseModel):
     body: str
     kind: Optional[str] = None
     title: Optional[str] = None
-
-
-class PullRequestInput(BaseModel):
-    number: int
-    url: Optional[str] = None
-    note: Optional[str] = None
-
-
-class EncounterInput(BaseModel):
-    evidence: str
-    session_id: Optional[str] = None
 
 
 class Node(BaseModel):

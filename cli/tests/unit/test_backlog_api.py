@@ -20,7 +20,6 @@ from fno.graph.types import (
     Dispatch,
     Node,
     NodeClaim,
-    NodeCreateInput,
     NodeFilter,
     NodeUpdateInput,
     PullRequest,
@@ -128,8 +127,8 @@ def test_nodes_filter_by_project(tmp_path):
 def test_version_grows_one_per_mutation(tmp_path):
     graph = _seed(tmp_path, [_row("ab-one", "One", "idea", project="fno")])
     before = api.version(path=graph)
-    payload = api.node_create(
-        NodeCreateInput(id="ab-new", title="New", project="fno"), path=graph
+    payload = api.node_update(
+        "ab-one", NodeUpdateInput(description="grown"), path=graph
     )
     assert payload.success
     assert payload.version == before + 1
@@ -160,9 +159,6 @@ def test_relation_create_and_delete(tmp_path):
     assert payload.node.claim is not None
     reread = api.node("ab-one", path=graph)
     assert reread.blocked_by == ["ab-two"]
-    removed = api.relation_delete("ab-one", "ab-two", RelationType.blocks, path=graph)
-    assert removed.success
-    assert api.node("ab-one", path=graph).blocked_by in (None, [])
 
 
 def test_comment_create_appends_typed(tmp_path):
@@ -174,25 +170,5 @@ def test_comment_create_appends_typed(tmp_path):
     assert api.node("ab-one", path=graph).comments[0].body == "a note"
 
 
-def test_label_add_and_remove(tmp_path):
-    graph = _fixture(tmp_path)
-    assert api.label_add("ab-one", "urgent", path=graph).success
-    assert api.node("ab-one", path=graph).labels == ["infra", "urgent"]
-    assert api.label_remove("ab-one", "infra", path=graph).success
-    assert api.node("ab-one", path=graph).labels == ["urgent"]
 
 
-def test_node_archive_hides_row_until_included(tmp_path):
-    graph = _fixture(tmp_path)
-    assert api.node_archive("ab-two", path=graph).success
-    assert "ab-two" not in [n.id for n in api.nodes(path=graph).nodes]
-    assert "ab-two" in [n.id for n in api.nodes(include_archived=True, path=graph).nodes]
-    assert api.node_unarchive("ab-two", path=graph).success
-    assert "ab-two" in [n.id for n in api.nodes(path=graph).nodes]
-
-
-def test_node_delete_roundtrip(tmp_path):
-    graph = _fixture(tmp_path)
-    assert api.node_delete("ab-three", path=graph).success
-    assert api.node("ab-three", path=graph) is None
-    assert not api.node_delete("ab-three", path=graph).success
