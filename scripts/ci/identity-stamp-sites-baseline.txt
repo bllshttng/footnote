@@ -27,6 +27,6 @@ cli/src/fno/review_capability.py::detect_session  BRANCH. Names this harness's n
 cli/src/fno/target/resume_bind.py::resume_bind  PREDICATE. Refuses when ambient identity does not match the manifest; a mismatch is the output, not a stamp.
 cli/src/fno/target_cli.py::_codex_desktop_handoff_policy  BRANCH. Decides whether this is a Codex Desktop chat.
 cli/src/fno/target_cli.py::_codex_native_repo  BRANCH. Same Codex Desktop decision, for the repo lane.
-cli/src/fno/target_cli.py::start  BRANCH. Selects a worktree LOCATION. A wrong guess costs a path, not an identity.
+cli/src/fno/target_cli.py::_start_body  BRANCH. Selects a worktree LOCATION. A wrong guess costs a path, not an identity.
 cli/src/fno/agents/rust_runtime.py::_is_bounded_codex_code_spawn  BRANCH. Resolves the ambient harness to decide whether a bounded Codex code spawn needs the git-grant refusal; the resolved name only gates the branch and never reaches a row, claim, or event.
 cli/src/fno/review/policy.py::_local_runtime_kind  BRANCH. Classifies the review policy: the ambient harness seeds the effective reviewer kinds and stands in as the implementer when the ledger has no row. The resolved kind reaches verdict JSON and prose only, never a row, claim, or event.
