@@ -162,3 +162,51 @@ fn output_line_matcher_survives_a_late_prompt() {
     assert_eq!(strip_prompts("sh-3.2$ hello"), "hello");
     assert_eq!(strip_prompts("$"), "");
 }
+
+#[test]
+fn output_line_guard_finds_no_exact_trim_match() {
+    // Retires the x-cd8d class: a pane/screen row compared for exact
+    // trim-equality against a literal misses output that already rendered
+    // when a queued CR nudge prints its prompt onto the line. Port any hit
+    // to common::screen_has_line or common::strip_prompts. The needles are
+    // concat!'d so this file never holds the joined text and cannot match
+    // itself.
+    let needle_a: &str = concat!(".trim()", " ==");
+    let needle_b: &str = concat!(".trim_end()", " ==");
+    // Positive control: each needle must match a line built at runtime, so
+    // a mistyped needle cannot green an empty scan.
+    for needle in [needle_a, needle_b] {
+        let line = format!("if l{} \"x\" {{", needle);
+        assert!(
+            line.contains(needle),
+            "needle {needle:?} failed its own positive control"
+        );
+    }
+    let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files_read = 0;
+    let mut hits: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("tests dir must be readable") {
+        let path = entry.expect("dir entry readable").path();
+        if path.extension() != Some(std::ffi::OsStr::new("rs")) || !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("test source readable");
+        files_read += 1;
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(needle_a) || line.contains(needle_b) {
+                hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        files_read >= 20,
+        "guard read only {files_read} files under {}; a partial scan must not pass",
+        tests_dir.display()
+    );
+    assert!(
+        hits.is_empty(),
+        "exact trim-equality pane/screen matches must move to \
+         common::screen_has_line / common::strip_prompts; hits:\n{}",
+        hits.join("\n")
+    );
+}
