@@ -804,6 +804,15 @@ pub struct RegistryEntry {
     pub requested_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_effort: Option<String>,
+    /// The fenced `--` tokens a codex thread spawn carried, verbatim. Startup
+    /// recovery re-parses them into the same `thread/resume.config` the start
+    /// built, so a daemon restart does not silently drop the operator's
+    /// per-thread codex config the way the state-root grant was once lost.
+    /// Rust-set on the codex thread mint; skip-when-empty keeps every other
+    /// row slim, and Python's `load_registry` reads named keys, so the extra
+    /// one round-trips. Absence means no fenced tokens, never unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_args: Vec<String>,
     /// Explicit model-route identity captured by the spawn path (v25),
     /// mirroring Python's `AgentEntry.route_provider_id`/`model_name`/
     /// `account_record_id`. These fields contain stable identifiers only;

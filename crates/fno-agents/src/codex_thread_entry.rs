@@ -21,6 +21,7 @@ pub(crate) fn build_codex_thread_entry(
     yolo: bool,
     node: Option<&str>,
     account: Option<&str>,
+    harness_args: &[String],
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
@@ -124,6 +125,9 @@ pub(crate) fn build_codex_thread_entry(
         // v30: the effective positive Git grant carried by the bounded thread
         // policy. Outside a repository there is no grant to record.
         git_grant: git_grant_for_cwd(cwd),
+        // The fenced tokens verbatim; startup recovery re-parses them into the
+        // resume frame's config.
+        harness_args: harness_args.to_vec(),
         ..RegistryEntry::new(
             Some(session_id),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
