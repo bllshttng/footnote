@@ -775,6 +775,24 @@ impl Core {
             });
             return;
         }
+        // (x-3ea6) `--portal new` resolves to the next free index HERE, before
+        // any park, so the parked replay lands where the reply says. Same
+        // allocator the TUI's new-portal gesture uses. The one-park guard
+        // above keeps two concurrent claude reaches from taking one index.
+        let portal = if placement.portal_new {
+            match self.next_free_portal() {
+                Some(idx) => idx,
+                None => {
+                    let _ = reply.send(ServerMsg::Err {
+                        code: err_code::BAD_REQUEST,
+                        msg: "no free portal: every index 0-255 is seated".to_string(),
+                    });
+                    return;
+                }
+            }
+        } else {
+            portal
+        };
         let cwd = self
             .agents
             .iter()
@@ -800,7 +818,8 @@ impl Core {
         // (x-9b60) The verb's index is the authoritative portal; the decoded
         // placement carries only geometry. Overwriting the portal trio keeps
         // the reach's addressing in exactly one field, the way every pre-v66
-        // caller already sent it.
+        // caller already sent it. (x-3ea6) `portal` is the resolved index by
+        // here, so a `new` reach names the index the server picked.
         let mut placement = placement;
         placement.portal = Some(portal);
         placement.portal_new = false;

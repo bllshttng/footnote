@@ -978,6 +978,116 @@ fn thread_pane_ctl_lands_the_reach_and_replies_where() {
 }
 
 #[test]
+fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
+    // AC2-HP (x-3ea6): a machine reach asking for `portal new` takes the
+    // next free index in a NEW tab. Portal 0 still seats row A, tab T's
+    // focus never moves, and the reply names the index the server picked.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let agents = || {
+        vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ]
+    };
+    // Seed: portal 0 seats row A (its viewer is tab T's focus pane P).
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents()), tx);
+    let _ = rx.blocking_recv().expect("seed reply");
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let (sid, tab_t) = core.session.find_pane(a_seat).expect("A's pane in tree");
+
+    // Reach row B through the same door with portal_new + TabSel::New.
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee2",
+        0,
+        PanePlacement {
+            portal_new: true,
+            tab: Some(TabSel::New),
+            ..Default::default()
+        },
+        Some(agents()),
+        tx,
+    );
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Notice { text } => assert!(
+            text.contains("thread pane -> target-b") && text.contains("portal 1"),
+            "the reply names B and the resolved index: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.seat),
+        Some(a_seat),
+        "portal 0 still seats row A"
+    );
+    let b_seat = core
+        .portals
+        .get(&1)
+        .unwrap_or_else(|| panic!("row B at the server-picked index"))
+        .seat;
+    let (_, b_tab) = core.session.find_pane(b_seat).expect("B's pane in tree");
+    assert_ne!(tab_t, b_tab, "row B landed in a tab of its own");
+    assert_eq!(
+        core.session.squad(sid).expect("squad").tabs[tab_t].focus,
+        a_seat,
+        "tab T's focus is still row A's viewer"
+    );
+    assert_eq!(
+        core.session.squad(sid).expect("squad").tabs[b_tab].focus,
+        b_seat,
+        "the new tab's focus is row B's viewer"
+    );
+    core.reap_pane(a_seat);
+    core.reap_pane(b_seat);
+}
+
+#[test]
+fn thread_pane_ctl_new_portal_refuses_when_no_index_is_free() {
+    // AC2-ERR (x-3ea6): a `new` reach on a full portal space replies Err
+    // naming the ceiling and spawns nothing - it never repoints an index.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, p1, _rx) = thread_core();
+    for idx in 0..=u8::MAX {
+        core.portals.insert(
+            idx,
+            Portal {
+                row_key: format!("sentinel-{idx}"),
+                seat: p1, // a live pane, so every index is held
+                tab: 1,
+            },
+        );
+    }
+    let panes_before = core.panes.len();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee2",
+        0,
+        PanePlacement {
+            portal_new: true,
+            tab: Some(TabSel::New),
+            ..Default::default()
+        },
+        Some(vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))]),
+        tx,
+    );
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("no free portal"),
+            "the refusal names the exhausted space: {msg}"
+        ),
+        other => panic!("expected an Err refusal, got {other:?}"),
+    }
+    assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+    assert_eq!(
+        core.portals.get(&255).map(|e| e.row_key.as_str()),
+        Some("sentinel-255"),
+        "no index was repointed"
+    );
+}
+
+#[test]
 fn thread_pane_ctl_refuses_an_unknown_name() {
     let (mut core, _client_id, _p1, _rx) = thread_core();
     let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();

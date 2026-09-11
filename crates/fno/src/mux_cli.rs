@@ -6677,6 +6677,10 @@ mod tests {
     #[path = "control_roundtrip_tests.rs"]
     mod control_roundtrip_tests;
 
+    // (x-3ea6) The thread verb's --portal argument surface.
+    #[path = "thread_portal_arg_tests.rs"]
+    mod thread_portal_arg_tests;
+
     #[test]
     fn squad_target_reads_the_id_spelling_pane_ls_reports() {
         // `pane ls` answers with a squad id; before this the tab verbs took only
