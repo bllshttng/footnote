@@ -290,6 +290,54 @@ def test_send_pointer_without_identity_keeps_the_default_and_still_sends(
     assert seen["from_name"] == "fno"
 
 
+# --- role holders resolve once, where the address is born --------------------
+
+
+class _Row:
+    name = "t-ae54-worker"
+    harness_session_id = "01a08dab-7d3a"
+    cc_session_id = None
+    session_id = None
+
+
+def test_holder_agent_name_resolves_both_role_prefixes(monkeypatch) -> None:
+    from fno.claims.core import TARGET_SESSION_HOLDER_PREFIX, holder_agent_name
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [_Row()])
+    assert holder_agent_name("spawn-handover:t-ae54-worker") == "t-ae54-worker"
+    assert (
+        holder_agent_name(f"{TARGET_SESSION_HOLDER_PREFIX}01a08dab-7d3a")
+        == "t-ae54-worker"
+    )
+    assert holder_agent_name("spawn-handover:bp-gone") is None
+    assert holder_agent_name("sess-plain-holder") == "sess-plain-holder"
+    assert holder_agent_name(None) is None
+
+
+def test_a_resolvable_role_holder_reaches_the_worker_behind_it(monkeypatch) -> None:
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [_Row()])
+    got = note_recipients(
+        {"id": "x-0d08"},
+        index={},
+        holder_of=_holders(**{"x-0d08": "spawn-handover:t-ae54-worker"}),
+        kings_of=lambda scope: [],
+    )
+    assert got == [("t-ae54-worker", "holder of x-0d08")]
+
+
+def test_an_unresolvable_role_holder_skips_instead_of_failing(monkeypatch) -> None:
+    """The night's notify leg failed on role markers handed to the mail
+    resolver verbatim; a marker with no row behind it is nobody to reach."""
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    got = note_recipients(
+        {"id": "x-0d08"},
+        index={},
+        holder_of=_holders(**{"x-0d08": "spawn-handover:bp-c79d-prwatch-deadline"}),
+        kings_of=lambda scope: [],
+    )
+    assert got == []
+
+
 # --- the verb: delivery is the default, --quiet is the opt-out ---------------
 
 

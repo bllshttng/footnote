@@ -997,6 +997,46 @@ def compare_and_rebind(
 #: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
+#: The requeue pseudo-holder (`backlog/requeue`): the invoking session that will
+#: take the node, not an agent. Role holders are workflow markers, not mail
+#: addresses - `holder_agent_name` is the one resolver for that.
+TARGET_SESSION_HOLDER_PREFIX = "target-session:"
+
+
+def holder_agent_name(holder: Optional[str]) -> Optional[str]:
+    """Resolve a claim holder to the agent behind it, or None.
+
+    Role-prefixed holders name a worker or a session, not an address; a
+    caller that would mail the holder resolves here first. None means the
+    named worker or session has no registry row, so there is nobody to
+    reach - a skip, not a failure. An unprefixed holder passes through.
+    """
+    if not holder:
+        return None
+    from fno.agents.registry import load_registry
+
+    if holder.startswith(HANDOVER_HOLDER_PREFIX):
+        name = holder[len(HANDOVER_HOLDER_PREFIX):]
+        return name if any(row.name == name for row in load_registry()) else None
+    if holder.startswith(TARGET_SESSION_HOLDER_PREFIX):
+        sid = holder[len(TARGET_SESSION_HOLDER_PREFIX):]
+        name = next(
+            (
+                row.name
+                for row in load_registry()
+                if sid
+                in {
+                    row.harness_session_id,
+                    getattr(row, "cc_session_id", None),
+                    getattr(row, "session_id", None),
+                }
+            ),
+            None,
+        )
+    else:
+        return holder
+    return name or None
+
 #: Suffix of the per-claim recovery mutex directory. One definition: this
 #: string was written out at six call sites, and a seventh (the dispatch
 #: guard's targeted recovery) is what made the duplication worth collapsing.

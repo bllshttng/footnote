@@ -36,6 +36,18 @@ pub(crate) fn decode_key(filename: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The requeue pseudo-holder (mirrors `TARGET_SESSION_HOLDER_PREFIX` in
+/// `fno.claims.core`): the invoking session that will take the node, not an
+/// agent. Both role prefixes mark workflow state, never a worker.
+const TARGET_SESSION_HOLDER_PREFIX: &str = "target-session:";
+
+/// A role-prefixed holder is workflow state (a launch window, a requeue
+/// reservation), not a worker driving the node.
+fn is_role_holder(holder: &str) -> bool {
+    holder.starts_with(crate::claim_verbs::HANDOVER_HOLDER_PREFIX)
+        || holder.starts_with(TARGET_SESSION_HOLDER_PREFIX)
+}
+
 /// One root's live + dead claim rows (core._list_claims_impl with
 /// include_stale=true): every `.lock` file, classified, dead states kept.
 pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
@@ -64,18 +76,14 @@ pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
             Ok(rec) => {
                 let state = crate::claims::classify(&rec, None);
                 let state = state.as_str();
-                // A spawn-handover row is the dispatcher's launch window, not
-                // a worker: live/suspect is its whole life by construction
-                // (the spawn pid is gone the moment the fork lands), so
-                // reading it as a stalled holder makes every king spawn flag
-                // itself within two minutes. An EXPIRED handover stays in
-                // scope: a window that lapsed without a worker taking over
-                // IS a stall.
-                if matches!(state, "live" | "suspect")
-                    && rec
-                        .holder
-                        .starts_with(crate::claim_verbs::HANDOVER_HOLDER_PREFIX)
-                {
+                // A role-prefixed row is the dispatcher's launch window or a
+                // requeue reservation, not a worker: live/suspect is its
+                // whole life by construction (the spawn pid is gone the
+                // moment the fork lands), so reading it as a stalled holder
+                // makes every king spawn flag itself within two minutes. An
+                // EXPIRED role holder stays in scope: a window that lapsed
+                // without a worker taking over IS a stall.
+                if matches!(state, "live" | "suspect") && is_role_holder(&rec.holder) {
                     continue;
                 }
                 // The board consumes live/suspect (stalled_holder's locks,
@@ -176,10 +184,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let (name, yaml) = handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-90fa");
         std::fs::write(dir.join(name), yaml).expect("write handover claim");
+        let (tname, tyaml) =
+            handover_row("target-session:a6d2ce6a-1da0", 900_000, "node%3Ax-requeue");
+        std::fs::write(dir.join(tname), tyaml).expect("write requeue claim");
         let rows = scan_claims_dir(&dir);
         assert!(
             rows.is_empty(),
-            "handover row leaked into the board: {rows:?}"
+            "role-prefixed row leaked into the board: {rows:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

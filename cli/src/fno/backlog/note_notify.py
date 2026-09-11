@@ -88,6 +88,8 @@ def note_recipients(
     self_session: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """Ordered, de-duplicated ``(address, why)`` pairs for one note."""
+    from fno.claims.core import holder_agent_name
+
     node_id = str(entry.get("id") or "")
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -95,8 +97,16 @@ def note_recipients(
     def add(address: Optional[str], why: str) -> None:
         if not address or address in seen:
             return
-        # A claim holder is role-prefixed (`target-session:<id>`); the prover is not.
-        if self_session and address.endswith(self_session):
+        # A claim holder is role-prefixed (`spawn-handover:<worker>`,
+        # `target-session:<sid>`): a workflow marker, not a mail address.
+        # Resolve it to the agent behind it here, where the address is born;
+        # None means the named worker/session has no registry row, so the
+        # note skips instead of failing to mail a role marker.
+        raw = address
+        address = holder_agent_name(address)
+        if not address or address in seen:
+            return
+        if self_session and (address.endswith(self_session) or raw.endswith(self_session)):
             return
         seen.add(address)
         out.append((address, why))
