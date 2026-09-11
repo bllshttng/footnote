@@ -123,6 +123,7 @@ fn open(graph: &Path) -> Result<Connection, String> {
         .execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
+             PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS graph_meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -629,6 +630,10 @@ mod tests {
                 {"id": "ab-one", "slug": "one", "title": "One", "type": "feature",
                  "status": "idea", "priority": "p2", "domain": "code",
                  "created_at": "2026-09-11T00:00:00+00:00", "tags": [],
+                 "locked_by": "holder-1", "locked_at": "2026-09-11T01:00:00+00:00",
+                 "dispatch_verb": "do",
+                 "source": "idea", "source_kind": "operator_request",
+                 "supersession": {"successor": "ab-two", "reason": "merged"},
                  "sessions": [{"phase": "do", "harness": "claude",
                                "session_id": "s-1"}],
                  "blocked_by": ["ab-two"]},
@@ -789,7 +794,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(nodes_left, 1, "the surviving node stays");
-        for table in ["sessions", "relations"] {
+        // The mirrors cascade with the node row; a pragma-less connection
+        // would strand these as orphans.
+        for table in [
+            "node_claims",
+            "node_dispatch",
+            "node_provenance",
+            "supersessions",
+            "sessions",
+            "relations",
+        ] {
             let rows: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
