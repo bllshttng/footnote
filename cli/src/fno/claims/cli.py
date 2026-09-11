@@ -963,14 +963,11 @@ def status(
         workers = info.get("roster_workers") or []
         try:
             from fno.graph.statuses import closed_worker_session_ids
-            from fno.graph.store import read_graph
+            from fno.graph.store import read_nodes_by_ids
             from fno.paths import graph_json
 
-            entry = next(
-                (e for e in read_graph(graph_json())
-                 if isinstance(e, dict) and str(e.get("id") or "") == node_id),
-                None,
-            )
+            reply = read_nodes_by_ids(graph_json(), [node_id]) or {}
+            entry = next(iter(reply.get("entries") or []), None)
             closed = closed_worker_session_ids(entry) if entry else set()
         except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
             closed = set()
