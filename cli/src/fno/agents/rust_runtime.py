@@ -351,6 +351,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # it must never auto-route to the daemon.
     "newest-assistant-text",
     "distress-verdicts",  # x-3ecf: blocked_child's verdict lookup; no Rust port.
+    # The stop hook's read-only spawn-gate capacity probe. Pure Python (the
+    # gate lives in fno.agents.spawn_gate); no Rust port, so it must never
+    # auto-route to the daemon.
+    "gate-status",
     # ab-098967b4 P1: internal helper the Rust `list` render path shells out to
     # for the discovered-live-sessions lane. Pure Python (reads
     # ~/.claude/sessions via fno.agents.discover); no Rust port, so it

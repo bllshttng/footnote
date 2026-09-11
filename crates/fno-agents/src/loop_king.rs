@@ -55,6 +55,7 @@
 //! close to do.
 
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -1335,3 +1336,116 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// What the dry-fire scan found: how many fires have landed with no new work
+/// done, and what was actionable on the most recent one.
+pub(crate) struct KingFireHistory {
+    /// Every fire this session has made. The manifest's `budget_max_iterations`
+    /// is a ceiling on THIS, not on the dry streak: a king clearing a row every
+    /// fire makes progress forever and must still stop somewhere.
+    pub(crate) total: u64,
+    pub(crate) dry: u64,
+    /// Actionable row identities recorded on the previous fire, or empty when
+    /// this is the first.
+    pub(crate) last_ids: Vec<String>,
+}
+
+/// Count how many king loop-check fires have landed with no NEW work done.
+///
+/// Progress is a positive marker, never board size: the board refills while
+/// the king works, so the actionable count can rise on the very fire that
+/// clears a row. Two things count, and the first is the one that fires.
+///
+/// 1. A row identity present on the previous fire and absent now: external
+///    truth off the board, needing no producer. The first cut had only rule
+///    2, nothing emitted the event it keyed on, and every king terminated
+///    NoProgress on its third fire no matter how much it dispatched.
+/// 2. A `king_action` naming a target id this run has not acted on before.
+///    Re-acting on the same id is NOT progress: `stalled_holder` rows can
+///    outlive the only action a king has for them, and a reset-on-repeat
+///    counter would never converge.
+pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return KingFireHistory {
+            total: 0,
+            dry: 0,
+            last_ids: Vec::new(),
+        };
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total: u64 = 0;
+    let mut dry: u64 = 0;
+    let mut last_ids: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let data = value.get("data");
+        let sid = data
+            .and_then(|d| d.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if sid != session_id {
+            continue;
+        }
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("king_action") => {
+                let target = data
+                    .and_then(|d| d.get("target_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !target.is_empty() && seen.insert(target.to_string()) {
+                    dry = 0;
+                }
+            }
+            Some("king_loop_check") => {
+                total += 1;
+                dry += 1;
+                // The clear is recorded ON the fire that saw it, so the reset
+                // survives into every later read. Resetting only the local
+                // `dry` inside `king_decide` left the journal unchanged, so
+                // the next fire recounted this row and the tolerance shrank by
+                // one per fire until a working king died on its third.
+                if data
+                    .and_then(|d| d.get("cleared"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    dry = 0;
+                }
+                last_ids = data
+                    .and_then(|d| d.get("actionable_ids"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+    KingFireHistory {
+        total,
+        dry,
+        last_ids,
+    }
+}
+
+/// True when any row the previous fire called actionable is gone now.
+///
+/// Deliberately one-directional. Rows ARRIVING is the board refilling, which
+/// is not progress and not failure; only a row leaving is something the king
+/// cleared.
+pub(crate) fn king_cleared_a_row(last_ids: &[String], now_ids: &[String]) -> bool {
+    if last_ids.is_empty() {
+        return false;
+    }
+    let now: std::collections::HashSet<&str> = now_ids.iter().map(String::as_str).collect();
+    last_ids.iter().any(|id| !now.contains(id.as_str()))
+}
+
+/// Consecutive dry fires before the loop gives up on a board that will not
+/// shrink. Named rather than inlined so it is tunable in one place.
+pub(crate) const KING_DRY_FIRE_CEILING: u64 = 3;

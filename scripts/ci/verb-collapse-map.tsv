@@ -29,6 +29,7 @@ agents dispatch one	T1	agents dispatch one	9
 agents dispatch resolve	T1	agents dispatch resolve	23
 agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
+agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
 agents gate	T1	agents gate	6
