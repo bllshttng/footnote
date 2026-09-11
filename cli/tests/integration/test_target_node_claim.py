@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from cli.tests._init_space import install_state_path_stub
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 
@@ -86,6 +88,13 @@ def _sandbox(tmp_path: Path):
     mock.chmod(0o755)
     log = tmp_path / "fno.log"
 
+    # The stub answers `fno-agents state path` so init writes its state into the
+    # test-owned space dir whether or not a real fno-agents sits on PATH. The
+    # legacy $REPO_ROOT/.fno leg stays pinned by the no-binary tests in
+    # test_init_target_state_skip_flags.py.
+    space = tmp_path / "space"
+    stub_env = install_state_path_stub(bindir, space)
+
     # Pin `python3` to the interpreter running these tests. Production no longer
     # shells an interpreter for the stamp, but the mock's delegation to the
     # real writer below does, and it needs fno's dependencies importable; an
@@ -105,6 +114,7 @@ def _sandbox(tmp_path: Path):
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
         "MOCK_ABI_SHIM": str(REPO_ROOT / "scripts" / "roadmap-tasks.py"),
+        **stub_env,
     })
     return repo, home, log, env
 
@@ -124,7 +134,9 @@ def _run_init(repo: Path, env: dict):
 
 
 def _state(repo: Path) -> str:
-    f = repo / ".fno" / "target-state.md"
+    assert not (repo / ".fno" / "target-state.md").exists(), \
+        "state must live in the stub space, not the legacy path"
+    f = repo.parent / "space" / "target-state.md"
     return f.read_text() if f.exists() else ""
 
 
@@ -237,6 +249,8 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     assert manifest_session_id != thread_id
     assert "-cx" in manifest_session_id
     assert f"codex_thread_id: {thread_id}" in state
+    assert "harness: codex" in state, state
+    assert f"harness_session_id: {thread_id}" in state, state
     assert graph["session_id"] == thread_id
     assert f'--holder target-session:{thread_id}' in acquire
     assert f'target_claim_holder: "target-session:{thread_id}"' in state
@@ -266,7 +280,7 @@ def test_held_by_other_refuses(tmp_path):
     state = _state(repo)
     assert state, f"no state written: rc={r.returncode} stderr={r.stderr[:600]!r}"
 
-    assert (repo / ".fno" / ".target-cancelled").exists(), \
+    assert (repo.parent / "space" / ".target-cancelled").exists(), \
         "exit 1 must touch the cancel sentinel"
     assert "target_claim_blocked_reason: claim_held_by_other" in state
     assert f"graph_node_id: {NODE_ID}" in state
@@ -281,7 +295,7 @@ def test_non_contention_error_does_not_block(tmp_path):
     state = _state(repo)
     assert state, f"no state written: rc={r.returncode} stderr={r.stderr[:600]!r}"
 
-    assert not (repo / ".fno" / ".target-cancelled").exists(), \
+    assert not (repo.parent / "space" / ".target-cancelled").exists(), \
         "a non-contention acquire failure must NOT block"
     assert "target_claim_blocked_reason: acquire_error_rc_2" in state
     assert f'target_claim_key: "node:{NODE_ID}"' not in state
