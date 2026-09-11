@@ -2199,7 +2199,8 @@ def abandoned_leg(entries, claimed, graph_path, apply):
                      f"row(s) not reaped (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue")
     return lines, None
 
-# --- pass orchestration + evidence sources (moved from graph/cli.py) ---
+# --- pass orchestration + evidence sources (moved from graph/cli.py);
+# tracker-owned machinery: these reads are the maintain verb's engine ---
 
 def _validity_rg_search(symbol: str) -> Optional[int]:
     """Bounded git-grep file count for ``symbol``, or ``None`` when the source
