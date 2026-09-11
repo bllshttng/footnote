@@ -437,7 +437,7 @@ pub fn run_name_mint(args: &[String]) -> i32 {
         _ => (Some(pos[0].as_str()), pos[1].clone()),
     };
     if node.is_empty() {
-        eprintln!("error: a node id is required: fno agents name [prefix] <node-id>");
+        eprintln!("error: a node id is required: fno-agents name-mint <node-id>");
         return 2;
     }
     match bridge_name(
