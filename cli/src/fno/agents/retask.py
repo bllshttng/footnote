@@ -11,7 +11,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
-from fno.agents.harness_map import capabilities, dispatch_command
+from fno.agents.harness_map import (
+    DispatchResolveError,
+    capabilities,
+    dispatch_command,
+    normalize_command,
+)
 from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.registry import (
     AgentEntry,
@@ -42,6 +47,9 @@ class RetaskCoordinate:
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
+    # The node's next lifecycle verb (x-ebd2); profiles.<verb> supplies the
+    # tier this coordinate carries.
+    verb: str = "target"
 
 
 def _resolve_retask_node(node: str) -> str:
@@ -273,6 +281,28 @@ def resolve_thread_viewport(
     raise RetaskTransportError("thread_view_join_missed")
 
 
+def _resolve_node_verb(node: str) -> str:
+    """The node's next lifecycle verb from the x-ebd2 table; an abstain
+    (None) means ``target``. Raises DispatchResolveError on a rung the
+    table cannot answer - the caller refuses rather than guessing."""
+    from fno.agents.harness_map import resolve_effective_verb
+    from fno.graph.ladder import plan_rung as node_plan_rung
+    from fno.graph.load import load_graph
+
+    rec = next(
+        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node),
+        None,
+    )
+    verb, _note = resolve_effective_verb(
+        verb=rec.get("dispatch_verb") if rec else None,
+        difficulty=rec.get("difficulty") if rec else None,
+        plan_rung=node_plan_rung(rec).value,
+    )
+    # The table answers canonical "/blueprint"; the seed probe and the
+    # registry rename both take the bare word.
+    return (verb or "target").lstrip("/") or "target"
+
+
 def resolve_target_coordinate(
     node: str,
     *,
@@ -281,12 +311,13 @@ def resolve_target_coordinate(
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> RetaskCoordinate:
+    verb = _resolve_node_verb(node)
     args = ["spawn", "--name", "retask-probe"]
     if model is not None:
         args += ["--model", model]
     if effort is not None:
         args += ["--effort", effort]
-    args.append(f"/fno:target {node}")
+    args.append(f"/fno:{verb} {node}")
     # x-7198: a probe, not a real dispatch - the builtin rung would otherwise
     # read as an explicit override and force every retask to respawn.
     resolved = inject_spawn_defaults(
@@ -319,6 +350,7 @@ def resolve_target_coordinate(
         permission_mode=_flag_value(resolved, "--permission-mode"),
         route=route,
         account=_flag_value(resolved, "--account"),
+        verb=verb,
     )
 
 
@@ -383,6 +415,10 @@ def detect_retask(
             "to": {"model": desired_model, "effort": desired_effort},
             "mechanism": "pending_operator_decision",
         }
+    if target.verb == "target":
+        command_template = dispatch_command(target.harness)
+    else:
+        command_template = normalize_command(f"/{target.verb} {{id}}", target.harness)
     payload = {
         "schema_version": 1,
         "worker": entry.name,
@@ -391,7 +427,7 @@ def detect_retask(
         "thread_id": entry.fno_id,
         "node": node,
         "target": {**asdict(target), "substrate": target_axes["substrate"]},
-        "target_command": dispatch_command(target.harness).format(id=node),
+        "target_command": command_template.format(id=node),
         "switch": switch,
         "execution": {"mode": "read_only_plan"},
         "preconditions": [
@@ -537,7 +573,7 @@ def execute_retask(
         return {**refusal, "cleared": True, "reason": "successor_row_count_invalid"}
     if transition.get("lineage_recorded") is not True:
         return {**refusal, "cleared": True, "reason": "successor_lineage_unrecorded"}
-    renamed = rename(f"target-{node}")
+    renamed = rename(f"{target.verb}-{node}")
     if not renamed:
         return {
             **refusal,
@@ -706,13 +742,25 @@ def run_retask(
     """Resolve live seams and execute one retask transaction."""
     node = _resolve_retask_node(node)
     entry = resolve_agent(worker, path=registry_path).entry
-    target = resolve_target_coordinate(
-        node,
-        settings=settings,
-        model=model,
-        effort=effort,
-        env=env,
-    )
+    try:
+        target = resolve_target_coordinate(
+            node,
+            settings=settings,
+            model=model,
+            effort=effort,
+            env=env,
+        )
+    except DispatchResolveError as exc:
+        return {
+            "status": "refused",
+            "cleared": False,
+            "session_restamped": False,
+            "switch": "not_started",
+            "switch_verified": False,
+            "target_submit_confirmed": False,
+            "reason": "dispatch_verb_unresolved",
+            "detail": str(exc),
+        }
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]
@@ -926,13 +974,20 @@ def plan_retask(
 ) -> dict:
     node = _resolve_retask_node(node)
     entry = resolve_agent(worker, path=registry_path).entry
-    target = resolve_target_coordinate(
-        node,
-        settings=settings,
-        model=model,
-        effort=effort,
-        env=env,
-    )
+    try:
+        target = resolve_target_coordinate(
+            node,
+            settings=settings,
+            model=model,
+            effort=effort,
+            env=env,
+        )
+    except DispatchResolveError as exc:
+        return {
+            "outcome": "refused",
+            "reason": "dispatch_verb_unresolved",
+            "detail": str(exc),
+        }
     return detect_retask(
         entry, target, node=node, live_permission_mode=_live_permission_mode(entry)
     )

@@ -47,6 +47,17 @@ def _screen_verdict(
     return {"matched": matched, "rule_id": rule_id, "state": state}
 
 
+@pytest.fixture(autouse=True)
+def _graph_with_target_node(monkeypatch):
+    """Verb resolution loads the node record; default it to a planless low
+    node so the probe resolves the target verb. A test overrides this by
+    monkeypatching load_graph again inside its own body."""
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-bdb9", "difficulty": "low"}],
+    )
+
+
 def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
     import fno.agents.retask as retask
 
@@ -61,6 +72,7 @@ def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
 
 
 def test_same_tier_builds_target_payload_without_executable_switch_commands():
+    from fno.agents.harness_map import dispatch_command
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
     target = resolve_target_coordinate(
@@ -71,7 +83,7 @@ def test_same_tier_builds_target_payload_without_executable_switch_commands():
     receipt = detect_retask(_row(), target, node="x-bdb9")
 
     assert receipt["outcome"] == "retask_ready"
-    assert receipt["payload"]["target_command"] == "$fno:target --no-merge x-bdb9"
+    assert receipt["payload"]["target_command"] == dispatch_command("codex").format(id="x-bdb9")
     assert receipt["payload"]["switch"] == {"required": False}
     assert receipt["payload"]["execution"] == {"mode": "read_only_plan"}
 
@@ -1119,3 +1131,104 @@ def test_run_retask_thread_door_refusal_carries_the_door_stderr(monkeypatch) -> 
     assert receipt["reason"] == "thread_view_unavailable"
     assert receipt["detail"] == stderr_line
     assert receipt["cleared"] is False
+
+
+def test_planless_blueprint_node_retasks_an_opus_claude_worker(tmp_path, monkeypatch):
+    """AC3-HP: the node's dispatch_verb drives the profile, so a planless
+    blueprint node reaches an opus anthropic worker instead of refusing on
+    the target profile's glm route."""
+    import fno.agents.retask as retask
+    from fno.agents.harness_map import normalize_command
+
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-bdb9",
+            "difficulty": "medium",
+            "dispatch_verb": "/fno:blueprint",
+        }],
+    )
+    settings = _settings(
+        provider="claude",
+        model="claude-opus-5",
+        permission_mode="bypassPermissions",
+    )
+    settings.agents.profiles = {
+        "target": settings.agents.profiles["target"],
+        "blueprint": settings.agents.profiles["target"],
+    }
+    row = _row(
+        harness="claude",
+        provider="claude",
+        model="claude-opus-5",
+        substrate="thread",
+        mux=None,
+        fno_id="F",
+    )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "permission-mode", "permissionMode": "bypassPermissions"})
+        + "\n"
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mux_recipient_transcript", lambda _entry: transcript
+    )
+
+    receipt = retask.plan_retask("bp-x", node="x-bdb9", settings=settings, env={})
+
+    assert receipt["outcome"] == "retask_ready"
+    assert receipt["payload"]["target"]["verb"] == "blueprint"
+    assert receipt["payload"]["target_command"] == normalize_command(
+        "/blueprint {id}", "claude"
+    ).format(id="x-bdb9")
+
+
+def test_ready_target_node_keeps_the_zai_lane_and_refuses_an_opus_row(
+    tmp_path, monkeypatch
+):
+    """AC3-ERR: a ready node still resolves the target profile, so law
+    d-20293d74 holds - an opus anthropic row cannot take the glm lane."""
+    import fno.agents.retask as retask
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-bdb9",
+            "difficulty": "medium",
+            "dispatch_verb": None,
+            "cwd": str(tmp_path),
+            "plan_path": "plan.md",
+        }],
+    )
+    settings = _settings(route="zai/glm-5.3-flash[1m]")
+    row = _row(
+        harness="claude",
+        provider="claude",
+        model="claude-opus-5",
+        substrate="thread",
+        mux=None,
+        fno_id="F",
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+    monkeypatch.setattr("fno.agents.dispatch._mux_recipient_transcript", lambda _entry: None)
+
+    receipt = retask.plan_retask("bp-x", node="x-bdb9", settings=settings, env={})
+
+    assert receipt == {"outcome": "spawn_required", "reason": "provider"}
+
+
+def test_unresolvable_dispatch_verb_refuses_instead_of_guessing(monkeypatch):
+    import fno.agents.retask as retask
+
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+    row = _row()
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+
+    receipt = retask.plan_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["reason"] == "dispatch_verb_unresolved"
+    assert receipt["detail"]

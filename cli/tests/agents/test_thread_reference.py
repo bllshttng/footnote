@@ -3,7 +3,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from fno.agents.registry import AgentEntry
+
+
+@pytest.fixture(autouse=True)
+def _graph_with_target_node(monkeypatch):
+    """Verb resolution loads the node record; default it to a planless low
+    node so the probe resolves the target verb."""
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-bdb9", "difficulty": "low"}],
+    )
 
 
 def _thread_row(**overrides) -> AgentEntry:
@@ -108,5 +120,7 @@ def test_thread_viewport_resolver_uses_thread_identity_not_pane_zero(monkeypatch
     monkeypatch.setenv("FNO_SESSION", "main")
 
     assert retask.resolve_thread_viewport(_thread_row()) == ("main", 993)
-    assert calls[0] == ["fno", "mux", "thread", "--server", "main", "thread-session"]
+    # The door keys on the row name (portal_reach row_answers_key); the
+    # fno_id rides the join below.
+    assert calls[0] == ["fno", "mux", "thread", "--server", "main", "thread-worker"]
     assert calls[1][:5] == ["fno", "mux", "pane", "ls", "--server"]
