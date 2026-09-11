@@ -1,12 +1,12 @@
 # Graph search
 
-Optional. Nothing in footnote depends on it, and a checkout without it works the same.
+## Is this page for you?
 
-The tool is `graphify`. It builds a knowledge graph of the repo and answers a where-does-this-live question with a scoped subgraph instead of a repo-wide grep. Use it when a question spans several files and you do not yet know which ones.
+Your question spans several files and you do not yet know which ones, so a scoped subgraph beats a repo-wide grep. This page owns the `graphify` tool and its four verbs. Nothing in footnote depends on the tool, and a checkout without it works the same.
 
-## Is it here
+Not for: ordinary symbol lookups. When `graphify-out/graph.json` does not exist in the repo root there is nothing to query, so skip this page and use `rg` / Grep.
 
-Only when `graphify-out/graph.json` exists in the repo root. If it does not, skip this page and use `rg` / Grep.
+## Availability
 
 The index is generated and local, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool. Keep `graphify-out/` out of commits: `graph.json` runs to tens of megabytes, and one `graphify-out/` under `crates/` makes the rust build report a dirty tree.
 
