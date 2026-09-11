@@ -513,13 +513,13 @@ def history_cmd(
     happened across the reign. Contract: docs/architecture/reign.md.
     """
     from fno.king.history import HistoryUnreadable, resolve_scope, run_native
-    from fno.paths import project_events_json
+    from fno.paths import event_journals
 
     try:
         crown = resolve_scope(scope)
     except HistoryUnreadable as exc:
         _refuse(f"king: {exc}")
-    code, out, err = run_native(project_events_json(), crown, as_json)
+    code, out, err = run_native(event_journals(), crown, as_json)
     if out:
         typer.echo(out.rstrip("\n"))
     if err:

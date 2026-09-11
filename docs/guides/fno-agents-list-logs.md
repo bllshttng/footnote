@@ -93,7 +93,7 @@ Returns a canonical object suitable for scripts:
   "discovered_sessions": [],
   "discovered_count": 0,
   "filters_applied": { "cwd": null, "harness": null, "provider": null, "status": null, "progress": null },
-  "fields_omitted": ["model"],
+  "fields_omitted": ["model", "model_basis"],
   "schema_version": 3
 }
 ```

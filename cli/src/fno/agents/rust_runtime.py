@@ -234,9 +234,9 @@ RUST_CLIENT_VERBS = frozenset(
         # crowns gather_court already adjudicated.
         "court-fold",
         # Crown-scope reign_checkin readback for `fno agents king history`:
-        # daemon-free read; Python resolves the caller's crown scope and pins
-        # the journal path, then invokes the binary directly (not via `fno
-        # agents` routing).
+        # daemon-free read; Python resolves the caller's crown scope and
+        # passes every journal paths.event_journals resolves, then invokes
+        # the binary directly (not via `fno agents` routing).
         "king-history",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
@@ -258,6 +258,9 @@ RUST_CLIENT_VERBS = frozenset(
         "authorized-merge",
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
+        # Durable fleet incident breaker (x-77db): direct dispatch in client.rs
+        # (no daemon RPC); public surface `fno agents incident`. Parity-synced.
+        "fleet-incident",
     }
 )
 
@@ -293,7 +296,8 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     "gate",
     # Messaging verbs are not direct agents actions. They live below the
     # Python-owned `fno agents mail` subgroup and therefore never auto-route as
-    # direct send, inbox, or ack Rust verbs.
+    # direct send, inbox, or ack Rust verbs. `incident` (x-77db) relays argv.
+    "incident",
     # Epic ab-d3a1ae3e G2 Task 4.3: the stream-json observe surface. Pure Python;
     # polls the worker's stream.read_frames directly. No Rust client port (the
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
@@ -470,13 +474,14 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
-    "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--json]; invoked directly by `fno agents king history`, not `fno agents` routing.",
+    "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; invoked directly by `fno agents king history`, which passes every journal paths.event_journals resolves.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
+    "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

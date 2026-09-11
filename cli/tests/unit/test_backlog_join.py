@@ -1204,9 +1204,12 @@ def test_joiner_transcript_probe_reads_the_newest_entry(tmp_path, monkeypatch):
     _write_entry(10)
     assert advance._transcript_recently_active(sid) is True
 
-    # No timestamped entry: the mtime fallback answers, never raises.
+    # No timestamped entry: NO evidence, and the fresh mtime must not rescue
+    # it - the mtime fallback read a file touched 2h33m after its newest
+    # record as live, so an undatable transcript answers False, never a
+    # raise.
     transcript.write_text(json.dumps({"type": "last-prompt"}) + "\n")
-    assert advance._transcript_recently_active(sid) is True  # fresh mtime
+    assert advance._transcript_recently_active(sid) is False  # fresh mtime, no records
 
     # An absent transcript is activity-nothing -> False.
     assert advance._transcript_recently_active("0badc0de-54cf-0000-0000-ffffffffffff") is False

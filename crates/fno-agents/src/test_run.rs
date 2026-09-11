@@ -318,7 +318,40 @@ pub fn run_test_run(args: &[String]) -> i32 {
         return 2;
     }
 
+    // x-77db: the durable fleet incident stop gates BEFORE nested-owner
+    // detection, suite-claim acquisition, or any child process group. A suite
+    // already running when the stop lands is untouched (this process was
+    // admitted earlier); every LATER admission refuses here with a positive
+    // suite_refused receipt naming the generation, so absence never reads as
+    // evidence. An unreadable state fails closed with its own marker.
     let run_id = new_run_id();
+    match crate::fleet_incident::verdict() {
+        crate::fleet_incident::Verdict::Clear(_) => {}
+        crate::fleet_incident::Verdict::Stopped(record) => {
+            emit(
+                &run_id,
+                "suite_refused",
+                &[
+                    ("reason", "fleet-stop".to_string()),
+                    ("generation", record.generation.to_string()),
+                    ("incident", record.reason.clone()),
+                ],
+            );
+            return crate::fleet_incident::EXIT_CHECK_STOPPED;
+        }
+        crate::fleet_incident::Verdict::Unavailable(detail) => {
+            emit(
+                &run_id,
+                "suite_refused",
+                &[
+                    ("reason", "fleet-stop-unavailable".to_string()),
+                    ("detail", detail),
+                ],
+            );
+            return crate::fleet_incident::EXIT_CHECK_UNAVAILABLE;
+        }
+    }
+
     let holder = format!("test-run:{}:{}", std::process::id(), now_secs());
     let claims_root = opts
         .claims_root
@@ -489,6 +522,11 @@ mod tests {
 
     #[test]
     fn nested_owner_rejects_a_foreign_or_stale_token() {
+        // The env pins are process-global: hold the shared env lock so a
+        // sibling env test cannot clear these vars mid-read.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // A pid this test did not spawn (pid 1 on any unix box) will never
         // match a birth value this process invents, so the token is refused
         // rather than trusted.
@@ -502,6 +540,9 @@ mod tests {
 
     #[test]
     fn nested_owner_accepts_a_live_matching_self() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let pid = std::process::id();
         let birth = crate::daemon::process_start_time(pid).unwrap_or(0);
         std::env::set_var("FNO_TEST_OWNER_PID", pid.to_string());

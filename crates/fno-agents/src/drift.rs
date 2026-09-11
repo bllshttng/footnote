@@ -141,7 +141,9 @@ pub fn drift_warning(state: &DriftState, pid: Option<u32>) -> Option<String> {
             };
             Some(format!(
                 "fno agents: {who} is an older build than the installed binary; \
-                 run `fno agents restart` to pick up the new build."
+                 `fno agents restart` fixes it but restarts every worker on the \
+                 shared daemon, so it is an operator action - surface it to the \
+                 operator instead of running it from an agent session."
             ))
         }
         DriftState::Fresh | DriftState::DaemonDown | DriftState::Unknown => None,
@@ -293,18 +295,23 @@ mod tests {
     fn drift_warning_names_restart_verb() {
         // AC1-HP (message half): a Drifted state warns, names the restart verb,
         // and weaves in the pid when present.
+        let msg = drift_warning(&drift_state(), Some(91627)).expect("warns on drift");
+        assert!(msg.contains("fno agents restart"), "names the remedy verb");
+        assert!(msg.contains("build"), "describes a build mismatch");
+        assert!(msg.contains("91627"), "names the pid when known");
+        assert!(msg.contains("operator"), "names who can act");
+        assert!(!msg.contains('\n'), "stays on one line");
+    }
+
+    fn drift_state() -> DriftState {
         let fp = ExeFingerprint {
             path: PathBuf::from("/x"),
             mtime_nanos: 1,
             size: 1,
         };
-        let state = DriftState::Drifted {
+        DriftState::Drifted {
             running: fp.clone(),
             on_disk: fp,
-        };
-        let msg = drift_warning(&state, Some(91627)).expect("warns on drift");
-        assert!(msg.contains("fno agents restart"), "names the remedy verb");
-        assert!(msg.contains("build"), "describes a build mismatch");
-        assert!(msg.contains("91627"), "names the pid when known");
+        }
     }
 }

@@ -62,7 +62,10 @@ CHECKS: dict[str, str] = {
 # attached: fold or retire before raising this.
 MENU_CAP_ROOT_NAMESPACE = 12
 MENU_CAP_TOP_LEVEL = 10
-MENU_CAP_SUB_APP = 12
+# x-77db allocates `mail team`, the operator's fleet announcement verb, as
+# mail's thirteenth advertised verb: an incident command hidden from the menu
+# is the wedged-lock failure mode again.
+MENU_CAP_SUB_APP = 13
 
 
 # Single-line argv shapes that are intentionally still owned by a provider or

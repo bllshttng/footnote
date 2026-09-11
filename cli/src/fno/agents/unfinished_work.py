@@ -1,47 +1,13 @@
 """The unfinished-work report: the operator question the fleet watchdog answers.
 
-The verdict classifier in :mod:`fno.agents.watchdog` stays the internal
-recovery engine (wake, reroute, reap, retire). This module answers the
-outcome question the operator actually asks: was work started and never
-finished? Four dimensions, each finding naming the one verb that clears it:
-
-- ``started_free_claim``: an in_progress node whose claim is free, ranked by
-  idle age, with the branch's commits ahead of ``origin/main`` where a
-  worktree resolves. Clear: ``/fno:target <node>``.
-- ``done_ahead_of_main``: a done node whose worktree branch still carries
-  commits ahead of a freshly fetched ``origin/main``. Clear: the stranded
-  recovery verb scoped to the repository.
-- ``dirty_ownerless_worktree``: a worktree with uncommitted paths and no
-  authoritative live owner. Clear: adopt or finish it.
-- ``open_pr_ownerless``: a PR open past 24h whose node has no live owner.
-  Clear: ``/fno:pr check <number>``.
-
-Liveness is read ONLY from pid incarnation and transcript truth (the
-authorities the fleet already trusts). A stored status word, registry
-absence, or display name contributes no liveness verdict: unreadable
-evidence preserves the candidate as unmeasurable (the dimension reads
-unknown, never clean) because the cost of guessing wrong is somebody's
-uncommitted work.
-
-The commit metric is ``git rev-list --count origin/main..HEAD`` after one
-``git fetch origin main`` per repository. The upstream tracking ref is not a
-substitute on this path: a stale remote-tracking ref inflated a measured
-count to 936 against a true 8, and a report that can be wrong by two orders
-of magnitude on its first line is untrustworthy. The stranded-worktree
-module's own unpushed probe is untouched; it protects destructive cleanup
-and answers a different question.
-
-The main worktree of each repository is excluded from the dirty dimension:
-the canonical checkout is a shared surface with transient tenants (operator
-scratch files read as dirt), so the owner join cannot answer for it.
-
-``classify()`` is pure over injected observations; ``collect_observations()``
-is the IO seam; ``build_report()`` is the one producer both the manual verb
-and the scheduled tick consume.
+Four dimensions, one clearing verb each; liveness from pid and transcript
+truth only; unreadable evidence keeps the dimension unknown, never clean.
+The full contract lives in
+docs/architecture/unfinished-work-and-row-registration.md.
 """
+
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 from dataclasses import dataclass
@@ -50,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from fno.worktree_stranded import resolve_node_id
+from fno.agents.registry import registry_rows_by_cwd
 
 # --- kinds and dimension vocabulary ----------------------------------------
 
@@ -129,6 +96,9 @@ class OwnerProbe:
     ``pid_alive``: True/False only from a positive process probe; None when
     no pid was recorded or the probe could not answer. ``transcript_age_s``:
     seconds since the session's transcript last moved, None when unreadable.
+    ``last_activity_basis``: how that age was taken (``mtime`` = a file stamp,
+    which the shared predicate refuses as positive evidence); None when the
+    probe could not answer or the caller injected a synthetic age.
     ``claim_state``: the claim view this handle holds, when it holds one.
     ``stored_exited``: the ONE stored status that is itself a probe result
     (reconcile writes it only after confirming the child was gone)."""
@@ -136,6 +106,7 @@ class OwnerProbe:
     handle: str
     pid_alive: Optional[bool] = None
     transcript_age_s: Optional[float] = None
+    last_activity_basis: Optional[str] = None
     claim_state: Optional[str] = None
     stored_exited: bool = False
 
@@ -148,24 +119,39 @@ OWNER_UNKNOWN = "unknown"
 def owner_verdict(
     probe: OwnerProbe, *, live_activity_s: float = DEFAULT_LIVE_ACTIVITY_S
 ) -> str:
-    """``live`` | ``gone`` | ``unknown`` for one owner candidate.
+    """``live`` | ``gone`` | ``unknown``, through the ONE shared predicate
+    (``classify_reachability``), never a private vocabulary (x-dead).
 
-    Positive evidence only, in both directions. Live: a live pid, or a
-    transcript that moved inside the activity window. Gone: a positively dead
-    pid, an expired lease, or the confirmed-exit stamp. Everything else,
-    including every unreadable read, is unknown, and unknown never reads as
-    ownerless."""
-    if probe.pid_alive is True:
+    Falsifiers first (dead pid, exit stamp - never while the transcript is
+    fresh: a harness resume kills the pid while the session keeps writing),
+    then positive evidence. Unknown never reads as ownerless. The one
+    clock-word outside the predicate is a STALE claim: only TTL expiry proves
+    a lease dead."""
+    from fno.agents.reachability import REACHABLE, UNREACHABLE, classify_reachability
+
+    fresh = probe.transcript_age_s is not None and probe.transcript_age_s <= live_activity_s
+    if probe.stored_exited and not fresh:
+        falsifier: Optional[str] = "exit-recorded"
+    elif probe.pid_alive is False and not fresh:
+        falsifier = "process-gone"
+    else:
+        falsifier = None
+    age_s = int(probe.transcript_age_s) if probe.transcript_age_s is not None else None
+    reading = classify_reachability(
+        truth_state="working" if probe.transcript_age_s is not None else None,
+        age_s=age_s,
+        falsifier=falsifier,
+        fresh_s=live_activity_s,
+        pid_alive=True if probe.pid_alive is True else None,
+        last_activity_basis=probe.last_activity_basis,
+    )
+    if reading.verdict == REACHABLE:
         return LIVE
-    if probe.transcript_age_s is not None and probe.transcript_age_s <= live_activity_s:
-        return LIVE
-    if probe.pid_alive is False:
+    if reading.verdict == UNREACHABLE:
         return GONE
     # Only TTL expiry (stale) proves a lease dead: suspect keeps TTL
     # protection, and the claims machinery itself refuses to steal it.
     if probe.claim_state == "stale":
-        return GONE
-    if probe.stored_exited:
         return GONE
     return OWNER_UNKNOWN
 
@@ -697,12 +683,20 @@ def report_roots() -> "list[Path]":
 # --- the IO seam ---------------------------------------------------------------
 
 
-def _default_truth(handle: str) -> Optional[float]:
+def _default_truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
+    """One truth resolution, age AND basis (an mtime-derived age must reach
+    the classifier labelled, or the stat lie reads as positive evidence).
+    The injected ``truth_resolver`` contract keeps returning a bare age, so
+    injected probes carry no basis."""
     from fno.agents.session_truth import resolve_session_truth
 
     result = resolve_session_truth(handle)
     age = result.get("last_activity_age_s")
-    return float(age) if isinstance(age, (int, float)) else None
+    basis = result.get("last_activity_basis")
+    return (
+        (float(age) if isinstance(age, (int, float)) else None),
+        (str(basis) if basis else None),
+    )
 
 
 def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
@@ -716,35 +710,6 @@ def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
         return _pid_alive(pid, None)
     except Exception:  # noqa: BLE001 - a broken probe is unreadable, not dead
         return None
-
-
-def _read_registry_rows(path: Optional[Path] = None) -> tuple[dict, bool]:
-    """cwd -> [registry row, ...] plus an ok flag. A missing registry is a
-    legitimate empty fleet and is ok; one that exists and fails to parse is
-    a genuine read failure, which reads every candidate unmeasurable."""
-    import os
-
-    from fno import paths as _paths
-
-    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
-    target = Path(override) if override else (path or _paths.agents_registry_path())
-    if not target.exists():
-        return {}, True
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}, False
-    if not isinstance(data, dict):
-        return {}, False
-    by_cwd: dict[str, list[dict]] = {}
-    for row in data.get("agents", []):
-        if not isinstance(row, dict):
-            continue
-        cwd = row.get("cwd") or ""
-        if not cwd:
-            continue
-        by_cwd.setdefault(str(Path(cwd)), []).append(row)
-    return by_cwd, True
 
 
 def _session_handle(row: dict) -> Optional[str]:
@@ -796,7 +761,8 @@ def collect_observations(
     """Gather every observation the classifier needs. Read-only apart from
     one ``git fetch origin main`` per repository and the GitHub PR reads."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
-    truth = truth_resolver or _default_truth
+    truth_pair = ((lambda h: (truth_resolver(h), None)) if truth_resolver is not None
+                  else _default_truth_pair)
     warnings: list[str] = []
 
     def _budget_left() -> Optional[float]:
@@ -834,7 +800,7 @@ def collect_observations(
     registry_by_cwd, registry_ok = (
         (dict(registry_rows[0]), bool(registry_rows[1]))
         if registry_rows is not None
-        else _read_registry_rows()
+        else registry_rows_by_cwd()
     )
     if not registry_ok:
         warnings.append("registry unreadable")
@@ -917,6 +883,7 @@ def collect_observations(
                         else _default_pid_alive(claim_view.get("pid"))
                     ),
                     transcript_age_s=cached.transcript_age_s,
+                    last_activity_basis=cached.last_activity_basis,
                     claim_state=(claim_view or {}).get("state"),
                     stored_exited=cached.stored_exited,
                 )
@@ -931,10 +898,12 @@ def collect_observations(
             if _session_handle(row) == handle
         )
         pid = (claim_view or {}).get("pid")
+        age, basis = truth_pair(handle)
         probe = OwnerProbe(
             handle=handle,
             pid_alive=_default_pid_alive(pid),
-            transcript_age_s=truth(handle),
+            transcript_age_s=age,
+            last_activity_basis=basis,
             claim_state=claim_state,
             stored_exited=stored_exited,
         )

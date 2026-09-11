@@ -46,7 +46,7 @@ def resolve_scope(explicit: str) -> str:
     return canonicalize_scope(own)
 
 
-def run_native(events_path: Path, scope: str, as_json: bool) -> tuple[int, str, str]:
+def run_native(events_paths: list[Path], scope: str, as_json: bool) -> tuple[int, str, str]:
     """Relay to the native ``king-history`` read; ``(code, stdout, stderr)``."""
     from fno.agents.rust_runtime import refuse_without_binary
     from fno.rust_binary import resolve_binary
@@ -54,7 +54,9 @@ def run_native(events_path: Path, scope: str, as_json: bool) -> tuple[int, str, 
     binary = resolve_binary()
     if binary is None:
         refuse_without_binary("king history")
-    argv = [str(binary), "king-history", "--scope", scope, "--events-path", str(events_path)]
+    argv = [str(binary), "king-history", "--scope", scope]
+    for path in events_paths:
+        argv += ["--events-path", str(path)]
     if as_json:
         argv.append("--json")
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)

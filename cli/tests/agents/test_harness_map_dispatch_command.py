@@ -16,6 +16,7 @@ from fno.agents.harness_map import (
     dispatch_command,
     normalize_command,
     resolve_dispatch,
+    resolve_effective_verb,
 )
 
 
@@ -479,20 +480,43 @@ def test_redispatch_build_rungs_advance_to_target_despite_stored_blueprint(rung)
 
 @pytest.mark.parametrize("rung", ["unreadable", "done", "superseded"])
 def test_unanswerable_plan_rungs_refuse(rung):
-    with pytest.raises(DispatchResolveError, match=rung):
+    with pytest.raises(DispatchResolveError, match=rung) as exc_info:
         resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung=rung)
+    assert_refusal_names_subject_and_cites_no_node(exc_info.value)
 
 
 def test_planless_node_without_difficulty_refuses_naming_the_field():
-    with pytest.raises(DispatchResolveError, match="difficulty"):
+    with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
         resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung="none")
+    assert_refusal_names_subject_and_cites_no_node(exc_info.value)
 
 
 def test_planless_node_with_invalid_difficulty_refuses():
-    with pytest.raises(DispatchResolveError, match="difficulty"):
+    with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
         resolve_dispatch(
             harness="claude", node_id="x-abcd", difficulty="spicy", plan_rung="none"
         )
+    assert_refusal_names_subject_and_cites_no_node(exc_info.value)
+
+
+def test_direct_refusal_without_node_id_keeps_subjectless_shape():
+    # No node in scope: the sentence keeps its values but still carries no
+    # citation for a reader to mistake for the subject.
+    with pytest.raises(DispatchResolveError) as exc_info:
+        resolve_effective_verb(plan_rung="none")
+    message = str(exc_info.value)
+    assert "for node" not in message
+    assert "(x-" not in message
+
+
+def assert_refusal_names_subject_and_cites_no_node(exc: DispatchResolveError) -> None:
+    # A king reads the refusal cold: the failing node must be the first
+    # identifier in the sentence, and a trailing citation invites a misread
+    # (the node that shipped this assertion went to fix the cited node).
+    message = str(exc)
+    assert "for node x-abcd" in message
+    assert message.index("for node x-abcd") < message.index("plan rung")
+    assert "(x-" not in message
 
 
 def test_bare_resolve_without_node_context_keeps_target_template():

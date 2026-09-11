@@ -427,7 +427,14 @@ def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
     monkeypatch.setattr(dispatch, "update_registry", update_with_duplicate)
     monkeypatch.setattr(claude_mod, "claude_stop", lambda *_a, **_k: (0, ""))
 
-    assert dispatch.stop_agent("victim").claude_exit == 0
+    # x-dead task 3.1: the mocked shellout is a silent no-op - the row still
+    # names the stopped session and still reads live - so the verb refuses
+    # instead of printing `stopped:` beside a live row. The duplicate-row
+    # isolation holds either way: neither row's lifecycle is mutated.
+    from fno.agents.dispatch_errors import DispatchAskError
+
+    with pytest.raises(DispatchAskError, match="still reads live"):
+        dispatch.stop_agent("victim")
 
     assert len(persisted) == 2
     assert {entry.status for entry in persisted} == {"live"}

@@ -25,7 +25,6 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
-from fno.decide import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 # the external-backend verb classification: the sets live beside the data
 # they classify (the classification runner below fails the import when a
@@ -1529,16 +1528,22 @@ def cmd_idea(
         None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
     Equivalent to `fno backlog add <title>` but signals intent to skip the
-    spec/plan ceremony for now. The new node has no ``plan_path`` and so
-    derives to ``status: idea`` until a plan is associated (via
-    ``fno backlog intake`` or by setting ``--plan-path`` on
-    ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
-    can carry parent/size/domain without a follow-up ``fno backlog update``.
+    spec/plan ceremony: no ``plan_path`` derives to ``status: idea`` until
+    one is bound. Shares ``add``'s full option set.
     """
+    from fno.text_or_file import read_text_arg
+
+    details = read_text_arg(details, details_file, what="the details")
+
     if wave_of:
         if evidence is not None:
             typer.echo("Error: --wave-of cannot record a creation vote", err=True)
@@ -1546,29 +1551,23 @@ def cmd_idea(
         if separate:
             typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        topology_flags = []
-        if blocked_by:
-            topology_flags.append("--blocked-by")
-        if parent:
-            topology_flags.append("--parent")
-        if roadmap_id:
-            topology_flags.append("--roadmap-id")
-        if vision_path:
-            topology_flags.append("--vision-path")
-        if project:
-            topology_flags.append("--project")
-        if cwd:
-            topology_flags.append("--cwd")
-        if size:
-            topology_flags.append("--size")
-        if batch:
-            topology_flags.append("--batch")
-        if related:
-            topology_flags.append("--related")
-        if type_ != "feature":
-            topology_flags.append("--type")
-        if priority != "p2":
-            topology_flags.append("--priority")
+        topology_flags = [
+            flag
+            for flag, given in (
+                ("--blocked-by", blocked_by),
+                ("--parent", parent),
+                ("--roadmap-id", roadmap_id),
+                ("--vision-path", vision_path),
+                ("--project", project),
+                ("--cwd", cwd),
+                ("--size", size),
+                ("--batch", batch),
+                ("--related", related),
+                ("--type", type_ != "feature"),
+                ("--priority", priority != "p2"),
+            )
+            if given
+        ]
         if topology_flags:
             typer.echo(
                 "Error: wave filing cannot use node-only topology flags: "
@@ -1754,25 +1753,19 @@ def cmd_decompose(
         "--groups",
         help=(
             "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]"
-            "[,adopt]} group specs. Optional per-group project/cwd route a child "
-            "into a different repo (multi-repo decomposition): project resolves "
-            "its cwd from the settings work-map; an explicit cwd overrides; "
-            "absent -> inherit the epic's repo. "
-            "Optional `adopt: [<node-id>...]` re-parents EXISTING nodes under the "
-            "group child instead of minting new ones - use it to package an epic "
-            "already populated by `fno backlog idea --parent` rather than "
-            "doubling it. Epic children no group adopts are named on stderr. "
-            "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
+            "[,adopt]} specs; '@file' or '-' reads stdin. Per-group project/cwd "
+            "route a child into another repo; `adopt` re-parents existing nodes "
+            "instead of minting. Full schema: "
+            "skills/blueprint/references/epic-decomposition.md."
         ),
     ),
     max_prs: Optional[int] = typer.Option(
         None,
         "--max-prs",
         help=(
-            "Ceiling on group/PR count. Rejects when groups exceed it (N is a "
-            "ceiling, not a quota). Defaults to config.blueprint.max_prs_per_epic. "
-            "An epic doc's `max_children:` frontmatter overrides that default; "
-            "--max-prs may then only tighten it (never loosen the author's cap)."
+            "Ceiling on group/PR count; rejects when exceeded. Default: "
+            "config.blueprint.max_prs_per_epic, tightened by the epic doc's "
+            "`max_children:` frontmatter."
         ),
     ),
     force: bool = typer.Option(
@@ -1785,12 +1778,9 @@ def cmd_decompose(
         "separate",
         "--plans",
         help=(
-            "Per-child plan packaging. Only 'separate' is supported: scaffold a "
-            "self-contained quick-plan stub per child and repoint its plan_path "
-            "to that file (one plan == one PR == one node). The former 'fragment' "
-            "packaging (a <epic-doc>#group-<slug> section of a shared doc) was "
-            "removed - it is still recognized on existing children for idempotent "
-            "re-decompose, but never authored."
+            "Only 'separate': a self-contained quick-plan per child (one plan "
+            "== one PR == one node). The removed 'fragment' form is still "
+            "recognized on existing children for idempotent re-decompose."
         ),
     ),
 ) -> None:
@@ -2923,83 +2913,6 @@ def cmd_intake(
 # -- update --
 
 
-@cli.command("note")
-def cmd_note(
-    task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
-    text: str = typer.Argument(..., help="Progress note text (one line)."),
-    quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
-    ),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
-    read: list[str] = typer.Option([], "--read", help=READ_HELP),
-) -> None:
-    """Append a timestamped progress note to a backlog node, and DELIVER it.
-
-    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
-    verb mails a pointer to the node's holder, the owner's holder and the epic's
-    king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
-    fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
-    """
-    from fno.decide import (
-        UnmeasuredClaimError,
-        UnresolvableCitationError,
-        note_evidence,
-        unmeasured_note_warning,
-        warn_if_note_is_long,
-    )
-    from fno.graph.store import append_progress_note
-    from fno.claims.self_identity import resolve_self_identity
-    from fno.rust_binary import VerbUnavailable
-
-    text = text.strip()
-    if not text:
-        typer.echo("Error: note text is empty", err=True)
-        raise typer.Exit(code=1)
-
-    # A citation the repo contradicts refuses BEFORE the append, quiet or not
-    # (a silent annotation is still a fact on the node). An unmeasured claim
-    # only warns: this verb advises, never refuses a body - a failed read,
-    # or a gate that cannot run at all, refuses.
-    try:
-        read_rows, claims = note_evidence(text, list(read))
-    except (UnresolvableCitationError, UnmeasuredClaimError, VerbUnavailable) as exc:
-        typer.echo(f"Error: note refused: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-    note: "dict[str, Any]" = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
-    if read_rows:
-        note["reads"] = read_rows
-    try:
-        identity = resolve_self_identity()
-    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
-        identity = None
-    if identity is not None and identity.session_id:
-        note["source_session_id"] = identity.session_id
-    if identity is not None and identity.harness:
-        note["source_harness"] = identity.harness
-    entries: list[dict] = []
-    found, _ = append_progress_note(_graph_path(), task_id, note, entries_out=entries)
-    if not found:
-        typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
-        raise typer.Exit(code=1)
-    warn_if_note_is_long(text)
-    if claims:
-        typer.echo(unmeasured_note_warning(claims), err=True)
-    if json_output:
-        typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
-    else:
-        typer.echo(f"noted {task_id}: {text}")
-    if not quiet:
-        try:
-            from fno.backlog.note_notify import deliver_note
-
-            receipts = deliver_note(task_id, text, _graph_path(), entries or None)
-        except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
-            receipts = [(f"notify FAILED {task_id}: {exc}", True)]
-        for line, undelivered in receipts:
-            typer.echo(line, err=undelivered or json_output)
-
-
 @cli.command("encounter", hidden=True)
 def cmd_encounter(
     task_id: str = typer.Argument(..., help="Node id this session hit while doing something else."),
@@ -3192,10 +3105,8 @@ def cmd_update(
         None,
         "--repo",
         help=(
-            "owner/name of the repo the PR lives in, when that differs from the "
-            "cwd checkout. A cwd-derived url is a guess; naming the repo makes "
-            "the stamp an assertion, which is also what lets it override a "
-            "recorded pr_url that names a different repo ()."
+            "owner/name of the repo the PR lives in, when that differs from "
+            "the cwd checkout; naming it makes the stamp an assertion."
         ),
     ),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
@@ -3209,6 +3120,11 @@ def cmd_update(
         "--description",
         "-d",
         help="Update free-form details/rationale (stored in `details`). Pass 'null' to clear.",
+    ),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
@@ -3262,17 +3178,16 @@ def cmd_update(
         None,
         "--source-node",
         help=(
-            "Set the origin node this node came out of (id, slug, or bare hex). "
-            "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
+            "Origin node this node came out of (id, slug, or hex). 'null' "
+            "clears; a self-reference or an unresolved id refuses."
         ),
     ),
     related: Optional[List[str]] = typer.Option(
         None,
         "--related",
         help=(
-            "Replace the related list (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Pass 'null' to clear. Refuses a self-reference or an id "
-            "that does not resolve."
+            "Replace the related list (asserted, symmetric, non-blocking); "
+            "repeat or comma-separate. 'null' clears."
         ),
     ),
     blocked_by: Optional[List[str]] = typer.Option(
@@ -3352,6 +3267,7 @@ def cmd_update(
     ),
 ) -> None:
     from fno._flag_aliases import refuse_retired_model_tier
+    from fno.text_or_file import read_text_arg
     from fno.graph._constants import (
         PRIORITY_ORDER,
         normalize_difficulty,
@@ -3369,6 +3285,10 @@ def cmd_update(
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 
     refuse_retired_model_tier(_model_tier_tombstone)
+
+    details = read_text_arg(details, details_file, what="the details")
+    # A file's content is data; the 'null' clear-sentinel is CLI-only.
+    details_from_file = details_file is not None
 
     _require_node_id(task_id)
 
@@ -3822,7 +3742,11 @@ def cmd_update(
                 raise typer.Exit(code=1)
             node["title"] = new_title
         if details is not None:
-            node["details"] = None if details.lower() == "null" else details
+            node["details"] = (
+                None
+                if (not details_from_file and details.lower() == "null")
+                else details
+            )
         if domain is not None:
             node["domain"] = domain
         if size is not None:
@@ -12770,5 +12694,7 @@ def _classify_backlog_verbs() -> None:
             f"removed?): {sorted(unknown)}"
         )
 
+
+from fno.graph import note_cli  # noqa: E402,F401
 
 _classify_backlog_verbs()

@@ -107,6 +107,10 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         # The join call site's per-worker policy file: its PATH is a value,
         # never a prompt word.
         "--sandbox-write-policy",
+        # A retry budget is a duration, never a prompt word.
+        "--wait",
+        # A prompt-file PATH is never a prompt word.
+        "--prompt-file",
     }
 )
 

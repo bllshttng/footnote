@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1479,6 +1480,13 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     calls: list[list[str]] = []
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 4)
+    # Path resolution and the settings load shell git on cold caches, and CI
+    # sharding decides which test pays the cold read. Pin the repo root (the
+    # wrapper reads the env var per call and answers without a subprocess)
+    # and the override seam, so the exact-call-list contract is
+    # order-independent.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(Path(__file__).resolve().parents[3]))
+    monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",

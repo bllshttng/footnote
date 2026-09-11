@@ -139,6 +139,63 @@ def test_registry_lock_replacement_loop_honors_timeout(
 # ---------------------------------------------------------------------------
 
 
+def test_xdead_heal_own_cwd_stamps_the_working_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Task 0.1 (x-dead): the spawner mints the row with the SPAWN directory;
+    the worker's own SessionStart heal moves the cwd field to the directory
+    it actually works in, so every cwd-keyed occupancy join can find it."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import (
+        AgentEntry,
+        heal_own_cwd,
+        load_registry,
+        registry_rows_by_cwd,
+        write_registry,
+    )
+
+    write_registry(
+        [
+            AgentEntry(
+                name="t-b7f8-worker",
+                harness="claude",
+                cwd="/Users/bb16/code/footnote/footnote",
+                short_id="deadbeef",
+                harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+                log_path="/tmp/t-b7f8-worker.log",
+            )
+        ]
+    )
+
+    moved = heal_own_cwd(
+        name="t-b7f8-worker",
+        harness="claude",
+        cwd="/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+    )
+    assert moved == (
+        "/Users/bb16/code/footnote/footnote",
+        "/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+    )
+    by_cwd, ok = registry_rows_by_cwd()
+    assert ok is True
+    assert list(by_cwd) == ["/Users/bb16/.fno/worktrees/footnote/x-b7f8"]
+    assert load_registry()[0].cwd == "/Users/bb16/.fno/worktrees/footnote/x-b7f8"
+    # Idempotent: a second SessionStart writes nothing and answers None.
+    assert (
+        heal_own_cwd(
+            name="t-b7f8-worker",
+            harness="claude",
+            cwd="/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+        )
+        is None
+    )
+    # No such row: a no-op, never a raise.
+    assert (
+        heal_own_cwd(name="nobody", harness="claude", cwd="/somewhere") is None
+    )
+
+
 def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     """AC1-HP: write + read back a single agent entry preserving all fields."""
     use_tmpdir(monkeypatch, tmp_path)

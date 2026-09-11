@@ -636,7 +636,9 @@ def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
 
     warning = (
         "fno agents: the running daemon (pid 91627) is an older build than the installed "
-        "binary; run `fno agents restart` to pick up the new build."
+        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+        "daemon, so it is an operator action - surface it to the operator instead of "
+        "running it from an agent session."
     )
     calls: list[tuple[list[str], dict]] = []
     monkeypatch.setattr(
@@ -668,7 +670,9 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
 
     warning = (
         "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build."
+        "`fno agents restart` fixes it but restarts every worker on the shared daemon, "
+        "so it is an operator action - surface it to the operator instead of running it "
+        "from an agent session."
     )
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
     monkeypatch.setenv("FNO_AGENTS_BIN", "/custom/fno-agents")
@@ -700,7 +704,9 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
             0,
             "not json",
             "fno agents: the running daemon (pid 7) is an older build than the installed "
-            "binary; run `fno agents restart` to pick up the new build.",
+            "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+            "daemon, so it is an operator action - surface it to the operator instead of "
+            "running it from an agent session.",
         ),
         (1, '{"daemon": {"pid": 7}}', "fno agents: transport failed"),
     ],
@@ -738,7 +744,9 @@ def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
     )
     warning = (
         "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build."
+        "`fno agents restart` fixes it but restarts every worker on the shared daemon, "
+        "so it is an operator action - surface it to the operator instead of running it "
+        "from an agent session."
     )
     monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
 

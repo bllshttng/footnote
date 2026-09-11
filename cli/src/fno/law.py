@@ -1,17 +1,14 @@
 """One-step law recording: `fno inbox law set`.
 
-The operator types one ruling and it records; there is no staged proposal and
-no resume path (ruling d-e1eec854). The door resolves its caller by process
-ancestry and answers `chat_attested`, never `operator`, so a reader can
-always tell a chat recording from a person at a terminal - and a session can
-mint a law row while `retract_decision` stays operator-only. The measured
-narrative of that trade, and the `review-coverage-waiver` carve-out, live in
+One ruling, recorded: no staged proposal, no resume path (ruling
+d-e1eec854). The caller-resolver and the measured narrative:
 docs/architecture/decision-record.md.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import typer
 
@@ -81,7 +78,10 @@ def _law_callback() -> None:
 @law_app.command("set")
 def record_command(
     subject: str = typer.Argument(..., help="Subject governed by the law."),
-    decision: str = typer.Argument(..., help="Operator workaround or policy."),
+    decision: str | None = typer.Argument(None, help="Operator workaround or policy."),
+    decision_file: Path | None = typer.Option(
+        None, "--decision-file", help="Read the decision from a file ('-' = stdin)."
+    ),
     rationale: str | None = typer.Option(None, "--rationale"),
     option: list[str] = typer.Option([], "--option"),
     supersedes: str | None = typer.Option(None, "--supersedes"),
@@ -100,6 +100,9 @@ def record_command(
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
     from fno.rust_binary import VerbUnavailable
+    from fno.text_or_file import read_text_arg
+
+    decision = read_text_arg(decision, decision_file, what="the decision") or ""
 
     try:
         validate_durable_law(

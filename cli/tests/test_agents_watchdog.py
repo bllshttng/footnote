@@ -3686,6 +3686,7 @@ def _probe(
     *,
     pid_alive=None,
     transcript_age_s=None,
+    last_activity_basis=None,
     claim_state=None,
     stored_exited=False,
 ):
@@ -3693,6 +3694,7 @@ def _probe(
         handle=handle,
         pid_alive=pid_alive,
         transcript_age_s=transcript_age_s,
+        last_activity_basis=last_activity_basis,
         claim_state=claim_state,
         stored_exited=stored_exited,
     )
@@ -3834,6 +3836,48 @@ def test_ac2_live_pid_defeats_any_stored_terminal_word():
 def test_ac2_fresh_transcript_defeats_stored_state_too():
     assert uw.owner_verdict(_probe(transcript_age_s=30.0)) == "live"
     assert uw.owner_verdict(_probe(transcript_age_s=30.0, claim_state="stale")) == "live"
+
+
+# --- x-dead: the owner verdict routes through the shared predicate ---------
+
+
+def test_xdead_resumed_worker_dead_pid_fresh_transcript_reads_live():
+    # A harness resume kills the recorded pid while the session keeps writing
+    # (x-a613); the fresh transcript outranks the corpse, exactly as the
+    # claims layer's witness heals a resumed holder.
+    assert uw.owner_verdict(_probe(pid_alive=False, transcript_age_s=30.0)) == "live"
+
+
+def test_xdead_mtime_basis_is_never_positive_evidence():
+    # Measured 2026-09-11: a transcript mtime read 2h33m past its newest
+    # record because the file is touched with no record appended. An
+    # active-looking age taken from a file stamp reads UNKNOWN.
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0, last_activity_basis="mtime")) == "unknown"
+
+
+def test_xdead_claim_holder_counts_with_a_stale_registry_cwd():
+    # Task 0.3 proof (the x-b7f8 shape): the registry row records the SPAWN
+    # directory, so the cwd join contributes no handle; the live claim's
+    # holder is the second occupancy source and keeps the tree owned.
+    probe = _probe(handle="spawn-handover:t-b7f8-worker", pid_alive=True)
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-b7f8", dirty=3, node_id="x-b7f8", probes=[probe])])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+def test_xdead_true_positive_keeps_its_clearing_verb():
+    # x-77db, measured: the one genuinely ownerless dirty tree of the five
+    # the watchdog reported that hour. The fix must not suppress it; the
+    # finding carries the target verb because the GONE was positive.
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-77db", dirty=4, node_id="x-77db")])
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DIRTY
+    assert "no live owner" in finding.basis
+    assert "/fno:target x-77db" in finding.clear_command
 
 
 def test_ac2_unreadable_liveness_is_unknown_not_ownerless():

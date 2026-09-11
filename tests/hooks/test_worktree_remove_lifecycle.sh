@@ -194,13 +194,31 @@ S=$(new_sandbox)
 git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
 COMMON=$(git -C "$S" rev-parse --git-common-dir)
 case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
-LOCKDIR="$COMMON/fno-wt-sweep.lock"
+# Physical path: the sweep's guidance line prints what its own rev-parse
+# resolved, and macOS /var is a symlink to /private/var.
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
 rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"; echo $$ > "$LOCKDIR/pid"   # this test process is alive
 out=$(cd "$S/wt" && bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
 if [[ $rc -eq 0 ]] && echo "$out" | grep -q "already running" && ! echo "$out" | grep -q "^STATUS"; then
     pass "second sweep exits immediately, no scan (exit 0)"
 else
     fail "concurrent sweep exclusion" "rc=$rc out=$out"
+fi
+# A pid-only stamp is a legacy stamp: the holder may be a pre-upgrade sweep, so
+# the refusal tells the operator which path to clear by hand.
+if echo "$out" | grep -qF "remove $LOCKDIR"; then
+    pass "pid-only refusal names the lock path to remove"
+else
+    fail "legacy lock guidance" "no remove-the-lock line in: $out"
+fi
+# The birth certificate is created before the lock check; the already-running
+# exit must not leak it into the common dir. Positive controls: the
+# already-running line above proves this exit path ran, and the planted lock
+# still being here proves this is the directory the sweep resolves.
+if [[ -d "$LOCKDIR" ]] && [[ -z "$(find "$COMMON" -maxdepth 1 -name '.fno-wt-sweep-started.*' 2>/dev/null)" ]]; then
+    pass "already-running exit leaves no birth certificate"
+else
+    fail "birth certificate leak" "leftovers: $(find "$COMMON" -maxdepth 1 -name '.fno-wt-sweep-started.*' 2>/dev/null)"
 fi
 rm -rf "$LOCKDIR"
 rm -rf "$S"
@@ -464,11 +482,27 @@ LOCKDIR="$COMMON/fno-wt-sweep.lock"
 rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
 echo "$DEAD" > "$LOCKDIR/pid"
+# The winner must still HOLD when the contender makes its next decision: a
+# sweep that finishes and tears down inside the contender's retry budget lets
+# the second sweep legitimately acquire a FREE path, which reads as
+# proceeded=2 while mutual exclusion never broke. Slowing the acquirer's
+# fetch past the contender's whole decision window pins the interleaving the
+# case exists to test.
+RACESTUB=$(mktemp -d -t race-stub.XXXXXX)
+REALGIT="$(command -v git)"
+cat > "$RACESTUB/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-C" && "\$3" == "fetch" ]]; then
+    sleep 1
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$RACESTUB/git"
 OUT_A=$(mktemp -t race-a.XXXXXX)
 OUT_B=$(mktemp -t race-b.XXXXXX)
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
 RACE_A=$!
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
 RACE_B=$!
 wait "$RACE_A" 2>/dev/null
 wait "$RACE_B" 2>/dev/null
@@ -482,7 +516,7 @@ else
     fail "concurrent reclaim race" "proceeded=$PROCEEDED (want 1) A=[$(cat "$OUT_A")] B=[$(cat "$OUT_B")]"
 fi
 rm -f "$OUT_A" "$OUT_B"
-rm -rf "$LOCKDIR" "$S" "$BARE"
+rm -rf "$RACESTUB" "$LOCKDIR" "$S" "$BARE"
 
 # 5h2. ABA, staged deterministically - no timing, no concurrency. The
 # reclaimer observes a stale lock (dead pid), and between that observation
@@ -762,6 +796,12 @@ rm -rf "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
 mkdir -p "$LOCKDIR.stale.999001"; echo "$DEAD" > "$LOCKDIR.stale.999001/pid"
 mkdir -p "$LOCKDIR.stale.999002"; echo "$$" > "$LOCKDIR.stale.999002/pid"
+# A two-line stamp naming this live test shell with an impossible start time:
+# the sibling GC must read the start line, not just the pid.
+mkdir -p "$LOCKDIR.stale.999003"; printf '%s\n%s\n' "$$" "Thu Jan 1 00:00:00 1970" > "$LOCKDIR.stale.999003/pid"
+# Birth certificates: one older than the five-minute reap bound, one fresh.
+: > "$COMMON/.fno-wt-sweep-started.999010"; touch -t 202001010000 "$COMMON/.fno-wt-sweep-started.999010"
+: > "$COMMON/.fno-wt-sweep-started.999011"
 OUT_ABA6=$(mktemp -t aba6.XXXXXX)
 ( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA6" 2>&1 )
 if grep -q "^STATUS" "$OUT_ABA6"; then
@@ -779,8 +819,18 @@ if [[ -d "$LOCKDIR.stale.999002" ]]; then
 else
     fail "sibling GC ate a live-stamp leftover" "a claim naming a live process was reaped"
 fi
+if [[ ! -d "$LOCKDIR.stale.999003" ]]; then
+    pass "sibling GC reaped the reused-pid leftover"
+else
+    fail "sibling GC kept a reused-pid leftover" "a two-line stamp naming a live pid with a foreign start time survived"
+fi
+if [[ ! -e "$COMMON/.fno-wt-sweep-started.999010" && -e "$COMMON/.fno-wt-sweep-started.999011" ]]; then
+    pass "birth certificate GC reaped the old one, kept the fresh one"
+else
+    fail "birth certificate GC" "old-present=$([[ -e "$COMMON/.fno-wt-sweep-started.999010" ]] && echo y || echo n) fresh-present=$([[ -e "$COMMON/.fno-wt-sweep-started.999011" ]] && echo y || echo n)"
+fi
 rm -f "$OUT_ABA6"
-rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* "$COMMON"/.fno-wt-sweep-started.* 2>/dev/null
 
 # 5h7. The deepest wedge: a PID-LESS dir WITH content (an interrupted steal's
 # nested copy, whose owner's trap unlinked the pid but could not rmdir) is
@@ -868,6 +918,133 @@ else
     fail "reap instrument never ran" "the stub ls was never consulted; a green here would be vacuous"
 fi
 rm -f "$OUT_W3"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+# 5h9. A recycled pid: the lock's stamp names this LIVE test shell but carries
+# an impossible start time (the epoch, which no process can claim). kill -0
+# alone reads the holder as alive and every sweep no-ops forever; the start
+# comparison must read the stamp as reused, reclaim the lock, and proceed.
+# No stubs: the mismatch is planted, not raced.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare9.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+printf '%s\n%s\n' "$$" "Thu Jan 1 00:00:00 1970" > "$LOCKDIR/pid"
+OUT_RECYCLED=$(mktemp -t recycled.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_RECYCLED" 2>&1 )
+if grep -q "^STATUS" "$OUT_RECYCLED"; then
+    pass "reused-pid lock reclaimed, sweep proceeds"
+else
+    fail "reused pid wedges the sweep" "no STATUS; the sweep read a live foreign stamp as a live holder: [$(tail -1 "$OUT_RECYCLED")]"
+fi
+if grep -q "the pid was reused" "$OUT_RECYCLED"; then
+    pass "reused-pid receipt printed"
+else
+    fail "no reused-pid receipt" "the reclaim happened silently or not at all: [$(tail -1 "$OUT_RECYCLED")]"
+fi
+rm -f "$OUT_RECYCLED"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h10. The control for 5h9: a two-line stamp whose start time REALLY belongs
+# to the live pid must keep the already-running refusal - the new check must
+# never steal from a genuine holder. The stamp is written from the same
+# identity primitive the sweep uses, so any mismatch here is instrument error,
+# not behavior.
+source "$REPO_ROOT/scripts/lib/events-lock.sh"
+eval "$(sed -n '/^_wt_stamp_identity()/,/^}/p' "$LIFECYCLE")"
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare10.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+REAL_STARTED="$(_wt_stamp_identity $$)"
+if [[ -n "$REAL_STARTED" ]]; then
+    pass "identity instrument answered for a live pid"
+else
+    fail "identity instrument empty" "ps -o lstart= answered nothing; the planted stamp below proves nothing"
+fi
+printf '%s\n%s\n' "$$" "$REAL_STARTED" > "$LOCKDIR/pid"
+OUT_HOLDER=$(mktemp -t holder.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_HOLDER" 2>&1 )
+if grep -q "already running" "$OUT_HOLDER" && ! grep -q "^STATUS" "$OUT_HOLDER"; then
+    pass "genuine two-line holder still refused politely"
+else
+    fail "live holder stolen" "the sweep took a lock whose stamp matched reality: [$(tail -1 "$OUT_HOLDER")]"
+fi
+if ! grep -q "the pid was reused" "$OUT_HOLDER"; then
+    pass "no false reused-pid receipt for a matched stamp"
+else
+    fail "false reused receipt" "a matching start time was read as a recycled pid"
+fi
+rm -f "$OUT_HOLDER"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h11. Writer round trip: an acquiring sweep must stamp TWO lines - its pid
+# and its own UTC start identity. A git stub captures the lock's pid file at
+# the sweep's first post-acquire git worktree call and, while the sweep is
+# still alive, recomputes the identity of the stamped pid from the same
+# primitive. Fails while the writer stamps only $$.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare11.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"
+REALGIT="$(command -v git)"
+STUBDIR=$(mktemp -d -t stamp-stub.XXXXXX)
+CAPFILE="$STUBDIR/captured-pid"
+IDENTFILE="$STUBDIR/computed-identity"
+STUBRAN="$STUBDIR/stub-ran"
+cat > "$STUBDIR/git" <<EOF
+#!/usr/bin/env bash
+# One-time at the first post-acquire worktree listing: capture the stamp the
+# sweep wrote, then recompute the stamped pid's start identity from the same
+# helper while the sweep is alive to answer ps.
+if [[ "\$1" == "worktree" && ! -e "$STUBRAN" ]]; then
+    : > "$STUBRAN"
+    /bin/cat "$LOCKDIR/pid" > "$CAPFILE" 2>/dev/null
+    source "$REPO_ROOT/scripts/lib/events-lock.sh"
+    eval "\$(sed -n '/^_wt_stamp_identity()/,/^}/p' "$LIFECYCLE")"
+    _wt_stamp_identity "\$(head -1 "$CAPFILE")" > "$IDENTFILE" 2>/dev/null
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$STUBDIR/git"
+OUT_STAMP=$(mktemp -t stamp.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_STAMP" 2>&1 )
+if grep -q "^STATUS" "$OUT_STAMP"; then
+    pass "writer round-trip sweep acquired and listed"
+else
+    fail "writer round-trip sweep never ran" "[$(tail -1 "$OUT_STAMP")]"
+fi
+if [[ -f "$STUBRAN" ]]; then
+    pass "stamp capture instrument ran"
+else
+    fail "stamp capture instrument never ran" "the stub git was never consulted; a green here would be vacuous"
+fi
+if [[ "$(wc -l < "$CAPFILE" 2>/dev/null | tr -d ' ')" == "2" ]]; then
+    pass "stamp carries exactly two lines"
+else
+    fail "stamp shape" "want 2 lines, got $(wc -l < "$CAPFILE" 2>/dev/null | tr -d ' '): [$(/bin/cat "$CAPFILE" 2>/dev/null)]"
+fi
+if [[ -s "$IDENTFILE" ]] && [[ "$(sed -n 2p "$CAPFILE" 2>/dev/null)" == "$(cat "$IDENTFILE")" ]]; then
+    pass "stamp line 2 equals the pid's computed start identity"
+else
+    fail "stamp identity mismatch" "line2=[$(sed -n 2p "$CAPFILE" 2>/dev/null)] computed=[$(/bin/cat "$IDENTFILE" 2>/dev/null)]"
+fi
+rm -f "$OUT_STAMP"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
 
 echo "== 6. the sweep lock resolves its own directory, honestly =="

@@ -1,23 +1,12 @@
 """SessionStart entry point: bind the current session to its registry row.
 
-Invoked by ``hooks/register-session-start.sh`` as
-``python3 -m fno.agents.register_session --harness claude ...``. Two modes,
-selected by ``--agent-self``:
-
-- without it, REGISTER an operator-started session (it has no row yet);
-- with it, RESTAMP a footnote-spawned worker's existing row, named by
-  ``FNO_AGENT_SELF``, onto the session id its harness is actually using. The
-  id footnote passed at spawn is not durable, and registration keys its upsert
-  on that same id, so a re-minted worker routed through registration would
-  gain a second row rather than have its first corrected.
-
-Fail-soft by contract (US7 AC7-ERR): any failure emits a
-``session_register_failed`` / ``session_restamp_failed`` warning event and
-still exits 0, so the hook never blocks session start even when the registry
-is locked or unwritable. On success it emits ``session_registered`` /
-``session_id_restamped`` and prints a one-line stderr note (hook stdout is
-reserved for the session preamble).
+Two modes via ``--agent-self``: absent, register an operator-started session;
+present, restamp a spawned worker's row onto the session id its harness is
+using now. Fail-soft by contract (US7 AC7-ERR): any failure emits a warning
+event and still exits 0. Full contract:
+docs/architecture/unfinished-work-and-row-registration.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -92,6 +81,7 @@ def _reading_for_entry(entry: Any) -> Optional["Reachability"]:
             truth_state=truth.get("state"),
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
+            last_activity_basis=truth.get("last_activity_basis"),
         )
     except Exception:
         return None
@@ -581,6 +571,21 @@ def _report_observation(
     )
 
 
+def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
+    """x-dead task 0.1: the worker stamps the cwd it actually runs in."""
+    from fno.agents.registry import heal_own_cwd
+
+    try:
+        moved = heal_own_cwd(name=agent_self, harness=harness, cwd=cwd)
+    except Exception as exc:  # fail-open: never block session start (AC7-ERR)
+        events.emit("session_cwd_heal_failed", provider=harness, name=agent_self, error=str(exc))
+        return
+    if moved is not None:
+        events.emit(
+            "session_cwd_healed", provider=harness, name=agent_self, old=moved[0], new=moved[1]
+        )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
     # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
@@ -616,9 +621,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.agent_self:
-        return _restamp(
+        rc = _restamp(
             args.agent_self, args.harness, args.session_id, source=args.source
         )
+        _heal_row_cwd(agent_self=args.agent_self, harness=args.harness, cwd=args.cwd)
+        return rc
 
     try:
         vendor = resolve_lane_vendor([args.harness], env=os.environ, harness=args.harness)

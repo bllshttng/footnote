@@ -989,8 +989,9 @@ def test_an_unmapped_row_state_does_not_degrade_the_reading(cwd_tmp, fake_roster
     row that IS in the listing. Blocking on it printed "roster not consulted"
     forever and answered None for every SUSPECT claim, so nothing was reaped.
 
-    Carrying it is safe because an unknown state matches no finished state, so
-    the alarm reads the worker as engaged - the conservative direction."""
+    An unmapped word is no liveness evidence either: the row reads unmeasured,
+    never engaged-by-default - the old conservative alarm fired on a label
+    nobody had mapped, which is a verdict from a word, not a measurement."""
     from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 
     fake_roster(
@@ -998,8 +999,10 @@ def test_an_unmapped_row_state_does_not_degrade_the_reading(cwd_tmp, fake_roster
         warnings=[f"{ADVISORY_WARNING_PREFIX}unmapped row state 'frobnicating'"],
     )
     r = runner.invoke(cli, ["status", "node:x-76d1"])
-    assert "UNCLAIMED but a live worker is on this node" in r.output
+    assert "unmeasured, never live" in r.output
+    assert "t-x76d1-rmtruth" in r.output
     assert "roster not consulted" not in r.output
+    assert "UNCLAIMED but a live worker" not in r.output
 
 
 def test_an_unanticipated_warning_degrades_by_default(cwd_tmp, fake_roster):
@@ -1017,8 +1020,17 @@ def test_a_lying_done_row_still_raises_the_alarm(cwd_tmp, fake_roster, monkeypat
     incident `_TERMINAL_STATES` carries a warning about. A transcript that is
     positively still moving overrules the row, so an operator deciding whether
     to staff this node is told a worker is on it."""
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
     monkeypatch.setattr(
-        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: False
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 60,
+            tail_text="", last_role="assistant", last_text="working the task",
+            pr_polls=None,
+        ),
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
@@ -1030,8 +1042,16 @@ def test_an_aged_out_transcript_leaves_the_row_standing(cwd_tmp, fake_roster, mo
     A wrong reap archives a live worker's claim; a wrong line here is an alarm
     on an empty node, and one that fires on every finished session whose
     transcript has aged out teaches operators to ignore the alarm."""
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
     monkeypatch.setattr(
-        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: None
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 11 * 3600,
+            tail_text="", last_role="assistant", last_text="...", pr_polls=None,
+        ),
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])

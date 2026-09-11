@@ -1,8 +1,7 @@
 """`fno inbox outstanding` - read what is waiting on a human; ask and clear questions.
 
-Machine-first, mirroring `fno backlog carveout`: stdout carries the value (the report,
-or a new question id), guidance and warnings go to stderr, and exit codes are
-predictable (0 ok / 1 read or write failure).
+Machine-first, mirroring `fno backlog carveout`: stdout carries the value,
+guidance goes to stderr, exit codes are predictable (0 ok / 1 failure).
 """
 
 from __future__ import annotations
@@ -184,7 +183,14 @@ def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict
 
 @outstanding_app.command("ask")
 def ask(
-    question: str = typer.Argument(..., help="What you need the operator to decide or answer."),
+    question: str | None = typer.Argument(
+        None, help="What you need the operator to decide or answer."
+    ),
+    question_file: Path | None = typer.Option(
+        None,
+        "--question-file",
+        help="Read the question from a file ('-' = stdin); QUESTION_CAP truncation still applies.",
+    ),
     ask: str = typer.Option(None, "--ask", help="One action that closes the question."),
     option: List[str] = typer.Option(
         [], "--option", help="A choice the operator can make; repeatable."
@@ -203,15 +209,22 @@ def ask(
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point. `session_truth` classifies from the transcript
+    The capture is the point: `session_truth` classifies from the transcript
     tail, so an unrecorded question stops existing the moment another turn
-    lands - and in a mail-driven mesh the very next turn is usually the agent
-    answering some mail.
+    lands.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle
     from fno.outstanding.core import QuestionIndexWriteError, append_question_event
+    from fno.text_or_file import read_text_arg
+
+    question = read_text_arg(question, question_file, what="the question")
+    if not question:
+        typer.echo(
+            "error: provide the question - positionally or --question-file", err=True
+        )
+        raise typer.Exit(code=2)
 
     if len(question) > QUESTION_CAP:
         typer.echo(

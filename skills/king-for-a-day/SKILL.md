@@ -327,7 +327,7 @@ Use `fno do plan path` for the canonical filename.
 
 One session takes up to **three** blueprints in sequence. A fourth blueprint starts a second dispatch. The number is the rule: a rule with no number is advice nobody applies.
 
-A blueprint can also run as a subagent of the court session: `/fno:blueprint subagent <id>` (Substrate in `skills/blueprint/SKILL.md`). It is faster than a lane, and it still takes the node claim, writes the blueprint row and runs every blueprint gate. Never hand-type a planning prompt into the Agent tool. A node-specific constraint goes on the node with `fno backlog update <id> --dispatch-brief "..."`, where the planner reads it.
+A blueprint can also run as a subagent of the court session: `/fno:blueprint subagent <id>` (Substrate in `skills/blueprint/SKILL.md`). It cannot orphan, because its completion IS the tool result, and it spends no spawn share, because the gate counts spawned workers; it still takes the node claim, writes the blueprint row and runs every blueprint gate. Never hand-type a planning prompt into the Agent tool. A node-specific constraint goes on the node with `fno backlog update <id> --dispatch-brief "..."`, where the planner reads it.
 
 Group the wave by shape before you count dispatches. When one plan can name the same files or fix the same defect from two sides, the two nodes are the same shape. Title words do not decide this. The file and the defect decide it, the same identity test the Consolidation Gate uses (`skills/blueprint/SKILL.md` step 2d).
 

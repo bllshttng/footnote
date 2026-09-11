@@ -90,6 +90,8 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
         Ok(ServerMsg::SessionRetired {
             retired,
             panes_closed,
+            closed_panes,
+            tabs_removed,
         }) => {
             if json {
                 println!(
@@ -98,11 +100,23 @@ pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
                         "session": host_session,
                         "retired": retired,
                         "panes_closed": panes_closed,
+                        "closed_panes": closed_panes,
+                        "tabs_removed": tabs_removed,
                     })
                 );
             } else {
+                let names = if closed_panes.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", closed_panes.join(", "))
+                };
+                let tabs = if tabs_removed.is_empty() {
+                    String::new()
+                } else {
+                    format!("; removed empty tab(s): {}", tabs_removed.join(", "))
+                };
                 println!(
-                    "retire-session {host_session}: retired {retired} member(s), closed {panes_closed} pane(s)"
+                    "retire-session {host_session}: retired {retired} member(s), closed {panes_closed} pane(s){names}{tabs}"
                 );
             }
             EXIT_OK

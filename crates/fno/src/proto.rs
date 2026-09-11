@@ -2149,7 +2149,17 @@ pub enum ServerMsg {
     /// (v75) Answer to [`ControlVerb::RetireSession`]: how many members the
     /// store tombstoned and how many attached panes closed. Both are zero on
     /// a repeat call: retirement is idempotent, never an error.
-    SessionRetired { retired: usize, panes_closed: usize },
+    /// (x-9b37) The closed panes are NAMED, and any tab the closes emptied
+    /// and removed is named too; both lists ride default-skipped so an older
+    /// reader is unaffected.
+    SessionRetired {
+        retired: usize,
+        panes_closed: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        closed_panes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tabs_removed: Vec<String>,
+    },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).

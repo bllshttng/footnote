@@ -42,6 +42,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive-authority",
     "evidence-gate",
     "finalize",
+    "fleet-incident",
     "graph-get",
     "grid",
     "help",
@@ -84,6 +85,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "resume-argv",
     "review-start",
     "rm",
+    "scratch",
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
@@ -229,6 +231,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
     }
 
+    // `scratch` is the scratch-shape sweep (x-caf8): `fno doctor scratch
+    // sweep|report` routes here binary-direct via the Python leaf. Matched
+    // with `matches!` like `mail-inject` so the routable-verb parity guard
+    // does not see it - it is not an `fno agents` verb; the doctor group
+    // owns its surface.
+    if matches!(verb, "scratch") {
+        return fno_agents::scratch::run_cli(&args[1..]);
+    }
+
     // `codex-assign-project` is the hidden project-assignment verb (x-dc97):
     // resolve or create the repo's codex project for --cwd, and when
     // --thread-id is given, assign that bound thread to it. The Python headless
@@ -329,6 +340,16 @@ async fn run(args: Vec<String>) -> i32 {
     // `fno agents` verb, `cli/src/fno/test_runner.py` is its only caller.
     if verb == "test-run" {
         return fno_agents::test_run::run_test_run(&args[1..]);
+    }
+
+    // `fleet-incident`: the durable fleet incident breaker (x-77db, see
+    // fleet_incident.rs doc). Direct dispatch, no daemon RPC: a stop must be
+    // writable even when the daemon is the thing wedged. Python's `fno agents
+    // incident` adapter relays it; the admission gates call the library in
+    // process. Same `==` dispatch + ALL_CLIENT_ACTIONS registration as
+    // `test-run`, so the parity tests stay in sync.
+    if verb == "fleet-incident" {
+        return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc
@@ -1126,7 +1147,22 @@ async fn run(args: Vec<String>) -> i32 {
             }
         },
         Err(e) => {
-            eprintln!("fno-agents: {e}");
+            if verb_owned == "rm" && !agent_name.is_empty() {
+                // A dead connection does not prove the daemon skipped the
+                // removal; read the store rather than assert the outcome. An
+                // unread store reports unknown instead of absent.
+                let still_registered = match fno_agents::state::load_registry(&home.registry_json())
+                {
+                    Ok(reg) => Some(reg.find_name_or_full_session_id(&agent_name).is_some()),
+                    Err(_) => None,
+                };
+                eprintln!(
+                    "{}",
+                    rm_failure_line(&agent_name, &e.to_string(), still_registered)
+                );
+            } else {
+                eprintln!("fno-agents: {e}");
+            }
             1
         }
     }
@@ -3565,6 +3601,21 @@ fn str_arg(
     it.next()
         .map(Value::String)
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// The stderr line a transport-level `rm` failure prints. The pre-exec removal
+/// banner is past tense and the transport error alone reads like a completed
+/// removal, so the line names the row and answers from the registry: a dead
+/// connection does not prove the daemon skipped the write, and the store is
+/// the receipt. `None` means the store itself could not be read, and the line
+/// says so rather than wearing an absent verdict.
+fn rm_failure_line(name: &str, err: &str, still_registered: Option<bool>) -> String {
+    let verdict = match still_registered {
+        Some(true) => "nothing was removed - the row is still registered",
+        Some(false) => "the row is no longer registered",
+        None => "the registry could not be read to confirm whether anything was removed",
+    };
+    format!("fno-agents: rm {name}: {err}; {verdict}")
 }
 
 /// Format a successful daemon response for human-readable stdout.

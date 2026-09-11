@@ -68,6 +68,7 @@ from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
+from fno.agents.stop_receipt import emit_shellout_stop, wake_set_refusal
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -3893,16 +3894,6 @@ def _stop_agent_inner(
                 )
                 raise DispatchAskError(f"claude stop failed: {exc}", exit_code=1) from exc
 
-            def _emit_shellout_stop() -> None:
-                events.emit(
-                    "agent_stopped",
-                    name=name,
-                    provider="claude",
-                    claude_exit=exit_code,
-                    short_id=short_id,
-                    stopped_by="shellout",
-                )
-
             if exit_code != 0:
                 if stderr_text:
                     sys.stderr.write(stderr_text)
@@ -3911,16 +3902,21 @@ def _stop_agent_inner(
                 escalated = _escalate_to_pid()
                 if escalated is not None:
                     return escalated
-                _emit_shellout_stop()
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
                 raise DispatchAskError(
                     # retired-ok: reports which shellout failed on which session.
                     f"claude stop {short_id} exited {exit_code}",
                     exit_code=1,
                 )
 
-            _emit_shellout_stop()
-
+            # x-dead task 3.1: the shellout's receipt is verified before the
+            # word `stopped` prints.
             _mark_stopped_orphaned(name, existing)
+            receipt = wake_set_refusal(name, short_id, existing)
+            if receipt is not None:
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
+                raise DispatchAskError(receipt, exit_code=1)
+            emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
 
             print(
                 f"stopped: {name} ({short_id})",

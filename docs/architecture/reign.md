@@ -42,7 +42,7 @@ A reign does not dispatch. The single exception is a provably dead dispatching a
 
 Every `reign_checkin` row carries the canonical keys `scope` and `change`, plus the beat's measured evidence under distinct extra keys. The validator refuses any other shape. The aliases `crown_scope`, `crown`, and `result` are refused even beside the canonical keys. Before this contract, 153 check-ins from five kings named the scope three different ways. No schema-keyed reader can walk a journal like that.
 
-`fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. A zero-match answer still names the journal path and the scanned count, so an empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
+`fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. It reads every journal ``paths.event_journals`` resolves: live files, rotations, mirrors. A zero-match answer still names every journal it read, with each file's scanned row count. An empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
 
 ## The codex limit
 

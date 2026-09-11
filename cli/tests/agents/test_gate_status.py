@@ -215,3 +215,35 @@ def test_registry_schema_ahead_refuses(monkeypatch):
     verdict = spawn_gate.probe_capacity()
     assert verdict["verdict"] == "refused"
     assert verdict["reason"] == "registry_schema"
+
+
+def test_accepted_verdict_carries_the_readings_that_admitted_it(monkeypatch):
+    """Rank 8: an accepted answer names the trigger values WITH their current
+    readings, so `gate-status` can gate a script on numbers, not on a bare
+    verdict. min_free_gb stays absent when the floor is disabled (0), exactly
+    like the refusal path skipping the check."""
+    alive = os.getpid()
+    rows = [_row("z1", alive)]
+    _wire(monkeypatch, rows, ram=7.5, lanes={"zai": 0, "codex": 0})
+    verdict = spawn_gate.probe_capacity()
+    assert verdict["verdict"] == "accepted"
+    assert verdict["max_live"] == 30
+    assert verdict["live_workers"] == len(rows)
+    assert verdict["share_low"] == pytest.approx(0.1)
+    assert verdict["ceiling"] == pytest.approx(0.5)
+    assert verdict["load_15m"] == pytest.approx(1.0)
+    assert verdict["hard_max_load_per_cpu"] == pytest.approx(40.0)
+    # _settings() sets min_free_gb = 0.0: a disabled floor names no reading.
+    assert "min_free_gb" not in verdict
+
+
+def test_accepted_verdict_names_the_ram_floor_when_enabled(monkeypatch):
+    alive = os.getpid()
+    rows = [_row("z1", alive)]
+    settings = _settings()
+    settings.agents.min_free_gb = 2.0
+    _wire(monkeypatch, rows, ram=7.5, lanes={"zai": 0, "codex": 0}, settings=settings)
+    verdict = spawn_gate.probe_capacity()
+    assert verdict["verdict"] == "accepted"
+    assert verdict["min_free_gb"] == pytest.approx(2.0)
+    assert verdict["available_ram_gb"] == pytest.approx(7.5)

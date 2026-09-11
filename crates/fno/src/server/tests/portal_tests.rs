@@ -2329,3 +2329,94 @@ fn the_notice_latch_holds_through_the_restart_path() {
     );
     assert!(!core.portal_noticed, "nothing latched");
 }
+
+/// (x-9b37) AC2: with two portals open, the reap of one viewer's subject
+/// closes only that viewer's pane. The neighbour's pane, its portal entry,
+/// and its tab all survive. This pins the two-leaf arithmetic that rules
+/// the reported tab cascade out: a cascade would have taken BOTH panes.
+#[test]
+fn reaping_one_portals_subject_leaves_the_sibling_portal_alone() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+
+    core.close_pane_reasoned(a_seat, "child exited");
+
+    assert!(
+        !core.panes.contains_key(&a_seat),
+        "the reaped subject's viewer is gone"
+    );
+    assert!(
+        core.panes.contains_key(&b_seat),
+        "the sibling portal's pane survives the neighbour's reap"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(b_seat),
+        "portal 1 still seats the sibling viewer"
+    );
+    assert!(
+        core.session.find_pane(b_seat).is_some(),
+        "the tab still exists for the sibling"
+    );
+}
+
+/// (x-9b37) AC3: a portal whose seat pane closes says so, naming the portal
+/// index, the row, and the reason. The x-d545 stand-in swap keeps the view,
+/// so it stays silent: nothing was lost.
+#[test]
+fn a_vanishing_portal_says_so_and_names_its_row() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+    while rx.try_recv().is_ok() {}
+
+    core.close_pane_reasoned(b_seat, "child exited");
+    let loss = collect_until_portal_closed(&mut rx, "portal 1").expect("the loss notice arrived");
+    assert!(
+        loss.contains("deadbee2") && loss.contains("child exited"),
+        "the notice names the row and the reason: {loss:?}"
+    );
+
+    // The LAST portal gets the x-d545 stand-in instead: the view survives,
+    // so there is no loss notice for portal 0.
+    core.close_pane_reasoned(a_seat, "child exited");
+    while let Ok(msg) = rx.try_recv() {
+        if let ServerMsg::Notice { text } = msg {
+            assert!(
+                !text.contains("portal 0"),
+                "the stand-in swap keeps the view and stays silent: {text:?}"
+            );
+        }
+    }
+}
+
+/// Drain `rx` until a Notice naming `needle` arrives, collecting it; the
+/// caller asserts on the text. Returns None at channel exhaustion so a
+/// missing notice fails the caller's expect, never hangs.
+fn collect_until_portal_closed(rx: &mut mpsc::Receiver<ServerMsg>, needle: &str) -> Option<String> {
+    while let Ok(msg) = rx.try_recv() {
+        if let ServerMsg::Notice { text } = msg {
+            if text.contains(needle) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}

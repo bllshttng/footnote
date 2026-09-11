@@ -30,7 +30,9 @@
 # larger than the allowance - does. The remedy is to port the verb to crates/,
 # land the feature in Rust, or refactor the growth away: per-harness DATA
 # belongs in the capability contract, long prose belongs in docs/, and
-# duplicate blocks belong behind one loop.
+# duplicate blocks belong behind one loop. An operator can grant a one-PR
+# exception with the file-budget-exception label; agents never apply it, and
+# it waives the tree tally alone, never a per-file grow.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget
@@ -42,6 +44,10 @@
 #   FILE_BUDGET_LINES  per-file line budget. Default 5000.
 #   PY_TREE_ALLOWANCE  net lines cli/src/fno Python may grow per change.
 #                      Default 100.
+#   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
+#                      waives the tree allowance (guards.yml passes it only
+#                      when the PR carries the label). Waives the tree tally
+#                      alone. Default: empty.
 #   PR_BASE_REF        base branch name, no remote prefix. Default: main.
 #   PR_REMOTE          remote holding the base. Default: origin.
 #   FILE_BUDGET_BASE_SHA  explicit base sha to diff instead of the merge base;
@@ -84,6 +90,7 @@ case "$PY_ALLOWANCE" in '' | *[!0-9]*)
 esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
+EXC_LABEL="${FILE_BUDGET_EXCEPTION_LABEL:-}"
 # The source types this gate measures. The diffs and the uncommitted-work check
 # read this one list, so a new type cannot reach one and miss the other.
 GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
@@ -245,9 +252,14 @@ while IFS= read -r -d '' row; do
 done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
 py_net=$((py_added - py_deleted))
+exc_waived=0
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
-    echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat." >> "$findings"
-    fails=1
+    if [[ -n "$EXC_LABEL" ]]; then
+        exc_waived=1
+    else
+        echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it." >> "$findings"
+        fails=1
+    fi
 fi
 
 # A worker runs this locally mid-change to learn its number before CI does.
@@ -265,6 +277,8 @@ if [[ "$fails" -eq 1 ]]; then
     exit 1
 fi
 if [[ "$QUIET" -eq 0 ]]; then
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE)"
+    waived=""
+    [[ "$exc_waived" -eq 1 ]] && waived="; label $EXC_LABEL waives the tree allowance"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE$waived)"
 fi
 exit 0

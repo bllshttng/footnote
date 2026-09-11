@@ -2459,6 +2459,82 @@ def heal_mux_ref(
     return before, new_mux
 
 
+def heal_own_cwd(
+    *,
+    name: str,
+    harness: str,
+    cwd: str,
+    registry_path: Optional[Path] = None,
+) -> Optional[tuple[Optional[str], str]]:
+    """Stamp the directory the worker WORKS in (x-dead task 0.1).
+
+The spawner mints the row with the spawn directory; the worker's own
+SessionStart heal makes the registry's cwd field answer "where does this
+worker work" for every reader that joins on it. Returns ``(old, new)`` when
+the row moved, else None; the idempotent no-op never rewrites the file.
+"""
+    if not name or not harness or not cwd:
+        return None
+
+    def _find(entries: list[AgentEntry]) -> Optional[AgentEntry]:
+        for e in entries:
+            if e.harness == harness and (e.name == name or name in e.aliases):
+                return e
+        return None
+
+    # Pre-read so the idempotent no-op never rewrites the file; the updater
+    # re-decides under the lock so a racing writer cannot double-write.
+    row = _find(load_registry(path=registry_path))
+    if row is None or row.cwd == cwd:
+        return None
+    before = row.cwd
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = _find(entries)
+        if target is not None and target.cwd != cwd:
+            target.cwd = cwd
+        return entries
+
+    persisted = update_registry(_updater, path=registry_path)
+    healed = _find(persisted)
+    if healed is None or healed.cwd != cwd:
+        return None
+    return before, cwd
+
+
+def registry_rows_by_cwd(
+    path: Optional[Path] = None,
+) -> tuple[dict[str, list[dict]], bool]:
+    """Raw registry rows indexed by each row's own ``cwd``, plus an ok flag.
+
+    The ONE occupancy join for every reader that asks "which worker holds
+    this tree" (x-dead task 0.2, folding x-73df); three copies used to live
+    in unfinished_work and the worktree status legs. A missing registry is a
+    legitimate empty fleet (ok); one that exists and fails to parse reads
+    every candidate unmeasurable.
+    """
+    import json
+    import os
+
+    from fno.paths import agents_registry_path
+
+    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
+    target = Path(override) if override else (path or agents_registry_path())
+    if not target.exists():
+        return {}, True
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, False
+    by_cwd: dict[str, list[dict]] = {}
+    for row in data.get("agents", []):
+        if isinstance(row, dict) and row.get("cwd"):
+            by_cwd.setdefault(str(Path(row["cwd"])), []).append(row)
+    return by_cwd, True
+
+
 #: Outcome of one SessionStart id observation (see
 #: :func:`record_session_observation`).
 SESSION_OBSERVATION_OUTCOMES = (

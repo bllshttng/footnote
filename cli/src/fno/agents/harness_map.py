@@ -1281,6 +1281,7 @@ def resolve_effective_verb(
     verb: Optional[str] = None,
     difficulty: Optional[str] = None,
     plan_rung: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """The target/blueprint lifecycle conditional; full table:
     docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
@@ -1288,7 +1289,9 @@ def resolve_effective_verb(
     ``verb`` reconciles through the table; out-of-family abstains to declared
     precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
     Raises :class:`DispatchResolveError` on a refusal rung, or planless
-    without low/medium/high difficulty. ``plan_rung`` is a Rung value."""
+    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
+    refusal leads with ``node_id`` when the caller holds one, so the subject
+    of the failure is never read off a citation."""
     raw_verb = (verb or "").strip()
     if raw_verb.startswith("/fno:"):
         raw_verb = "/" + raw_verb[len("/fno:"):]
@@ -1305,9 +1308,10 @@ def resolve_effective_verb(
         answer = _RUNG_ANSWERS[rung]
         note = f"verb=lifecycle(plan {rung} -> {answer}"
     else:
+        who = f" for node {node_id}" if node_id else ""
         raise DispatchResolveError(
-            f"dispatch verb cannot be derived: plan rung {rung!r} with "
-            f"difficulty {d!r} answers no lifecycle rung (x-ebd2)"
+            f"dispatch verb cannot be derived{who}: plan rung {rung!r} with "
+            f"difficulty {d!r} answers no lifecycle rung"
         )
     if raw_verb and raw_verb != answer:
         note += f"; stored dispatch_verb {raw_verb} reconciled"
@@ -1357,7 +1361,7 @@ def resolve_dispatch(
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
         lifecycle_verb, lifecycle_note = resolve_effective_verb(
-            verb=verb, difficulty=difficulty, plan_rung=plan_rung
+            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
         )
         decision.append(lifecycle_note)
     cfg = (

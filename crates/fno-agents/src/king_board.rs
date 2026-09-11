@@ -1068,6 +1068,39 @@ mod tests {
     }
 
     #[test]
+    fn x_dead_contained_nodes_reach_neither_queue() {
+        // Task 1.4b (the x-58a5 shape): a node with `contained_in` set has an
+        // owner by definition and never dispatches alone, so `none` - the
+        // word that fills unheld_progress and undriven_pr - is not an
+        // available verdict for it. One check inside node_driver drops it
+        // from both queues at once.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![
+            json!({
+                "id": "x-58a5", "priority": "p1", "status": "in_progress",
+                "title": "contained work", "contained_in": "x-b7f8",
+            }),
+            json!({
+                "id": "x-contained-pr", "priority": "p1", "status": "in_progress",
+                "title": "contained with a pr", "contained_in": "x-owner", "pr_number": 42,
+            }),
+        ]);
+        inputs.pr_nodes = ok_read(json!([
+            json!({"id": "x-contained-pr", "priority": "p1", "pr_number": 42}),
+        ]));
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        for name in ["unheld_progress", "undriven_pr"] {
+            let q = queues.iter().find(|q| q["name"] == name).unwrap();
+            assert_eq!(
+                q["rows"].as_array().map(|rows| rows.len()).unwrap_or(0),
+                0,
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
     fn unheld_progress_names_a_claim_free_in_progress_row() {
         // x-add3 sat in_progress 25 minutes with a free claim and a dead
         // worker while every queue read clean; the status stamp is never
@@ -1211,7 +1244,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None);
+        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None, None);
         assert_eq!(state, "active");
     }
 

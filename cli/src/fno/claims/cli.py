@@ -1,54 +1,12 @@
 """fno agents claim - Typer surface for the work-claim verbs.
 
-Exit codes:
-    0  success
-    1  ClaimHeldByOther, or acquire/refresh's own contention-retry
-       exhaustion (both mean "transient, caller should retry later"); also
-       `reap`'s own distinct overload of 1 - a reapable file's archive move
-       could not be confirmed on re-read (see `reap`'s own docstring, not a
-       retry signal)
-    2  validation / input error
-    3  ClaimCorrupted or ClaimGoneAway (race during operation)
-    4  HolderMismatch (release/refresh wrong holder)
-
-The structured output uses --json on each verb. Without --json, output is a
-human-friendly summary on stdout; errors always go to stderr.
-
-do provenance: why the claim verbs write it
--------------------------------------------
-A node's `do` lifecycle row used to be written only at a clean terminal
-(release --stamp-do, the finalize backstop, /execute Step 1.5). A session killed
-mid-phase reaches none of those, so the whole row was lost - including a
-started_at that sat in its claim file the entire time. A node finished to an
-open, green, attested PR read `sessions=[blueprint only]`, and a groom pass
-would have redone it.
-
-The claim is the one thing every worker touches at the start of work and again
-at its end, so the row is bound to the claim's own lifecycle:
-
-  acquire  -> OPEN the row (started_at = claim.acquired_at, no ended_at)
-  release  -> CLOSE it (--stamp-do fills ended_at on the same row)
-
-`append_session_record` completes a duplicate row by filling a timestamp the
-first write omitted and never overwrites one, so open-then-close collapses to a
-single row and a retried stamp is a no-op.
-
-Three constraints shape the rest:
-
-* Both reachable acquire paths must stamp. The CLI `acquire` verb (init's cold
-  start) and target-start's in-process `_reacquire_node_claim` takeover are
-  separate code paths; a stamp on one is decorative, since a session killed on
-  the other still loses its row.
-* The identity is the OWNED one, never the ambient env. `_owned_do_identity`
-  reads the harness the claim was pinned to (init passes the proven --harness)
-  and the session encoded in the holder, because ambient marker precedence would
-  launder an inherited foreign marker into the row. Acquire and release share it
-  so they always address the same row.
-* Acquiring is not doing. A caller that takes the claim as a serialization step
-  and only then validates can be refused after the row is open; it releases with
-  --rollback-do, which removes an open row whose started_at matches this claim.
-  A closed row, or one opened by an earlier real window under the same identity,
-  is never touched.
+Exit codes: 0 success; 1 held/contention retry exhaustion (also reap's own
+archive-confirm failure, a distinct overload of 1, not a retry signal); 2
+validation or input error; 3 corruption or race; 4 holder mismatch. The full
+table lives in docs/architecture/claim-verbs-do-provenance.md. Structured
+output uses --json on each verb; without it, output is a human-friendly
+summary on stdout and errors always go to stderr. The claim verbs also write
+the node's `do` provenance rows; that contract lives in the same doc.
 """
 
 from __future__ import annotations
@@ -87,8 +45,7 @@ from fno.tombstones import tombstone_group_cls
 
 RosterReading = _roster.RosterReading
 _finished_row_states = _roster._finished_row_states
-_really_finished = _roster._really_finished
-_transcript_activity = _roster._transcript_activity
+classify_workers = _roster.classify_workers
 read_roster = _roster.read_roster
 
 
@@ -870,7 +827,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     }
 
 
-def _roster_verdict_line(info: dict) -> str:
+def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> str:
     """One line naming what was consulted and what it found.
 
     Each string is produced by exactly one outcome, so a caller asserts a
@@ -878,9 +835,10 @@ def _roster_verdict_line(info: dict) -> str:
     absence has two explanations and cannot tell them apart, which is the
     defect this whole cross-check exists to remove.
 
-    Four outcomes, not three: a node whose only roster rows are finished
+    Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
-    would train every reader to ignore the alarm.
+    would train every reader to ignore the alarm; and rows the predicate
+    could not date read UNKNOWN, never live-by-default (x-dead).
     """
     # The claim's OWN state, never the hardcoded word free. The cross-check runs
     # for every unheld state, and `stale` is one of them, so a line saying free
@@ -891,10 +849,35 @@ def _roster_verdict_line(info: dict) -> str:
         return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
 
-    engaged = [w for w in workers if not _really_finished(w)]
+    if worker_verdicts is None:
+        engaged, unmeasurable, worker_verdicts = classify_workers(workers)
+    else:
+        from fno.agents.reachability import REACHABLE, UNKNOWN
+
+        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
+        unmeasurable = [
+            w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN
+        ]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
-        return f"UNCLAIMED but a live worker is on this node: {rendered}"
+        line = f"UNCLAIMED but a live worker is on this node: {rendered}"
+        unresolved = info.get("roster_rows_unresolved", 0)
+        if unresolved or unmeasurable:
+            # x-dead task 2.1: the verdict is only as good as its coverage,
+            # so the engaged line names the fraction too.
+            scanned = info.get("roster_rows_scanned", 0)
+            line += (
+                f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
+                + (f", {len(unmeasurable)} undated" if unmeasurable else "")
+            )
+        return line
+    if unmeasurable:
+        rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in unmeasurable)
+        return (
+            f"{state}, no positively-live worker; {len(unmeasurable)} row(s) "
+            f"unmeasured, never live: {rendered}. "
+            f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
+        )
     unresolved = info.get("roster_rows_unresolved", 0)
     if unresolved:
         scanned = (
@@ -978,10 +961,28 @@ def status(
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
         workers = info.get("roster_workers") or []
-        engaged = [worker for worker in workers if not _really_finished(worker)]
+        try:
+            from fno.graph.statuses import closed_worker_session_ids
+            from fno.graph.store import read_nodes_by_ids
+            from fno.paths import graph_json
+
+            reply = read_nodes_by_ids(graph_json(), [node_id]) or {}
+            entry = next(iter(reply.get("entries") or []), None)
+            closed = closed_worker_session_ids(entry) if entry else set()
+        except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
+            closed = set()
+        workers = [w for w in workers if str(w.get("row_id") or "") not in closed]
+        engaged, undated, worker_verdicts = classify_workers(workers)
         if engaged:
             info["worked_by"] = [worker["name"] for worker in engaged]
-            info["basis"] = "live-worker"
+            # x-dead task 2.1: degraded coverage enters the verdict, not a
+            # field beside it (31 of 53 rows went unresolved under a flat
+            # `live-worker`).
+            info["basis"] = (
+                "live-worker-degraded-coverage"
+                if info.get("roster_rows_unresolved", 0) or undated
+                else "live-worker"
+            )
         unresolved = info.get("roster_rows_unresolved", 0)
         if info.get("roster_unresolved_candidates"):
             # An unresolved row whose worktree names THIS node is an
@@ -1002,7 +1003,7 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        line = _roster_verdict_line(info)
+        line = _roster_verdict_line(info, worker_verdicts)
         # Witness named when one answered: a verdict from a failing probe
         # stays auditable on the loud line.
         if info.get("session_basis"):
