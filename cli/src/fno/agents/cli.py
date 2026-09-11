@@ -1092,8 +1092,7 @@ def cmd_spawn(
         None,
         "--role",
         help=(
-            "Per-spawn model-selection role; auxiliary roles route to a "
-            "secondary provider when configured."
+            "Per-spawn model-selection role; auxiliary roles route to a secondary provider."
         ),
     ),
     route: str | None = typer.Option(

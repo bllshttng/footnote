@@ -3604,7 +3604,7 @@ def cmd_send(
         None, "--kind", "-k",
         help=(
             "Inbox kind (heads-up | question | fyi); pair with --to-project. "
-            "Omit for a default agent-to-agent send (live if a peer is hosted)."
+            "Omit for a plain agent-to-agent send."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -3658,9 +3658,9 @@ def cmd_send(
     to_self: bool = typer.Option(
         False, "--to-self",
         help=(
-            "Address this session as the recipient (no <id> needed). With "
+            "Address this session as the recipient (no <id> needed); with "
             "--raw the envelope is stripped so a slash command parses at your "
-            "own prompt line; the audit event records the sender."
+            "own prompt line."
         ),
     ),
     force: bool = typer.Option(
