@@ -39,6 +39,7 @@ def install(
     force: bool = typer.Option(
         False,
         "--force",
+        "-F",
         help="Refresh the install even when the harness already has this version.",
     ),
 ) -> None:
