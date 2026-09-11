@@ -293,7 +293,11 @@ fn write_claude_shim(fleet_dir: &Path, shim_dir: &Path) {
     std::fs::write(
         &c4,
         format!(
-            r#"{{"kind":"background","id":"{S4}","sessionId":"{U4}","name":"{ROW4}","cwd":"{WORK}","state":"done"}}"#,
+            // The LIVE row must read live everywhere: a terminal roster
+            // state now retires a row whatever its transcript recency, so
+            // staging it `done` would make it dead by the harness's own
+            // word.
+            r#"{{"kind":"background","id":"{S4}","sessionId":"{U4}","name":"{ROW4}","cwd":"{WORK}","state":"working"}}"#,
             WORK = fleet_dir.join("work").display()
         ),
     )
