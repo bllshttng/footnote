@@ -586,7 +586,10 @@ fn ac3_the_conflict_release_reads_all_done_over_bare_witness_nodes() {
     .unwrap();
 
     let graph = graph_read(
-        &[("sess-conf", "x-aaaa", "done"), ("x-cccc", "x-cccc", "done")],
+        &[
+            ("sess-conf", "x-aaaa", "done"),
+            ("x-cccc", "x-cccc", "done"),
+        ],
         &[],
     );
     let release = gc_sweep::Release {
