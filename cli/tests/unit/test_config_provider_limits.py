@@ -54,8 +54,12 @@ def test_retired_trigger_parses_warns_once_and_is_ignored(caplog):
     key is ignored, not clamped."""
     import logging
 
+    from fno import config as config_mod
     from fno.config import AgentsBlock
 
+    # The once-guard is process-global: an earlier test in the same run may
+    # have consumed this key's single warning. Reset it for determinism.
+    config_mod._DEPRECATED_WARNED.discard("agents.max_load_per_cpu")
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         block = AgentsBlock(max_load_per_cpu=10.0)
     assert block.max_load_per_cpu == 10.0
