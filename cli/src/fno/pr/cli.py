@@ -618,6 +618,9 @@ def review_hold(
     if not branch and not (action == "acquire" and pr_number is not None):
         typer.echo(f"review-hold {action} needs --branch", err=True)
         raise typer.Exit(code=1)
+    # A PR-number acquire resolves the branch below; every path reaching here
+    # otherwise holds one. Rebound so the callers read as typed.
+    branch = branch or ""
     if action == "release":
         # --holder is OPTIONAL here, and omitting it is the normal case: this is
         # a lane lock, not an ownership assertion. The refusal an operator reads

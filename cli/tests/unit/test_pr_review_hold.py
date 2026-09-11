@@ -16,6 +16,12 @@ from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 DEAD_PID = 2**30  # far above any live pid; is_live() reads it as dead
@@ -483,6 +489,7 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
     assert claim_status(key, root=tmp_path)["state"] == "free"
 
 
+@requires_rust
 def test_an_expired_hold_clears_while_its_holder_still_runs(
     tmp_path: Path, monkeypatch, capsys
 ):
