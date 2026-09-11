@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fno import update
 from fno.cli import app
+from fno.doctor_cli import doctor_app
 
 
 @pytest.fixture(autouse=True)
@@ -2554,9 +2555,17 @@ def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
     )
 
     runner = CliRunner()
-    result = runner.invoke(app, ["doctor", "update", "--check"])
+    # The doctor sub-app, not the root app: this test's subject is the
+    # update command and its --check flag, and routing through the root adds
+    # the lazy stub load, the verb-move registry, and the root callback -
+    # three process-global layers where an xdist sibling's leftover state
+    # turned this test red twice (7d476fad2814, ac341e3a1, exit 2) with the
+    # polluter unidentifiable from the assertion alone.
+    result = runner.invoke(doctor_app, ["update", "--check"])
 
-    assert result.exit_code == 0
+    # Print the usage-error text, not just the code: an xdist-only exit 2 with
+    # no output was undiagnosable twice (7d476fad2814, ac341e3a1).
+    assert result.exit_code == 0, f"exit={result.exit_code} output={result.output!r}"
     payload = json.loads(result.output)
     assert payload["update_ready"] is True
     assert "guidance" in payload
