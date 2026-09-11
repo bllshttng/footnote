@@ -742,7 +742,8 @@ def global_receipt_events_path() -> None:
         "config.post_merge.sync_command in the CANONICAL checkout after a PR "
         "merges (opt-in; unset command = no-op). Exactly-once per merge SHA via "
         "a marker + single-flight lock; fail-open. Exit 0 no-op/skipped/synced, "
-        "non-zero only on a failed sync_command (marker withheld -> retries)."
+        "non-zero on a failed sync_command or a canonical checkout dirty on "
+        "paths this merge touches (marker withheld -> retries)."
     ),
 )
 def sync_canonical(
