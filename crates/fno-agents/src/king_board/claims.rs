@@ -64,6 +64,20 @@ pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
             Ok(rec) => {
                 let state = crate::claims::classify(&rec, None);
                 let state = state.as_str();
+                // A spawn-handover row is the dispatcher's launch window, not
+                // a worker: live/suspect is its whole life by construction
+                // (the spawn pid is gone the moment the fork lands), so
+                // reading it as a stalled holder makes every king spawn flag
+                // itself within two minutes. An EXPIRED handover stays in
+                // scope: a window that lapsed without a worker taking over
+                // IS a stall.
+                if matches!(state, "live" | "suspect")
+                    && rec
+                        .holder
+                        .starts_with(crate::claim_verbs::HANDOVER_HOLDER_PREFIX)
+                {
+                    continue;
+                }
                 // The board consumes live/suspect (stalled_holder's locks,
                 // undriven_pr's driver read) and stale/corrupted (its own
                 // queue); `free` never has a file to scan.
@@ -132,6 +146,7 @@ pub(crate) fn read_claims(cwd: &Path) -> SourceRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn claim_keys_decode_from_filenames() {
         assert_eq!(
@@ -139,5 +154,46 @@ mod tests {
             "node:x-25b8"
         );
         assert_eq!(decode_key("node%3Ax%20sp"), "node:x sp");
+    }
+
+    fn handover_row(holder: &str, expires_in_ms: i64, key: &str) -> (String, String) {
+        let now = crate::claims::now_ms();
+        let expires_at = now + expires_in_ms;
+        // Handwritten YAML on purpose: the lock file is the artifact the
+        // scanner reads, so the fixture is the artifact the writer would
+        // have produced, not a private constructor.
+        let yaml = format!(
+            "schema_version: 1\nkey: \"{decoded}\"\nholder: \"{holder}\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {expires_at}\nreason: \"spawn handover window for {decoded}\"\n",
+            decoded = key.replace("%3A", ":"),
+        );
+        (format!("{key}.lock"), yaml)
+    }
+
+    #[test]
+    fn a_live_handover_row_never_reads_as_a_stalled_holder() {
+        let dir = std::env::temp_dir().join(format!("kb-claims-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-90fa");
+        std::fs::write(dir.join(name), yaml).expect("write handover claim");
+        let rows = scan_claims_dir(&dir);
+        assert!(
+            rows.is_empty(),
+            "handover row leaked into the board: {rows:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_expired_handover_row_stays_in_scope() {
+        let dir = std::env::temp_dir().join(format!("kb-claims-exp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (name, yaml) = handover_row("spawn-handover:t-90fa-port", -1, "node%3Ax-90fa");
+        std::fs::write(dir.join(name), yaml).expect("write expired handover claim");
+        let rows = scan_claims_dir(&dir);
+        assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
+        assert_eq!(rows[0]["state"], "stale");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
