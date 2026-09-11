@@ -118,7 +118,10 @@ def test_contain_is_idempotent_on_rerun(tmp_graph):
 
 def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
-    _invoke("backlog", "done", owner)
+    # --force: closing over live children is refused without it (x-a31a), and
+    # the forced close re-parents the kids - irrelevant here, the owner is
+    # done either way and contain must still refuse.
+    _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is done" in r.output

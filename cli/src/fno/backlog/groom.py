@@ -198,6 +198,7 @@ def _mechanical_legs(age: int) -> list[tuple[str, list[str]]]:
 
 _ARCHIVE_MOVED_RE = re.compile(r"^Archived (\d+) terminal node\(s\)", re.MULTILINE)
 _ARCHIVE_HELD_RE = re.compile(r"^  held back \([\w-]+\): (\d+)$", re.MULTILINE)
+_REPARENT_RE = re.compile(r"^re-parented (\d+) stranded child", re.MULTILINE)
 
 
 def _archive_leg_outcome(stdout: str) -> str:
@@ -212,6 +213,16 @@ def _archive_leg_outcome(stdout: str) -> str:
     moved = int(moved_match.group(1)) if moved_match else 0
     held = sum(int(n) for n in _ARCHIVE_HELD_RE.findall(stdout))
     return f"ok (archived {moved}, held back {held})"
+
+
+def _reconcile_leg_outcome(stdout: str) -> str:
+    """Name the strand-heal count, mirroring ``_archive_leg_outcome`` (x-a31a).
+
+    Bare "ok" reads the same whether the self-heal re-parented 38 stranded
+    children or none.
+    """
+    match = _REPARENT_RE.search(stdout)
+    return f"ok (re-parented {int(match.group(1)) if match else 0})"
 
 
 def _run_mechanical(age: int) -> dict[str, str]:
@@ -233,9 +244,12 @@ def _run_mechanical(age: int) -> dict[str, str]:
             results[name] = f"failed: {type(exc).__name__}: {str(exc)[:120]}"
             continue
         if proc.returncode == 0:
-            results[name] = (
-                _archive_leg_outcome(proc.stdout or "") if name == "archive" else "ok"
-            )
+            if name == "archive":
+                results[name] = _archive_leg_outcome(proc.stdout or "")
+            elif name == "reconcile":
+                results[name] = _reconcile_leg_outcome(proc.stdout or "")
+            else:
+                results[name] = "ok"
             continue
         detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
         label = "partial" if proc.returncode == _PARTIAL_EXIT else "failed"

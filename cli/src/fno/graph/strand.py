@@ -1,8 +1,6 @@
 """Terminal-parent strand family: detect, refuse, and heal stranded children.
 
-A live node whose DIRECT parent is terminal (done/superseded/deferred) is
-stranded: every reader shows it as owned while nothing will ever dispatch it.
-`_is_live` and `_live_child_ids` moved here from graph/cli.py so the close
+`_is_live`/`_live_child_ids` moved here from graph/cli.py so the close
 guards, the reconcile self-heal, and the starvation receipts share one
 liveness predicate instead of three.
 """
@@ -15,14 +13,10 @@ _MAX_ANCESTOR_WALK = 64
 
 
 def _is_live(entry: dict) -> bool:
-    """A child is LIVE when it is not terminal: it would strand if its owner died.
-
-    Terminal is the precedence floor in `recompute_statuses` (done > superseded
-    > deferred): a node with ``completed_at`` is done, one with
-    ``superseded_by`` is superseded, one with ``deferred_at`` is deferred.
-    Everything else (idea, ready, blocked, in_review, in_progress) is live and
-    dispatchable, so killing its owner without releasing it leaves it
-    unbuildable under the dead-ancestor guard.
+    """LIVE = not terminal. Terminal is the `recompute_statuses` floor (done
+    > superseded > deferred) via completed_at / superseded_by / deferred_at;
+    everything else is dispatchable and would strand if its owner died. A
+    superseded_by without a verified supersession record still counts dead.
     """
     if entry.get("completed_at") or entry.get("deferred_at"):
         return False
@@ -33,16 +27,12 @@ def _is_live(entry: dict) -> bool:
 
 
 def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Ids of the owner's live children that the supersede guard refuses over.
+    """Ids of the owner's live membership children (``parent == owner``).
 
-    Membership children only (``parent == owner``), EXCLUDING contained
-    children (``contained_in == owner``). The two axes are released differently:
-    a contained child is folded delivery work, and superseding the unit
-    releases it routinely - that release IS the safety, so it is not a reason
-    to refuse. A parent-only child is epic membership; superseding orphans it
-    (clearing ``parent``), a structural change the guard exists to consent to.
-    This is also why the guard reads liveness, not ``type``: the epic that
-    prompted this was itself typed ``feature``.
+    Contained children (``contained_in == owner``) are excluded: folding a
+    unit releases them routinely, so they are never a reason to refuse. Reads
+    liveness, not ``type`` (the epic that prompted this guard was itself typed
+    ``feature``).
     """
     if not owner_id:
         return []
@@ -50,68 +40,50 @@ def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if e.get("contained_in") == owner_id:
-            continue  # folded work - the contained release handles it, not the guard
-        if e.get("parent") != owner_id:
+        if e.get("contained_in") == owner_id or e.get("parent") != owner_id:
             continue
-        if not _is_live(e):
-            continue
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            live.append(nid)
+        if _is_live(e) and isinstance(e.get("id"), str) and e["id"]:
+            live.append(e["id"])
     return live
-
-
-def _nearest_live_ancestor(
-    entries_by_id: dict, dead_id: str
-) -> Optional[str]:
-    """First non-terminal ancestor walking up from ``dead_id``, else None."""
-    seen: set[str] = set()
-    cur = (entries_by_id.get(dead_id) or {}).get("parent")
-    steps = 0
-    while isinstance(cur, str) and cur and steps < _MAX_ANCESTOR_WALK:
-        if cur == dead_id or cur in seen:
-            break  # cycle - no trustworthy ancestor
-        seen.add(cur)
-        anc = entries_by_id.get(cur)
-        if anc is None:
-            break  # missing parent - nothing live to hand the children to
-        if _is_live(anc):
-            return cur
-        cur = anc.get("parent")
-        steps += 1
-    return None
 
 
 def _reparent_live_children(
     entries: list[dict], dead_id: Optional[str]
 ) -> list[tuple[str, Optional[str]]]:
-    """Point each live membership child of ``dead_id`` at a live ancestor.
+    """Re-parent each live membership child of ``dead_id``; return the pairs.
 
-    Same membership ``_live_child_ids`` refuses over; a terminal child keeps
-    its link as history. The new parent is the dead node's nearest live
-    ancestor, or None (key kept, set to None - the ``_release_parented_children``
-    convention) when the whole ancestor chain is terminal. Returns the
-    (child_id, new_parent) pairs it wrote.
+    The new parent is the dead node's nearest live ancestor, else None (key
+    kept - the ``_release_parented_children`` convention). Terminal children
+    keep their link as history.
     """
-    if not dead_id:
+    kids = set(_live_child_ids(entries, dead_id))
+    if not kids:
         return []
     by_id = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
-    target = _nearest_live_ancestor(by_id, dead_id)
+    # Walk up from dead_id's parent; a cycle back into the dead node stops the
+    # walk (never hand the children to the corpse).
+    seen: set[str] = set()
+    cur = (by_id.get(dead_id) or {}).get("parent")
+    target: Optional[str] = None
+    steps = 0
+    while isinstance(cur, str) and cur and steps < _MAX_ANCESTOR_WALK:
+        if cur == dead_id or cur in seen:
+            break
+        seen.add(cur)
+        anc = by_id.get(cur)
+        if anc is None:
+            break  # missing parent - nothing live to hand the children to
+        if _is_live(anc):
+            target = cur
+            break
+        cur = anc.get("parent")
+        steps += 1
     moved: list[tuple[str, Optional[str]]] = []
     for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("contained_in") == dead_id:
-            continue  # folded work - the contained release owns that axis
-        if e.get("parent") != dead_id:
-            continue
-        if not _is_live(e):
-            continue
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
+        nid = e.get("id") if isinstance(e, dict) else None
+        if nid in kids:
             e["parent"] = target
             moved.append((nid, target))
     return moved
@@ -127,16 +99,12 @@ def _strandable_orphan_ids(entries: list[dict]) -> set[str]:
     }
     out: set[str] = set()
     for e in entries:
-        if not isinstance(e, dict) or not _is_live(e):
+        if not isinstance(e, dict) or not _is_live(e) or e.get("contained_in"):
             continue
-        if e.get("contained_in"):
-            continue  # the contained sweep owns that axis
         pid = e.get("parent")
-        if not isinstance(pid, str) or not pid:
-            continue
-        parent = by_id.get(pid)
+        parent = by_id.get(pid) if isinstance(pid, str) else None
         nid = e.get("id")
-        if parent is not None and not _is_live(parent) and isinstance(nid, str) and nid:
+        if pid and parent is not None and not _is_live(parent) and isinstance(nid, str) and nid:
             out.add(nid)
     return out
 
@@ -146,9 +114,8 @@ def _sweep_reparent_stranded_orphans(
 ) -> list[tuple[str, Optional[str]]]:
     """Re-parent every stranded child on the board; one pass, no fixpoint.
 
-    Every stranded child has a terminal DIRECT parent, so visiting each
-    terminal parent once is enough - and re-parenting never creates a new
-    terminal parent (the target is live, or None).
+    Every stranded child has a terminal DIRECT parent, and re-parenting never
+    creates one (the target is live, or None), so one pass converges.
     """
     stranded = _strandable_orphan_ids(entries)
     if not stranded:
@@ -156,8 +123,30 @@ def _sweep_reparent_stranded_orphans(
     by_id = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
-    dead_parents = sorted({by_id[i].get("parent") for i in stranded} - {None})
     moved: list[tuple[str, Optional[str]]] = []
-    for pid in dead_parents:
+    for pid in sorted({by_id[i].get("parent") for i in stranded} - {None}):
         moved.extend(_reparent_live_children(entries, pid))
     return moved
+
+
+def _reparent_receipt(pairs: list[tuple[str, Optional[str]]], lead: str = "") -> str:
+    """One line per batch. Bare lead is the past tense whose line start groom
+    parses (``^re-parented N stranded child``); "Would " previews instead.
+    """
+    verb = "re-parented" if not lead else "re-parent"
+    listed = ", ".join(f"{cid} -> {p or '(none)'}" for cid, p in pairs)
+    return f"{lead}{verb} {len(pairs)} stranded child(ren) under terminal parents: {listed}"
+
+
+def _stranded_next_receipts(receipts: list[tuple[str, str]]) -> list[str]:
+    """Capped strand-only advisory lines for a `next` that picked a winner."""
+    stranded = [(nid, r) for nid, r in receipts if r == "dead-ancestor"]
+    if not stranded:
+        return []
+    lines = [f"stranded {nid}: {r}" for nid, r in stranded[:10]]
+    shown = f" (showing {min(len(stranded), 10)})" if len(stranded) > 10 else ""
+    lines.append(
+        f"{len(stranded)} node(s) stranded under terminal parents{shown}; "
+        "`fno backlog reconcile` re-parents them"
+    )
+    return lines

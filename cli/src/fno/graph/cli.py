@@ -4128,8 +4128,9 @@ def _starvation_receipts(
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.backlog.advance import selection_guards
+    from fno.backlog.advance import first_dead_ancestor, selection_guards
     from fno.graph._intake import filter_by_project
+    from fno.graph.strand import _is_live
 
     container_ids = _container_ids(entries)
     # One pass, guarding against a non-dict row (codebase convention: a malformed
@@ -4168,6 +4169,19 @@ def _starvation_receipts(
         hold_guard = selection_guards(e, by_id, now, staleness_days=staleness_days)
         if hold_guard and hold_guard.startswith("dispatch-hold"):
             reason = hold_guard
+        elif first_dead_ancestor(
+            e, by_id, is_dead=lambda anc: not _is_live(anc)
+        ) and not (
+            e.get("contained_in") or _has_unmerged_open_pr(e) or _is_batched_member(e)
+        ):
+            # Terminal-ancestor arm (x-a31a): the structural cause outranks
+            # incidental attributes - a plan-less node under a dead parent
+            # reads here, not plan-less, because writing a plan under a dead
+            # parent fixes nothing. Superseded/deferred ancestors are a subset
+            # of terminal, so this arm also owns the old selection-guards
+            # dead-ancestor classification. Contained, in-review, and batched
+            # nodes fall through so their existing classifications stand.
+            reason = "dead-ancestor"
         elif not e.get("plan_path"):
             reason = "plan-less"
         elif nid in container_ids:
@@ -4191,9 +4205,7 @@ def _starvation_receipts(
             g = hold_guard
             if not g:
                 continue  # no known exclusion (would have been selected)
-            if g.startswith("dead-ancestor"):
-                reason = "dead-ancestor"
-            elif g.startswith("contained"):
+            if g.startswith("contained"):
                 # Not starvation either: the work IS being delivered, inside
                 # another node's PR. Left in the generic `quarantined` bucket it
                 # read as stale work needing attention, and a decomposed epic
@@ -4639,37 +4651,45 @@ def cmd_next(
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
-    if result[0] is None:
-        # Zero-silent-starvation receipts ( G1): explain to stderr why
-        # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
-        # contract `_next_node` parses, so a receipt failure never breaks
-        # dispatch. Under an external backend the receipts explain the ACTUAL
-        # joined denominator, never the local graph.
-        try:
-            from fno.backlog.advance import _guard_staleness_days
+    # Zero-silent-starvation receipts ( G1): explain to stderr why nothing
+    # was picked - and, even when a winner WAS picked, which in-scope nodes
+    # are stranded under terminal parents (x-a31a). Advisory - stdout stays
+    # exactly the node-or-"null" contract `_next_node` parses, so a receipt
+    # failure never breaks dispatch. Under an external backend the receipts
+    # explain the ACTUAL joined denominator, never the local graph.
+    try:
+        from fno.backlog.advance import _guard_staleness_days
 
-            recv_entries = (
-                pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
-            ) or []
-            scope_ids = (
-                descendants_of(recv_entries, parent_target_id)
-                if parent_target_id is not None
-                else None
-            )
-            for nid, reason in _starvation_receipts(
-                recv_entries,
-                project_filter,
-                all_,
-                scope_ids,
-                _live_claimed_node_ids(),
-                datetime.now(timezone.utc),
-                _guard_staleness_days(),
-                mission=mission,
-                roadmap_id=roadmap_id,
-            ):
+        recv_entries = (
+            pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
+        ) or []
+        scope_ids = (
+            descendants_of(recv_entries, parent_target_id)
+            if parent_target_id is not None
+            else None
+        )
+        receipts = _starvation_receipts(
+            recv_entries,
+            project_filter,
+            all_,
+            scope_ids,
+            _live_claimed_node_ids(),
+            datetime.now(timezone.utc),
+            _guard_staleness_days(),
+            mission=mission,
+            roadmap_id=roadmap_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - receipts are advisory
+        typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+    else:
+        if result[0] is None:
+            for nid, reason in receipts:
                 typer.echo(f"excluded {nid}: {reason}", err=True)
-        except Exception as exc:  # noqa: BLE001 - receipts are advisory
-            typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+        else:
+            # A winner exists: only the strand receipts fire, capped, so a
+            # healthy dispatch never drowns in exclusion noise again.
+            for line in _stranded_next_receipts(receipts):
+                typer.echo(line, err=True)
 
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
@@ -8008,52 +8028,17 @@ def _release_contained_children(entries: list[dict], owner_id: Optional[str]) ->
     return freed
 
 
-def _is_live(entry: dict) -> bool:
-    """A child is LIVE when it is not terminal: it would strand if its owner died.
-
-    Terminal is the precedence floor in `recompute_statuses` (done > superseded
-    > deferred): a node with ``completed_at`` is done, one with
-    ``superseded_by`` is superseded, one with ``deferred_at`` is deferred.
-    Everything else (idea, ready, blocked, in_review, in_progress) is live and
-    dispatchable, so killing its owner without releasing it leaves it
-    unbuildable under the dead-ancestor guard.
-    """
-    if entry.get("completed_at") or entry.get("deferred_at"):
-        return False
-    if not entry.get("superseded_by"):
-        return True
-    supersession = entry.get("supersession")
-    return isinstance(supersession, dict) and not supersession.get("verified_at")
-
-
-def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Ids of the owner's live children that the supersede guard refuses over.
-
-    Membership children only (``parent == owner``), EXCLUDING contained
-    children (``contained_in == owner``). The two axes are released differently:
-    a contained child is folded delivery work, and superseding the unit
-    releases it routinely - that release IS the safety, so it is not a reason
-    to refuse. A parent-only child is epic membership; superseding orphans it
-    (clearing ``parent``), a structural change the guard exists to consent to.
-    This is also why the guard reads liveness, not ``type``: the epic that
-    prompted this was itself typed ``feature``.
-    """
-    if not owner_id:
-        return []
-    live: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("contained_in") == owner_id:
-            continue  # folded work - the contained release handles it, not the guard
-        if e.get("parent") != owner_id:
-            continue
-        if not _is_live(e):
-            continue
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            live.append(nid)
-    return live
+# In graph/strand.py: the terminal-parent strand family (moved with the
+# close guards and self-heal that share its liveness predicate).
+from fno.graph.strand import (  # noqa: E402
+    _is_live,
+    _live_child_ids,
+    _reparent_live_children,
+    _reparent_receipt,
+    _strandable_orphan_ids,
+    _stranded_next_receipts,
+    _sweep_reparent_stranded_orphans,
+)
 
 
 def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
@@ -8730,6 +8715,9 @@ def cmd_done(
     except Exception:
         cost_rollup = {}
 
+    # Stranded children of a forced close, echoed after the lock releases.
+    reparented_out: list = [[]]
+
     def mutator(entries):
         n = _find_node(entries, task_id)
         if not n:
@@ -8740,6 +8728,22 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
+        # Strand guard (same shape as the supersede guard): closing over live
+        # children strands them under a terminal parent, so refuse unless
+        # forced - and a forced close re-parents them in this same mutation.
+        live_kids = _live_child_ids(entries, n["id"])
+        if live_kids and not force:
+            typer.echo(
+                f"Error: cannot close {task_id}: it still has "
+                f"{len(live_kids)} live child(ren): {', '.join(live_kids)}. "
+                "Closing would strand them under a terminal parent. Re-run "
+                "with --force --reason to close anyway (each child is "
+                "re-parented to its nearest live ancestor).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if live_kids:
+            reparented_out[0] = _reparent_live_children(entries, n["id"])
         node_after_out[0] = n
         _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. the done root)
@@ -8770,6 +8774,8 @@ def cmd_done(
         return
 
     typer.echo(f"Marked {task_id} done")
+    if reparented_out[0]:
+        typer.echo(_reparent_receipt(reparented_out[0]))
 
     # Operator-authority matrix (LD3/LD29): `fno backlog done` is an allowed
     # action during a drive window, but audit-tag it so the trail attributes
@@ -10011,6 +10017,10 @@ def _reconcile_once(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
+    # Same self-heal role on the parent axis (x-a31a): gates the dry-run
+    # preview when no other leg has candidates. The mutator's strand sweep
+    # re-detects; this is the read-only preview set.
+    strandable_orphans = _strandable_orphan_ids(entries) if _full_sweep else set()
     # A pending supersession whose successor closed outside this sweep is owed a
     # verdict nothing else will ever deliver. Gather its evidence BEFORE the
     # lock: these are `gh` round trips, and the graph lock is not the place for
@@ -10080,6 +10090,10 @@ def _reconcile_once(
 
     closed: list[dict] = []
     healed_epics: list[str] = []
+    # (child_id, new_parent) pairs written by the close-time re-parent and the
+    # full-sweep strand self-heal; reported in the summary and --json payload.
+    reparented: list = []
+    reparented_acc: list = []
     contained_closed: list[str] = []
     carried_stamped: list[str] = []
     contained_errors: list[dict] = []
@@ -10148,6 +10162,7 @@ def _reconcile_once(
             cascade_closed_acc.clear()
             supersession_unverified_acc.clear()
             blocked_by_settlement_acc.clear()
+            reparented_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
@@ -10167,6 +10182,16 @@ def _reconcile_once(
                         )
                         continue
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    # The close must not strand its live children under a
+                    # now-terminal parent: re-parent them in this same
+                    # mutation. Guarded like every non-load-bearing leg here.
+                    try:
+                        reparented_acc.extend(
+                            _reparent_live_children(entries, record.node_id)
+                        )
+                    except Exception as _rp_exc:  # noqa: BLE001 - never abort a close
+                        contained_errors_acc.append({"owner": record.node_id, "stage": "strand-reparent", "error": str(_rp_exc)[:200]})
+                        typer.echo(f"warning: re-parenting {record.node_id}'s live children failed: {_rp_exc}", err=True)
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
                             entries,
@@ -10272,6 +10297,13 @@ def _reconcile_once(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # Strand self-heal (x-a31a): re-parents live children stranded
+                # under terminal parents by closes that predate the guard.
+                try:
+                    reparented_acc.extend(_sweep_reparent_stranded_orphans(entries))
+                except Exception as _sr_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append({"owner": None, "stage": "strand-heal", "error": str(_sr_exc)[:200]})
+                    typer.echo(f"warning: the strand self-heal failed: {_sr_exc}", err=True)
                 # AFTER both close sweeps: a node closed this pass is a
                 # passenger too. Guarded like them, for the same reason.
                 try:
@@ -10501,7 +10533,10 @@ def _reconcile_once(
         contained_closed = sorted(set(contained_closed_acc))
         carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
-    elif dry_run and (closeable or strandable or strandable_contained or status_drift):
+        reparented = sorted(set(reparented_acc))
+    elif dry_run and (
+        closeable or strandable or strandable_contained or strandable_orphans or status_drift
+    ):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -10512,10 +10547,12 @@ def _reconcile_once(
         _sim = _copy.deepcopy(entries)
         _sim_acc: list = []
         _sim_contained: list = []
+        _sim_reparented: list = []
         for record in closeable:
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
+                _sim_reparented.extend(_reparent_live_children(_sim, record.node_id))
                 # Same order as the real mutator (contained children first), and
                 # guarded like it: an unguarded raise crashed the PREVIEW where
                 # a real run degrades to a warning, and left `contained_errors`
@@ -10555,8 +10592,10 @@ def _reconcile_once(
                     }
                 )
             _sim_acc.extend(_sweep_close_done_epics(_sim))
+            _sim_reparented.extend(_sweep_reparent_stranded_orphans(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        reparented = sorted(set(_sim_reparented))
         try:  # a preview that omits a leg reads "in sync" where a run writes
             carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
         except Exception:  # noqa: BLE001 - a preview never raises
@@ -10764,6 +10803,9 @@ def _reconcile_once(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Live children re-parented away from terminal parents (close-time
+            # + full-sweep strand heal). The count the summary line names.
+            "reparented": [{"node_id": cid, "parent": p} for cid, p in reparented],
             "reclaimed": [
                 {"node_id": node_id, "from": before, "to": after}
                 for node_id, (before, after) in status_drift.items()
@@ -10820,6 +10862,7 @@ def _reconcile_once(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not reparented
         and not carried_stamped
         and not reverted_stamped
         and not promise_held
@@ -10850,6 +10893,8 @@ def _reconcile_once(
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
             )
+        if reparented:
+            typer.echo(_reparent_receipt(reparented, lead="Would "))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"Would reclaim {node_id}: {before} -> {after}")
     else:
@@ -10882,6 +10927,9 @@ def _reconcile_once(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+        if reparented:
+            # Bare-lead shape: groom's _reconcile_leg_outcome parses this line.
+            typer.echo(_reparent_receipt(reparented))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"reclaimed {node_id}: {before} -> {after}")
 
