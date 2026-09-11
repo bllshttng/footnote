@@ -95,6 +95,8 @@ def test_map_covers_current_surface_once():
     # their own-surface rows: 562 -> 565.
     # x-a3e8 allocates `doctor harness-matrix`, the matrix regenerator:
     # counted from the merged file, 565 -> 566.
+    # x-a238 allocates `agents king history`, the crown-scope reign readback:
+    # 566 -> 567.
     # This branch adds `agents king cancel`, the isolated cancellation
     # control: counted from the merged file, 566 -> 567, and `agents king
     # shape` (reign) lands on the same count: 567 total from 565.
@@ -143,8 +145,11 @@ def test_map_covers_current_surface_once():
     # probe (hidden verb): 593 -> 594. This branch allocates `agents census`,
     # the running-process build-drift census (hidden verb): 594 -> 595.
     # `backlog session open`, the blueprint session claim holder (x-95dd),
-    # allocated 594 -> 595 on main in the same window: 595 -> 596.
-    assert len(mapped) == 596, (
+    # allocated 594 -> 595 on main in the same window: 595 -> 596. The
+    # reign-readback branch allocates `agents king history` and its
+    # help-injected `agents king-history` twin: counted from the merged
+    # file, 596 -> 598.
+    assert len(mapped) == 598, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

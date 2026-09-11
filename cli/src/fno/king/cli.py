@@ -501,6 +501,39 @@ def manifest_path_cmd(
     typer.echo(path)
 
 
+def history_cmd(
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to read. Default: this session's own crown."
+    ),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the full JSON payload."),
+) -> None:
+    """Read this crown's recorded reign: its check-ins, newest first.
+
+    Reads back what the king already journalled - merge order, asks opened
+    and retired, corrections - verbatim from the canonical ``reign_checkin``
+    rows. It never generates a summary: ``fno agents court -n`` answers who
+    rules NOW, and this answers what happened across the reign. Legacy rows
+    using the refused aliases stay evidence: counted, and surfaced with
+    their line numbers when they name this crown.
+    """
+    from fno.king.history import HistoryUnreadable, read_history, render, resolve_scope
+    from fno.paths import project_events_json
+
+    try:
+        crown = resolve_scope(scope)
+    except HistoryUnreadable as exc:
+        _refuse(f"king: {exc}")
+    try:
+        result = read_history(project_events_json(), crown)
+    except HistoryUnreadable as exc:
+        typer.echo(f"king: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        typer.echo(render(result))
+
+
 @king_app.command("board")
 def board_cmd(
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the board payload."),
@@ -721,6 +754,9 @@ agents_king_app.command("shape")(shape_cmd)
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
+# Registered here only, like the faq typer: the retired bare `fno king` menu
+# stays capped, and the collapse map allocates the agents-king row.
+agents_king_app.command("history")(history_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
 

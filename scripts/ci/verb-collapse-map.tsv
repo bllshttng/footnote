@@ -44,6 +44,7 @@ agents king drain	T1	agents king drain	1
 agents king escalate	T1	agents king escalate	1
 agents king faq add	T1	agents king faq add	2
 agents king faq list	T1	agents king faq list	2
+agents king history	T1	agents king history	0
 agents king init	T1	agents king init	7
 agents king manifest-path	T1	agents king manifest-path	3
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
