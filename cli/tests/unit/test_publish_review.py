@@ -55,16 +55,23 @@ class FakeGh:
             return _ok(HEAD)
         if argv[:2] == ["gh", "pr"] and "--json" in argv:
             field = argv[argv.index("--json") + 1]
-            if "number" in field.split(",") and "reviewDecision" not in field:
-                return _ok(self.pr_for_head or "")
-            if "author" in field.split(","):
-                return _ok(self.author)
-            if "headRefOid" in field.split(","):
-                return _ok(self.pr_head if self.pr_head is not None else "")
             if "reviewDecision" in field.split(","):
                 return _ok(self.review_decision)
-        if argv[:2] == ["gh", "repo"] and "nameWithOwner" in argv:
-            return _ok(self.slug)
+            # The one combined PR read: number,author,headRefOid,url.
+            if {"number", "author", "headRefOid", "url"} <= set(field.split(",")):
+                if not self.pr_for_head:
+                    return _rc(1, "", "no PR for HEAD")
+                return _ok(
+                    json.dumps(
+                        {
+                            "number": int(self.pr_for_head),
+                            "author": {"login": self.author},
+                            "headRefOid": self.pr_head,
+                            "url": f"https://github.com/{self.slug}/pull/{self.pr_for_head}",
+                        }
+                    )
+                )
+            return _rc(1, "", f"fake: unhandled field list {field}")
         if argv[:3] == ["gh", "api", "-X"] and "POST" in argv:
             self.posts.append({"argv": argv, "env": env})
             if self.post_rc != 0:

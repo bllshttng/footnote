@@ -365,7 +365,9 @@ def test_bot_identity_defaults_none_and_leaves_lane_predicate_alone(
         assert settings.review.peer_identity is None
         assert settings.review.peers == []
         assert settings.review.required_bots is None
-        assert settings.review.optional_apps == []
+        # Raw default is None (UNSET resolves to the built-in optional set on
+        # the readers); the bot keys must leave that untouched either way.
+        assert settings.review.optional_apps is None
     assert _load(tmp_path, monkeypatch, "schema_version: 1\n").review.bot_identity is None
     assert _load(tmp_path, monkeypatch, "schema_version: 1\n").review.bot_token_env is None
 
