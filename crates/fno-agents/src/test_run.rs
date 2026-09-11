@@ -522,6 +522,11 @@ mod tests {
 
     #[test]
     fn nested_owner_rejects_a_foreign_or_stale_token() {
+        // The env pins are process-global: hold the shared env lock so a
+        // sibling env test cannot clear these vars mid-read.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // A pid this test did not spawn (pid 1 on any unix box) will never
         // match a birth value this process invents, so the token is refused
         // rather than trusted.
@@ -535,6 +540,9 @@ mod tests {
 
     #[test]
     fn nested_owner_accepts_a_live_matching_self() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let pid = std::process::id();
         let birth = crate::daemon::process_start_time(pid).unwrap_or(0);
         std::env::set_var("FNO_TEST_OWNER_PID", pid.to_string());
