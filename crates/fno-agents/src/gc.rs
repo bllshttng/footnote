@@ -167,7 +167,9 @@ pub enum KeepReason {
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
-    /// live in the only sense the law allows.
+    /// live in the only sense the law allows. A terminal harness state
+    /// overrides it (the roster's `done` is not a turn boundary), and so
+    /// does a dead pid.
     Active { age_s: i64 },
     /// The transcript could not be resolved. Absence is not quiet.
     TranscriptUnresolved,
@@ -338,7 +340,10 @@ fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
         // x-2774 change 8: a provably dead pid (ESRCH) overrides recency.
         // Recency without a living writer is not liveness; only ESRCH
         // revokes it, never an absent or unanswerable pid.
-        Some(age) if age <= grace_secs && !row.pid_gone => {
+        // x-b7f8: a terminal harness state overrides recency too. The
+        // live roster shows a between-turns session as working/idle, never
+        // done - `done` is not a turn boundary, it is the finish line.
+        Some(age) if age <= grace_secs && !row.pid_gone && row.session_terminal.is_none() => {
             (GcAction::Keep, Some(KeepReason::Active { age_s: age }))
         }
         Some(_) => (GcAction::Retire, None),
@@ -2396,8 +2401,9 @@ mod tests {
     }
 
     /// Change 1: the harness publishing a terminal state overrides the
-    /// open-work keep. The grace gate still rules: a fresh transcript keeps
-    /// under `active`, and a non-terminal state keeps under open work.
+    /// open-work keep. The grace gate still rules on the OTHER guards: a
+    /// non-terminal state keeps under open work, and a terminal state with
+    /// an unresolved transcript keeps under transcript unresolved.
     #[test]
     fn terminal_session_state_releases_the_open_work_keep() {
         let mut row = open_row("in_review");
@@ -2407,12 +2413,43 @@ mod tests {
         row.transcript_age_s = Some(10);
         assert_eq!(
             gc_decide(&row, GRACE),
-            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 }),),
-            "a terminal state never sweeps a transcript inside the grace"
+            (GcAction::Retire, None),
+            "the roster measurement: `done` is a finish line, not a turn \
+             boundary - a between-turns session reads working/idle, never done"
         );
         // A non-terminal state never reaches this field: the population
         // site filters through is_terminal_roster_state, covered at sweep
         // level by x2774_terminal_harness_state_releases_an_open_work_row.
+    }
+
+    /// x-b7f8: recency yields to a terminal harness state. An AllDone row
+    /// inside the grace window retires when its roster state reads done and
+    /// names the early fire when `working` or `blocked` - not terminal -
+    /// keeps it under active, exactly as today.
+    #[test]
+    fn a_terminal_harness_state_overrides_recency() {
+        let mut retiring_row = retiring();
+        retiring_row.transcript_age_s = Some(274);
+        retiring_row.session_terminal = Some("done".into());
+        assert_eq!(gc_decide(&retiring_row, GRACE), (GcAction::Retire, None));
+
+        let mut working = retiring();
+        working.transcript_age_s = Some(274);
+        working.session_terminal = None;
+        assert_eq!(
+            gc_decide(&working, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 274 })),
+            "no terminal fact, no override"
+        );
+
+        let mut unresolved = retiring();
+        unresolved.transcript_age_s = None;
+        unresolved.session_terminal = Some("done".into());
+        assert_eq!(
+            gc_decide(&unresolved, GRACE),
+            (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
+            "a terminal state never makes an unreadable transcript quiet"
+        );
     }
 
     /// Change 3: a live newer peer on the same node releases the shield.

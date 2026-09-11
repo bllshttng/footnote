@@ -81,7 +81,10 @@ pub struct GcSummary {
     pub kept_shared_tree: Vec<(String, String)>,
     /// `(row id, descendant)`: a live registry row names this row's session
     /// in its own `spawned_by_session` - the parent is held, unretired,
-    /// until that child is gone.
+    /// until that child is gone. A parent whose own harness reports a
+    /// terminal state is not held: the lineage guard exists to keep a
+    /// running parent's surface alive for its children, and a terminal
+    /// parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
@@ -1546,17 +1549,18 @@ pub(crate) fn run_with_release(
         // parked or never-started node, and a recorded merge the status lags
         // all answer the same question - is THIS session's own story over -
         // and each falls through to the grace gate in gc_decide.
-        let session_terminal =
-            if matches!(work, WorkState::Open { .. }) && e.harness_name() == "claude" {
-                let mut memo = agents_memo.borrow_mut();
-                let snapshot = memo.get_or_insert_with(&agents_read);
-                crate::daemon::claude_row_id(e)
-                    .and_then(|rid| snapshot.find(&rid).cloned())
-                    .and_then(|row| row.state)
-                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
-            } else {
-                None
-            };
+        // x-b7f8: EVERY claude row carries its terminal state, not only
+        // Open-work rows - recency and lineage must be able to yield to it.
+        let session_terminal = if e.harness_name() == "claude" {
+            let mut memo = agents_memo.borrow_mut();
+            let snapshot = memo.get_or_insert_with(&agents_read);
+            crate::daemon::claude_row_id(e)
+                .and_then(|rid| snapshot.find(&rid).cloned())
+                .and_then(|row| row.state)
+                .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
+        } else {
+            None
+        };
         let superseded_by_live_peer = match &work {
             WorkState::Open { node, .. } => live_peer
                 .get(node)
@@ -1688,7 +1692,12 @@ pub(crate) fn run_with_release(
         // lineage field says who spawned whom, and this is the only site
         // that consults it. Runs before staging so no active-surface
         // removal ever touches a row a live child names.
-        if !sid.is_empty() {
+        // x-b7f8: one conjunct - a parent whose own harness reports a
+        // terminal state is not held. The guard's harm (a parent's native
+        // surface archived while children still run) needs a RUNNING
+        // parent; the shared-worktree guard below still protects a live
+        // child's tree.
+        if !sid.is_empty() && row.session_terminal.is_none() {
             let sid_lower = sid.to_ascii_lowercase();
             if let Some(child) = registry.entries.iter().find(|other| {
                 other.name != e.name
@@ -1723,9 +1732,18 @@ pub(crate) fn run_with_release(
             // The release lift (x-e3cc): a missing age reads quiet for this
             // row only. An ANSWERED fresh age still keeps - activity is
             // activity even under a ruling.
+            // x-b7f8: for a terminal row the re-check asks one question -
+            // did the session write since classification. A smaller fresh
+            // age IS a new write (the session came back, perhaps through a
+            // mail inject); an equal-or-older one is not. An unresolved
+            // re-read keeps: absence is not quiet.
+            // ponytail: a write inside the same whole second as a
+            // classification that already read age 0 is not seen.
             let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs)
                 || pid_gone_now
-                || (release_quiet_row && fresh_age.is_none());
+                || (release_quiet_row && fresh_age.is_none())
+                || (row.session_terminal.is_some()
+                    && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
@@ -1769,6 +1787,61 @@ pub(crate) fn run_with_release(
                 escalated: false,
             });
             continue;
+        }
+        // x-58a5: the same honesty for pane rows. The precheck answers what
+        // the real run's stop will answer - already-stopped retires, a live
+        // pid is a kill no dry run may promise, an unprovable pid is a
+        // refusal both runs share. No release lift here: a release
+        // satisfies only the stop_on_death seam, and the pane stop never
+        // consults that seam, so the real pane stop refuses under one and
+        // the dry run must predict that.
+        if dry_run && e.substrate.as_deref() == Some("pane") {
+            match crate::pane_stop::precheck_pane_stop(e) {
+                crate::pane_stop::PanePrecheck::AlreadyStopped(_) => {}
+                crate::pane_stop::PanePrecheck::NeedsKill => {
+                    let detail = "pane pid is running; a dry run does not promise a kill \
+                                  it cannot prove"
+                        .to_string();
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to needs live stop ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.needs_live_stop.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "needs live stop",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+                crate::pane_stop::PanePrecheck::Unprovable(detail) => {
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to stop refused ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.stop_refused.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "stop refused",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+            }
         }
         // The stop-family release still ISSUES the stop (x-e3cc): the seam
         // runs, the receipt records the outcome, and the release satisfies
@@ -1908,6 +1981,20 @@ pub(crate) fn run_with_release(
             } else {
                 basis
             };
+        // x-b7f8: name the early fire for a terminal state the way the pid
+        // evidence names its own. An AllDone row retiring INSIDE the grace
+        // window went because the harness says the session finished, not
+        // because the transcript aged out; the Open basis already names the
+        // state in its own arm.
+        if matches!(probed.work, WorkState::AllDone { .. })
+            && probed.session_terminal.is_some()
+            && probed.transcript_age_s.is_some_and(|age| age <= grace_secs)
+        {
+            basis = format!(
+                "{basis}; session terminal: harness state {}",
+                probed.session_terminal.clone().unwrap_or_default()
+            );
+        }
         // The release rides the audit line (x-e3cc): what was ruled, how old
         // the hold was, and an unconfirmed stop named as such.
         if let Some(note) = &release_note {
