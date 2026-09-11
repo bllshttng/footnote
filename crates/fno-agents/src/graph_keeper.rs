@@ -495,13 +495,17 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     }
     // Seat flock BEFORE touching the socket: the loser exits 3 and the
     // Python spawner keeps polling the incumbent rather than respawning.
-    if take_seat(&cfg.sock).is_none() {
+    // `_seat` is a named binding, the daemon's bind_supervisor_socket
+    // shape: the File holds the flock, so an `if take_seat(..).is_none()`
+    // temporary drops at the end of the condition and the lock guards
+    // nothing (x-252e).
+    let Some(_seat) = take_seat(&cfg.sock) else {
         eprintln!(
             "store keeper: {} is owned by a live keeper (lock held); exiting",
             cfg.sock.display()
         );
         std::process::exit(EXIT_SEAT_OWNED);
-    }
+    };
     // A keeper built before the seat lock can still own the path. With the
     // flock held, one short-bound Identify decides: an answerer is a live
     // incumbent, a refusal or silence is a dead leftover.
