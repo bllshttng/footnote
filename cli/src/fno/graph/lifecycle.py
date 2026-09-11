@@ -17,14 +17,11 @@ import typer
 
 def register_lifecycle_commands(
     cli: typer.Typer,
-    expand_valid_ids: Callable[[List[str]], List[str]],
-    require_nodes: Callable[[list, List[str]], None],
+    expand_valid_ids: Callable[..., List[str]],
+    require_nodes: Callable[..., None],
     graph_path: Callable[[], Path],
     project_plans_from_graph: Callable[..., None],
 ) -> None:
-    from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
-
     @cli.command("undefer", hidden=True)
     def cmd_undefer(
         task_ids: List[str] = typer.Argument(
@@ -40,6 +37,11 @@ def register_lifecycle_commands(
         streak-reset event. The verb prints the reason it clears and any plan
         ruling against the node.
         """
+        # Call-time imports: the verbs must read whatever the running test or
+        # caller patched onto the source modules, never a register-time copy.
+        from fno.graph._intake import _find_node
+        from fno.graph.store import locked_mutate_graph
+
         ids = expand_valid_ids(task_ids)
 
         was_deferred: list[tuple[str, bool, str | None, str | None, str | None]] = []
@@ -105,6 +107,8 @@ def register_lifecycle_commands(
         Full contract: docs/architecture/backlog-graph-verb-contracts.md
         """
         from fno.graph._constants import has_node_id_prefix
+        from fno.graph._intake import _find_node
+        from fno.graph.store import locked_mutate_graph
 
         if not has_node_id_prefix(node_id):
             typer.echo(

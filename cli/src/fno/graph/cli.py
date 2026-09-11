@@ -12337,14 +12337,17 @@ from fno.graph import note_cli  # noqa: E402,F401
 # Node-lifecycle reversal verbs live in graph/lifecycle.py (file-budget
 # ratchet): the module never imports graph.cli, so the shared helpers are
 # injected here at registration, the same shape as the decide leaves above.
+# Each helper rides a lambda so the call resolves the module global at CALL
+# time: tests monkeypatch these names on this module, and a reference
+# captured at import would read the unpatched original.
 from fno.graph.lifecycle import register_lifecycle_commands  # noqa: E402
 
 register_lifecycle_commands(
     cli,
-    _expand_valid_ids,
-    _require_nodes,
-    _graph_path,
-    _project_plans_from_graph,
+    lambda *a, **k: _expand_valid_ids(*a, **k),
+    lambda *a, **k: _require_nodes(*a, **k),
+    lambda: _graph_path(),
+    lambda *a, **k: _project_plans_from_graph(*a, **k),
 )
 
 _classify_backlog_verbs()
