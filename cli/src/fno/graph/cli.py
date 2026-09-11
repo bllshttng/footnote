@@ -11193,9 +11193,7 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
-            "backfill url-less pr_url). "
-            "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
+            "Apply the deterministic legs; the judgment legs stay "
             "proposal-only regardless of this flag."
         ),
     ),
@@ -11219,28 +11217,17 @@ def cmd_maintain(
         False,
         "--suspect-reverts",
         help=(
-            "Read-only retro sweep: print drained nodes that carry evidence of "
-            "a human curation decision, then exit. Runs no other leg, mutates "
-            "nothing, and emits no undefer command - the operator rules on the "
-            "list themselves."
+            "Read-only retro sweep: print drained nodes carrying evidence of "
+            "a human curation decision, then exit; mutates nothing."
         ),
     ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
-    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
-    carrying a ``pr_number`` with no url. Three are
-    judgment calls and only ever PROPOSE (never mutate, regardless of
-    ``--apply``): surface near-duplicate idea titles, propose a reversible
-    ``defer`` for stale ideas, and report a Now column over its WIP cap. The
-    last leg appends a summary to health-history so ``triage trend`` shows the
-    board trending cleaner.
-
-    Loop form: ``/loop 1d fno backlog maintain --apply``.
-
-    Best-effort: a malformed row is skipped, a single failed apply does not
-    abort the rest, and an empty graph is a clean no-op.
+    Deterministic legs apply under ``--apply``; the judgment legs (dedup,
+    drain-stale, cap-Now) only ever propose. Full leg list + loop form:
+    docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
+    apply does not abort the rest; an empty graph is a clean no-op.
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph.statuses import recompute_statuses
@@ -11344,6 +11331,10 @@ def cmd_maintain(
         defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
+
+    ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
+    if ab_warn:
+        typer.echo(f"warning: {ab_warn}", err=True)
 
     # --- apply (deterministic legs only) ---
     applied_rescope: list[str] = []
@@ -11751,6 +11742,8 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
+    if ab_lines:
+        typer.echo("\n".join(ab_lines))
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "

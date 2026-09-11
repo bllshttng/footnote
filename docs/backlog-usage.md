@@ -341,6 +341,10 @@ fno backlog maintain --apply       # recurring sweep: re-scope, prune, pr_url ba
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
 
+### Abandoned do rows
+
+An open do row wedges its node `in_progress`. The in-progress status hides the row from the Rust settle's done+merged gate. A session that died mid-do strands its node forever. `fno backlog maintain` carries the leg that watches this population. Read mode reports every candidate with its verdict (`gone` or `held`) and the reason. `--apply` reaps a `gone` row only after the transcript prover proves the session quiet. The bar is `config.backlog.maintain.abandoned_do_row_hours` (default 24) with a non-engaged tail. A live claim holds the row. A live roster worker holds the row. A transcript the prover cannot read holds the row and names the reason. Opencode rows always hold, because no file-backed transcript exists to prove against. A held row can still be reaped by hand. Run `fno backlog session reap-open` after you have proven the session dead yourself.
+
 ### The daily pass
 
 `fno backlog groom` is the single grooming surface, and it runs the whole pass:

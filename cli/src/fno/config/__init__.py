@@ -261,29 +261,20 @@ class MaintainBlock(BaseModel):
 
     staleness_days: int = 30
     max_failed_attempts: int = 3
+    # Transcript-quiet hours before the abandoned-do-row leg reaps.
+    abandoned_do_row_hours: int = 24
     # Validity sweep. No raising validators: a nonpositive/oversized
     # value degrades to a bounded default IN THE LEG (per Failure Modes) so a bad
     # config never breaks the whole `maintain` command.
     validity_days: int = 60
     validity_batch_size: int = 25
 
-    @field_validator("staleness_days")
+    @field_validator("staleness_days", "max_failed_attempts", "abandoned_do_row_hours")
     @classmethod
-    def staleness_days_positive(cls, v: int) -> int:
-        """An idea cannot be 'older than N days' for N < 1."""
+    def _positive_counts(cls, v: int, info: ValidationInfo) -> int:
+        """A threshold below 1 cannot bound anything."""
         if v < 1:
-            raise ValueError("config.backlog.maintain.staleness_days must be >= 1")
-        return v
-
-    @field_validator("max_failed_attempts")
-    @classmethod
-    def max_failed_attempts_positive(cls, v: int) -> int:
-        """A consecutive-failure threshold below 1 would auto-defer every node
-        on its first failure (or with zero failures), so N must be >= 1."""
-        if v < 1:
-            raise ValueError(
-                "config.backlog.maintain.max_failed_attempts must be >= 1"
-            )
+            raise ValueError(f"config.backlog.maintain.{info.field_name} must be >= 1")
         return v
 
 

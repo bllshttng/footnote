@@ -356,3 +356,118 @@ def test_explain_reports_an_unanswerable_verb_instead_of_the_target_slot(monkeyp
     assert calls == []
     assert routing["candidate"] is None
     assert "verb unresolved" in routing["chain"][0]
+
+
+# ---------------------------------------------------------------------------
+# The abandoned-do-row settle arm (x-f714): two positive controls in one file.
+# The gone arm proves the instrument FIRES (row reaped, node leaves
+# in_progress, advance names it a candidate again); the held arm proves it can
+# REFUSE (fresh transcript keeps the row, report stamps held). Neither is
+# trusted alone.
+# ---------------------------------------------------------------------------
+
+import json as _json
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+from typer.testing import CliRunner as _CliRunner
+
+_AB_SID_GONE = "9f06a492-1111-4222-8333-444455556666"
+_AB_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
+
+
+def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
+    """A hermetic graph with ONE node whose only open do row names `sid`,
+    plus a real fixture transcript for that session."""
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    import fno.graph.cli as gcli
+
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
+
+    stamp = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    root = tmp_path / "projects" / "-some-worktree"
+    root.mkdir(parents=True)
+    record = {
+        "type": "assistant",
+        "timestamp": stamp,
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "<promise>done</promise>"}]},
+    }
+    (root / f"{sid}.jsonl").write_text(_json.dumps(record) + "\n")
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+    g.write_text(_json.dumps({"entries": [{
+        "id": node_id, "title": "abandoned arm", "priority": "p2",
+        "project": "fno", "domain": "code", "cwd": "/some/worktree",
+        "status": "in_progress",
+        "sessions": [{"phase": "do", "harness": "claude", "session_id": sid,
+                      "started_at": "2026-09-09T15:46:29Z"}],
+    }]}))
+    return g
+
+
+def _ab_maintain_apply(monkeypatch):
+    from fno.cli import app
+
+    result = _CliRunner().invoke(
+        app, ["backlog", "maintain", "--apply", "--no-validity"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
+    tmp_path, monkeypatch
+):
+    """AC1-HP + AC2-HP: quiet transcript past the bar -> the apply receipt
+    reads row_removed true with status_after idea, and advance --explain
+    answers with a candidate line, never `never a candidate`."""
+    g = _ab_world(tmp_path, monkeypatch, _AB_SID_GONE, age_hours=72)
+    result = _ab_maintain_apply(monkeypatch)
+    assert "row_removed true" in result.output
+    assert "status_after idea" in result.output
+
+    entries = _json.loads(g.read_text())["entries"]
+    assert entries[0]["sessions"] == []
+    assert entries[0]["status"] == "idea"
+
+    from fno.cli import app
+
+    explain = _CliRunner().invoke(
+        app, ["backlog", "advance", "--explain", "--explain-node", "x-abt0001"],
+        catch_exceptions=False,
+    )
+    assert explain.exit_code == 0, explain.output
+    assert "never a candidate" not in explain.output
+    assert "x-abt0001" in explain.output
+    assert "eligible, ranked" in explain.output
+
+
+def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
+    """AC3-HP: a last event inside the bar holds the row - report stamps held
+    with the active-transcript reason, and the node still carries the open do
+    row for that exact session."""
+    g = _ab_world(tmp_path, monkeypatch, _AB_SID_LIVE, age_hours=0)
+    result = _ab_maintain_apply(monkeypatch)
+    assert "held" in result.output
+    assert "transcript active" in result.output
+
+    entries = _json.loads(g.read_text())["entries"]
+    rows = entries[0]["sessions"]
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == _AB_SID_LIVE
+    assert "ended_at" not in rows[0]
+    assert entries[0]["status"] == "in_progress"
