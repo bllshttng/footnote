@@ -653,8 +653,7 @@ def _emit_drain_marker(
 
     Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
     state; ``reason`` distinguishes printed from skipped-duplicate (W2).
-    Swallowed on any failure: the caller has already printed and acked the
-    message, so a missing receipt degrades to the cursor fallback (AC9-ERR).
+    Swallowed on any failure: a missing receipt degrades to the cursor fallback.
     """
     from fno.agents import events
 
