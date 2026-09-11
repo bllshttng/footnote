@@ -814,8 +814,11 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     having rewritten the graph field. An out-of-family verb (``/think``) keeps
     declared precedence; ``unreadable``/``done``/``superseded`` plan rungs and
     a planless node without a valid difficulty REFUSE. Selection drops such a
-    node as ``no-difficulty`` on the cold path, before any dispatcher reserves
-    it, so one underivable row never spends a drain tick. ``verb_source`` keeps
+    node as ``no-difficulty`` on the UNSCOPED drain head, before any dispatcher
+    reserves it, so one underivable row never spends a drain tick. A scoped
+    call (``--parent``, ``--mission``, ``--roadmap-id``) is an enumeration:
+    it still surfaces the row, so the epic fan-out decides per row, where one
+    refusal costs a failed spawn and never the tick. ``verb_source`` keeps
     the RAW declaration state (declared / none-declared) beside the resolved
     verb, and a node dict missing the ``dispatch_verb`` key at all is a lossy
     selection projection: the spawn refuses before anything is spent. The stage

@@ -1227,8 +1227,18 @@ fn drops_for_filter(
                 // A cold idea the verb derivation is certain to refuse must
                 // not spend a drain tick: drop it where every autonomous
                 // dispatcher reads, attributed for `advance --explain`.
-                (!ctx.opts.include_ideas && is_cold_dispatchable(e) && !has_intake_difficulty(e))
-                    .then(|| "no-difficulty".to_string())
+                // A scoped call (--parent / --mission / --roadmap-id) is an
+                // enumeration, not the drain head: the epic fan-out must
+                // still surface cold ideas and decides per row, where one
+                // refusal costs a failed spawn, never the tick.
+                let scoped = ctx.opts.parent.is_some()
+                    || ctx.opts.mission.is_some()
+                    || ctx.opts.roadmap_id.is_some();
+                (!scoped
+                    && !ctx.opts.include_ideas
+                    && is_cold_dispatchable(e)
+                    && !has_intake_difficulty(e))
+                .then(|| "no-difficulty".to_string())
             })
         }
         _ => None,
@@ -1489,5 +1499,25 @@ mod tests {
             .expect("x-a dropped");
         assert_eq!(drop.filter, "selection-guard");
         assert_eq!(drop.reason, "dead-ancestor:x-p");
+    }
+
+    #[test]
+    fn scoped_parent_call_still_enumerates_cold_ideas_without_difficulty() {
+        let entries = vec![
+            json!({"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"}),
+            json!({"id": "x-c", "status": "idea", "priority": "p2", "parent": "x-e"}),
+        ];
+        let reply = select(
+            &entries,
+            &ReadyOpts {
+                all: true,
+                parent: Some("x-e".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert_eq!(reply.rows[0].get("id"), Some(&json!("x-c")));
+        assert!(reply.drops.iter().all(|d| d.reason != "no-difficulty"));
     }
 }
