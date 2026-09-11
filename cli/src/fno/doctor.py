@@ -74,7 +74,9 @@ DoctorStatus = Literal["fresh", "stale", "unknown"]
 
 _DAEMON_DRIFT_WARNING = re.compile(
     r"^fno agents: .* is an older build than the installed binary; "
-    r"run `fno agents restart` to pick up the new build\.$"
+    r"`fno agents restart` fixes it but restarts every worker on the shared "
+    r"daemon, so it is an operator action - surface it to the operator "
+    r"instead of running it from an agent session\.$"
 )
 
 REVIEW_INVOCATION_LOST_WINDOW_SECONDS = 15 * 60
