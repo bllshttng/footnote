@@ -177,10 +177,49 @@ mod tests {
             .arg("37")
             .spawn()
             .expect("spawn sleep");
-        let read = process_argv(child.id());
+        // Retry briefly: a fresh child can sit in an exec window where procfs
+        // reads empty, and a busy runner stretches it.
+        let mut read = None;
+        let mut why = String::new();
+        for _ in 0..20 {
+            match process_argv(child.id()) {
+                Some(argv) => {
+                    read = Some(argv);
+                    break;
+                }
+                None => {
+                    // Name the platform fact instead of guessing: is the
+                    // child's /proc entry absent while it is provably alive
+                    // (a hardened platform hiding cross-pid procfs), empty
+                    // (mid-exec), or erroring?
+                    let alive = child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+                    why = match std::fs::metadata(format!("/proc/{}/cmdline", child.id())) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound && alive => {
+                            format!("child {pid} alive but /proc entry hidden", pid = child.id())
+                        }
+                        Ok(m) => format!("entry exists (len {})", m.len()),
+                        Err(e) => format!("entry unreadable: {e}"),
+                    };
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let still_running = child.try_wait().map(|s| s.is_none()).unwrap_or(false);
         child.kill().ok();
         child.wait().ok();
-        let read = read.expect("a live child's argv is readable");
+        let Some(read) = read else {
+            let hidden = why.contains("alive but /proc entry hidden") && still_running;
+            // A hardened platform may hide other pids' procfs entries
+            // entirely while /proc/self stays readable (the child provably
+            // stayed alive). That is an environment fact, not a reader
+            // defect: record it and leave the leg to platforms that allow
+            // the read. Any other reason is a reader bug and fails.
+            if hidden {
+                eprintln!("skipping child-probe leg: {why}; the platform hides cross-pid procfs");
+                return;
+            }
+            panic!("child argv unreadable after 1s ({why})");
+        };
         assert!(
             read.first().is_some_and(|t| t.ends_with("sleep")) && read.contains(&"37".to_string()),
             "the reader sees the child, not only itself: {read:?}"
