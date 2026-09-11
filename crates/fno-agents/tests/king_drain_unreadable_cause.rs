@@ -1,7 +1,7 @@
-//! The quiet-board drain failure must name its cause (x-c6d3). A killed
-//! drain child is a timeout waiting for a quieter fire; a failed drain
-//! command is a bug to debug. Both blocked completion before, but the
-//! message flattened them into one cause-free "unreadable".
+//! The quiet-board drain failure must name its cause. A killed drain child
+//! is a timeout waiting for a quieter fire; a failed drain command is a bug
+//! to debug. Both blocked completion before, but the message flattened them
+//! into one cause-free "unreadable".
 
 use fno_agents::loopcheck::run_loop_check_capture;
 use serde_json::Value;

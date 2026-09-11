@@ -279,7 +279,10 @@ impl KingQueue {
 pub(crate) enum ScopeDrainError {
     /// The drain child outlived its bound and was killed. The bound is the
     /// configured ceiling clamped to the fire's remaining budget.
-    TimedOut { bound: std::time::Duration },
+    TimedOut {
+        scope: String,
+        bound: std::time::Duration,
+    },
     /// Spawn failure, non-zero exit, unparseable payload. The string quotes
     /// the command failure.
     Failed(String),
@@ -288,9 +291,9 @@ pub(crate) enum ScopeDrainError {
 impl std::fmt::Display for ScopeDrainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScopeDrainError::TimedOut { bound } => write!(
+            ScopeDrainError::TimedOut { scope, bound } => write!(
                 f,
-                "the king drain read timed out after {}ms and was killed (a spent fire budget leaves a late read only its {}ms floor); wait for a quieter fire or rerun the drain",
+                "king drain for {scope} timed out after {}ms and was killed (a spent fire budget leaves a late read only its {}ms floor); wait for a quieter fire or rerun the drain",
                 bound.as_millis(),
                 crate::loopcheck::STOPGATE_BOUND_FLOOR.as_millis()
             ),
@@ -334,15 +337,18 @@ fn scope_undelivered_count_with_timeout(
         timeout,
     )
     .map_err(|error| match error.timeout_bound() {
-        Some(bound) => ScopeDrainError::TimedOut { bound },
+        Some(bound) => ScopeDrainError::TimedOut {
+            scope: scope.to_string(),
+            bound,
+        },
         None => {
-            ScopeDrainError::Failed(format!("the king drain command failed: {}", error.render()))
+            ScopeDrainError::Failed(format!("king drain for {scope} failed: {}", error.render()))
         }
     })?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr_tail);
         return Err(ScopeDrainError::Failed(format!(
-            "the king drain command failed ({}): {}",
+            "king drain for {scope} failed ({}): {}",
             out.status,
             detail.trim().chars().take(200).collect::<String>()
         )));
@@ -351,7 +357,7 @@ fn scope_undelivered_count_with_timeout(
     let trimmed = stdout.trim();
     let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
         ScopeDrainError::Failed(format!(
-            "the king drain command returned no JSON (exit {}): {}",
+            "king drain for {scope} returned no JSON (exit {}): {}",
             out.status,
             trimmed.chars().take(200).collect::<String>()
         ))
@@ -361,7 +367,7 @@ fn scope_undelivered_count_with_timeout(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| {
             ScopeDrainError::Failed(format!(
-                "the king drain payload carries no undelivered count"
+                "king drain payload for {scope} carries no undelivered count"
             ))
         })
 }
