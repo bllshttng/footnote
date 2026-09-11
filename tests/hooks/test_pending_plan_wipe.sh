@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_pending_plan_wipe.sh - verify init-target-state.sh's session-start wipe
-# of a stale .fno/.pending-plan.md sidecar (task 2.2).
+# of a stale space/.pending-plan.md sidecar (task 2.2).
 #
 # Covers:
 #   AC1-EDGE: stale sidecar (past TTL, or prior session_id) is wiped at init.
@@ -35,11 +35,15 @@ bash -n "$INIT" || { echo "bash -n rejected $INIT" >&2; exit 1; }
 # Direct fallback gates have dedicated review, containment, and hold tests.
 export FNO_TARGET_INIT_GATED=1
 
-# Write a sidecar with a given session_id into <repo>/.fno/.pending-plan.md
+# Write a sidecar with a given session_id into <repo>/space/.pending-plan.md.
+# init resolves its state dir through `fno-agents state path`, so the stub
+# installed here pins that resolution to the scenario space dir.
 write_sidecar() {
   local dir="$1" sid="$2"
-  mkdir -p "$dir/.fno"
-  cat > "$dir/.fno/.pending-plan.md" <<EOF
+  mkdir -p "$dir/.fno" "$dir/space" "$dir/bin"
+  cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "$dir/bin/fno-agents"
+  chmod 755 "$dir/bin/fno-agents"
+  cat > "$dir/space/.pending-plan.md" <<EOF
 ---
 captured_at: 2026-06-02T21:30:00Z
 session_id: $sid
@@ -61,6 +65,7 @@ run_init() {
     && TARGET_START=1 TARGET_INPUT="test" \
        TARGET_TRANSCRIPT_ID="$claude_sid" \
        PENDING_PLAN_TTL_SECONDS="$ttl" \
+       PATH="$dir/bin:$PATH" FNO_TEST_SPACE="$dir/space" \
        bash "$INIT" >/dev/null 2>&1 )
 }
 
@@ -70,7 +75,7 @@ trap 'rm -rf "$T1" "${T2:-}" "${T3:-}" "${T4:-}"' EXIT
 ( cd "$T1" && git init -q )
 write_sidecar "$T1" "sess-SAME-123"
 run_init "$T1" "sess-SAME-123" 14400
-[[ -f "$T1/.fno/.pending-plan.md" ]] \
+[[ -f "$T1/space/.pending-plan.md" ]] \
   && pass "survive: same-session fresh sidecar kept" \
   || fail "survive: same-session sidecar was wiped (should survive)"
 
@@ -79,7 +84,7 @@ T2=$(mktemp -d -t pp-wipe-session.XXXXXX)
 ( cd "$T2" && git init -q )
 write_sidecar "$T2" "sess-OTHER-999"
 run_init "$T2" "sess-CURRENT-123" 14400
-[[ ! -f "$T2/.fno/.pending-plan.md" ]] \
+[[ ! -f "$T2/space/.pending-plan.md" ]] \
   && pass "session-mismatch: prior-session sidecar wiped" \
   || fail "session-mismatch: stale sidecar survived (should be wiped)"
 
@@ -88,11 +93,11 @@ T3=$(mktemp -d -t pp-wipe-ttl.XXXXXX)
 ( cd "$T3" && git init -q )
 write_sidecar "$T3" "sess-SAME-123"
 # Age the sidecar past a tiny TTL by back-dating its mtime ~1h.
-if touch -d '1 hour ago' "$T3/.fno/.pending-plan.md" 2>/dev/null; then :; \
-elif touch -A -010000 "$T3/.fno/.pending-plan.md" 2>/dev/null; then :; \
-else touch -t "$(date -u -v-1H '+%Y%m%d%H%M' 2>/dev/null || echo 202601010000)" "$T3/.fno/.pending-plan.md" 2>/dev/null; fi
+if touch -d '1 hour ago' "$T3/space/.pending-plan.md" 2>/dev/null; then :; \
+elif touch -A -010000 "$T3/space/.pending-plan.md" 2>/dev/null; then :; \
+else touch -t "$(date -u -v-1H '+%Y%m%d%H%M' 2>/dev/null || echo 202601010000)" "$T3/space/.pending-plan.md" 2>/dev/null; fi
 run_init "$T3" "sess-SAME-123" 60   # TTL 60s; sidecar is ~1h old
-[[ ! -f "$T3/.fno/.pending-plan.md" ]] \
+[[ ! -f "$T3/space/.pending-plan.md" ]] \
   && pass "ttl: past-TTL sidecar wiped even with matching session" \
   || fail "ttl: stale (past-TTL) sidecar survived (should be wiped)"
 
@@ -103,8 +108,9 @@ write_sidecar "$T4" "sess-whatever"
 ( cd "$T4" \
   && unset TARGET_TRANSCRIPT_ID CLAUDE_CODE_SESSION_ID \
   && TARGET_START=1 TARGET_INPUT="test" PENDING_PLAN_TTL_SECONDS="14400" \
+     PATH="$T4/bin:$PATH" FNO_TEST_SPACE="$T4/space" \
      bash "$INIT" >/dev/null 2>&1 )   # session id genuinely unavailable -> TTL only
-[[ -f "$T4/.fno/.pending-plan.md" ]] \
+[[ -f "$T4/space/.pending-plan.md" ]] \
   && pass "no-sid: fresh sidecar survives when session id unavailable (TTL only)" \
   || fail "no-sid: fresh sidecar wiped despite no session id and in-TTL"
 

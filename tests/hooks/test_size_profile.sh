@@ -44,16 +44,21 @@ run_init() {
 exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
 EOF
         chmod +x bin/fno
+        # State-path stub: pins init's manifest location under env -i.
+        mkdir -p space
+        cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" bin/fno-agents
+        chmod +x bin/fno-agents
         env -i \
             HOME="$tmp/home" \
             PATH="$tmp/bin:$PATH" \
+            FNO_TEST_SPACE="$tmp/space" \
             TARGET_START=1 \
             TARGET_INPUT="test" \
             ${size_env:+TARGET_SIZE="$size_env"} \
             "$@" \
             bash "$INIT_SCRIPT" >/dev/null 2>"$tmp/init.stderr"
     )
-    echo "$tmp/.fno/target-state.md"
+    echo "$tmp/space/target-state.md"
 }
 
 # Print the init script's own refusal when it wrote no state.
