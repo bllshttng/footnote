@@ -35,10 +35,10 @@ cli/src/fno/claims/cli.py:1378: L1 core -> L5 runtime / from fno.agents.truth_st
 # or opencode worker). tail_facts IS the transcript reader; there is no
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
-cli/src/fno/claims/roster.py:36: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
-cli/src/fno/claims/roster.py:42: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
-cli/src/fno/claims/roster.py:87: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-cli/src/fno/claims/roster.py:96: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/roster.py:34: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
+cli/src/fno/claims/roster.py:40: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
+cli/src/fno/claims/roster.py:86: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
+cli/src/fno/claims/roster.py:95: L1 core -> L5 runtime / from fno.agents.watchdog import (
 
 # Added 2026-09-10. The maintain abandoned-do-row leg's prover answers "is
 # this do row's session gone" from transcript truth: finished_with_the_tree

@@ -88,8 +88,10 @@ def note_recipients(
     self_session: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """Ordered, de-duplicated ``(address, why)`` pairs for one note."""
+    from fno.agents.registry import load_registry
     from fno.claims.core import holder_agent_name
 
+    registry_rows = load_registry()
     node_id = str(entry.get("id") or "")
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -97,9 +99,8 @@ def note_recipients(
     def add(address: Optional[str], why: str) -> None:
         if not address or address in seen:
             return
-        # A role holder is a marker, not an address; resolve it where the
-        # address is born. None means nobody is behind it: skip, not fail.
-        resolved = holder_agent_name(address)
+        # A role holder is a marker, not an address; None: nobody behind it.
+        resolved = holder_agent_name(address, registry_rows)
         if not resolved or resolved in seen:
             return
         if self_session and (resolved.endswith(self_session) or address.endswith(self_session)):

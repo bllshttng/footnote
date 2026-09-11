@@ -300,18 +300,17 @@ class _Row:
     session_id = None
 
 
-def test_holder_agent_name_resolves_both_role_prefixes(monkeypatch) -> None:
+def test_holder_agent_name_resolves_both_role_prefixes() -> None:
     from fno.claims.core import TARGET_SESSION_HOLDER_PREFIX, holder_agent_name
 
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [_Row()])
-    assert holder_agent_name("spawn-handover:t-ae54-worker") == "t-ae54-worker"
+    assert holder_agent_name("spawn-handover:t-ae54-worker", [_Row()]) == "t-ae54-worker"
     assert (
-        holder_agent_name(f"{TARGET_SESSION_HOLDER_PREFIX}01a08dab-7d3a")
+        holder_agent_name(f"{TARGET_SESSION_HOLDER_PREFIX}01a08dab-7d3a", [_Row()])
         == "t-ae54-worker"
     )
-    assert holder_agent_name("spawn-handover:bp-gone") is None
-    assert holder_agent_name("sess-plain-holder") == "sess-plain-holder"
-    assert holder_agent_name(None) is None
+    assert holder_agent_name("spawn-handover:bp-gone", []) is None
+    assert holder_agent_name("sess-plain-holder", []) == "sess-plain-holder"
+    assert holder_agent_name(None, []) is None
 
 
 def test_a_resolvable_role_holder_reaches_the_worker_behind_it(monkeypatch) -> None:

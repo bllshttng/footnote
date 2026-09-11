@@ -1002,25 +1002,24 @@ HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 
 
-def holder_agent_name(holder: Optional[str]) -> Optional[str]:
+def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
     """Resolve a claim holder to the agent behind it, or None.
 
-    None means no registry row stands behind the name: a skip, not a
-    failure.
+    None means no row in ``rows`` stands behind the name: a skip, not a
+    failure. ``rows`` is the caller's read; no agents import here.
     """
     if not holder:
         return None
-    from fno.agents.registry import load_registry
 
     if holder.startswith(HANDOVER_HOLDER_PREFIX):
         name = holder[len(HANDOVER_HOLDER_PREFIX):]
-        return name if any(row.name == name for row in load_registry()) else None
+        return name if any(row.name == name for row in rows) else None
     if holder.startswith(TARGET_SESSION_HOLDER_PREFIX):
         sid = holder[len(TARGET_SESSION_HOLDER_PREFIX):]
         row = next(
             (
                 r
-                for r in load_registry()
+                for r in rows
                 if sid in {
                     r.harness_session_id,
                     getattr(r, "session_id", None),
