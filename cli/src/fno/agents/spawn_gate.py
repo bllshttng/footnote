@@ -39,6 +39,19 @@ EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
 
+#: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
+#: HERE because these tokens are the gate's vocabulary; the CLI imports this
+#: set rather than re-spelling it. no_wait/no_wait_mutex_held surface only
+#: when an attempt runs no_wait (spawn --wait forces that), so the CLI
+#: deadline - not this gate's 600s queue - bounds the wait.
+WAITABLE_REFUSAL_REASONS = frozenset(
+    {
+        "load_backstop", "ram_floor", "cpu_instrument_unreadable",
+        "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
+        "max_live", "no_wait", "no_wait_mutex_held",
+    }
+)
+
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
@@ -2034,7 +2047,26 @@ def probe_capacity() -> dict:
             "every dispatch lane at cap: " + ", ".join(full),
             lanes=lanes,
         )
-    return {"verdict": "accepted", "lanes": lanes}
+    # An accepted verdict names the readings that admitted it: a trigger is
+    # only actionable beside its reading.
+    from fno.doctor_footprint import _admission_config
+
+    accepted: dict[str, object] = {
+        "verdict": "accepted",
+        "lanes": lanes,
+        "live_workers": c.slot_count,
+        "max_live": cap,
+        "share_low": admission.share_low,
+        "ceiling": admission.ceiling,
+        "load_15m": admission.load_15m,
+        "hard_max_load_per_cpu": _admission_config()[1],
+    }
+    if floor_gb > 0:
+        accepted["min_free_gb"] = floor_gb
+        avail = available_ram_gb()
+        if avail is not None:
+            accepted["available_ram_gb"] = avail
+    return accepted
 
 
 # ---------------------------------------------------------------------------

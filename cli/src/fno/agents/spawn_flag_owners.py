@@ -1,37 +1,35 @@
 """Every ``fno agents spawn`` flag, who owns it, and how its value arrives.
 
-``fno agents spawn`` carries 42 flags in one namespace, and nothing recorded
-which of them fno actually branches on. This table is that classification;
-``fno doctor lint spawn-flag-owners`` introspects the live parser against it,
-so a flag added without a row fails in the PR that adds it.
+``fno agents spawn`` carries 44 flags in one namespace, and nothing recorded which of them
+fno actually branches on. This table is that classification; ``fno doctor lint
+spawn-flag-owners`` introspects the live parser against it, so a flag added without a row
+fails in the PR that adds it.
 
-Three owners. The distinction is the ``--`` passthrough migration's own
-precondition: a flag fno only forwards is safe to move across the separator,
-a flag fno branches on is not.
+Three owners. The distinction is the ``--`` passthrough migration's own precondition: a
+flag fno only forwards is safe to move across the separator, a flag fno branches on is
+not.
 
-- ``fno`` branches on the value (routing, placement, identity, claim, gating).
-  Cannot move.
-- ``translated``: the harness owns the concept; fno owns only the per-harness
-  spelling map named by ``site``. Movable once the passthrough covers every
-  substrate (it is pane-only today). Two sites on one row means two copies of
-  one map, the ``--effort`` defect this module records.
-- ``forwarded``: fno passes the value through unread. Measured EMPTY: every
-  harness flag fno accepts, it also translates. An empty class is a finding,
-  not a gap, so the lint can still name it.
+- ``fno`` branches on the value (routing, placement, identity, claim, gating). Cannot move.
+- ``translated``: the harness owns the concept; fno owns only the per-harness spelling map
+  named by ``site``. Movable once the passthrough covers every substrate (it is pane-only
+  today). Two sites on one row means two copies of one map, the ``--effort`` defect this
+  module records.
+- ``forwarded``: fno passes the value through unread. Measured EMPTY: every harness flag fno
+  accepts, it also translates. An empty class is a finding, not a gap, so the lint can still
+  name it.
 
-``sources`` names how a value can reach a spawn, in the same words the spawn
-receipt prints at runtime on ``account_source``. Before the column, a config
-injection read as a caller decision.
+``sources`` names how a value can reach a spawn, in the same words the spawn receipt prints
+at runtime on ``account_source``. Before the column, a config injection read as a caller
+decision.
 
 - ``caller``: an explicit flag on this spawn's argv.
 - ``config``: a config gate injected it (``accounts.quota.pick_on_launch``).
 - ``env``: inherited from the spawning environment.
 - ``default``: nobody chose; the resolver's fallback.
 
-A new injection path lands together with its ``sources`` edit in the same
-diff. The harness axis keeps its own receipt wire values (``harness_source:``
-explicit / harness-inferred / builtin-default); they map onto it as caller /
-env / default.
+A new injection path lands together with its ``sources`` edit in the same diff. The harness
+axis keeps its own receipt wire values (``harness_source:`` explicit / harness-inferred /
+builtin-default); they map onto it as caller / env / default.
 """
 
 from __future__ import annotations
@@ -139,8 +137,9 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--session-phase": FlagOwner(FNO, "sessions-row lifecycle stamp"),
     "--force": FlagOwner(FNO, "spawn-gate bypass (cap and RAM floor)"),
     "--no-wait": FlagOwner(FNO, "spawn-gate queueing policy"),
+    "--wait": FlagOwner(FNO, "spawn-gate retry budget (CLI-side refusal-retry deadline)"),
+    "--prompt-file": FlagOwner(FNO, "long-prompt input file ('-' = stdin)"),
 }
 
-#: Growth ratchet, measured at merge: 42 flags. Falls as flags move across the
-#: ``--`` separator; rises only in a deliberate one-line diff a reviewer sees.
-SPAWN_FLAG_CAP = 42
+#: Growth ratchet, measured at merge: 44 flags (42 + --wait, --prompt-file).
+SPAWN_FLAG_CAP = 44
