@@ -124,9 +124,13 @@ fn start_daemon(home: &AgentsHome) -> DaemonChild {
 
 fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
     let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
     common::wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
@@ -140,10 +144,14 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
     let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
     }

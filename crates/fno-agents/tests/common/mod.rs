@@ -177,6 +177,12 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
     let mut cmd = std::process::Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        // The claim-audit journal resolves through this pin before the
+        // repo-root fallback (claim_events_path), so the daemon's claim
+        // audits land inside the test home instead of serializing on the
+        // checkout's shared .fno/events.jsonl - and out of the developer's
+        // live checkout entirely.
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
         .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     wait_for_path(&home.supervisor_sock(), std::time::Duration::from_secs(10));
