@@ -52,6 +52,10 @@ def _isolate(
     # checkout's own target-state.md instead of tmp_path's.
     from fno.paths import resolve_repo_root
 
+    # x-d211: pin the watcher-tick marker off by default so a control test
+    # cannot inherit a leftover value from the outer environment.
+    monkeypatch.delenv("FNO_PR_WATCH_ACTIVE_TICK", raising=False)
+
     # Stub the real install so tests never execute uv/pip.
     # We patch _discover_source to return a sentinel Path, and os.execvp + subprocess.run
     # to be no-ops. Monkeypatch BEFORE invoking the command (memory: feedback_default_arg_breaks_monkeypatch_isolation).
@@ -261,6 +265,63 @@ def test_update_without_source_rev_skips_marker_chain(
     assert "mv " not in joined
     # The canonical watcher refresh still rides the successful install (best-effort).
     assert "do pr watch refresh" in joined
+
+
+def _invoke_update_capturing_execvp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rev: str | None
+) -> str:
+    """Run `fno doctor update` with a pinned rev and return the exec'd shell line."""
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: rev)
+    marker = tmp_path / "state" / "installed-rev"
+    monkeypatch.setattr(update_mod, "_INSTALLED_REV_FILE", marker)
+
+    captured: dict[str, object] = {}
+
+    def _fake_execvp(file: str, args: list[str]) -> None:
+        captured["args"] = args
+
+    monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
+
+    result = runner.invoke(app, ["doctor", "update"])
+    assert result.exit_code == 0
+    return " ".join(captured.get("args") or [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_watcher_owned_update_skips_only_the_watcher_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP: an update inside a pr-watch tick (marker set) still installs and
+    refreshes the groom agent, but omits `do pr watch refresh` - that refresh
+    bootouts the job owning the running tick (x-d211)."""
+    monkeypatch.setenv("FNO_PR_WATCH_ACTIVE_TICK", "tick:12345")
+    joined = _invoke_update_capturing_execvp(tmp_path, monkeypatch, rev="cafef00d")
+
+    # Positive controls: the install itself and the groom refresh survive.
+    assert "cafef00d" in joined
+    assert "backlog groom --refresh-agent" in joined
+    # The executed refresh is absent. Match the argv-joined form (resolved
+    # binary prefix), not the bare phrase: the else-branch warning ("run by
+    # hand: fno do pr watch refresh; ...") legitimately still mentions it.
+    import shlex
+
+    from fno.pr_watch.cli import _resolve_fno_binary
+
+    executed_refresh = f"{shlex.quote(_resolve_fno_binary())} do pr watch refresh"
+    assert executed_refresh not in joined
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_ordinary_update_keeps_both_refreshes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP control: without the marker, both post-install refreshes remain."""
+    joined = _invoke_update_capturing_execvp(tmp_path, monkeypatch, rev=None)
+
+    assert "do pr watch refresh" in joined
+    assert "backlog groom --refresh-agent" in joined
 
 
 def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(

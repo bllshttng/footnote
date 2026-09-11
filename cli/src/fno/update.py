@@ -1512,11 +1512,18 @@ def update_command(
     # here costs nothing on a machine that does not use it.
     refresh_cmds: list[list[str]] = []
     try:
-        from fno.pr_watch.cli import _resolve_fno_binary
+        from fno.pr_watch.cli import _ENV_ACTIVE_TICK, _resolve_fno_binary
 
         _fno = _resolve_fno_binary()
+        # x-d211: an update running inside a pr-watch tick (marker set) skips
+        # the watcher refresh - it bootouts the job that owns the running
+        # tick. The next tick picks the new binary up on its own.
         refresh_cmds = [
-            [_fno, "do", "pr", "watch", "refresh"],
+            *(
+                []
+                if os.environ.get(_ENV_ACTIVE_TICK)
+                else [[_fno, "do", "pr", "watch", "refresh"]]
+            ),
             [_fno, "backlog", "groom", "--refresh-agent"],
         ]
         _await_bin = _fno
