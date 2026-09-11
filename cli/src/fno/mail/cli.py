@@ -113,9 +113,6 @@ mail_app = typer.Typer(
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 _OLD_PATH_WARNED = False
 
@@ -541,13 +538,8 @@ def _validate_kind(kind: str) -> str:
     raise typer.Exit(code=1)
 
 
-# ---------------------------------------------------------------------------
-# Notification helpers
-# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
 # Status helpers
-# ---------------------------------------------------------------------------
 
 def _daemon_loaded(project: str) -> DaemonState:
     import subprocess
@@ -722,9 +714,6 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     )
 
 
-# ---------------------------------------------------------------------------
-# Refs collection
-# ---------------------------------------------------------------------------
 
 def _collect_refs(
     ref_pr: Optional[int],
@@ -750,9 +739,6 @@ def _collect_refs(
     return refs
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def _is_job_name(name: Optional[str]) -> bool:
     """True when ``name`` is a ``node:<id>`` / ``pr:<n>`` job address."""
@@ -1677,9 +1663,7 @@ def cmd_lint(
     typer.echo(f"lint: {project} OK ({good} thread(s))")
 
 
-# ---------------------------------------------------------------------------
 # Output helpers
-# ---------------------------------------------------------------------------
 
 def _thread_to_dict(h: ThreadHandle) -> dict:
     return {
@@ -1719,9 +1703,7 @@ def _print_thread_summary(h: ThreadHandle) -> None:
     typer.echo(f"  {h.path}")
 
 
-# ---------------------------------------------------------------------------
 # Publish + cursor-consume (relocated from `fno agents`, ab-cee91152 Move B)
-# ---------------------------------------------------------------------------
 # `fno agents mail send` is the durable-first publish (the envelope lands on the bus
 # log before any live delivery is attempted). `fno agents mail unread`/`ack` are the
 # cursor-based consume over that log: unread lists messages addressed to me
@@ -2795,27 +2777,25 @@ def _codex_default_review_base(cwd: str | None) -> str | None:
     """Return the repository-declared origin default branch, never a guessed name."""
     if not cwd:
         return None
+    return _git_out(
+        cwd, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+    ) or None
+
+
+def _git_out(cwd: str | None, *args: str) -> str | None:
+    """One bounded `git -C <cwd>` read: stripped stdout on 0, None on failure."""
     import subprocess
 
     try:
         proc = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
+            ["git", "-C", cwd or ".", *args],
             capture_output=True,
             text=True,
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    ref = proc.stdout.strip()
-    return ref if proc.returncode == 0 and ref else None
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool, str]:
@@ -2847,16 +2827,7 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
         )
 
     def _git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", "-C", cwd, *args],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
+        return _git_out(cwd, *args)
 
     head = _git("rev-parse", "HEAD")
     if not head:
@@ -4047,13 +4018,7 @@ def cmd_send(
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
 
-        refs: dict[str, str] = {}
-        if ref_pr is not None:
-            refs["ref_pr"] = str(ref_pr)
-        if ref_node is not None:
-            refs["ref_node"] = ref_node
-        if ref_gate is not None:
-            refs["ref_gate"] = ref_gate
+        refs = _collect_refs(ref_pr, ref_node, ref_gate, None, None, None)
 
         from fno.inbox.store import generate_msg_id
 
@@ -4393,6 +4358,84 @@ def cmd_send(
             reason_tok += _live_miss_age_suffix(name)
         _warn_deferred(name, reason=result.reason)
         print(f"{result.msg_id} queued (durable) [{reason_tok}]")
+
+
+def _team_recipients(scope: str) -> list[tuple[str, str]]:
+    """Snapshot a fleet scope: sorted (name, identity), deduped by identity.
+    ``all``/``kings`` are live-row filters; else crown territory equality.
+    """
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+    from fno.harness_identity import session_identity_key
+
+    rows = load_registry()
+    if scope not in ("all", "kings"):
+        from fno.agents.crown import crown_scope_matches
+
+        rows = [r for r in rows if crown_scope_matches(getattr(r, "crown_scope", None), scope)]
+    pairs: dict[str, str] = {}
+    for row in rows:
+        if row.status in TERMINAL_STATUSES or not row.session_id:
+            continue
+        if scope == "kings" and row.crown_level is None:
+            continue
+        pairs.setdefault(session_identity_key(row.session_id), row.name)
+    return sorted((name, identity) for identity, name in pairs.items())
+
+
+@mail_app.command("team")
+def cmd_team(
+    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope>."),
+    message: str | None = typer.Argument(None, help="One body for every recipient."),
+    from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Recipients and receipts as JSON."),
+) -> None:
+    """Announce one body to a fleet scope via the ordinary named-send core.
+
+    Delivery is per recipient and irreversible: the body is validated once,
+    successes stand, and a partial failure exits 1 naming every unsent
+    recipient. Mail is never gated by a fleet incident stop.
+    """
+    from fno.agents.dispatch import dispatch_send
+    from fno.agents.self_stamp import stamp_from
+
+    if not message:
+        print("usage: fno agents mail team --scope <all|kings|<crown>> <message>", file=sys.stderr)
+        raise typer.Exit(code=2)
+    _refuse_forged_envelope(message)
+    _enforce_body_cap(message)
+    _enforce_style(message, allow_reason=None)
+    recipients = _team_recipients(scope)
+    if not recipients:
+        typer.secho(f"mail team: no live recipients in scope {scope!r}", err=True)
+        raise typer.Exit(code=1)
+
+    sent = queued = failed = 0
+    receipts: list[dict[str, object]] = []
+    for name, identity in recipients:
+        try:
+            result = dispatch_send(
+                name=name, message=message, provider=None, cwd=Path(os.getcwd()),
+                from_name=stamp_from(from_name),
+            )
+        except Exception as exc:  # noqa: BLE001 - one recipient never aborts the fleet
+            failed += 1
+            receipts.append({"name": name, "identity": identity, "error": str(exc)})
+            typer.secho(f"{name}: refused: {exc}", err=True)
+            continue
+        if result.delivery == "hosted":
+            sent += 1
+            receipt = f"{result.msg_id} delivered (hosted)"
+        else:
+            queued += 1
+            receipt = f"{result.msg_id} queued (durable)"
+        receipts.append({"name": name, "identity": identity, "msg_id": result.msg_id, "delivery": result.delivery})
+        print(f"{name}: {receipt}")
+    if json_out:
+        print(json.dumps({"scope": scope, "recipients": [i for _, i in recipients], "receipts": receipts, "sent": sent, "queued": queued, "failed": failed}))
+    else:
+        typer.echo(f"team scope={scope}: sent {sent}, queued {queued}, failed {failed}")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @mail_app.command("unread")
@@ -5211,143 +5254,10 @@ def cmd_drain_self(
                 )
 
 
-def _emit_drain_marker(
-    msg_id: str,
-    recipient: str,
-    address_form: str,
-    sender: "str | None",
-    reason: str = "printed",
-) -> None:
-    """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
+# Moved to fno.mail.hold (file budget); the ack/drain commands below import it.
+from fno.mail.hold import _emit_drain_marker, cmd_notify_self  # noqa: E402,F401
 
-    Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
-    state, and lets the dead-letter sweep prefer a positive marker over cursor
-    inference. ``reason`` distinguishes a message that was printed from one
-    skipped as a duplicate (W2), so the receipt never silently swallows a
-    message. Swallowed on any failure: the caller has already printed and acked
-    the message, so a missing receipt degrades to the cursor fallback rather than
-    failing the drain (AC9-ERR).
-    """
-    from fno.agents import events
-
-    try:
-        events.emit(
-            events.KIND_AGENT_MAIL_DRAINED,
-            msg_id=msg_id,
-            recipient=recipient,
-            address_form=address_form,
-            sender=sender or "",
-            reason=reason,
-        )
-    except (OSError, ValueError, TypeError):
-        pass
-
-
-@mail_app.command("notify-self", hidden=True)
-def cmd_notify_self() -> None:
-    """Write one atomic ``UserPromptSubmit`` mail payload, then acknowledge it.
-
-    The CLI owns the complete hook envelope so no shell capture can advance the
-    cursor before the JSON is ready. A write or flush failure leaves the cursor
-    unchanged; the next SessionStart or active-turn boundary can retry.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.config import load_settings
-    from fno.harness_identity import canonical_handle
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        print(f"error: notify-self: {exc}", file=sys.stderr)
-        return
-    if not ident.harness or not ident.session_id:
-        return
-
-    handle = canonical_handle(ident.session_id)
-
-    # Busy mode (x-481e). This hook fires on every UserPromptSubmit. For an idle
-    # hold that is the re-arm signal. For a wall hold it only keeps the policy
-    # live without moving its fixed deadline. A lapsed one is tidied here rather
-    # than on the send path, where the gate stays a pure read to avoid a
-    # re-entrant registry lock.
-    # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
-    # tidied must degrade to rendering the mail, never to swallowing this
-    # turn's delivery. Busy mode is a convenience layered over the bus, and it
-    # does not get to break the bus.
-    try:
-        from fno.mail import hold as hold_mod
-
-        if hold_mod.extend(handle) is not None:
-            return
-        hold_mod.tidy_lapsed(handle)
-    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
-        pass
-
-    lines: list[str] = []
-
-    unread = scan_unread(handle)
-    from fno.mail.reply_resolve import present_mail_ids
-
-    present = present_mail_ids()
-
-    def _dup(m: object) -> bool:
-        return present is not None and getattr(m, "id", "") in present
-
-    to_render = [m for m in unread if not _dup(m)]
-    if to_render:
-        lines.append(f"[fno agents mail] {len(to_render)} message(s) for {handle}:")
-        for message in to_render:
-            lines.extend(
-                (
-                    f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
-                    message.body.rstrip("\n"),
-                )
-            )
-        lines.append(
-            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
-        )
-
-    from fno.mail.landed import _defang_reminder, _sent_unclaimed, nag_line
-
-    ttl = load_settings().inbox.unclaimed_ttl
-    unclaimed = _sent_unclaimed(handle, ttl)
-    line = nag_line(unclaimed)
-    if line:
-        lines.append(line)
-
-    if not lines:
-        if unread:
-            advance_cursor(handle, unread[-1].id)
-            for m in unread:
-                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
-        return
-
-    try:
-        context = (
-            f"<system-reminder>\n"
-            f"{_defang_reminder(chr(10).join(lines))}\n"
-            f"</system-reminder>"
-        )
-        payload = json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": context,
-                }
-            },
-            ensure_ascii=False,
-        )
-        sys.stdout.write(payload + "\n")
-        sys.stdout.flush()
-    except (OSError, TypeError, ValueError):
-        return
-
-    if unread:
-        advance_cursor(handle, unread[-1].id)
-        for m in unread:
-            reason = "skipped-duplicate" if _dup(m) else "printed"
-            _emit_drain_marker(m.id, handle, handle, m.from_, reason)
+mail_app.command("notify-self", hidden=True)(cmd_notify_self)
 
 
 @mail_app.command("rebuild-render", hidden=True)

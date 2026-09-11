@@ -1597,3 +1597,121 @@ def test_codex_bridge_account_env_overlay_still_applies(monkeypatch) -> None:
         account_env={"CLAUDE_CONFIG_DIR": "/x"},
     )
     assert captured["env"].get("CLAUDE_CONFIG_DIR") == "/x"
+
+
+# ---------------------------------------------------------------------------
+# x-77db: stop/clear journey, every receipt carrying its exact generation
+# ---------------------------------------------------------------------------
+
+def _incident_binary() -> Path:
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    assert binary is not None, "the journey test needs the fno-agents binary"
+    return binary
+
+
+def _incident_run(binary: Path, *args: str, home: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(binary), "fleet-incident", *args],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FNO_AGENTS_HOME": str(home)},
+        timeout=30,
+    )
+
+
+def test_fleet_incident_journey_stop_gates_and_clear_reopens(tmp_path, monkeypatch):
+    """AC4 journey: clear -> admits; stop -> refuses without process creation
+    while mail still delivers; clear -> admits again. Every stop/clear/status
+    receipt names its exact generation, so absence never passes as evidence."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents-home"))
+    binary = _incident_binary()
+    home = tmp_path / "agents-home"
+    home.mkdir()
+    claims_root = tmp_path / "claims"
+    argv = ["--timeout", "30", "--claims-root", str(claims_root), "--", "/bin/echo", "journey-ok"]
+    run_env = {**os.environ, "FNO_AGENTS_HOME": str(home)}
+
+    # 1. Absent state is a positive default clear with source=default.
+    status = _incident_run(binary, "status", "--json", home=home)
+    assert status.returncode == 0, status.stderr
+    record = json.loads(status.stdout)
+    assert record["state"] == "clear" and record["generation"] == 0
+    assert record["source"] == "default"
+
+    # 2. A test invocation is admitted and really runs its argv.
+    admitted = subprocess.run(
+        [str(binary), "test-run", *argv],
+        capture_output=True, text=True, env=run_env, timeout=60,
+    )
+    assert admitted.returncode == 0, admitted.stderr + admitted.stdout
+    before_refusal = sorted(str(p) for p in claims_root.rglob("*")) if claims_root.exists() else []
+
+    # 3. Stop: the receipt carries generation 1.
+    stopped = _incident_run(binary, "stop", "--reason", "journey wedge", home=home)
+    assert stopped.returncode == 0, stopped.stderr
+    receipt = json.loads(stopped.stdout)
+    assert receipt["state"] == "stopped" and receipt["generation"] == 1
+
+    # 4. A FRESH process reads the stopped record at the same generation.
+    status = _incident_run(binary, "status", "--json", home=home)
+    assert status.returncode == 1
+    record = json.loads(status.stdout)
+    assert record["state"] == "stopped" and record["generation"] == 1
+
+    # 5. New test admission refuses (exit 90), emits suite_refused with the
+    # generation, and creates nothing: no claim, no process group.
+    refused = subprocess.run(
+        [str(binary), "test-run", *argv],
+        capture_output=True, text=True, env=run_env, timeout=60,
+    )
+    assert refused.returncode == 90, refused.stderr + refused.stdout
+    assert "suite_refused" in refused.stderr
+    assert "fleet-stop" in refused.stderr
+    assert "generation=1" in refused.stderr
+    after_refusal = sorted(str(p) for p in claims_root.rglob("*")) if claims_root.exists() else []
+    assert after_refusal == before_refusal, "a refused run must acquire no claim"
+
+    # 6. Mail still delivers while stopped (AC2-STOPPED): a team send through
+    # the ordinary core succeeds against the SAME stopped home.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.mail.cli import mail_app
+
+    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text, **_k: True)
+    write_registry([
+        AgentEntry(
+            name="red",
+            harness="claude",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
+            cwd="/tmp",
+            log_path="/tmp/red.log",
+            short_id="abcd1234",
+            status="live",
+        ),
+    ])
+    result = CliRunner().invoke(
+        mail_app, ["team", "--scope", "all", "still announcing", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["sent"] == 1 and payload["failed"] == 0, result.stdout
+
+    # 7. Clear is a positive record at the NEXT generation.
+    cleared = _incident_run(binary, "clear", "--reason", "journey resolved", home=home)
+    assert cleared.returncode == 0, cleared.stderr
+    receipt = json.loads(cleared.stdout)
+    assert receipt["state"] == "clear" and receipt["generation"] == 2
+
+    # 8. Admission reopens: the same invocation is admitted again.
+    admitted_again = subprocess.run(
+        [str(binary), "test-run", *argv],
+        capture_output=True, text=True, env=run_env, timeout=60,
+    )
+    assert admitted_again.returncode == 0, admitted_again.stderr + admitted_again.stdout

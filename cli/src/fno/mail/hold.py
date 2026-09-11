@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -639,3 +640,126 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         # the row still refuses is success on a no-op path.
         "policy_cleared": policy_cleared,
     }
+
+
+def _emit_drain_marker(
+    msg_id: str,
+    recipient: str,
+    address_form: str,
+    sender: "str | None",
+    reason: str = "printed",
+) -> None:
+    """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
+
+    Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
+    state; ``reason`` distinguishes printed from skipped-duplicate (W2).
+    Swallowed on any failure: a missing receipt degrades to the cursor fallback.
+    """
+    from fno.agents import events
+
+    try:
+        events.emit(
+            events.KIND_AGENT_MAIL_DRAINED,
+            msg_id=msg_id,
+            recipient=recipient,
+            address_form=address_form,
+            sender=sender or "",
+            reason=reason,
+        )
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def cmd_notify_self() -> None:
+    """Body of ``fno agents mail notify-self`` (hidden): one atomic
+    ``UserPromptSubmit`` mail payload, then acknowledge it.
+    """
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
+    from fno.bus.cursor import advance_cursor, scan_unread
+    from fno.config import load_settings
+    from fno.harness_identity import canonical_handle
+
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError as exc:
+        print(f"error: notify-self: {exc}", file=sys.stderr)
+        return
+    if not ident.harness or not ident.session_id:
+        return
+
+    handle = canonical_handle(ident.session_id)
+
+    # Busy mode (x-481e): the hook fires on every UserPromptSubmit - an idle
+    # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
+    # hold failure must degrade to rendering the mail, never swallowing this turn.
+    try:
+        if extend(handle) is not None:
+            return
+        tidy_lapsed(handle)
+    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
+        pass
+
+    lines: list[str] = []
+
+    unread = scan_unread(handle)
+    from fno.mail.reply_resolve import present_mail_ids
+
+    present = present_mail_ids()
+
+    def _dup(m: object) -> bool:
+        return present is not None and getattr(m, "id", "") in present
+
+    to_render = [m for m in unread if not _dup(m)]
+    if to_render:
+        lines.append(f"[fno agents mail] {len(to_render)} message(s) for {handle}:")
+        for message in to_render:
+            lines.extend(
+                (
+                    f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
+                    message.body.rstrip("\n"),
+                )
+            )
+        lines.append(
+            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
+        )
+
+    from fno.mail.landed import _defang_reminder, _sent_unclaimed, nag_line
+
+    ttl = load_settings().inbox.unclaimed_ttl
+    unclaimed = _sent_unclaimed(handle, ttl)
+    line = nag_line(unclaimed)
+    if line:
+        lines.append(line)
+
+    if not lines:
+        if unread:
+            advance_cursor(handle, unread[-1].id)
+            for m in unread:
+                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
+        return
+
+    try:
+        context = (
+            f"<system-reminder>\n"
+            f"{_defang_reminder(chr(10).join(lines))}\n"
+            f"</system-reminder>"
+        )
+        payload = json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            },
+            ensure_ascii=False,
+        )
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+    except (OSError, TypeError, ValueError):
+        return
+
+    if unread:
+        advance_cursor(handle, unread[-1].id)
+        for m in unread:
+            reason = "skipped-duplicate" if _dup(m) else "printed"
+            _emit_drain_marker(m.id, handle, handle, m.from_, reason)

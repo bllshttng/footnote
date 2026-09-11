@@ -258,6 +258,9 @@ RUST_CLIENT_VERBS = frozenset(
         "authorized-merge",
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
+        # Durable fleet incident breaker (x-77db): direct dispatch in client.rs
+        # (no daemon RPC); public surface `fno agents incident`. Parity-synced.
+        "fleet-incident",
     }
 )
 
@@ -293,7 +296,8 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     "gate",
     # Messaging verbs are not direct agents actions. They live below the
     # Python-owned `fno agents mail` subgroup and therefore never auto-route as
-    # direct send, inbox, or ack Rust verbs.
+    # direct send, inbox, or ack Rust verbs. `incident` (x-77db) relays argv.
+    "incident",
     # Epic ab-d3a1ae3e G2 Task 4.3: the stream-json observe surface. Pure Python;
     # polls the worker's stream.read_frames directly. No Rust client port (the
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
@@ -477,6 +481,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
+    "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

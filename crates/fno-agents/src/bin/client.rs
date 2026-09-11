@@ -42,6 +42,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive-authority",
     "evidence-gate",
     "finalize",
+    "fleet-incident",
     "graph-get",
     "grid",
     "help",
@@ -339,6 +340,16 @@ async fn run(args: Vec<String>) -> i32 {
     // `fno agents` verb, `cli/src/fno/test_runner.py` is its only caller.
     if verb == "test-run" {
         return fno_agents::test_run::run_test_run(&args[1..]);
+    }
+
+    // `fleet-incident`: the durable fleet incident breaker (x-77db, see
+    // fleet_incident.rs doc). Direct dispatch, no daemon RPC: a stop must be
+    // writable even when the daemon is the thing wedged. Python's `fno agents
+    // incident` adapter relays it; the admission gates call the library in
+    // process. Same `==` dispatch + ALL_CLIENT_ACTIONS registration as
+    // `test-run`, so the parity tests stay in sync.
+    if verb == "fleet-incident" {
+        return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc

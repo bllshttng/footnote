@@ -1,9 +1,7 @@
 """`fno agents` Typer subapp.
 
-``ask`` resolves its recipient and execs the Rust client binary; the Python
-ask adapters it once dispatched are gone (ported, parity frozen). ``list``
-and ``logs`` are live; ``ping`` remains a Phase 1 stub until its own user
-story lands.
+``ask`` resolves its recipient and execs the Rust client binary (the Python
+adapters are ported, parity frozen); ``list`` and ``logs`` are live.
 """
 
 from __future__ import annotations
@@ -263,6 +261,11 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
         return False
 
 
+def _claim_refused(action: str, common: dict[str, object]) -> dict[str, object]:
+    """The shared refusal verdict shape for an auto-deferred node."""
+    return {"verdict": "refused", "reason": action, **common}
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -330,11 +333,7 @@ def _spawn_guard_decision(
         "init_reached": _init_reached(node_id, observation.holder, cwd),
     }
     if observation.action in ("auto-deferred", "defer-failed"):
-        return {
-            "verdict": "refused",
-            "reason": observation.action,
-            **common,
-        }, 0
+        return _claim_refused(observation.action, common), 0
     if observation.blocks_dispatch:
         # A LIVE claim is benign dedup: somebody is genuinely building this and
         # a batch sweep must keep going. A SUSPECT one is a wedge - dead pid,
@@ -398,11 +397,7 @@ def _spawn_guard_decision(
                 # auto-deferred node `already-running` and hand back a
                 # force-release remedy that does nothing for it.
                 if observation.action in ("auto-deferred", "defer-failed"):
-                    return {
-                        "verdict": "refused",
-                        "reason": observation.action,
-                        **common,
-                    }, 0
+                    return _claim_refused(observation.action, common), 0
         if observation.blocks_dispatch:
             # A launch-window holder is NOT a wedge. Its claim carries the pid of
             # the `fno agents spawn` process, which exits the moment it has
@@ -460,7 +455,8 @@ def _spawn_guard_decision(
     #: claim below is the barrier that replaced it, so a failure to take it
     #: means something different on this path than on the ordinary one.
     reservation_recovered = False
-    try:
+
+    def _reserve_dispatch_slot() -> None:
         acquire_claim(
             res_key,
             holder,
@@ -468,6 +464,9 @@ def _spawn_guard_decision(
             ttl_ms=_parse_ttl(ttl),
             root=claims_root_for(res_key),
         )
+
+    try:
+        _reserve_dispatch_slot()
     except CLAIM_UNAVAILABLE:
         # A dead spawner's reservation blocks nothing. `spawn-cli:<pid>` is one
         # process that launches and exits, so it cannot come back under a new
@@ -513,13 +512,7 @@ def _spawn_guard_decision(
                    else {}),
             }, 0
         try:
-            acquire_claim(
-                res_key,
-                holder,
-                reason=f"bg-dispatch reservation for {node_id}",
-                ttl_ms=_parse_ttl(ttl),
-                root=claims_root_for(res_key),
-            )
+            _reserve_dispatch_slot()
         except CLAIM_UNAVAILABLE:
             return {
                 "verdict": "already-running",
@@ -739,9 +732,6 @@ def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
     return canonical
 
 
-# ---------------------------------------------------------------------------
-# Group 2, Task 4.3: `fno agents watch` — observe a held stream-json thread
-# ---------------------------------------------------------------------------
 
 
 def _agents_home_dir() -> Path:
@@ -977,6 +967,7 @@ def _parse_wait_seconds(raw: str) -> float:
     if not match:
         raise ValueError(raw)
     return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
+
 
 
 @agents_app.command("spawn")
@@ -4556,9 +4547,7 @@ def cmd_attach(
     refuse_without_binary("attach")
 
 
-# ---------------------------------------------------------------------------
 # Observability verbs: trace + resume (Tasks 3.3 / 3.4 / 3.5)
-# ---------------------------------------------------------------------------
 # Both commands live in their own modules so this CLI file stays focused
 # on shape + wiring. The cmd_<verb> functions are re-bound here as
 # Typer subcommands; tests can still monkeypatch cli.cmd_<verb> for
@@ -4575,9 +4564,7 @@ agents_app.command("resume")(_cmd_resume)
 agents_app.command("history")(history_command)
 
 
-# ---------------------------------------------------------------------------
 # Gate verb (Task 2.3): per-provider injection verification gate management
-# ---------------------------------------------------------------------------
 
 
 @agents_app.command("gate", hidden=True)
@@ -4710,3 +4697,27 @@ from fno.agents import (  # noqa: E402,F401
     peek_cli,
     transcript_reads,
 )
+
+
+@agents_app.command(
+    "incident",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def incident(ctx: typer.Context) -> None:
+    """Durable fleet incident breaker (x-77db).
+
+    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    """
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.secho(
+            "fno agents incident: fno-agents binary not found; `fno doctor update --rust` or set FNO_AGENTS_BIN",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    proc = subprocess.run([str(binary), "fleet-incident", *ctx.args])
+    raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)

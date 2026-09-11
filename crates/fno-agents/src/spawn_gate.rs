@@ -37,6 +37,40 @@ pub const EXIT_RAM_REFUSED: i32 = 77;
 /// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
 pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
+/// A durable fleet incident stop is active (x-77db) - refused before every
+/// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
+/// workers are untouched; only new admission is refused.
+pub const EXIT_FLEET_STOP: i32 = 80;
+/// The incident state exists but cannot be read: fail closed, and say this is
+/// a CANNOT-TELL refusal, never a stop verdict.
+pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 81;
+
+/// The first admission boundary of the native gate (x-77db): a durable
+/// incident stop or an unreadable incident state refuses before the
+/// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
+/// capacity math. Mail stays ungated so the incident can be announced and
+/// explained; `fno agents incident clear` reopens admission.
+fn fleet_incident_gate() -> Result<(), i32> {
+    match crate::fleet_incident::verdict() {
+        crate::fleet_incident::Verdict::Clear(_) => Ok(()),
+        crate::fleet_incident::Verdict::Stopped(record) => {
+            eprintln!(
+                "refused: fleet incident stop is active (generation {}, reason: {}); \
+                 in-flight workers continue, no new spawn is admitted. \
+                 Reopen with `fno agents incident clear --reason <text>`",
+                record.generation, record.reason
+            );
+            Err(EXIT_FLEET_STOP)
+        }
+        crate::fleet_incident::Verdict::Unavailable(detail) => {
+            eprintln!(
+                "refused: fleet incident state is unreadable ({detail}); \
+                 admission fails closed until the record is readable again"
+            );
+            Err(EXIT_FLEET_STOP_UNAVAILABLE)
+        }
+    }
+}
 
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
 const QUEUE_POLL: Duration = Duration::from_secs(2);
@@ -470,6 +504,10 @@ pub fn run_gate(
     substrate: &str,
     flags: GateFlags,
 ) -> Result<GateGuard, i32> {
+    // x-77db: the incident stop gates BEFORE the operator bypass below - a
+    // circuit breaker that a flag can bypass is not a circuit breaker.
+    fleet_incident_gate()?;
+
     // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     // precedent): test suites exercising spawn plumbing must not queue behind
     // the REAL machine's live workers, and it doubles as an operator escape.
@@ -1275,6 +1313,61 @@ mod tests {
 
     fn roots() -> Vec<String> {
         ROOTS.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// AC3-HP (Rust side): an active stop refuses at the FIRST boundary -
+    /// this call runs before `run_gate`'s `FNO_SPAWN_GATE=0` return, so the
+    /// bypass env cannot wave a spawn through.
+    #[test]
+    fn fleet_incident_gate_refuses_a_stopped_record() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let td = tempfile::TempDir::new().unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", td.path());
+        let path = crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(td.path()));
+        std::fs::create_dir_all(td.path()).unwrap();
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 3,
+            changed_at: "2026-09-11T00:00:00Z".into(),
+            changed_by: "op".into(),
+            reason: "wedged lock".into(),
+            source: Some("file".into()),
+        };
+        std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        assert_eq!(fleet_incident_gate(), Err(EXIT_FLEET_STOP));
+        match saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+    }
+
+    /// AC3-EDGE: a corrupt record is a CANNOT-TELL refusal with its own exit
+    /// code, never a clear and never a stop verdict.
+    #[test]
+    fn fleet_incident_gate_fails_closed_on_an_unreadable_record() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let td = tempfile::TempDir::new().unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", td.path());
+        std::fs::create_dir_all(td.path()).unwrap();
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(td.path())),
+            b"garbage",
+        )
+        .unwrap();
+
+        assert_eq!(fleet_incident_gate(), Err(EXIT_FLEET_STOP_UNAVAILABLE));
+        match saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
     }
 
     #[test]

@@ -197,6 +197,14 @@ impl AgentsHome {
         self.root.join("injection-gate.json")
     }
 
+    /// Machine-wide fleet incident breaker (`fleet-stop.json`, x-77db), next
+    /// to `registry.json`. Written by `fleet-incident stop|clear`, read by
+    /// every admission gate before its bypass branches; see
+    /// [`crate::fleet_incident`].
+    pub fn fleet_stop_json(&self) -> PathBuf {
+        self.root.join("fleet-stop.json")
+    }
+
     /// Durable roster-progress sidecar (x-cdc7 SECOND HALF): per-row git
     /// evidence (last commit sha/age, branch-ahead, PR number) keyed by row
     /// name, refreshed by the reconcile sweep alongside `registry.json`. A
