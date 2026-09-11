@@ -95,6 +95,7 @@ pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod fleet_incident;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_inventory;

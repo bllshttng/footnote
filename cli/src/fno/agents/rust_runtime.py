@@ -258,6 +258,12 @@ RUST_CLIENT_VERBS = frozenset(
         "authorized-merge",
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
+        # Durable fleet incident breaker (x-77db): stop/clear/status/check in
+        # one machine-wide file. Dispatched directly in client.rs (no daemon
+        # RPC); the public surface is the `fno agents incident` adapter and
+        # the admission gates call the crate directly, so this entry keeps
+        # the client.rs<->router parity test in sync and provides the help.
+        "fleet-incident",
     }
 )
 
@@ -477,6 +483,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
+    "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it; check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

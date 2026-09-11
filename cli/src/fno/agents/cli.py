@@ -1,9 +1,7 @@
 """`fno agents` Typer subapp.
 
-``ask`` resolves its recipient and execs the Rust client binary; the Python
-ask adapters it once dispatched are gone (ported, parity frozen). ``list``
-and ``logs`` are live; ``ping`` remains a Phase 1 stub until its own user
-story lands.
+``ask`` resolves its recipient and execs the Rust client binary (the Python
+adapters are ported, parity frozen); ``list`` and ``logs`` are live.
 """
 
 from __future__ import annotations
@@ -15,7 +13,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 
@@ -979,6 +977,25 @@ def _parse_wait_seconds(raw: str) -> float:
     return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
 
 
+# Shared option types for the spawn/ask pair: declared once so the two
+# commands cannot drift apart on the flags they both carry.
+FreshOpt = Annotated[
+    bool,
+    typer.Option(
+        "--fresh",
+        help="No-op alias: the worker cwd already defaults to the canonical root (x-85fe).",
+    ),
+]
+HereOpt = Annotated[
+    bool,
+    typer.Option(
+        "--here",
+        "--in-place",
+        help="Keep the worker in the caller's cwd instead of the canonical-root default.",
+    ),
+]
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -1080,17 +1097,8 @@ def cmd_spawn(
             "--permission-mode."
         ),
     ),
-    fresh: bool = typer.Option(
-        False,
-        "--fresh",
-        help="No-op alias: the worker cwd already defaults to the canonical root (x-85fe).",
-    ),
-    here: bool = typer.Option(
-        False,
-        "--here",
-        "--in-place",
-        help="Keep the worker in the caller's cwd instead of the canonical-root default.",
-    ),
+    fresh: FreshOpt = False,
+    here: HereOpt = False,
     role: str | None = typer.Option(
         None,
         "--role",
@@ -4659,47 +4667,8 @@ def yard(
 # harness against the (config-merged) row. Four verdicts and UNKNOWN never
 # acts: a missing binary or a timeout is UNKNOWN with its reason, never a
 # disagreement, because an absent instrument is not a measurement.
-harness_app = typer.Typer(
-    help="Instruments over the harness capability table.",
-    no_args_is_help=True,
-)
-
-
-@harness_app.command("probe")
-def harness_probe(
-    harness: str = typer.Argument(..., help="Harness name to probe."),
-    live: bool = typer.Option(
-        False, "--live", help="Allow behavioral probes (they spawn a scratch session)."
-    ),
-    write: bool = typer.Option(
-        False, "--write", help="Emit the config stanza for each disagreement, evidence + date beside it."
-    ),
-    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
-) -> None:
-    import json as _json
-
-    from fno.agents.capability_probe import probe_harness
-
-    report = probe_harness(harness, live=live, write=write)
-    if as_json:
-        typer.echo(_json.dumps(report, indent=2))
-    else:
-        if "error" in report:
-            typer.secho(f"probe refused: {report['error']}", err=True)
-            raise typer.Exit(code=1)
-        typer.echo(f"probe {harness} (map_version {report['map_version']})")
-        for field in report["fields"]:
-            typer.echo(
-                f"{field['verdict']:<11} {field['field']}: {field['detail']}"
-            )
-        for warning in report["warnings"]:
-            typer.secho(f"override warning: {warning}", fg=typer.colors.YELLOW, err=True)
-        if report["stanza"]:
-            typer.echo("")
-            typer.echo(report["stanza"])
-    if any(field["verdict"] == "DISAGREES" for field in report["fields"]):
-        raise typer.Exit(code=1)
-
+# Moved to fno.agents.harness_probe_cli (file budget); the composition stays.
+from fno.agents.harness_probe_cli import harness_app  # noqa: E402
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
 
@@ -4710,3 +4679,28 @@ from fno.agents import (  # noqa: E402,F401
     peek_cli,
     transcript_reads,
 )
+
+
+@agents_app.command(
+    "incident",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def incident(ctx: typer.Context) -> None:
+    """Durable fleet incident breaker (x-77db).
+
+    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    Relays the native `fno-agents fleet-incident` verb - exit code, stdout,
+    stderr - and decides nothing: the file is the authority. Mail is never gated.
+    """
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.secho(
+            "fno agents incident: fno-agents binary not found; `fno doctor update --rust` or set FNO_AGENTS_BIN",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=subprocess.run([str(binary), "fleet-incident", *ctx.args]).returncode)
