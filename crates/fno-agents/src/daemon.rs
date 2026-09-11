@@ -13781,14 +13781,14 @@ done
         sock
     }
 
-    /// Locate the cargo-built `fno-agents-worker` next to the test binary
-    /// (target/debug/deps/<test> -> target/debug/fno-agents-worker). `None` if it
-    /// is not built, so the e2e adopt test SKIPS rather than failing in an
-    /// environment where only the lib test target was compiled.
+    /// Locate the cargo-built `fno-agents-worker` (target/debug/fno-agents-worker,
+    /// via this crate's manifest dir). `None` if it is not built, so the e2e
+    /// adopt test SKIPS rather than failing in an environment where only the lib
+    /// test target was compiled. Final binaries stay in the checkout's target/
+    /// under build.build-dir, and CARGO_MANIFEST_DIR is worktree-local, so the
+    /// manifest-relative path holds from any test binary location.
     fn built_worker_bin() -> Option<PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?.parent()?; // deps -> debug
-        let cand = dir.join("fno-agents-worker");
+        let cand = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/fno-agents-worker");
         cand.exists().then_some(cand)
     }
 
