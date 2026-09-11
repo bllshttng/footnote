@@ -79,11 +79,11 @@ def cmd_ask(
         help="Read the prompt from a file ('-' = stdin) instead of the positional.",
     ),
 ) -> None:
-    """Send a message to a registered agent (follow-up only).
+    """Send a follow-up message to a registered agent.
 
-    Requires the agent to exist; unknown names exit 16 pointing at
-    ``spawn``. The reply prints verbatim on stdout. Runs on the Rust
-    runtime; this body keeps only the ``--to-project`` resolution.
+    The agent must exist; unknown names exit 16 pointing at ``spawn``.
+    The reply prints verbatim on stdout. Runs on the Rust runtime; this
+    body keeps only the ``--to-project`` resolution.
     """
     from fno import rust_binary
     from fno._flag_aliases import refuse_retired_provider

@@ -42,13 +42,10 @@ def cmd_peek(
 ) -> None:
     """Observe a peer read-only.
 
-    Resolves ``<handle>`` to a live session and tails its transcript
-    (claude/codex), preferring normalized status events when present. A
-    pane-substrate worker (the default substrate) has no transcript; peek
-    resolves it through the registry's mux ref and reads its pane. Never
-    writes anything the peer reads. Exit 13 = unknown peer, 1 = known peer
-    whose substrate has no reader or whose mux pane did not answer,
-    0 = observed (or "no activity yet").
+    Tails the transcript (claude/codex), preferring normalized status
+    events; a pane worker resolves through the registry's mux ref. Never
+    writes anything the peer reads. Exit 13 unknown peer, 1 no reader,
+    0 observed (or "no activity yet").
     """
     from fno.agents.peek import peek
     from fno.paths import state_dir
