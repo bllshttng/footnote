@@ -1301,9 +1301,10 @@ def _emit_merge_cleanup_request(
     merged 2026-09-06). Only against a gh-confirmed MERGED state, as the
     ritual holds."""
     from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
+    from fno.graph._reconcile import repo_slug_from_url
     from fno.worktree_reapable import is_linked_worktree
 
-    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName"], cwd)
+    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url"], cwd)
     meta = {}
     if res.ok:
         try:
@@ -1322,6 +1323,7 @@ def _emit_merge_cleanup_request(
         branch=branch,
         worktree=worktree,
         node_ids=bound_node_ids,
+        repo_slug=repo_slug_from_url(meta.get("url") or ""),
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
         candidate_row_names=rows_for_cleanup(worktree, bound_node_ids) if worktree else [],

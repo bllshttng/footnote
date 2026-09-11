@@ -7,7 +7,6 @@ crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::
 crossing	crates/fno-agents/src/authorized_merge.rs	556	let out = Command::new("fno")
 crossing	crates/fno-agents/src/bin/client.rs	1346	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	1399	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	2433	let mut cmd = std::process::Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/bin/client.rs	3819	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/client_verbs.rs	1277	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2943	let mut command = std::process::Command::new("fno");
@@ -24,6 +23,7 @@ crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text
 crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/gc.rs	833	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/finalize.rs	1880	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1936	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2308	let ok = Command::new("fno")

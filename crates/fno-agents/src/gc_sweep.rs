@@ -132,6 +132,36 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
+    /// The registry file could not be read this pass. Never a retirement on
+    /// a failed read; the tick names this instead of a quiet no_rows.
+    pub registry_unreadable: bool,
+}
+
+impl GcSummary {
+    /// Every `kept_*` bucket summed: the rows the pass judged but did not
+    /// retire. Zero alongside an empty `retired` means the pass classified
+    /// no row at all (the retire tick's `no_rows` skip reason).
+    pub fn kept_total(&self) -> usize {
+        self.kept_shared_tree.len()
+            + self.kept_live_descendants.len()
+            + self.kept_operator.len()
+            + self.kept_crowned.len()
+            + self.kept_not_spawn.len()
+            + self.kept_no_provenance.len()
+            + self.kept_node_conflict.len()
+            + self.kept_pr_contradicts.len()
+            + self.kept_planning_unclosed.len()
+            + self.kept_open_work.len()
+            + self.kept_active.len()
+            + self.kept_transcript_unresolved.len()
+            + self.kept_graph_unreadable.len()
+            + self.kept_open_do_row.len()
+            + self.kept_dirty.len()
+            + self.kept_unmerged.len()
+            + self.kept_unprobed.len()
+            + self.kept_no_receipt.len()
+            + self.kept_receipts.len()
+    }
 }
 
 /// One state file selected for deletion by the shared age policy.
@@ -938,7 +968,15 @@ pub(crate) fn run(
     if !dry_run {
         expire_reap_receipts(home, retain_days, &mut summary);
     }
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let (registry, registry_read) = match state::load_registry(&home.registry_json()) {
+        Ok(r) => (r, true),
+        Err(_) => (Default::default(), false),
+    };
+    if !registry_read {
+        // A read that failed is not a census of zero: the tick must render a
+        // failed sweep, not a quiet no_rows.
+        summary.registry_unreadable = true;
+    }
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }

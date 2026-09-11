@@ -152,7 +152,12 @@ def _cascade_close_contained(
         nid = e.get("id")
         if not isinstance(nid, str) or not nid:
             continue  # unidentifiable row: nothing to report, nothing to close
-        _apply_completion_fields(e)
+        # merged_at is set only when reconcile resolved MERGED from gh, so the
+        # child inherits the stamp instead of reading merge_status null (a
+        # null made the merge reaper hold the request the node shipped in).
+        _apply_completion_fields(
+            e, merge_status="merged" if merged_at is not None else None
+        )
         e["completion_note"] = note
         closed.append(nid)
     return closed

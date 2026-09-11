@@ -331,6 +331,7 @@ const FAILURE_SKIPS: &[&str] = &[
     "wake_failed",
     "sweep_failed",
     "notify_failed",
+    "registry_unreadable",
 ];
 
 /// What the reader holds about the daemon when it explains the rows. Computed

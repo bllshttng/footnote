@@ -597,24 +597,11 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
             seen.insert(root);
         }
     }
-    if let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) {
-        for line in contents.lines() {
-            let Ok(event) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if event.get("type").and_then(Value::as_str) != Some("merge_cleanup_requested") {
-                continue;
-            }
-            let Some(repo) = event
-                .get("data")
-                .and_then(|data| data.get("repo"))
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            if std::path::Path::new(repo).is_dir() {
-                seen.insert(repo.to_string());
-            }
+    // The request read spans the rotated generation too (merge_reap's reader),
+    // so a repo whose only request rotated aside stays in the roots.
+    for repo in crate::merge_reap::merge_cleanup_request_repos(home) {
+        if std::path::Path::new(&repo).is_dir() {
+            seen.insert(repo);
         }
     }
     seen.into_iter().collect()
@@ -2349,6 +2336,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     ctx.opts.agents_config_cwd.clone(),
                     ctx.home.events_jsonl(),
                     retire_interval,
+                    // Default prune flags only: an orphaned worker tab closes
+                    // on the retire cadence; a human's spent shells stay
+                    // opt-in via the manual verb (Locked Decision 6).
+                    || crate::gc::mux_tab_sweep(false, false),
                 );
                 // Worktree sweep + merge reaper (x-07dc). The sweep is the
                 // backstop for what the reaper cannot reach; the reaper is the

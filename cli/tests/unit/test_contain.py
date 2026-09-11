@@ -347,6 +347,37 @@ def test_cascade_close_contained_sets_completion_with_the_shipped_inside_note():
     assert "shipped inside o (PR #77)" in c1["completion_note"]
 
 
+def test_cascade_close_contained_stamps_merged_when_merged_at_is_set():
+    # AC4-HP: reconcile passes merged_at only after gh read MERGED, so the
+    # child records the ship; a merge reaper that re-reads merge_status no
+    # longer holds the request the node shipped in.
+    from fno.graph.cli import _cascade_close_contained
+
+    entries = [
+        {"id": "o", "pr_number": 77},
+        {"id": "c", "contained_in": "o"},
+    ]
+    closed = _cascade_close_contained(entries, "o", merged_at="2026-09-10T12:00:00Z")
+    assert closed == ["c"]
+    c = next(e for e in entries if e["id"] == "c")
+    assert c["merge_status"] == "merged"
+
+
+def test_cascade_close_contained_without_merged_at_leaves_merge_status_unset():
+    # AC4-EDGE: no merged_at means gh was not consulted on this path; the
+    # contract bars asserting a merge nobody resolved.
+    from fno.graph.cli import _cascade_close_contained
+
+    entries = [
+        {"id": "o", "pr_number": 77},
+        {"id": "c", "contained_in": "o"},
+    ]
+    closed = _cascade_close_contained(entries, "o")
+    assert closed == ["c"]
+    c = next(e for e in entries if e["id"] == "c")
+    assert c.get("merge_status") is None
+
+
 def test_strandable_contained_ids_names_open_nodes_of_a_done_owner():
     from fno.graph.cli import _strandable_contained_ids
 
