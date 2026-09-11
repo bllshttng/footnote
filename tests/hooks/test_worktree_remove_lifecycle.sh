@@ -482,11 +482,27 @@ LOCKDIR="$COMMON/fno-wt-sweep.lock"
 rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
 echo "$DEAD" > "$LOCKDIR/pid"
+# The winner must still HOLD when the contender makes its next decision: a
+# sweep that finishes and tears down inside the contender's retry budget lets
+# the second sweep legitimately acquire a FREE path, which reads as
+# proceeded=2 while mutual exclusion never broke. Slowing the acquirer's
+# fetch past the contender's whole decision window pins the interleaving the
+# case exists to test.
+RACESTUB=$(mktemp -d -t race-stub.XXXXXX)
+REALGIT="$(command -v git)"
+cat > "$RACESTUB/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-C" && "\$3" == "fetch" ]]; then
+    sleep 1
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$RACESTUB/git"
 OUT_A=$(mktemp -t race-a.XXXXXX)
 OUT_B=$(mktemp -t race-b.XXXXXX)
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
 RACE_A=$!
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
 RACE_B=$!
 wait "$RACE_A" 2>/dev/null
 wait "$RACE_B" 2>/dev/null
@@ -500,7 +516,7 @@ else
     fail "concurrent reclaim race" "proceeded=$PROCEEDED (want 1) A=[$(cat "$OUT_A")] B=[$(cat "$OUT_B")]"
 fi
 rm -f "$OUT_A" "$OUT_B"
-rm -rf "$LOCKDIR" "$S" "$BARE"
+rm -rf "$RACESTUB" "$LOCKDIR" "$S" "$BARE"
 
 # 5h2. ABA, staged deterministically - no timing, no concurrency. The
 # reclaimer observes a stale lock (dead pid), and between that observation
