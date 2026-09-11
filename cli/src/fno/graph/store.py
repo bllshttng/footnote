@@ -594,24 +594,6 @@ def identify_spawned_keepers() -> list[dict]:
     return rows
 
 
-def restart_spawned_keepers() -> list[dict]:
-    """Restart identified keepers so a backend config flip takes effect."""
-    rows = identify_spawned_keepers()
-    for row in rows:
-        try:
-            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
-        except (KeyError, StoreUnavailable):
-            continue
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and any(
-        store_socket_for(Path(row["graph"])).exists() for row in rows
-    ):
-        time.sleep(0.05)
-    for row in rows:
-        _client_for(Path(row["graph"]))
-    return identify_spawned_keepers()
-
-
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)

@@ -595,16 +595,6 @@ def state_roots() -> None:
     )
 
 
-def _dump_state_roots_baseline(repo_root: Path) -> str:
-    """Data lines only, for seeding the ratchet."""
-    return "\n".join(
-        sorted(
-            f"{rule}\t{rel}\t{key}\tunowned\tseeded from the measured census"
-            for rule, rel, key in _state_roots_findings(repo_root)
-        )
-    )
-
-
 # ---------------------------------------------------------------------------
 # hook-tombstones: a retired hook script stays one release as a no-op stub
 # ---------------------------------------------------------------------------

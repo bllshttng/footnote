@@ -4176,11 +4176,10 @@ def _starvation_receipts(
         ):
             # Terminal-ancestor arm (x-a31a): the structural cause outranks
             # incidental attributes - a plan-less node under a dead parent
-            # reads here, not plan-less, because writing a plan under a dead
-            # parent fixes nothing. Superseded/deferred ancestors are a subset
-            # of terminal, so this arm also owns the old selection-guards
-            # dead-ancestor classification. Contained, in-review, and batched
-            # nodes fall through so their existing classifications stand.
+            # reads here, not plan-less. Superseded/deferred are a subset of
+            # terminal, so this arm owns the old selection-guards
+            # dead-ancestor classification; contained, in-review, and batched
+            # nodes fall through so their classifications stand.
             reason = "dead-ancestor"
         elif not e.get("plan_path"):
             reason = "plan-less"
@@ -8003,65 +8002,19 @@ def _echo_freed(freed: list, owner_id: str) -> None:
     )
 
 
-def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
-
-    Called wherever a delivery unit permanently dies: remove and supersede. A
-    reversible defer keeps its folded delivery unit intact so undefer restores
-    the same one-PR scope. A permanently dead unit will never merge, so
-    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
-    its children, while ``selection_guards`` and ``fno do target init`` keep
-    refusing them: unbuildable, uncloseable, invisible to every sweep.
-
-    Un-contained, never closed: a unit dying is not a claim that its children
-    shipped.
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if isinstance(e, dict) and e.get("contained_in") == owner_id:
-            e.pop("contained_in", None)
-            nid = e.get("id")
-            if isinstance(nid, str) and nid:
-                freed.append(nid)
-    return freed
-
-
 # In graph/strand.py: the terminal-parent strand family (moved with the
-# close guards and self-heal that share its liveness predicate).
+# close guards, release twins, and self-heal that share its liveness predicate).
 from fno.graph.strand import (  # noqa: E402
     _is_live,
     _live_child_ids,
+    _release_contained_children,
+    _release_parented_children,
     _reparent_live_children,
     _reparent_receipt,
     _strandable_orphan_ids,
     _stranded_next_receipts,
     _sweep_reparent_stranded_orphans,
 )
-
-
-def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Clear ``parent`` on the owner's non-done children; return the ids freed.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("parent") != owner_id:
-            continue
-        if e.get("completed_at"):
-            continue  # done is truly terminal - keep parent as history
-        # Set None (key kept) rather than pop, matching the supported un-adopt
-        # path (`update --parent null`) and every other parent writer; readers
-        # use .get(), so a present-None reads identically to absent.
-        e["parent"] = None
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            freed.append(nid)
-    return freed
-
 
 # In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
@@ -8715,7 +8668,7 @@ def cmd_done(
     except Exception:
         cost_rollup = {}
 
-    # Stranded children of a forced close, echoed after the lock releases.
+    # Stranded children of a forced close, echoed after the lock.
     reparented_out: list = [[]]
 
     def mutator(entries):
@@ -10017,9 +9970,8 @@ def _reconcile_once(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
-    # Same self-heal role on the parent axis (x-a31a): gates the dry-run
-    # preview when no other leg has candidates. The mutator's strand sweep
-    # re-detects; this is the read-only preview set.
+    # Same self-heal role on the parent axis (x-a31a): gates the dry-run preview
+    # when no other leg has candidates; the mutator's sweep re-detects.
     strandable_orphans = _strandable_orphan_ids(entries) if _full_sweep else set()
     # A pending supersession whose successor closed outside this sweep is owed a
     # verdict nothing else will ever deliver. Gather its evidence BEFORE the

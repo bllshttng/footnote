@@ -47,6 +47,53 @@ def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
     return live
 
 
+def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
+
+    Called wherever a delivery unit permanently dies: remove and supersede. A
+    reversible defer keeps its folded delivery unit intact so undefer restores
+    the same one-PR scope. A permanently dead unit will never merge, so
+    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
+    its children, while ``selection_guards`` and ``fno do target init`` keep
+    refusing them: unbuildable, uncloseable, invisible to every sweep.
+
+    Un-contained, never closed: a unit dying is not a claim that its children
+    shipped.
+    """
+    if not owner_id:
+        return []
+    freed: list[str] = []
+    for e in entries:
+        if isinstance(e, dict) and e.get("contained_in") == owner_id:
+            e.pop("contained_in", None)
+            nid = e.get("id")
+            if isinstance(nid, str) and nid:
+                freed.append(nid)
+    return freed
+
+
+def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Clear ``parent`` on the owner's non-done children; return the ids freed.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    """
+    if not owner_id:
+        return []
+    freed: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("parent") != owner_id:
+            continue
+        if e.get("completed_at"):
+            continue  # done is truly terminal - keep parent as history
+        # Set None (key kept) rather than pop, matching the supported un-adopt
+        # path (`update --parent null`) and every other parent writer; readers
+        # use .get(), so a present-None reads identically to absent.
+        e["parent"] = None
+        nid = e.get("id")
+        if isinstance(nid, str) and nid:
+            freed.append(nid)
+    return freed
+
+
 def _reparent_live_children(
     entries: list[dict], dead_id: Optional[str]
 ) -> list[tuple[str, Optional[str]]]:
@@ -123,8 +170,9 @@ def _sweep_reparent_stranded_orphans(
     by_id = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    parents = {by_id[i].get("parent") for i in stranded}
     moved: list[tuple[str, Optional[str]]] = []
-    for pid in sorted({by_id[i].get("parent") for i in stranded} - {None}):
+    for pid in sorted(p for p in parents if isinstance(p, str)):
         moved.extend(_reparent_live_children(entries, pid))
     return moved
 
