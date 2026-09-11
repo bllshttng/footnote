@@ -1057,6 +1057,48 @@ def test_run_retask_exit_23_on_clear_reports_view_left_worker(monkeypatch):
     assert receipt["session_restamped"] is False
 
 
+def test_run_retask_exit_23_without_the_portal_marker_names_the_family(monkeypatch):
+    """AC4-ERR (x-3ea6): an identity refusal that is NOT the portal gate keeps
+    the family reason with the gate's own line as detail."""
+    import fno.agents.retask as retask
+
+    row = _claude_thread_row()
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    stderr_line = (
+        "fno mux pane send: pane 7 carries label bp-xbdb9-retask but no session "
+        "id resolves for it; re-address by session id through fno mux where"
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    _stub_claude_succession(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(rule_id="live_prompt_box"),
+    )
+
+    def run(command, **_kwargs):
+        if "send" in command:
+            return SimpleNamespace(returncode=23, stdout="", stderr=f"{stderr_line}\n")
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 7}]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="frame", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "identity_refused"
+    assert receipt["detail"] == stderr_line
+
+
 def test_run_retask_exit_23_after_clear_keeps_the_partial_state_truthful(monkeypatch):
     """AC4-ERR (x-3ea6): the gate refusing a later send must not unreport the
     /clear that already landed - cleared and the restamp stay in the receipt."""
@@ -1081,7 +1123,12 @@ def test_run_retask_exit_23_after_clear_keeps_the_partial_state_truthful(monkeyp
             text = command[command.index("--text") + 1]
             if text == "/clear":
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
-            return SimpleNamespace(returncode=23, stdout="", stderr="gate refused\n")
+            return SimpleNamespace(
+                returncode=23,
+                stdout="",
+                stderr="fno mux pane send: pane 7 is the portal for bp-xbdb9-retask "
+                "(attach deadbee1) but its child runs claude agents; the viewer left that session\n",
+            )
         if "ls" in command:
             return SimpleNamespace(
                 returncode=0,

@@ -57,8 +57,16 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         if text == "--portal" {
             let value = flag_value!("--portal");
             match value.parse::<u8>() {
-                Ok(n) => portal = Some(n),
-                Err(_) if value == "new" => placement.portal_new = true,
+                Ok(n) => {
+                    portal = Some(n);
+                    // Last --portal flag wins, so an explicit index clears a
+                    // `new` spelled earlier.
+                    placement.portal_new = false;
+                }
+                Err(_) if value == "new" => {
+                    placement.portal_new = true;
+                    portal = None;
+                }
                 Err(_) => {
                     eprintln!("fno mux thread: --portal takes an index 0-255 or new");
                     return EXIT_USAGE;
@@ -68,8 +76,14 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         if let Some(value) = text.strip_prefix("--portal=") {
             match value.parse::<u8>() {
-                Ok(n) => portal = Some(n),
-                Err(_) if value == "new" => placement.portal_new = true,
+                Ok(n) => {
+                    portal = Some(n);
+                    placement.portal_new = false;
+                }
+                Err(_) if value == "new" => {
+                    placement.portal_new = true;
+                    portal = None;
+                }
                 Err(_) => {
                     eprintln!("fno mux thread: --portal takes an index 0-255 or new");
                     return EXIT_USAGE;

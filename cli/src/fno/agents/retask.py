@@ -801,9 +801,16 @@ def run_retask(
             raise RetaskTransportError("pane_send_timeout") from exc
         if result.returncode == 23:  # EXIT_TARGET_IDENTITY_MISMATCH (mux_cli.rs)
             lines = [line for line in (result.stderr or "").splitlines() if line.strip()]
-            raise RetaskTransportError(
-                "view_left_worker", detail=lines[-1] if lines else None
+            detail = lines[-1] if lines else None
+            # The server's portal-refusal text names the left session; other
+            # identity refusals (unreconciled pane, addressed mismatch) keep
+            # the family name with the truthful detail.
+            reason = (
+                "view_left_worker"
+                if detail and "the viewer left that session" in detail
+                else "identity_refused"
             )
+            raise RetaskTransportError(reason, detail=detail)
         if text == "/clear" and submit and result.returncode == 0:
             clear_sent[0] = True
         return result.returncode == 0

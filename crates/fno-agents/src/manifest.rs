@@ -33,6 +33,11 @@ use crate::readiness::ScreenView;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// The rule-bordered composer's top-rule shape, compiled once (x-3ea6).
+static COMPOSER_TOP_RULE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^─{3,}( \S.* ─)?$").expect("static regex"));
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
 /// `all`/`any`/`not`) is refused while building the [`Gate`] so `evaluate`'s
@@ -176,10 +181,9 @@ fn prompt_box_body(text: &str) -> String {
     let Some(bottom) = lines.iter().rposition(|l| plain_rule(l)) else {
         return String::new();
     };
-    let top_rule = Regex::new(r"^─{3,}( \S.* ─)?$").expect("static regex");
     let Some(top) = lines[..bottom]
         .iter()
-        .rposition(|l| top_rule.is_match(l.trim()))
+        .rposition(|l| COMPOSER_TOP_RULE.is_match(l.trim()))
     else {
         return String::new();
     };
