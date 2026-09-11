@@ -53,7 +53,7 @@ def _patch_binary(monkeypatch, path) -> None:
 
 
 def test_command_relays_the_native_read(tmp_path, monkeypatch) -> None:
-    """The command hands scope, pinned journal path, and format to the binary."""
+    """The command hands scope, EVERY resolved journal path, and format to the binary."""
     from typer.testing import CliRunner
 
     from fno.king.cli import agents_king_app
@@ -86,7 +86,8 @@ def test_command_relays_the_native_read(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert seen["argv"][1] == "king-history"
     assert "--scope" in seen["argv"] and SCOPE in seen["argv"]
-    assert "--events-path" in seen["argv"] and str(journal) in seen["argv"]
+    assert seen["argv"].count("--events-path") >= 1
+    assert str(journal) in seen["argv"]
     assert "--json" in seen["argv"]
     assert '"matched": 0' in result.output
 
