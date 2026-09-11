@@ -1,6 +1,8 @@
-//! The `fno mux thread --portal` argument-surface tests, in a child module
-//! under the file-budget gate (the parent stays shrink-only).
-use super::*;
+//! The `fno mux thread --portal` argument-surface tests. An integration
+//! test: the mux_cli parent file is shrink-only under the file-budget gate.
+use std::ffi::OsString;
+
+use fno::mux_cli::{thread, EXIT_NO_SERVER, EXIT_USAGE};
 
 fn argv(a: &[&str]) -> Vec<OsString> {
     a.iter().map(OsString::from).collect()
