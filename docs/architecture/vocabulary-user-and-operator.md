@@ -1,5 +1,13 @@
 # Vocabulary: user and operator
 
+This document states what the two words mean in this repo, where each sense lives, and which senses stay spelled `operator` forever.
+
+## Is this page for you?
+
+You are about to rename, grep-and-replace, or otherwise "fix" one of the two words, or you are writing a new string that addresses the human. This page owns the vocabulary decision and the five-senses table. Following it keeps the authority guards, the wire values, and the shell-operator homonym intact.
+
+Not for: how the config wizard runs or how the inbox queue is acked. Those live in the configuration guide and the inbox help.
+
 Two words, two meanings, and the difference is load-bearing. This page is the one place that says what each word means, so nobody fixes a wording gripe with a repo-wide substitution.
 
 **User** is who we are talking to: the human on the other side. `config.user.name` is what the machine calls them, and `display_name()` in `cli/src/fno/user.py` is the one reader: configured name, else `git config user.name`, else "you". Set the name with `fno config set user.name <name>`. The first-run wizard asks for it. The human's own queue verb is `fno inbox user`. The pre-rename spelling `fno inbox operator` still works as a hidden alias.
