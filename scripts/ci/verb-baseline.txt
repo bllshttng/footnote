@@ -48,7 +48,8 @@ agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad
 annotate
 annotate list
 approvals
-autonomy
+autonomy provenance
+autonomy status
 backlog
 backlog advance !--continuation
 backlog done
