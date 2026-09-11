@@ -458,9 +458,8 @@ def tick() -> None:
             alarm_ok = False
             log.debug("pr-watch: SIGALRM unavailable outside main thread")
 
-        # x-d211: a bootout kills this process by signal, so without a handler
-        # the tick dies with no record and the readout blames a silent
-        # scheduler. Die BY the signal after writing the death record.
+        # x-d211: a bootout kills this process by signal; without a handler
+        # the tick dies with no record. Die BY the signal after recording.
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
             why = "self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed"
@@ -522,8 +521,7 @@ def tick() -> None:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
             # Which budget fired if the alarm does (x-d211): a cap below the
-            # remaining wall starves one phase; the wall itself is the tick
-            # deadline. A mid-tick self-kill is neither (SIGTERM handler).
+            # remaining wall starves one phase; the wall is the tick deadline.
             cap = _PHASE_CAP_S.get(name)
             wall_limited = ceiling_box["v"] is None or cap is None or cap >= left
             slice_s = max(1.0, slice_s)
@@ -1260,8 +1258,7 @@ def tick() -> None:
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
         # Scoped to the catch-up phase (x-d211): its sync shell inherits the
-        # marker, so the child `fno update` skips the refresh that bootouts
-        # THIS job mid-tick.
+        # marker, so the child `fno update` skips the job-bouncing refresh.
         prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
         os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
         try:
@@ -1296,8 +1293,8 @@ def tick() -> None:
             "phase": cut[0] if cut else current_tick_phase(),
             "pid": os.getpid(),
         }
-        # Name which timeout mechanism fired (x-d211): the wall deadline
-        # outranks a spent slice, because it is what ended the tick.
+        # Name which timeout mechanism fired (x-d211); the wall outranks a
+        # spent slice because it is what ended the tick.
         if timed_out:
             if "deadline_exceeded" in cut_whys.values():
                 end_data["why"] = "deadline_exceeded"

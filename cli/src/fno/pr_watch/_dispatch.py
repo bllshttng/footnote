@@ -678,8 +678,8 @@ def _run_tick(
     state = store.load()
 
     # x-d211: least-recently-polled first (missing cursor, then oldest stamp;
-    # discovery order breaks ties; corrupt stamps sort as missing) so a budget
-    # break resumes where the last tick stopped.
+    # discovery order breaks ties) so a budget break resumes where the last
+    # tick stopped; corrupt stamps sort as missing.
     def _poll_order(indexed):
         idx, cand = indexed
         try:
@@ -841,8 +841,8 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
-        # x-d211: after the cheap disposals - a parked or terminal prefix
-        # cannot spend the tick; only a candidate owing the rich read breaks.
+        # x-d211: after the cheap disposals; only a candidate owing the rich
+        # read is a legal break point.
         if (
             dispatch_deadline is not None
             and dispatch_deadline - time.monotonic()
@@ -885,8 +885,7 @@ def _run_tick(
                 )
                 entry = None
 
-            # x-d211: stamp the cursor on every successful rich observation;
-            # the final store.persist() carries it to the next tick's order.
+            # x-d211: stamp the cursor; the final persist carries it forward.
             if isinstance(entry, dict):
                 entry["last_polled_at"] = now_iso
 
