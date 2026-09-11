@@ -137,136 +137,52 @@ echo "$OUT" | grep -q "OAuth" && pass "oat token on tier-default-only route -> O
 OUT="$(run_hook "!!!bad model!!!" "not-a-url" "" 2>/dev/null)"; RC=$?
 [[ $RC -eq 0 ]] && pass "garbage env exits 0 (fail-open)" || fail "garbage env rc=$RC"
 
-# 8. Parity: the drift predicate is duplicated in
-#    skills/review/scripts/emit-attestation.sh, because a skill script may not
-#    source outside its own directory. Two copies of one predicate is the shape
-#    where a later edit fixes one and leaves the other, so drive BOTH over one
-#    env matrix and fail when they disagree - a third copy added later inherits
-#    this guarantee only by being added to the matrix, but a diverging edit to
-#    either existing copy is caught here.
+# 8. Hook drift matrix. The env rule used to live in TWO bodies held in parity
+#    here: hooks/attest-model.sh and the drift block in the review attestation
+#    emitter, kept as two copies because a skill script may not source outside
+#    its own directory. x-3f1d ported the attestation model stamp to the emit
+#    chokepoint, which reads the session's own transcript via resolve_self_model
+#    instead of the env, so the emitter no longer resolves a model at all and
+#    the parity harness had nothing left to hold equal. This file now pins the
+#    ONE remaining body: every row below drives hooks/attest-model.sh only.
 #
-#    The hook reports drift by warning. The emitter reports it by blanking the
-#    model it would otherwise stamp, so read its stderr summary: a non-empty
-#    ANTHROPIC_MODEL that surfaces as `model=unobserved` was judged inert.
-EMITTER="$REPO_ROOT/skills/review/scripts/emit-attestation.sh"
-if [[ ! -f "$EMITTER" ]]; then
-  fail "emitter not found at $EMITTER (parity matrix cannot run)"
-else
-  # Stub the event sink and CAPTURE ITS ARGV. Reading the emitter's stderr
-  # receipt would test the wrong layer: the receipt and the stored payload are
-  # what drifted apart in the first place (the summary printed "unobserved"
-  # while the row carried ""), so the assertion has to read what was actually
-  # handed to `event emit`.
-  #
-  # Discriminate on the verb, like tests/hooks/test_code_review_attest.sh's
-  # stub. The emitter shells `fno` for more than the event sink now (it clears
-  # the review hold once a verdict exists for the head), and a stub that
-  # captured EVERY call overwrote the payload under assertion with the last
-  # unrelated one - `.model` then read empty and a refused claim was
-  # indistinguishable from an absent one, which is the exact confusion the
-  # assertions below exist to refuse.
-  printf '#!/usr/bin/env bash\nif [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then printf "%%s\\n" "$@" > "%s/last-emit.txt"; fi\nexit 0\n' \
-    "$TMP" > "$TMP/fno-stub"
-  chmod +x "$TMP/fno-stub"
-
-  # A branch-checked scratch repo to emit from. The emitter refuses a detached
-  # HEAD (an empty branch field would mint a pre-branch-field event), and a CI
-  # checkout IS detached - $REPO_ROOT is not a place this emitter can run from.
-  # It also measures the diff under review and refuses a zero-line one, so the
-  # fixture carries a base commit on origin/main plus a real feature commit.
-  EMITREPO="$TMP/emitrepo"
-  git init -q -b scratch/emit "$EMITREPO"
-  git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-  git -C "$EMITREPO" update-ref refs/remotes/origin/main "$(git -C "$EMITREPO" rev-parse HEAD)"
-  echo body > "$EMITREPO/a.txt"
-  git -C "$EMITREPO" add a.txt
-  git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -qm feature
-
-  emitter_stored_model() { # args: MODEL BASE -> echoes the stored model value
-    local _m="$1" _b="$2"
-    rm -f "$TMP/last-emit.txt"
-    (cd "$EMITREPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
-      ANTHROPIC_MODEL="$_m" ANTHROPIC_BASE_URL="$_b" FNO="$TMP/fno-stub" \
-      bash "$EMITTER" code-review pass) >/dev/null 2>&1 || { echo "<error>"; return; }
-    [[ -f "$TMP/last-emit.txt" ]] || { echo "<no-emit>"; return; }
-    # argv is: event emit -t <kind> -s <source> -d <json>; take the last line.
-    tail -1 "$TMP/last-emit.txt" | jq -r '.model // "<missing>"'
-  }
-
-  emitter_drift() { # args: MODEL BASE -> echoes yes|no
-    local _m="$1" _b="$2"
-    [[ -z "$_m" ]] && { echo no; return; }   # no claim to refuse
-    case "$(emitter_stored_model "$_m" "$_b")" in
-      unobserved) echo yes ;;
-      *) echo no ;;
-    esac
-  }
-
-  hook_drift() { # args: MODEL BASE -> echoes yes|no
-    case "$(run_hook "$1" "$2" "" 2>/dev/null)" in
-      *"ROUTING DRIFT"*) echo yes ;;
-      *) echo no ;;
-    esac
-  }
-
-  # model|base|expected-drift
-  # The rows past the original seven are the surfaces the two copies judged
-  # differently before the collapse: bare tier aliases (the emitter's old
-  # claude* glob refused a coherent "opus"), mixed case (case-folded claim and
-  # host), padding, and a userinfo URL (the hook's old host parse kept the
-  # user@ prefix and missed the anthropic host under it).
-  MATRIX=(
-    "||no"
-    "claude-opus-4-8||no"
-    "glm-4.6||yes"
-    "glm-4.6|https://api.anthropic.com|yes"
-    "glm-4.6|https://eu.anthropic.com|yes"
-    "glm-4.6|https://open.bigmodel.cn/api/anthropic|no"
-    "glm-4.6|https://notanthropic.com/api|no"
-    "opus||no"
-    "fable||no"
-    "Claude-Haiku-4-5||no"
-    "opus ||no"
-    "glm-4.6|https://API.Anthropic.com|yes"
-    "glm-4.6|https://key@anthropic.com|yes"
-  )
-  for row in "${MATRIX[@]}"; do
-    IFS='|' read -r m b want <<<"$row"
-    got_hook="$(hook_drift "$m" "$b")"
-    got_emit="$(emitter_drift "$m" "$b")"
-    label="model='${m:-<unset>}' base='${b:-<unset>}'"
-    if [[ "$got_hook" == "$got_emit" && "$got_hook" == "$want" ]]; then
-      pass "drift parity ($label) -> $want"
-    else
-      fail "drift parity ($label): want=$want hook=$got_hook emitter=$got_emit"
-    fi
-  done
-
-  # 9. The three model states stay three distinct stored values. A refused claim
-  #    and an absent one must never share a value: an empty field would have two
-  #    explanations (nothing was set, versus something was set and rejected) and
-  #    a reader could not tell them apart. Assert the positive marker.
-  got="$(emitter_stored_model "" "")"
-  [[ "$got" == "" ]] && pass "no claim in env stores the empty string" \
-    || fail "no claim should store empty, stored '$got'"
-
-  got="$(emitter_stored_model "claude-opus-4-8" "")"
-  [[ "$got" == "claude-opus-4-8" ]] && pass "a coherent claim stores verbatim" \
-    || fail "coherent claim stored '$got'"
-
-  got="$(emitter_stored_model "glm-4.6" "")"
-  [[ "$got" == "unobserved" ]] && pass "a refused claim stores the literal unobserved" \
-    || fail "refused claim should store 'unobserved', stored '$got'"
-
-  # And the receipt must not re-collapse what the payload separates.
-  receipt="$(cd "$EMITREPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
-    FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
-  case "$receipt" in
-    *"model=unobserved"*) fail "receipt calls an ABSENT claim 'unobserved': $receipt" ;;
-    *"model=unset"*) pass "receipt distinguishes an absent claim from a refused one" ;;
-    *) fail "receipt has no recognisable model field: $receipt" ;;
+#    The rows past the original seven are the surfaces the old copies judged
+#    differently before the collapse: bare tier aliases, mixed case
+#    (case-folded claim and host), padding, and a userinfo URL (the hook's old
+#    host parse kept the user@ prefix and missed the anthropic host under it).
+hook_drift() { # args: MODEL BASE -> echoes yes|no
+  case "$(run_hook "$1" "$2" "" 2>/dev/null)" in
+    *"ROUTING DRIFT"*) echo yes ;;
+    *) echo no ;;
   esac
-fi
+}
+
+# model|base|expected-drift
+MATRIX=(
+  "||no"
+  "claude-opus-4-8||no"
+  "glm-4.6||yes"
+  "glm-4.6|https://api.anthropic.com|yes"
+  "glm-4.6|https://eu.anthropic.com|yes"
+  "glm-4.6|https://open.bigmodel.cn/api/anthropic|no"
+  "glm-4.6|https://notanthropic.com/api|no"
+  "opus||no"
+  "fable||no"
+  "Claude-Haiku-4-5||no"
+  "opus ||no"
+  "glm-4.6|https://API.Anthropic.com|yes"
+  "glm-4.6|https://key@anthropic.com|yes"
+)
+for row in "${MATRIX[@]}"; do
+  IFS='|' read -r m b want <<<"$row"
+  got_hook="$(hook_drift "$m" "$b")"
+  label="model='${m:-<unset>}' base='${b:-<unset>}'"
+  if [[ "$got_hook" == "$want" ]]; then
+    pass "hook drift ($label) -> $want"
+  else
+    fail "hook drift ($label): want=$want hook=$got_hook"
+  fi
+done
 
 echo ""
 echo "attest-model: $PASS passed, $FAIL failed"

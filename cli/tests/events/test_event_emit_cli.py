@@ -656,6 +656,85 @@ def test_attestation_refuses_the_ancestry_override_shape(
 
 
 # ---------------------------------------------------------------------------
+# model stamping: the caller gets no vote on review_attestation model either
+# ---------------------------------------------------------------------------
+
+
+def test_review_attestation_model_is_stamped_from_transcript(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No caller-supplied model -> the emit chokepoint stamps what the session's
+    own transcript says answered, via resolve_self_model."""
+    import fno.agents.self_stamp as self_stamp
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    events = _events_path(tmp_path)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(_attestation_data()),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(events.read_text().splitlines()[0])["data"]
+    assert data["model"] == "claude-opus-5"
+
+
+def test_review_attestation_unknown_model_drops_the_callers_claim(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable transcript means NOT OBSERVABLE: the caller's env claim
+    is dropped, never laundered into the record. Empty is the schema's contract
+    for that, so the event carries NO model key."""
+    import fno.agents.self_stamp as self_stamp
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "unknown")
+    events = _events_path(tmp_path)
+    payload = {**_attestation_data(), "model": "glm-5.2[1m]"}
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(payload),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(events.read_text().splitlines()[0])["data"]
+    assert "model" not in data
+
+
+def test_review_attestation_refuses_a_supplied_model_that_disagrees(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A --data model that disagrees with the transcript is REFUSED naming both,
+    never silently dropped - the positive marker that the caller gets no vote.
+    Assert the non-zero exit AND that no event line was appended, not merely
+    that stderr matched."""
+    import fno.agents.self_stamp as self_stamp
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    events = _events_path(tmp_path)
+    payload = {**_attestation_data(), "model": "glm-5.2[1m]"}
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(payload),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "glm-5.2[1m]" in result.stderr and "claude-opus-5" in result.stderr
+    assert not events.exists()
+
+
+# ---------------------------------------------------------------------------
 # review_coverage rides the global mirror: a hand emit reaches every reader
 # ---------------------------------------------------------------------------
 

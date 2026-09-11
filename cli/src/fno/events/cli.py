@@ -447,6 +447,7 @@ def emit(
         # process ancestry and raises on the override shape; a supplied --data
         # value that disagrees with the resolved one is refused too, never
         # silently dropped.
+        from fno.agents.self_stamp import resolve_self_model
         from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
 
         supplied = str(data_dict.get("attester_session_id") or "").strip()
@@ -468,6 +469,28 @@ def emit(
             raise typer.Exit(code=1)
         data_dict["attester_session_id"] = resolved_id
         data_dict["attester_witness"] = witness
+        # THE MODEL IS STAMPED HERE, SAME RULE AS THE ATTESTER. ANTHROPIC_MODEL
+        # names the model the session ASKED for; a non-Anthropic name over an
+        # unset base URL silently falls back to the primary model, so a claim
+        # read from env can name a model that never answered. resolve_self_model
+        # reads the session's own transcript - what actually answered - and
+        # floors to "unknown" when unobservable. An unresolvable transcript
+        # means NOT OBSERVABLE, so the caller's env claim is dropped, never
+        # laundered into the record; empty is the schema's contract for that.
+        observed = resolve_self_model()
+        supplied_model = str(data_dict.get("model") or "").strip()
+        if observed and observed != "unknown":
+            if supplied_model and supplied_model != observed:
+                typer.echo(
+                    f"error: model supplied as '{supplied_model}' but this session's "
+                    f"transcript reads '{observed}'. Drop the field; the emitter stamps it. "
+                    "No event emitted.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            data_dict["model"] = observed
+        else:
+            data_dict.pop("model", None)
 
     # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user
