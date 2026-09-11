@@ -104,6 +104,13 @@
 #      tree to join a session's store existence and locator - read-only, the
 #      same category as claude_roster.rs/client_verbs.rs/daemon.rs, from
 #      which this code moved. Footnote stores nothing there.
+#      scratch.rs (x-caf8) is the scratch-shape sweep: its whole subject IS
+#      Claude Code's own ~/.claude/jobs/<job>/tmp tree, read-only rglob for
+#      authored py/sh scratch; it writes only the global events journal
+#      under the state root. scratch_cli.py is its Python leaf, which only
+#      NAMES the default jobs dir in help text (the remedy-string category:
+#      model_routing.py et al). Footnote stores nothing under the harness
+#      dir in either file.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -225,6 +232,7 @@ cli/src/fno/graph/maintain.py
 cli/src/fno/inbox/drain.py
 cli/src/fno/observer/isolation.py
 cli/src/fno/paths.py
+cli/src/fno/scratch_cli.py
 cli/src/fno/provenance/resolver.py
 cli/src/fno/recovery.py
 cli/src/fno/relay/daemon.py
@@ -265,6 +273,7 @@ crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/receipt.rs
+crates/fno-agents/src/scratch.rs
 crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs
