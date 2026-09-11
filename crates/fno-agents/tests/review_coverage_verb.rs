@@ -644,3 +644,130 @@ esac"#,
     assert!(out["selector"].is_null());
     assert_eq!(out["branch"], "main");
 }
+
+// ── 2. spent budget (d-0fa92eb9) ─────────────────────────────────────────────
+
+const OLDER_ONE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OLDER_TWO: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// gh: OPEN PR #1 at HEAD, green CI, and the configured required bot's ONLY
+/// reviews are COMMENTED at two distinct OLDER commits. git: HEAD echo, with
+/// `diff --raw` failing, so both reviews read stale - the PR 1717 shape.
+fn spent_bins(dir: &Path) -> (PathBuf, PathBuf) {
+    let gh = make_script(
+        dir,
+        "gh",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"{HEAD}","mergeable":"MERGEABLE","baseRefName":"main"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-08-14T00:10:00Z","commit":{{"oid":"{OLDER_ONE}"}}}},{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-08-14T00:20:00Z","commit":{{"oid":"{OLDER_TWO}"}}}}],"comments":[]}}'
+  exit 0
+fi
+exit 1
+"#,
+        ),
+    );
+    let git = make_script(
+        dir,
+        "git",
+        r#"case "$*" in
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
+    );
+    (gh, git)
+}
+
+/// AC3-HP, the row: two stale rounds against a budget of two leave the
+/// emitted row covered, rounds_exhausted, and REVIEWED - the state word no
+/// longer folds back to unreviewed just because every verdict is stale.
+#[test]
+fn spent_budget_row_reads_reviewed_with_a_stale_required_bot() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "spent-row");
+    let bins = TempDir::new().unwrap();
+    let (gh, git) = spent_bins(bins.path());
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 0, "{json}");
+    let row = last_coverage(&project).expect("the verb emitted a row");
+    assert_eq!(row["rounds_exhausted"], serde_json::json!(true), "{row}");
+    assert_eq!(row["coverage"], serde_json::json!("covered"), "{row}");
+    assert_eq!(row["review_state"], serde_json::json!("reviewed"), "{row}");
+}
+
+/// AC3-HP, the loop: the same spent-budget shape terminates DonePRGreen -
+/// at the cap the stale required bot no longer holds the reviewed conjunct.
+#[test]
+fn spent_budget_with_a_stale_required_bot_terminates_green() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "spent-loop");
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        "---\nsession_id: sess-spent\nharness_session_id: sess-spent\ncreated_at: 2026-08-14T00:00:00Z\nattended: true\n---\n",
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &transcript,
+        serde_json::json!({"message": {"role": "assistant",
+            "content": "Done! <promise>MISSION COMPLETE</promise>"}})
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let bins = TempDir::new().unwrap();
+    let (gh, git) = spent_bins(bins.path());
+    let mut args: Vec<String> = vec![
+        "loop-check".to_string(),
+        "--state".to_string(),
+        manifest.display().to_string(),
+        "--transcript".to_string(),
+        transcript.display().to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--now".to_string(),
+        "2026-08-14T00:30:00Z".to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+    ];
+    args.extend(hermetic_tail());
+    std::env::set_var("FNO_NUDGE_DISABLED", "1");
+    std::env::set_var("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS", "0");
+    let (code, json_str) = run_loop_check_capture(&args);
+    assert_eq!(code, 0, "loop-check must allow: {json_str}");
+    let payload: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(
+        payload["termination_reason"].as_str(),
+        Some("DonePRGreen"),
+        "expected DonePRGreen at the spent budget: {json_str}"
+    );
+}
