@@ -548,6 +548,21 @@ def _hermetic_claim_reap(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_fleet_incident_home(monkeypatch, tmp_path):
+    """Default every test to an empty fleet-incident home.
+
+    The spawn gate reads the incident verdict through ``$HOME/.fno/agents`` on
+    every admission, and the HOME sandbox is ONE shared tmpdir per pytest
+    process, so one test that left a stopped record there refused every later
+    gate-touching test on that xdist worker. Same ambient-state-leak class as
+    ``_hermetic_merge_hold_gate`` above; closed at the reader, and a test that
+    exercises a real incident state pins ``FNO_AGENTS_HOME`` itself (monkeypatch
+    applies in order, so the test-local pin wins).
+    """
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents-home"))
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_merge_hold_gate(monkeypatch):
     """Default the plan-level merge hold gate to no hold.
 

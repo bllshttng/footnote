@@ -3433,7 +3433,10 @@ def test_team_stopped_fleet_still_delivers(tmp_path: Path, monkeypatch) -> None:
     _register_team_rows()
     injects = _team_inject_ok(monkeypatch)
 
-    agents_home = Path.home() / ".fno" / "agents"
+    # The incident record lives in a pinned home: the default home is the
+    # per-worker sandbox every other test in this process shares, and a
+    # stopped record there refuses every later spawn-gate test on the worker.
+    agents_home = tmp_path / "agents-home"
     agents_home.mkdir(parents=True, exist_ok=True)
     (agents_home / "fleet-stop.json").write_text(json.dumps({
         "version": 1,
@@ -3443,6 +3446,7 @@ def test_team_stopped_fleet_still_delivers(tmp_path: Path, monkeypatch) -> None:
         "changed_by": "operator",
         "reason": "wedged lock",
     }))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
 
     result = _team_invoke(monkeypatch, ["team", "--scope", "all", "we are stopped", "--json"])
 
