@@ -495,13 +495,17 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     }
     // Seat flock BEFORE touching the socket: the loser exits 3 and the
     // Python spawner keeps polling the incumbent rather than respawning.
-    if take_seat(&cfg.sock).is_none() {
+    // `_seat` is a named binding, the daemon's bind_supervisor_socket
+    // shape: the File holds the flock, so an `if take_seat(..).is_none()`
+    // temporary drops at the end of the condition and the lock guards
+    // nothing (x-252e).
+    let Some(_seat) = take_seat(&cfg.sock) else {
         eprintln!(
             "store keeper: {} is owned by a live keeper (lock held); exiting",
             cfg.sock.display()
         );
         std::process::exit(EXIT_SEAT_OWNED);
-    }
+    };
     // A keeper built before the seat lock can still own the path. With the
     // flock held, one short-bound Identify decides: an answerer is a live
     // incumbent, a refusal or silence is a dead leftover.
@@ -698,7 +702,16 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 {
                     last_seat_check = std::time::Instant::now();
                     if !seat_still_ours(&cfg.sock, sock_ino) {
-                        break;
+                        // The same verdict the pre-bind ladder spells 3, so
+                        // spell 3 here too: falling through reports a robbed
+                        // seat as success (the racer-0 exit-0 in the CI race).
+                        // The path is not ours; skip the inode-guarded
+                        // unlink below the loop as well.
+                        eprintln!(
+                            "store keeper: {} is owned by a live keeper (inode moved); exiting",
+                            cfg.sock.display()
+                        );
+                        std::process::exit(EXIT_SEAT_OWNED);
                     }
                 }
                 // Drift self-retire (x-f188 change 3): a keeper idling on a
@@ -735,7 +748,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ConnectionAborted
                     || e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            // Anything past WouldBlock/Aborted/Interrupted is a listener
+            // that can no longer accept: a broken keeper must not report
+            // success (worker.rs prints the Err and exits 2).
+            Err(e) => return Err(format!("accept failed on {}: {e}", cfg.sock.display())),
         }
     }
     // Unlink only what we still own: after a seat loss the path names the
