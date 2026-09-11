@@ -80,7 +80,11 @@ pub fn classify_node(
 
     let node_ship_ts =
         node.and_then(|n| str_field(n, "merged_at").or_else(|| str_field(n, "completed_at")));
-    let merged = node.is_some_and(|n| str_field(n, "merge_status") == Some("merged"));
+    // A merge timestamp is merge evidence even when the status field is stale
+    // or missing: current confirmed evidence wins over an old state value.
+    let merged = node.is_some_and(|n| {
+        str_field(n, "merge_status") == Some("merged") || str_field(n, "merged_at").is_some()
+    });
 
     let (class, delivered, confirmed, evidence) = if merged {
         ("merged", true, true, "graph_merge")
@@ -219,18 +223,16 @@ mod tests {
         })
     }
 
-    fn row(node: &str, terminal: &str) -> Map<String, Value> {
-        let r = json!({"graph_node_id": node, "termination_reason": terminal, "cost_usd": 1.5});
-        r.as_object().unwrap().clone()
+    fn row(node: &str, terminal: &str) -> Value {
+        json!({"graph_node_id": node, "termination_reason": terminal, "cost_usd": 1.5})
     }
 
-    fn node(id: &str, merge_status: Option<&str>) -> Map<String, Value> {
-        let n = json!({"id": id, "merge_status": merge_status});
-        n.as_object().unwrap().clone()
+    fn node(id: &str, merge_status: Option<&str>) -> Value {
+        json!({"id": id, "merge_status": merge_status})
     }
 
-    fn one(v: Map<String, Value>) -> Map<String, Value> {
-        v
+    fn one(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
     }
 
     #[test]
@@ -300,6 +302,19 @@ mod tests {
             let out = classify_node(Some(&n), "x-1", &[&r], v);
             assert_eq!(out["class"], "merged");
             assert_eq!(out["ship_ts"], "2026-09-10T00:00:00Z");
+        });
+    }
+
+    #[test]
+    fn a_merge_timestamp_wins_over_a_stale_status_value() {
+        with_vocab(|v| {
+            let n = one(
+                json!({"id": "x-1", "merge_status": "queued", "merged_at": "2026-09-10T00:00:00Z"}),
+            );
+            let r = one(row("x-1", "DonePRGreen"));
+            let out = classify_node(Some(&n), "x-1", &[&r], v);
+            assert_eq!(out["class"], "merged");
+            assert_eq!(out["confirmed"], true);
         });
     }
 
