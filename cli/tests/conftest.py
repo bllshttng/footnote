@@ -402,8 +402,13 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     """
     # Real-provider smoke tests (@pytest.mark.smoke, run nightly by
     # provider-smoke.yml) intentionally exec the real binary; never guard
-    # those (codex P2 review). Per-PR CI excludes `-m smoke`.
-    if request.node.get_closest_marker("smoke"):
+    # those (codex P2 review). Per-PR CI excludes `-m smoke`. Same for the
+    # real-codex boundary job, whose FNO_REAL_CODEX_PLUGIN_TEST=1 env is the
+    # test file's own explicit real-provider opt-in.
+    if (
+        request.node.get_closest_marker("smoke")
+        or os.environ.get("FNO_REAL_CODEX_PLUGIN_TEST") == "1"
+    ):
         return
 
     import shutil
