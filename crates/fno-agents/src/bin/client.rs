@@ -77,6 +77,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "review-summary",
     "restart",
     "resume",
+    "resume-argv",
     "review-start",
     "rm",
     "session-start-bytes",
