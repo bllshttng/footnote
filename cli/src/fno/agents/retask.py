@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from fno.agents.harness_map import (
-    DispatchResolveError,
-    capabilities,
-    dispatch_command,
-    normalize_command,
+    DispatchResolveError, capabilities, dispatch_command,
+    normalize_command, resolve_effective_verb,
 )
 from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.registry import (
@@ -47,8 +45,7 @@ class RetaskCoordinate:
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
-    # The node's next lifecycle verb (x-ebd2); profiles.<verb> supplies the
-    # tier this coordinate carries.
+    # The node's next lifecycle verb; profiles.<verb> supplies the tier.
     verb: str = "target"
 
 
@@ -182,13 +179,9 @@ _TRANSCRIPT_TAIL_BYTES = 1024 * 1024
 
 
 def _live_permission_mode(entry: AgentEntry) -> Optional[str]:
-    """The live worker's permission mode, read from its own transcript.
-
-    The registry row does not record the mode. Every mode change a claude
-    worker makes writes a ``permission-mode`` record, so the last one in the
-    transcript is the live mode. Anything else - another harness, a missing
-    transcript, no record - returns None, and the caller must fail closed.
-    """
+    """The live permission mode from the worker's own transcript: the last
+    ``permission-mode`` record wins. None (other harness, missing transcript,
+    no record) must fail closed at the caller."""
     if entry.harness != "claude":
         return None
     from fno.agents.dispatch import _mux_recipient_transcript
@@ -199,8 +192,7 @@ def _live_permission_mode(entry: AgentEntry) -> Optional[str]:
     try:
         with transcript.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            handle.seek(max(0, handle.tell() - _TRANSCRIPT_TAIL_BYTES))
             tail = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return None
@@ -244,8 +236,7 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    # The door answers the row NAME, not the session uuid (portal_reach.rs
-    # row_answers_key): the fno_id check above only guards the join below.
+    # The door answers the row NAME, not the session uuid; fno_id guards the join.
     door = invoke(["mux", "thread", "--server", session, entry.name], 30)
     if door.returncode:
         lines = (door.stderr or door.stdout or "").strip().splitlines()
@@ -282,16 +273,13 @@ def resolve_thread_viewport(
 
 
 def _resolve_node_verb(node: str) -> str:
-    """The node's next lifecycle verb from the x-ebd2 table; an abstain
-    (None) means ``target``. Raises DispatchResolveError on a rung the
-    table cannot answer - the caller refuses rather than guessing."""
-    from fno.agents.harness_map import resolve_effective_verb
+    """The node's next lifecycle verb; an abstain (None) means ``target``.
+    Raises DispatchResolveError on a rung the table cannot answer."""
     from fno.graph.ladder import plan_rung as node_plan_rung
     from fno.graph.load import load_graph
 
     rec = next(
-        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node),
-        None,
+        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node), None
     )
     verb, _note = resolve_effective_verb(
         verb=rec.get("dispatch_verb") if rec else None,
@@ -380,9 +368,8 @@ def detect_retask(
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 
-    # Compare the live worker, never presence: [agents.defaults] always
-    # resolves a permission_mode, so a presence test refused every retask
-    # (x-4d4d). A mode the transcript cannot confirm fails closed.
+    # Compare against the live worker, never mere presence: config defaults
+    # always resolve a permission_mode, and an unobservable mode fails closed.
     if target.permission_mode is not None:
         if live_permission_mode is None:
             return {"outcome": "spawn_required", "reason": "permission_mode_unobserved"}
@@ -528,8 +515,6 @@ def execute_retask(
         "target_submit_confirmed": False,
     }
     strategy = capabilities(entry.harness)["model_switch_strategy"]
-    desired_model = target.model or entry.model
-    desired_effort = target.effort or entry.effort
     if strategy["kind"] == "unsupported":
         return {**refusal, "reason": "unsupported_switch_strategy"}
     if source_preflight is not None:
