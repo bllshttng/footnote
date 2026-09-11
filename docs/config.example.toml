@@ -529,7 +529,7 @@ provider_outage_529_span_seconds = 120
 provider_outage_529_cross_session_window_seconds = 600
 # Maximum age in seconds for a persisted pane snapshot to vote; minimum and default 120.
 provider_outage_pane_freshness_seconds = 120
-# Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable.
+# Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable. Evidence naming a reset epoch still in the future stays admissible past this age, by name, so a multi-hour cap cannot age out of view.
 provider_outage_evidence_freshness_seconds = 600
 # Grace after a reset-bearing limit before the breaker may close; minimum and default 120.
 provider_outage_reset_grace_seconds = 120

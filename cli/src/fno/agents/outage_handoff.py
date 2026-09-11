@@ -408,6 +408,11 @@ def _revalidate_persisted_and_raw_evidence(
         session_id = snapshot.source.harness_session_id
         if not session_id:
             return EvidenceProof(False, 0, "source transcript identity is unknown")
+        from fno.adapters.providers.runtime_state import record_reset_timezone
+
+        # Revalidate with the SAME admission rule the breaker was built on: a
+        # reset-admitted stale record must re-collect here, or the fingerprint
+        # set can never match and every real handoff drifts.
         records, refusals = collect_transcript_evidence(
             [EvidenceIdentity(
                 row_id=request.source_row_id, harness=snapshot.source.harness,
@@ -416,6 +421,7 @@ def _revalidate_persisted_and_raw_evidence(
             )],
             now_s=now, transcript_path_for=transcript_path_for,
             evidence_freshness_s=evidence_freshness_s,
+            reset_timezone_for=record_reset_timezone,
         )
         raw = {record.fingerprint for record in records}.intersection(expected)
         if refusals or raw != transcript_expected:

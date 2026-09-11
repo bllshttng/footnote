@@ -172,18 +172,23 @@ def collect_transcript_evidence(
     transcript_path_for: Callable[[EvidenceIdentity], Path | None] | None = None,
     evidence_freshness_s: float = 600,
     entries_for: Callable[[str], "list[dict] | None"] | None = None,
+    reset_timezone_for: Callable[[str], str | None] | None = None,
 ) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
     """Read raw assistant records without consulting liveness projections.
 
     Dispatches on harness: only shapes with a parser here are read. A harness
     whose transcript shape has no parser is a NAMED refusal carrying the
     harness and the resolved path - never an empty result that reads as a
-    quiet, healthy fleet.
+    quiet, healthy fleet. The same law covers age: past-window evidence is a
+    named ``evidence_stale`` refusal, unless its body names a reset epoch
+    still in the future - a live cap however old the line is.
 
     ``entries_for(row_id)`` hands in an already-parsed transcript tail (the
     sweep tick reads each transcript ONCE and shares the parse between this
     collector and the tail classifier), so the file is never opened here.
-    None from it means unreadable and refuses exactly like a failed read."""
+    None from it means unreadable and refuses exactly like a failed read.
+    ``reset_timezone_for(account)`` supplies the account's reset_timezone
+    for naive reset stamps."""
     if transcript_path_for is None:
         from fno.provenance.observed import resolve_transcript_path
 
@@ -241,10 +246,13 @@ def collect_transcript_evidence(
                     "count": 1,
                 })
                 continue
-            records.extend(_outage_records_from_parsed(
+            row_records, row_refusals = _outage_records_from_parsed(
                 parsed, identity, now_s=now_s,
                 evidence_freshness_s=evidence_freshness_s,
-            ))
+                reset_timezone_for=reset_timezone_for,
+            )
+            records.extend(row_records)
+            refusals.extend(row_refusals)
             continue
         try:
             path = transcript_path_for(identity)
@@ -277,19 +285,36 @@ def collect_transcript_evidence(
                 continue
             if isinstance(raw, dict):
                 lines_parsed.append(raw)
-        records.extend(_outage_records_from_parsed(
+        row_records, row_refusals = _outage_records_from_parsed(
             lines_parsed, identity, now_s=now_s,
             evidence_freshness_s=evidence_freshness_s,
-        ))
+            reset_timezone_for=reset_timezone_for,
+        )
+        records.extend(row_records)
+        refusals.extend(row_refusals)
     return records, refusals
 
 
 def _outage_records_from_parsed(
     parsed: "list[dict]", identity: EvidenceIdentity, *, now_s: float,
     evidence_freshness_s: float,
-) -> "list[OutageEvidence]":
-    """Filter one row's parsed transcript records down to outage evidence."""
+    reset_timezone_for: Callable[[str], str | None] | None = None,
+) -> "tuple[list[OutageEvidence], list[dict[str, Any]]]":
+    """Filter one row's parsed transcript records down to outage evidence.
+
+    Past-window evidence is refused BY NAME unless its reset epoch
+    is still in the future: the freshness expired, not the fact, and a
+    capped fleet that went quiet must not read as healthy."""
+    from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+    tz: str | None = None
+    if reset_timezone_for is not None and identity.account:
+        try:
+            tz = reset_timezone_for(identity.account)
+        except Exception:  # noqa: BLE001 - a timezone miss must not mask the refusal
+            tz = None
     out: list[OutageEvidence] = []
+    refusals: list[dict[str, Any]] = []
     for raw in parsed:
         if not isinstance(raw, dict) or raw.get("type") != "assistant":
             continue
@@ -298,9 +323,6 @@ def _outage_records_from_parsed(
             continue
         observed_at = _record_epoch(raw.get("timestamp"))
         if observed_at is None:
-            continue
-        age = now_s - observed_at
-        if age < 0 or age > evidence_freshness_s:
             continue
         content = _message_text(message.get("content"))
         if not content:
@@ -314,6 +336,18 @@ def _outage_records_from_parsed(
             raw_status = _pane_status(content)
             if raw_status is None:
                 continue
+        reset_at = reset_epoch_from(content, tz)
+        age = now_s - observed_at
+        if age < 0 or age > evidence_freshness_s:
+            if not (age > 0 and reset_at is not None and now_s < reset_at):
+                refusals.append({
+                    "row_id": identity.row_id,
+                    "reason": "evidence_stale",
+                    "age_s": int(age),
+                    "reset_at": reset_at,
+                    "count": 1,
+                })
+                continue
         out.append(OutageEvidence(
             source="transcript",
             observed_at=observed_at,
@@ -325,8 +359,9 @@ def _outage_records_from_parsed(
             raw_status=raw_status,
             raw_kind="api_error" if is_error else "content",
             content=content,
+            reset_at=reset_at,
         ))
-    return out
+    return out, refusals
 
 
 def pane_read_via_mux(
@@ -368,9 +403,11 @@ def collect_pane_evidence(
     identities: Iterable[EvidenceIdentity], *, mux_by_row: dict[str, dict[str, Any]],
     now_s: float, snapshot_dir: Path,
     pane_read_fn: Callable[[str, Any], str],
+    reset_timezone_for: Callable[[str], str | None] | None = None,
 ) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
     """Persist exact mux screens before returning any pane-backed vote."""
     from fno.state.io import atomic_write
+    from fno.adapters.providers.error_taxonomy import reset_epoch_from
 
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     records: list[OutageEvidence] = []
@@ -407,6 +444,13 @@ def collect_pane_evidence(
             "utf-8", errors="ignore"
         ).strip()
         status = _pane_status(bounded)
+        pane_tz = None
+        if reset_timezone_for is not None and identity.account:
+            try:
+                pane_tz = reset_timezone_for(identity.account)
+            except Exception:  # noqa: BLE001 - a timezone miss must not mask the vote
+                pane_tz = None
+        pane_reset_at = reset_epoch_from(bounded, pane_tz)
         record = OutageEvidence(
             source="pane",
             observed_at=now_s,
@@ -421,6 +465,7 @@ def collect_pane_evidence(
             pane_id=str(pane_id),
             persisted=True,
             snapshot_at=now_s,
+            reset_at=pane_reset_at,
         )
         snapshot = {
             "observed_at": now_s,
@@ -611,6 +656,9 @@ class OutageEvidence:
     pane_id: str | None = None
     persisted: bool = True
     snapshot_at: float | None = None
+    # Resolved once at collect time through the account's reset_timezone, so
+    # the pure fold can tell a live cap from an expired one without config.
+    reset_at: float | None = None
 
     def __post_init__(self) -> None:
         if self.content_fingerprint:
@@ -664,8 +712,15 @@ def _validate(record: OutageEvidence, now_s: float, policy: OutagePolicy) -> str
             return "pane_not_persisted"
         if record.snapshot_at > now_s or now_s - record.snapshot_at > policy.pane_freshness_s:
             return "pane_snapshot_stale"
-    if record.observed_at > now_s or now_s - record.observed_at > policy.evidence_freshness_s:
-        return "evidence_stale"
+    age = now_s - record.observed_at
+    if age < 0 or age > policy.evidence_freshness_s:
+        # Same rule as the collector: a live reset epoch admits the record
+        # however old the line is; otherwise the refusal is named.
+        if not (
+            age > 0 and isinstance(record.reset_at, (int, float))
+            and now_s < float(record.reset_at)
+        ):
+            return "evidence_stale"
     if record.raw_kind == "content" and record.raw_status is None:
         return None
     if record.raw_kind != "api_error" or not isinstance(record.raw_status, int):
@@ -717,9 +772,9 @@ def _session_summaries(
             if record.raw_status == 429 and "fair usage policy" in record.content.lower():
                 terminal = record
         if terminal is not None:
-            from fno.adapters.providers.error_taxonomy import reset_epoch_from
-
-            reset_at = reset_epoch_from(terminal.content)
+            # Resolved at collect time with the account's reset_timezone; a
+            # naive stamp the fold cannot see still resolves here.
+            reset_at = terminal.reset_at
             sessions[row_id] = {
                 "state": "terminal", "kind": "fair_usage_policy", "consecutive": 1,
                 "reset_at": reset_at, "manual_restoration": reset_at is None,
@@ -777,10 +832,17 @@ def _breakers(
             if kind == "fair_usage_policy"
             else policy.overload_cross_session_window_s
         )
-        if (
-            len(distinct) < policy.quorum
-            or distinct[-1]["at"] - distinct[0]["at"] > window_s
-        ):
+        if len(distinct) < policy.quorum:
+            continue
+        # Votes sharing a still-future reset ARE one event: rows noticing
+        # the same live cap hours apart still describe one outage, so the
+        # spread window (the proxy for votes that cannot) yields.
+        one_live_cap = kind == "fair_usage_policy" and all(
+            isinstance(vote.get("reset_at"), (int, float))
+            and now_s < float(vote["reset_at"])
+            for vote in distinct
+        )
+        if not one_live_cap and distinct[-1]["at"] - distinct[0]["at"] > window_s:
             continue
         key = _breaker_key(provider, account, kind)
         previous = prior_by_key.get(key, {})
@@ -842,7 +904,10 @@ def fold_provider_outages(
         if reason:
             refusals.append(_refusal(record, reason))
             continue
-        known.setdefault(record.fingerprint, record)
+        # Fresh wins on a repeated fingerprint: only reset_at can differ,
+        # and a resolution made after reset_timezone was set must upgrade
+        # the record the journal carried, not stay shadowed by its None.
+        known[record.fingerprint] = record
         if record.source == "pane":
             pane_snapshots[record.fingerprint] = {
                 "fingerprint": record.fingerprint,
