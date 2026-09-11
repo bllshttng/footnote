@@ -18,7 +18,11 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
-from fno.agents.harness_map import PERMISSION_MODE_HELP
+from fno.agents.harness_map import (
+    PERMISSION_MODE_HELP,
+    spawn_seed_receipt_fields,
+    spawn_seed_receipt_fragment,
+)
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -2314,7 +2318,7 @@ def cmd_spawn(
                 receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
             if effective_message is not None:
-                receipt_obj["effective_message"] = effective_message
+                receipt_obj.update(spawn_seed_receipt_fields(effective_message))
             if pane_result.placement is not None:
                 # Server-authored exact-placement receipt (anchor/direction/
                 # fallback/squad/tab); never synthesized from the request.
@@ -2568,11 +2572,7 @@ def cmd_spawn(
             else ""
         )
         effective_message = getattr(result, "effective_message", None)
-        message_field = (
-            f', "effective_message": {json.dumps(effective_message)}'
-            if effective_message is not None
-            else ""
-        )
+        message_field = spawn_seed_receipt_fragment(effective_message)
         # provider/model appear only for an explicit route or model. provider is the
         # vendor, never a harness; `model` is the EFFECTIVE model (--model wins).
         receipt_provider = route_provider or recorded_provider
@@ -3820,82 +3820,12 @@ def cmd_orphans(
         raise typer.Exit(2)
 
 
-@agents_app.command("pane-identity", hidden=True)
-def cmd_pane_identity(
-    session_id: Optional[str] = typer.Option(
-        None,
-        "--session-id",
-        help="Mux session to check. Default: the resolved session.",
-    ),
-    session_legacy: Optional[str] = typer.Option(
-        None,
-        "--session",
-        hidden=True,
-        help="Deprecated alias for --session-id.",
-    ),
-    as_json: bool = typer.Option(
-        False, "--json", "-J", help="Emit the same content as JSON."
-    ),
-) -> None:
-    """Cross-check mux panes against registry rows, in both directions.
+# The pane-identity command moved to fno.agents.pane_identity (file
+# budget); the composition stays on the agents app here.
+from fno.agents.pane_identity import cmd_pane_identity  # noqa: E402
 
-    Every registry row with a mux ref must resolve to a pane whose fno_id
-    matches the row (a stale ref means the pane was re-homed, e.g. by a
-    resume); every pane whose argv carries fno's spawn signature must be
-    referenced by a row (a miss is an fno worker no fno surface can address).
-    The counts compared print on every run, so a zero-mismatch result is a
-    reading and not a silence. A mismatch is a READING, never a repair: this
-    verb mutates nothing, and it never mints an identity from argv.
+agents_app.command("pane-identity", hidden=True)(cmd_pane_identity)
 
-    Exit codes: 0 clean, 1 mismatch found, 2 an instrument (mux listing or
-    registry) could not be read.
-    """
-    import json as _json
-    import subprocess as _subprocess
-
-    from fno._flag_aliases import merge_deprecated_alias
-    from fno.agents.mux_spawn import _run_mux, resolve_mux_session
-    from fno.agents.reachability import (
-        pane_identity_crosscheck,
-        render_pane_identity_crosscheck,
-    )
-    from fno.agents.registry import load_registry
-
-    session_name = resolve_mux_session(
-        merge_deprecated_alias(
-            session_id,
-            session_legacy,
-            canonical_flag="--session-id",
-            legacy_flag="--session",
-        )
-    )
-    listing = _run_mux(
-        ["mux", "pane", "ls", "--session", session_name, "--json"], _subprocess.run
-    )
-    if listing.returncode != 0 or not (listing.stdout or "").strip():
-        detail = (listing.stderr or "").strip() or "pane ls returned non-zero"
-        print(f"pane-identity: mux listing unavailable: {detail}", file=sys.stderr)
-        raise typer.Exit(2)
-    try:
-        panes = _json.loads(listing.stdout)
-    except _json.JSONDecodeError as exc:
-        print(f"pane-identity: unparseable pane ls JSON: {exc}", file=sys.stderr)
-        raise typer.Exit(2)
-    if not isinstance(panes, list):
-        print("pane-identity: pane ls JSON was not a list", file=sys.stderr)
-        raise typer.Exit(2)
-    try:
-        rows = load_registry()
-    except Exception as exc:  # noqa: BLE001 - an unreadable registry is a broken instrument
-        print(f"pane-identity: registry unavailable: {exc}", file=sys.stderr)
-        raise typer.Exit(2)
-    result = pane_identity_crosscheck(panes, rows, session_name)
-    if as_json:
-        print(_json.dumps(result, indent=2))
-    else:
-        print(render_pane_identity_crosscheck(result))
-    if result["row_mismatches"] or result["pane_mismatches"]:
-        raise typer.Exit(1)
 
 
 def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
@@ -4738,7 +4668,12 @@ def cmd_rm(
 ) -> None:
     """Remove an agent: harness or mux session first, registry row after.
 
-    Per-harness teardown:
+    rm runs on the Rust runtime only: it requires the `fno-agents` binary,
+    and `FNO_AGENTS_RUNTIME=python` cannot force it onto Python. With a
+    binary installed, `auto` routing (the default) execs it directly, so
+    this body is reached only when no binary resolved.
+
+    Per-harness teardown (all on the Rust side):
 
     \b
       claude    bg session: drops the claude session record; pane session:
@@ -4753,48 +4688,26 @@ def cmd_rm(
     Your history is never removed here -- teardown drops the harness's
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
-    the orphan in the receipt. A live row is refused by the Rust runtime
-    (the default route; the Python runtime does not gate on liveness), and
-    a blocked row names model rotation as its remedy. Terminal rows need
-    no separate stop first.
-
-    This implementation refuses a live row on its own stored status and the
-    harness teardown call's exit code; it does not itself re-check the
-    claude roster (that reconciliation, claude only today (codex/opencode
-    are not yet covered), is ``fno-agents``'s Rust ``agent.rm`` RPC, which
-    ``auto`` routing prefers when the binary is installed -- self-review
-    finding: this docstring is what a Python-fallback or
-    ``FNO_AGENTS_RUNTIME=python`` invocation actually runs, so it must not
-    claim a check only the other implementation makes, for a harness that
-    check does not even cover). Do not tear a session down by hand: the
+    the orphan in the receipt. A live row is refused until the row is
+    provably gone: a non-claude pane worker is told to kill its pane and
+    re-run rm, and a claude row names what its roster read showed.
+    Terminal rows need
+    no separate stop first. Do not tear a session down by hand: the
     harness session record IS the resume handle, and dropping it directly
     spends that handle for nothing this command has not already done. If one
     is already orphaned, use the retained full ``harness_session_id`` with
-    ``fno agents adopt``. A short id is only a best-effort lookup while durable
-    harness evidence still resolves it.
-
-    A linked worktree is removed only when the shared guarded predicate says it
-    is clean, merged, and unowned; otherwise the row is removed and the
-    worktree receipt names the refusal.
+    ``fno agents adopt``. A linked worktree is removed only when the shared
+    guarded predicate says it is clean, merged, and unowned; otherwise the
+    row is removed and the worktree receipt names the refusal.
     """
-    from fno.agents.dispatch import DispatchAskError, rm_agent
+    from fno import rust_binary
+    from fno.agents.rust_runtime import refuse_without_binary, runtime_mode
 
-    try:
-        kwargs: dict[str, Any] = {"force": force}
-        if audit_actor is not None:
-            kwargs["audit_actor"] = audit_actor
-        if audit_reason != "operator-requested":
-            kwargs["audit_reason"] = audit_reason
-        if audit_request_id is not None:
-            kwargs["audit_request_id"] = audit_request_id
-        if audit_worktree_touched:
-            kwargs["audit_worktree_touched"] = True
-        if audit_reclaimed_bytes is not None:
-            kwargs["audit_reclaimed_bytes"] = audit_reclaimed_bytes
-        rm_agent(name, **kwargs)
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+    binary = rust_binary.resolve_installed_binary()
+    if runtime_mode() == "python" or binary is None:
+        # There is no Python rm to fall back to: the twin was deleted
+        # (d-e11b2b3e: one verb, one implementation). Refuse by name.
+        refuse_without_binary("rm")
 
 
 @agents_app.command("reconcile", hidden=True)
@@ -5063,4 +4976,4 @@ def harness_probe(
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
 
-from fno.agents import distress_reads as _dr, transcript_reads as _tr  # noqa: E402,F401
+from fno.agents import distress_reads, gate_reads, transcript_reads  # noqa: E402,F401

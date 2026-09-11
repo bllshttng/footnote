@@ -1538,6 +1538,16 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     except ValueError as exc:
         raise ValueError(f"{spec['plan_path']}: {exc}") from exc
 
+    # Request origin: intake keeps the plan's references as evidence,
+    # never claims a requester the plan did not declare.
+    from fno.graph.node_builder import stamp_request_origin
+
+    plan_sources = fm.get("sources") or []
+    origin, origin_evidence = stamp_request_origin(
+        source_kind=None, birth_channel="intake",
+        origin_evidence=("; ".join(map(str, plan_sources)) if plan_sources else f"plan:{spec['plan_path']}")[:300],
+    )
+
     node = {
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
@@ -1575,6 +1585,8 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "completion_note": None,
         "points": spec.get("points"),
         "source": "intake",
+        "request_origin": origin,
+        "origin_evidence": origin_evidence,
         "created_at": datetime.now(timezone.utc).isoformat(),
         # Mission context: only present when the plan was spawned by megatron.
         # Preserved verbatim so megawalk.extract_mission_env can read them.

@@ -391,7 +391,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             resolved.append(peer.session_id)
 
         pane_ls = subprocess.run(
-            [str(fno_bin), "mux", "pane", "ls", "--session", mux_session, "--json"],
+            [str(fno_bin), "mux", "pane", "ls", "--server", mux_session, "--json"],
             cwd=repo,
             text=True,
             capture_output=True,
@@ -404,7 +404,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         )
         assert pane["fno_id"] == identity
         located = subprocess.run(
-            [str(fno_bin), "mux", "where", identity, "--session", mux_session, "--json"],
+            [str(fno_bin), "mux", "where", identity, "--server", mux_session, "--json"],
             cwd=repo,
             text=True,
             capture_output=True,
@@ -934,7 +934,7 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     run_call = runner.calls[0]
     assert run_call[1:4] == ["mux", "pane", "run"]
     assert "--claim" in run_call  # agent panes opt into the writer claim
-    assert run_call[run_call.index("--session") + 1] == "main"
+    assert run_call[run_call.index("--server") + 1] == "main"
     assert run_call[run_call.index("--cwd") + 1] == str(tmp_path)
     # Mesh identity rides the env(1) wrapper after `--`.
     tail = run_call[run_call.index("--") + 1 :]
@@ -1035,7 +1035,7 @@ def test_ac1_hp_session_resolution_env_beats_default(
     )
     assert result.session == "work"
     run_call = runner.calls[0]
-    assert run_call[run_call.index("--session") + 1] == "work"
+    assert run_call[run_call.index("--server") + 1] == "work"
     # An explicit session beats the env.
     runner2 = FakeRunner()
     result2 = dispatch_spawn_pane(
@@ -3161,7 +3161,7 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     assert result.placement == placement, "receipt is server-authored, not synthesized"
     # The readiness gate probes the spawn's own session, not the default.
     wait_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "wait"])
-    assert "--session" in wait_call, "readiness probe targets the spawn's session"
+    assert "--server" in wait_call, "readiness probe targets the spawn's server"
     assert [r.name for r in load_registry()] == ["peer"], "a ready spawn writes the row"
     assert runner.kill_calls == [], "no reap on a successful readiness gate"
 
@@ -3191,7 +3191,7 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
     assert len(runner.kill_calls) == 1, "the transaction-owned pane was reaped"
     kill = runner.kill_calls[0]
     assert kill[1:4] == ["mux", "pane", "kill"]
-    assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
+    assert "--server" in kill and "main" in kill, "cleanup targets the spawn's server"
     assert "7" in kill, "the placed pane id is reaped"
     assert load_registry() == [], "no registry row on launch failure"
 
@@ -3320,7 +3320,7 @@ def test_registry_write_failure_reaps_exact_spawned_pane(
         )
 
     assert runner.kill_calls == [
-        ["fno", "mux", "pane", "kill", "--session", "main", "7"]
+        ["fno", "mux", "pane", "kill", "--server", "main", "7"]
     ]
     assert load_registry() == []
 

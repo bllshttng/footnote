@@ -457,6 +457,7 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+mod cancel_sentinel;
 mod watch_lease_gate;
 
 /// AC1-HP: promise with green PR -> DonePRGreen, exit 0, termination event.
@@ -955,47 +956,6 @@ fn ac1_fr_manifest_readonly() {
 
     let after = fs::read(&manifest_path).unwrap();
     assert_eq!(before, after, "manifest must not be mutated by any fire");
-}
-
-/// Cancel sentinel present (mtime >= created_at) -> Interrupted.
-#[test]
-fn cancel_sentinel_interrupted() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    let sentinel_path = cwd.join(".fno/.target-cancelled");
-
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-cancel", "2026-06-04T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-    fs::write(&sentinel_path, "").unwrap(); // mtime = now, after created_at
-
-    let mock = MockBins::green();
-
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T01:00:00Z",
-        &format!("--gh-bin={}", mock.gh.display()),
-        &format!("--git-bin={}", mock.git.display()),
-    ]);
-
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "allow");
-    assert_eq!(d.termination_reason.as_deref(), Some("Interrupted"));
 }
 
 /// Legacy manifest with status: COMPLETE -> allow + loop_check_legacy_manifest.

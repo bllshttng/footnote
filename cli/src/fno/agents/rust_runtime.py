@@ -19,6 +19,11 @@ installed binary is present). See :data:`AUTO_ROUTE_VERBS`.
 - ``python`` -- force the Python dispatch; never touch the binary.
 - unset / anything else -- ``auto`` (the default described above).
 
+Retired twins: ``ask`` and ``rm`` have NO Python implementation. In ``auto``
+they run on the binary (a missing binary refuses through
+:func:`refuse_without_binary`, never a silent Python leg); ``=python`` cannot
+force them and refuses by name; ``=rust`` is unchanged.
+
 To keep the default from surprising a *development* checkout, ``auto`` resolves
 only *installed* binaries (bundled wheel dir / launcher sibling / ``PATH``) and
 ignores the cargo dev target; a dev opts into the local build with
@@ -351,6 +356,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # it must never auto-route to the daemon.
     "newest-assistant-text",
     "distress-verdicts",  # x-3ecf: blocked_child's verdict lookup; no Rust port.
+    # The stop hook's read-only spawn-gate capacity probe. Pure Python (the
+    # gate lives in fno.agents.spawn_gate); no Rust port, so it must never
+    # auto-route to the daemon.
+    "gate-status",
     # ab-098967b4 P1: internal helper the Rust `list` render path shells out to
     # for the discovered-live-sessions lane. Pure Python (reads
     # ~/.claude/sessions via fno.agents.discover); no Rust port, so it
@@ -729,6 +738,31 @@ def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
         raise SystemExit(2)
 
 
+def _refuse_unfireable_seed(args: "Sequence[str]") -> None:
+    """Refuse a verb-shaped seed the codex session cannot expand, pre-route.
+
+    Beside ``_refuse_lost_verb_payload``: the Rust client execs the fleet's
+    default thread spawn, so a check inside ``cmd_spawn`` never sees it.
+    """
+    from fno.agents.harness_map import cannot_fire_refusal
+    from fno.agents.spawn_defaults import _seed_of
+
+    toks = list(args[1:])
+    seed = _seed_of(toks)
+    if not seed or not seed.strip().startswith(("/", "$fno:")):
+        return
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
+
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
+    refusal = cannot_fire_refusal(seed, harness)
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -928,10 +962,11 @@ def _rm_target_name(args: Sequence[str]) -> Optional[str]:
 def _gate_rm_at_seam(args: Sequence[str]) -> bool:
     """Warn that ``rm`` forfeits a resume handle; return False only on a declined prompt.
 
-    Runs at the routing seam so the ONE implementation covers both runtimes:
+    Runs at the routing seam so the ONE implementation covers every route:
     ``rm`` is in :data:`AUTO_ROUTE_VERBS`, so an installed binary serves it and
-    a notice living only in ``dispatch.rm_agent`` would be dead code for every
-    installed user.
+    the Python twin that once lived in ``dispatch`` is gone (one verb, one
+    implementation). A notice below the seam would only reach the no-binary
+    refusal this module also owns.
 
     A ``--help`` on the verb, or a call with no name, is left entirely alone:
     the real parser owns those, and warning about a reap that is not about to
@@ -1562,6 +1597,7 @@ def make_agents_group_cls() -> type:
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                         _refuse_lost_verb_payload(args)
+                        _refuse_unfireable_seed(args)
                     _export_worker_dirs_at_seam(args)
                     if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)

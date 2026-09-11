@@ -35,10 +35,10 @@ AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, prov
 
 ### Assert a positive marker, never an absence
 
-An absence has three explanations: the real outcome, "the instrument never ran", or a pipeline loss. In the third case, the instrument ran, it HIT, and the pipeline ate the output before anything read it. Require a marker only the outcome produces, pinned to the measured thing, not a matching word. A positive control validates the TOOL, not the TARGET. A green control aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the behavior's symbol: for a Python capability, use the function name, not the CLI spelling. Never truncate or post-process a search whose zero you intend to trust.
+An absence has three explanations: the real outcome, "the instrument never ran", or a pipeline loss. In the third case, the instrument ran, it HIT, and the pipeline ate the output before anything read it. Require a marker only the outcome produces, pinned to the measured thing, not a matching word. A positive control validates the TOOL, not the TARGET. A green control aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the behavior's symbol: for a Python capability, use the function name, not the CLI spelling. Never truncate or post-process a search whose zero you intend to trust. The read-side twin: two positive readers can disagree about one object, nothing naming which is authoritative. A verdict that did not confirm which store it read is the same false zero wearing a value.
 
-- specimens: 2026-08-23 to 08-30. Five false zeros, five causes: `head -6` truncation; the rtk wrapper; a quoted-token regex against bare tokens; zsh eating `:c` in an unquoted `$SHA:path`, so `git show` failed and `grep -c` printed a clean 0; and `stat` printing LOCAL time, where a hand-appended Z aged a 3-minute write to seven hours (print `%z`). 2026-09-06. A diff-RANGE fault, not a search fault: `git show <merge> -- path` returned 0 for a symbol its patch adds 3x, because a merge's combined diff drops hunks matching one parent, while `--stat` showed 112 changed lines in that file. Use `git diff <merge>^1 <merge>`. Control: grep the same fetch for a token you expect present.
-- graduates-to: An assert helper rejects absence-only success and zero-hit probes without a positive control. Honest exit codes answering the wrong question still need a verdict verb.
+- specimens: 2026-08-23 to 08-30, five false zeros with five causes. `head -6` truncation. The rtk wrapper. A quoted-token regex against bare tokens. zsh ate `:c` in an unquoted `$SHA:path`, so `git show` failed and `grep -c` printed a clean 0. `stat` printed LOCAL time, where a hand-appended Z aged a 3-minute write to seven hours (print `%z`). 2026-09-06. A diff-RANGE fault, not a search fault: `git show <merge> -- path` returned 0 for a symbol its patch adds 3x. A merge's combined diff drops hunks matching one parent, while `--stat` showed 112 changed lines in that file. Use `git diff <merge>^1 <merge>`. Control: grep the same fetch for a token you expect present. 2026-09-07. Rootless `claim_status("node:<id>")` read `free` while the routed call read `live`. Three production sites called a held node free off the empty repo space.
+- graduates-to: An assert helper rejects absence-only success and zero-hit probes without a positive control. Honest exit codes answering the wrong question still need a verdict verb. The read side: the node-occupancy reader gate fails a new reader until it registers with its covering control.
 - added: 2026-07-27
 
 ### A capability probe delivered over the mail bus can only ever return yes
@@ -120,7 +120,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding, and either no open finding or the configured rounds spent), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
 - *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
-- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `touch .fno/.target-cancelled`; king: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
+- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `/fno:cancel-target` (attributed). King: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
 
 ### State files & forbidden surfaces
@@ -198,12 +198,12 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 Everything the body already links is reachable from the paragraph that explains it. These are the docs nothing above points at:
 
-Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md)
+Backlog: [usage](docs/backlog-usage.md), [board ordering](docs/architecture/backlog-board-ordering.md), [triage](docs/backlog-triage.md)
 
-Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md)
+Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md), [target reliability](docs/architecture/target-reliability-core.md)
 
-Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
+Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
 
-Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
 
-Platform & ops: [fleet FAQ](docs/fleet-faq.md) · [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md) · [workspace restore](docs/architecture/workspace-restore.md) · [disposable deletes](docs/architecture/disposable-deletes.md) · [thread lanes](docs/architecture/thread-lanes.md) · [resource meter](docs/architecture/resource-meter.md)
+Platform & ops: [fleet FAQ](docs/fleet-faq.md), [reaping FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md)

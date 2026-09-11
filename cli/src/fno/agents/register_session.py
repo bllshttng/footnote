@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from fno.agents.reachability import Reachability
 
 from fno.agents import events
+from fno.agents.mux_server import mux_server_env
 from fno.agents.registry import heal_mux_ref, register_existing_session, restamp_harness_session_id
 from fno.agents.spawn_defaults import resolve_lane_vendor
 
@@ -133,11 +134,12 @@ def _predecessor_observation(
 
 
 def _heal_own_mux_ref(agent_self: str, harness: str, session_id: str) -> None:
-    """x-0345 W2: heal this worker's row to its pane. Pair from FNO_SESSION/FNO_PANE
-    (pane-only; non-numeric/negative ignored). Failure emits session_pane_rebound_failed,
-    success emits only on a verified write.
+    """x-0345 W2: heal this worker's row to its pane. Pair from FNO_SERVER/FNO_SESSION
+    (FNO_SERVER first, x-f209) with FNO_PANE (pane-only; non-numeric/negative
+    ignored). Failure emits session_pane_rebound_failed, success emits only on
+    a verified write. Silent resolver: a session-start hook never prints.
     """
-    session = (os.environ.get("FNO_SESSION") or "").strip()
+    session = mux_server_env().strip()
     pane_raw = (os.environ.get("FNO_PANE") or "").strip()
     if not session or not pane_raw:
         return

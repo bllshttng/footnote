@@ -434,7 +434,7 @@ if [[ "$FORCE" -eq 0 ]]; then
   fi
   if [[ -n "$FORCE_LIVE_EVIDENCE" ]]; then
     echo "archive-worktree: live target session ($FORCE_LIVE_EVIDENCE)" >&2
-    echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
+    echo "    Cancel it first (printf 'author: you\nreason: why\n' > $TARGET/.fno/.target-cancelled) or use --force." >&2
     exit 2
   fi
 fi

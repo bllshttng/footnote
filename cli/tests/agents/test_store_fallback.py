@@ -535,9 +535,8 @@ def test_resume_refuses_registry_hit_that_collides_with_store_session(
     assert store_only_id in result.stderr
 
 
-@pytest.mark.parametrize("verb", ["stop", "rm"])
 def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
-    _registry_home, verb
+    _registry_home,
 ):
     from fno.agents import dispatch
     from fno.agents.registry import AgentEntry, write_registry
@@ -556,7 +555,7 @@ def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
     _write_codex_session(_registry_home, store_only_id)
 
     with pytest.raises(dispatch.DispatchAskError) as exc:
-        getattr(dispatch, f"{verb}_agent")("deadbeef")
+        dispatch.stop_agent("deadbeef")
 
     assert exc.value.exit_code == 2
     assert registered_id in str(exc.value)

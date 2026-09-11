@@ -663,3 +663,24 @@ def _no_review_coverage_recompute(monkeypatch):
     monkeypatch.setattr(
         _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "disabled in test")
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_evidence_gate(monkeypatch):
+    """Hermetic default for the evidence gate.
+
+    `fno.decide.check_ruling_evidence`/`note_evidence` transport to the
+    `fno-agents evidence-gate` verb through `fno.rust_binary.verb_call`. In
+    the test environment that resolver can find a real installed binary, so
+    an unstubbbed gate would run a foreign implementation of the claim
+    checker. The default answers pass-through (no claim); tests that need a
+    specific verdict install their own responder on
+    `fno.decide._evidence_gate`.
+    """
+
+    def _passthrough(payload):
+        return {"ok": True, "rows": None, "claims": None}
+
+    from fno import decide
+
+    monkeypatch.setattr(decide, "_evidence_gate", _passthrough)

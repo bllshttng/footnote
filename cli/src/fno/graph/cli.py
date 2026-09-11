@@ -25,10 +25,20 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
+from fno.decide import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     _build_backlog_node,
     _session_provenance,
+)
+from fno.graph.node_builder import (
+    DESCRIPTION_HELP,
+    ENCOUNTER_EVIDENCE_HELP,
+    ORIGIN_EVIDENCE_HELP,
+    RELATED_HELP,
+    SOURCE_KIND_HELP,
+    SOURCE_NODE_HELP,
+    TAG_HELP,
 )
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
@@ -965,6 +975,28 @@ def _validate_priority_or_exit(priority: str, *, blocks_everything: bool = False
         raise typer.Exit(code=2)
 
 
+def _require_node_id(task_id: str) -> None:
+    """The shared node-id gate: one refusal text for every verb that takes one."""
+    from fno.graph._constants import has_node_id_prefix
+
+    if has_node_id_prefix(task_id):
+        return
+    typer.echo(
+        f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+    )
+    raise typer.Exit(code=1)
+
+
+def _require_nodes(entries: "list[dict]", ids: "list[str]") -> None:
+    """The shared missing-node gate for the multi-id verbs."""
+    from fno.graph._intake import _find_node
+
+    missing = [tid for tid in ids if _find_node(entries, tid) is None]
+    if missing:
+        typer.echo(f"Error: feature(s) not found: {', '.join(missing)}", err=True)
+        raise typer.Exit(code=1)
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -988,6 +1020,7 @@ def _create_node_impl(
     source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
+    origin_evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1114,6 +1147,8 @@ def _create_node_impl(
             tags=resolved_tags,
             source_node=resolved_source_node,
             source_kind=source_kind,
+            origin_channel="idea",
+            origin_evidence=origin_evidence,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1295,47 +1330,23 @@ def cmd_add(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
 ) -> None:
     _create_node_impl(
@@ -1360,6 +1371,7 @@ def cmd_add(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1490,47 +1502,23 @@ def cmd_idea(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
@@ -1741,6 +1729,7 @@ def cmd_idea(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -2082,6 +2071,8 @@ def cmd_decompose(
                     difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    origin_channel="decompose",
+                    origin_evidence=f"parent:{epic_resolved_id}",
                     known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]
@@ -2932,6 +2923,7 @@ def cmd_note(
         False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
+    read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
@@ -2940,15 +2932,35 @@ def cmd_note(
     king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
     fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
+    from fno.decide import (
+        UnmeasuredClaimError,
+        UnresolvableCitationError,
+        note_evidence,
+        unmeasured_note_warning,
+        warn_if_note_is_long,
+    )
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
+    from fno.rust_binary import VerbUnavailable
 
     text = text.strip()
     if not text:
         typer.echo("Error: note text is empty", err=True)
         raise typer.Exit(code=1)
 
-    note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    # A citation the repo contradicts refuses BEFORE the append, quiet or not
+    # (a silent annotation is still a fact on the node). An unmeasured claim
+    # only warns: this verb advises, never refuses a body - a failed read,
+    # or a gate that cannot run at all, refuses.
+    try:
+        read_rows, claims = note_evidence(text, list(read))
+    except (UnresolvableCitationError, UnmeasuredClaimError, VerbUnavailable) as exc:
+        typer.echo(f"Error: note refused: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    note: "dict[str, Any]" = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    if read_rows:
+        note["reads"] = read_rows
     try:
         identity = resolve_self_identity()
     except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
@@ -2962,7 +2974,9 @@ def cmd_note(
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
-    _warn_if_note_is_long(text)
+    warn_if_note_is_long(text)
+    if claims:
+        typer.echo(unmeasured_note_warning(claims), err=True)
     if json_output:
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
@@ -2976,30 +2990,6 @@ def cmd_note(
             receipts = [(f"notify FAILED {task_id}: {exc}", True)]
         for line, undelivered in receipts:
             typer.echo(line, err=undelivered or json_output)
-
-
-def _warn_if_note_is_long(text: str) -> None:
-    """Advise on a long note, never refuse one.
-
-    Why uncapped, and why the blunt multiplier:
-    docs/architecture/backlog-graph-verb-contracts.md.
-    """
-    from fno import style
-
-    try:
-        from fno.config import load_settings
-
-        cap = load_settings().style.word_cap.encounter
-    except Exception:  # noqa: BLE001 - an advisory must never break a write
-        cap = style.MESSAGE_WORD_CAP
-    count = style.word_count(text)
-    if count <= cap * 4:
-        return
-    typer.echo(
-        f"note appended ({count} words). Long evidence belongs in a plan doc; "
-        "a note carrying a path is cheaper for every later reader.",
-        err=True,
-    )
 
 
 @cli.command("encounter", hidden=True)
@@ -3356,7 +3346,6 @@ def cmd_update(
     from fno._flag_aliases import refuse_retired_model_tier
     from fno.graph._constants import (
         PRIORITY_ORDER,
-        has_node_id_prefix,
         normalize_difficulty,
         normalize_tag,
         validate_priority_write,
@@ -3373,11 +3362,7 @@ def cmd_update(
 
     refuse_retired_model_tier(_model_tier_tombstone)
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     if priority is not None and priority not in PRIORITY_ORDER:
         typer.echo(
@@ -3651,6 +3636,11 @@ def cmd_update(
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
+            # An archived node must not read as absent (the reopen contract).
+            from fno.graph._archive_lookup import refuse_update_if_archived
+
+            if refuse_update_if_archived(task_id):
+                raise typer.Exit(code=1)
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
@@ -6790,7 +6780,6 @@ def cmd_cost(
     import click
 
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
 
     session = merge_deprecated_alias(
@@ -6801,11 +6790,7 @@ def cmd_cost(
     if session is None:
         raise click.UsageError("Missing option '--session-id'.")
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     try:
         amount_f = float(amount)
@@ -6844,15 +6829,10 @@ def cmd_remove(
     """Delete a node from the graph permanently. This verb exists and works.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     entries = read_graph(_graph_path())
     dependents = _find_dependents(entries, task_id)
@@ -6964,13 +6944,7 @@ def cmd_defer(
     def mutator(entries):
         # Resolve every id and abort naming ALL missing ones before mutating,
         # mirroring cmd_queue's all-or-nothing batch atomicity.
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         now = datetime.now(timezone.utc).isoformat()
         for tid in ids:
             node = _find_node(entries, tid)
@@ -7023,18 +6997,13 @@ def cmd_defer(
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
     """Expand one-or-many id args; refuse an empty set and non-node ids
     (the shared prologue of every batch-mutating verb)."""
-    from fno.graph._constants import has_node_id_prefix
 
     ids = _expand_id_args(task_ids)
     if not ids:
         typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
     for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+        _require_node_id(tid)
     return ids
 
 
@@ -7133,13 +7102,7 @@ def cmd_queue(
     cleaned_reason = (reason or "").strip() or None
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         now = datetime.now(timezone.utc).isoformat()
         for tid in ids:
             node = _find_node(entries, tid)
@@ -7174,13 +7137,7 @@ def cmd_unqueue(
     not_queued: list[str] = []
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
             if not node.get("queued_at"):
@@ -7569,13 +7526,7 @@ def cmd_undefer(
     was_deferred: list[tuple[str, bool]] = []
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
             was_deferred.append((tid, bool(node.get("deferred_at"))))
@@ -8717,12 +8668,7 @@ def cmd_done(
         _done_via_seam(task_id, skip_stamp=skip_stamp, force=force, reason=reason)
         return
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Usage guard: --force requires --reason
     if force and not reason:
@@ -8903,38 +8849,11 @@ def _canonical_post_close(
 
 
 def _archived_entry(node_id: str) -> Optional[dict]:
-    """The node's row in graph-archive.json, or None. Read-only, never raises.
+    """The archive lookup, kept as a name for reopen's call sites; the
+    question owns the module now (fno.graph._archive_lookup)."""
+    from fno.graph._archive_lookup import archived_entry
 
-    Reopen needs this to tell "archived" apart from "absent". Without it an
-    archived node reports "not found", which is the same message a typo gets,
-    while the node sits readable in the sibling file - an absence with two
-    explanations and no way to distinguish them.
-    """
-    from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
-
-    try:
-        # The archive is default-backend storage: never consulted behind an
-        # external selection (the caller's refusal already fired; this guard
-        # keeps the helper honest for any future caller).
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
-            return None
-        # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
-        # already route through it, and a helper that resolves the archive its
-        # own way is a second path that drifts on the first config change.
-        path = _archive_path()
-        if not path.exists():
-            return None
-        # `_find_node`, not an exact compare: it is what resolved the id against
-        # the WORKING graph a line earlier, and a stricter match here recreates
-        # the very ambiguity this helper exists to remove. An exact compare made
-        # `reopen ab-9728` report "not found" for an archived ``,
-        # which is the same message a typo gets.
-        return _find_node(read_graph(path), node_id)
-    except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
-        return None
+    return archived_entry(node_id)
 
 
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
@@ -9013,7 +8932,6 @@ def cmd_reopen(
     """Clear a node's completion, returning it to its underlying state.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9022,12 +8940,7 @@ def cmd_reopen(
         resolve_merge_evidence,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Validate at the CLI boundary the way cmd_defer validates its own reason, so
     # a direct call cannot land a reasonless reopen that the event then records
@@ -11215,9 +11128,7 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
-            "backfill url-less pr_url). "
-            "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
+            "Apply the deterministic legs; the judgment legs stay "
             "proposal-only regardless of this flag."
         ),
     ),
@@ -11241,28 +11152,17 @@ def cmd_maintain(
         False,
         "--suspect-reverts",
         help=(
-            "Read-only retro sweep: print drained nodes that carry evidence of "
-            "a human curation decision, then exit. Runs no other leg, mutates "
-            "nothing, and emits no undefer command - the operator rules on the "
-            "list themselves."
+            "Read-only retro sweep: print drained nodes carrying evidence of "
+            "a human curation decision, then exit; mutates nothing."
         ),
     ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
-    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
-    carrying a ``pr_number`` with no url. Three are
-    judgment calls and only ever PROPOSE (never mutate, regardless of
-    ``--apply``): surface near-duplicate idea titles, propose a reversible
-    ``defer`` for stale ideas, and report a Now column over its WIP cap. The
-    last leg appends a summary to health-history so ``triage trend`` shows the
-    board trending cleaner.
-
-    Loop form: ``/loop 1d fno backlog maintain --apply``.
-
-    Best-effort: a malformed row is skipped, a single failed apply does not
-    abort the rest, and an empty graph is a clean no-op.
+    Deterministic legs apply under ``--apply``; the judgment legs (dedup,
+    drain-stale, cap-Now) only ever propose. Full leg list + loop form:
+    docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
+    apply does not abort the rest; an empty graph is a clean no-op.
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph.statuses import recompute_statuses
@@ -11366,6 +11266,10 @@ def cmd_maintain(
         defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
+
+    ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
+    if ab_warn:
+        typer.echo(f"warning: {ab_warn}", err=True)
 
     # --- apply (deterministic legs only) ---
     applied_rescope: list[str] = []
@@ -11773,6 +11677,8 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
+    if ab_lines:
+        typer.echo("\n".join(ab_lines))
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
@@ -11839,15 +11745,10 @@ def cmd_reprioritize(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
 ) -> None:
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
@@ -11971,35 +11872,6 @@ cli.command("rank")(_cmd_rank)
 
 # -- archive --
 
-_ARCHIVE_SKIP_REASONS = (
-    "referenced-by-open-node",
-    "related-peer-not-archived",
-    "too-recent",
-    "no-parseable-timestamp",
-)
-
-
-def _archive_bucket_counts(skipped: list) -> dict[str, int]:
-    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
-
-    Zero-filled so the receipt always names all four buckets (): a run
-    that holds back 0 for a reason reads as "checked, none held", not as an
-    absent line a reader has to interpret as either "zero" or "not measured".
-    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
-    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
-    (and in groom's regex sum over these lines) instead of vanishing.
-    """
-    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
-    for s in skipped:
-        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
-    return held
-
-
-def _receipt_reason_order(held: dict[str, int]) -> list[str]:
-    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
-    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
-
-
 @cli.command(
     "archive",
     hidden=True,
@@ -12031,9 +11903,13 @@ def cmd_archive(
         GraphCorruptError,
     )
     from fno.graph.archive import (
+        _archive_bucket_counts,
+        _last_sweep_line,
+        _receipt_reason_order,
         merge_into_archive,
         partition_for_archive,
         release_soft_edges,
+        retire_stale_postmortems,
         stamp_archived_at,
     )
 
@@ -12060,6 +11936,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
+        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -12087,11 +11964,13 @@ def cmd_archive(
             pass
 
     if not apply:
-        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        entries, retired = retire_stale_postmortems(read_graph(_graph_path()), now)
+        to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
+        typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
         # Every run emits, dry-run included: a leg that went silent must stay
@@ -12100,9 +11979,11 @@ def cmd_archive(
         _emit_swept_event(len(to_archive), _archive_bucket_counts(skipped), mode="dry-run")
         return
 
-    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0}
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0, "retired": 0}
 
     def mutator(entries):
+        entries, retired = retire_stale_postmortems(entries, now)
+        receipt["retired"] = len(retired)
         to_archive, remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
@@ -12136,6 +12017,10 @@ def cmd_archive(
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+    if receipt["retired"]:
+        typer.echo(
+            f"Retired {receipt['retired']} stale postmortem receipt(s) (closed by age rule)"
+        )
     _echo_receipt(receipt["moved"], receipt["held"], receipt["stripped"])
     _emit_swept_event(receipt["moved"], receipt["held"], receipt["stripped"])
 
@@ -12369,7 +12254,6 @@ def cmd_unarchive(
     """Move one node from graph-archive.json back into the working graph.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph._intake import _find_node
     from fno.graph.store import (
         GraphCorruptError,
@@ -12380,12 +12264,7 @@ def cmd_unarchive(
         read_graph,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     if _find_node(read_graph(_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
@@ -13214,12 +13093,13 @@ def cmd_supersede(
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets the compatibility edge plus a pending structured evidence record on
-    the old node. The old row stays active until a merged PR covers every
-    declared surface. Refuses if ``replaces`` still has live children unless
-    ``--force`` is given; under ``--force`` the live children's ``parent`` is
-    cleared so they stay dispatchable instead of stranding under a dead unit.
-    Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a structured evidence record on the old
+    node. The edge terminals the old row's status immediately (x-e8f3); the
+    record stays unverified until a merged PR covers every declared surface,
+    which reconcile reports as receipts. Refuses if ``replaces`` still has
+    live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -13241,10 +13121,11 @@ def cmd_supersede(
     if not cleaned_cause:
         typer.echo(
             "Error: --cause is required and cannot be blank.\n"
-            "A supersede now carries the evidence that closes it: what the old\n"
+            "A supersede carries the evidence trail: what the old\n"
             "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node stays open until a merged PR covers every\n"
-            "declared surface.\n"
+            "replaced it. The old node's status reads superseded from the edge\n"
+            "alone; a merged PR covering every declared surface later stamps the\n"
+            "evidence verified_at.\n"
             f"  {_SUPERSEDE_EXAMPLE}",
             err=True,
         )

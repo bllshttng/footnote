@@ -1065,9 +1065,9 @@ def get_cmd(
     home-vs-project override is the defect this fixes, so the resolved value
     alone on stdout would keep the confusion. stdout stays value-only because
     callers pipe it (normalize.sh compares the whole stream); the source line,
-    including an ``overrides`` clause exactly when a lower-precedence file
-    also sets the key, is stderr-only. ``--json`` carries both streams' facts
-    as one object.
+    including an ``overrides`` clause exactly when a lower-precedence file set
+    a value the merge discarded, is stderr-only. ``--json`` carries both
+    streams' facts as one object.
     """
     import json
     import os

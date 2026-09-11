@@ -149,7 +149,7 @@ def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
     verbs = [c[0][3] for c in fake.calls]
     assert verbs == ["send", "send"]
     for argv, _ in fake.calls:
-        assert argv[argv.index("--session") + 1] == "work"
+        assert argv[argv.index("--server") + 1] == "work"
         assert argv[4] == "7"
     # Envelope bytes ride --stdin --guarded verbatim; the CR submit is its own send.
     paste, cr = fake.calls[0], fake.calls[1]

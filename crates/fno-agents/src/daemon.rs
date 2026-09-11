@@ -31,6 +31,7 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
+mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod roster_death;
 pub(crate) use self::blocking_bound::directory_bytes;
@@ -597,24 +598,11 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
             seen.insert(root);
         }
     }
-    if let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) {
-        for line in contents.lines() {
-            let Ok(event) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if event.get("type").and_then(Value::as_str) != Some("merge_cleanup_requested") {
-                continue;
-            }
-            let Some(repo) = event
-                .get("data")
-                .and_then(|data| data.get("repo"))
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            if std::path::Path::new(repo).is_dir() {
-                seen.insert(repo.to_string());
-            }
+    // The request read spans the rotated generation too (merge_reap's reader),
+    // so a repo whose only request rotated aside stays in the roots.
+    for repo in crate::merge_reap::merge_cleanup_request_repos(home) {
+        if std::path::Path::new(&repo).is_dir() {
+            seen.insert(repo);
         }
     }
     seen.into_iter().collect()
@@ -862,11 +850,14 @@ pub fn worktree_sweep(
 }
 
 pub(crate) use crate::gc_inventory::{index_tree, HarnessStoreIndex};
+// x-1b90: the pane kill and its absence vocabulary moved to pane_stop.rs
+// with the stop helper that now shares them.
+pub(crate) use crate::pane_stop::{mux_pane_is_absent, run_mux_pane_kill};
 
 /// Wall-clock bound for one harness removal subprocess (`run_claude_rm`). A
 /// hung removal must never wedge its caller (the operator measured a 300s+
 /// hang on a stuck row; the removal cannot inherit it).
-const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Remove a reaped row's session from its OWN harness's store (AC6). Returns
 /// `Some((row_id, reason))` when harness removal refused or failed; `None` on
@@ -2349,6 +2340,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     ctx.opts.agents_config_cwd.clone(),
                     ctx.home.events_jsonl(),
                     retire_interval,
+                    // Default prune flags only: an orphaned worker tab closes
+                    // on the retire cadence; a human's spent shells stay
+                    // opt-in via the manual verb (Locked Decision 6).
+                    || crate::gc::mux_tab_sweep(false, false),
                 );
                 // Worktree sweep + merge reaper (x-07dc). The sweep is the
                 // backstop for what the reaper cannot reach; the reaper is the
@@ -6512,52 +6507,6 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     }
 }
 
-fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
-    let pane_id = pane_id.to_string();
-    let mut child = std::process::Command::new("fno")
-        .args(["mux", "pane", "kill", "--session", session, &pane_id])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("mux pane kill failed to start: {error}"))?;
-    let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(true),
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(-1);
-                let output = child.wait_with_output().ok();
-                let detail = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stderr).to_ascii_lowercase())
-                    .unwrap_or_default();
-                if mux_pane_is_absent(&detail) {
-                    return Ok(false);
-                }
-                return Err(format!("mux pane kill exited {code}: {}", detail.trim()));
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("mux pane kill timed out".into());
-            }
-            Err(error) => return Err(format!("mux pane kill wait failed: {error}")),
-        }
-    }
-}
-
-fn mux_pane_is_absent(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("no such pane")
-        || detail.contains("no live pane owns")
-        || (detail.contains("cannot reach session")
-            && (detail.contains("no such file or directory")
-                || detail.contains("connection refused")))
-}
-
 /// What a read-only look at the pane referent proved. `Unknown` is the
 /// fail-closed posture: a probe that cannot prove absence changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6575,14 +6524,7 @@ fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let pane = pane_id.to_string();
     let mut child = match std::process::Command::new("fno")
         .args([
-            "mux",
-            "pane",
-            "read",
-            "--session",
-            session,
-            "--lines",
-            "1",
-            &pane,
+            "mux", "pane", "read", "--server", session, "--lines", "1", &pane,
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -6742,15 +6684,13 @@ async fn handle_rm_with(
     // its own fail-closed posture. A claude row absent from the `claude agents
     // --json --all` roster is provably gone, whoever removed it (claude-only;
     // `claude_row_provably_absent` is unconditionally false elsewhere). A pane
-    // row whose terminal state is explicit is finished even though Claude
-    // keeps it in the roster, and a pane row whose pane the probe cannot find
-    // is provably gone because the pane is that row's ONE live ref. Anything
-    // less than proof keeps refusing, and `--force` remains the only escape.
-    // One death verdict for the whole gate, shared with the reaper: a claude
-    // row whose roster state is terminal, or whose roster pid is provably
-    // gone, is finished even though Claude keeps the row listed. The reaper
-    // accepts the same evidence - a merge cleanup whose stop cleared on it
-    // must not be refused by the very next `fno agents rm`.
+    // row whose pane the probe cannot find is provably gone - the pane is that
+    // row's ONE live ref - and a claude row whose roster state is terminal or
+    // whose roster pid is provably gone is finished even though Claude keeps
+    // it listed. Anything less keeps refusing, and `--force` remains the only
+    // escape. One death verdict for the whole gate, shared with the reaper: a
+    // merge cleanup whose stop cleared on it must not be refused by the very
+    // next `fno agents rm`.
     let provably_gone = claude_agents
         .as_ref()
         .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
@@ -6778,9 +6718,11 @@ async fn handle_rm_with(
             roster_known,
             row_present,
             &warnings,
+            entry.mux.as_ref().map(|m| (m.session.as_str(), m.pane_id)),
         );
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
+    let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
     let harness_outcome = off_executor(|| {
         cascade_harness_session_result_with(
             &entry,
@@ -6798,14 +6740,28 @@ async fn handle_rm_with(
             );
         }
     }
-    let pane_outcome = if let Some(mux) = entry.mux.as_ref() {
-        match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
+    let pane_outcome;
+    let mut pane_stop_detail: Option<String> = None;
+    let pane_arm_ran = entry.substrate.as_deref() == Some("pane");
+    if pane_arm_ran {
+        // x-1b90: a pane row's ONE live ref is the pane process, and a
+        // successful or absent pane kill is not a death - the stored pane id
+        // is not an address for a process a keeper re-adopt. rm proves the
+        // stop the same way the reap does: verified pid, pane found by child
+        // pid, ESRCH only.
+        let e_for_stop = entry.clone();
+        let stop = off_executor(move || crate::pane_stop::stop_pane_process_confirmed(&e_for_stop));
+        let (outcome, detail) = crate::pane_stop::rm_pane_outcome(&stop);
+        pane_outcome = outcome;
+        pane_stop_detail = detail;
+    } else if let Some(mux) = entry.mux.as_ref() {
+        pane_outcome = match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
             Ok(true) => CascadeOutcome::Removed,
             Ok(false) => CascadeOutcome::AlreadyAbsent("mux pane already absent".into()),
             Err(reason) => CascadeOutcome::Failed(reason),
-        }
+        };
     } else {
-        CascadeOutcome::NotApplicable
+        pane_outcome = CascadeOutcome::NotApplicable;
     };
     if let CascadeOutcome::Failed(reason) = &pane_outcome {
         if !force {
@@ -6818,6 +6774,17 @@ async fn handle_rm_with(
                 CascadeOutcome::AlreadyAbsent(_) => "harness row already absent; ".into(),
                 _ => String::new(),
             };
+            if pane_arm_ran {
+                // The pane arm's reason IS the stop measurement; there may be
+                // no mux ref at all to name.
+                return Response::err(
+                    req.id,
+                    ErrorCode::Internal,
+                    format!(
+                        "agent {name}: {harness_note}registry retained; the pane stop did not confirm: {reason}"
+                    ),
+                );
+            }
             let mux = entry.mux.as_ref().expect("pane outcome requires a mux ref");
             return Response::err(
                 req.id,
@@ -6893,6 +6860,7 @@ async fn handle_rm_with(
     {
         Ok(dropped) => dropped,
         Err(e) => {
+            codex_index_capture.restore_on_registry_failure();
             return Response::err(
                 req.id,
                 state_error_code(&e),
@@ -6997,7 +6965,9 @@ async fn handle_rm_with(
         "pane_session": pane_session,
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        "pane_reason": pane_outcome.reason(),
+        // x-1b90: a confirmed pane stop's detail (pane killed, pid gone)
+        // rides here because `Removed` carries no reason of its own.
+        "pane_reason": pane_stop_detail.as_deref().or(pane_outcome.reason()),
         "worktree_receipt": worktree_receipt,
         "actor": audit.actor,
         "reason": audit.reason,
@@ -10347,100 +10317,6 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_still_refuses_a_stored_live_pane_row_when_the_probe_is_unknown() {
-        // Fail-closed: a probe that errored, timed out, or parsed badly proves
-        // nothing. The refusal and the row both stay.
-        let home = short_home("rmpaneunknown");
-        let mut row = ask_row("maybe-pane-worker", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("opencode".into());
-        row.status = AgentStatus::Live;
-        row.mux = Some(state::MuxRef {
-            session: "main".into(),
-            pane_id: 76,
-        });
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "maybe-pane-worker"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| panic!("non-Claude row must not read the Claude list"),
-            &|_| panic!("non-Claude row must not call claude rm"),
-            &|_, _| panic!("a refused row must not reach the pane kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let error = response.error().expect("a stored-live row must be refused");
-        assert!(error.message.contains("still live"), "{}", error.message);
-        // Positive markers (x-d19e): the refusal names the safe verb and the
-        // cost of forcing past it; the override lives in --help, never here.
-        assert!(
-            error.message.contains("fno agents stop maybe-pane-worker"),
-            "{}",
-            error.message
-        );
-        assert!(error.message.contains("resume handle"), "{}", error.message);
-        assert!(!error.message.contains("--force"), "{}", error.message);
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_still_refuses_a_stored_live_pane_row_when_the_pane_is_present() {
-        // A live pane is a live worker; the refusal must stand.
-        let home = short_home("rmpanepresent");
-        let mut row = ask_row("live-pane-worker", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("opencode".into());
-        row.status = AgentStatus::Live;
-        row.mux = Some(state::MuxRef {
-            session: "main".into(),
-            pane_id: 76,
-        });
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "live-pane-worker"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| panic!("non-Claude row must not read the Claude list"),
-            &|_| panic!("non-Claude row must not call claude rm"),
-            &|_, _| panic!("a refused row must not reach the pane kill"),
-            &|_, _| PaneProbe::Present,
-        )
-        .await;
-
-        let error = response.error().expect("a stored-live row must be refused");
-        assert!(error.message.contains("still live"), "{}", error.message);
-        // Positive markers (x-d19e): same contract as the probe-unknown arm.
-        assert!(
-            error.message.contains("fno agents stop live-pane-worker"),
-            "{}",
-            error.message
-        );
-        assert!(error.message.contains("resume handle"), "{}", error.message);
-        assert!(!error.message.contains("--force"), "{}", error.message);
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

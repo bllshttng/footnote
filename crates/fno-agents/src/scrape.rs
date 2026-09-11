@@ -171,7 +171,7 @@ pub fn decide(
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
 /// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
 /// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
-fn fno_bin() -> std::ffi::OsString {
+pub fn fno_bin() -> std::ffi::OsString {
     std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
 }
 
@@ -186,7 +186,7 @@ fn fno_bin() -> std::ffi::OsString {
 /// sweeps rather than piling them up).
 fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Option<String>>> {
     let out = Command::new(bin)
-        .args(["mux", "pane", "ls", "--session", session, "--json"])
+        .args(["mux", "pane", "ls", "--server", session, "--json"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -215,7 +215,7 @@ fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<Stri
             "pane",
             "read",
             &pane.to_string(),
-            "--session",
+            "--server",
             session,
             "--json",
         ])

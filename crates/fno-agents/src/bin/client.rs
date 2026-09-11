@@ -40,6 +40,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "distress-scan",
     "drive",
     "drive-authority",
+    "evidence-gate",
     "finalize",
     "graph-get",
     "grid",
@@ -55,6 +56,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "node-origin",
     "node-route",
     "notify-watch",
     "orphan-reap",
@@ -78,6 +80,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "census",
     "restart",
     "resume",
+    "resume-argv",
     "review-start",
     "rm",
     "session-start-bytes",
@@ -165,6 +168,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::reentry::run_reentry_plan(&args[1..], &AgentsHome::from_env());
     }
 
+    // `resume-argv` is the INTERNAL machine verb behind the mux resume
+    // gesture (x-eb79): the server shells it for the codex lane instead of
+    // re-deriving the declared form and losing the writable-roots grant.
+    // Same `matches!` treatment as `reentry-plan` - it is not an `fno agents`
+    // verb, so the routable-verb parity guard never sees it.
+    if matches!(verb, "resume-argv") {
+        return fno_agents::pane_relaunch::run_resume_argv(&args[1..]);
+    }
+
     if matches!(verb, "manifest-for-session") {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
@@ -189,6 +201,18 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
     if matches!(verb, "component-verdict") {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
+    }
+
+    // `evidence-gate` is the hidden binary-direct transport for the ruling and
+    // note evidence gates: the checker + bounded read runner ported
+    // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
+    // one JSON request on stdin (lane, text, reads, root, timeout) and prints
+    // one JSON answer on stdout; a refusal is data (`ok: false`), not a
+    // process error. Same `matches!` treatment as `component-verdict` so the
+    // routable-verb parity guard does not see it - no advertised fno verb is
+    // added.
+    if matches!(verb, "evidence-gate") {
+        return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
@@ -230,6 +254,16 @@ async fn run(args: Vec<String>) -> i32 {
     // rung of the badge lattice currently badges the agent. Same `matches!`
     // treatment as `claim` so it stays out of CLIENT_VERB_USAGE /
     // RUST_CLIENT_VERBS and the parity guard.
+    // `node-origin` is the HIDDEN transport verb over the request-origin
+    // decision (fno_agents::node_origin): Python birth assembly posts birth
+    // records and stamps the receipt. Same `matches!` treatment as `claim`
+    // so the routable-verb parity guard does not see it; the verb IS
+    // registered in ALL_CLIENT_ACTIONS because the verb-surface ratchet's
+    // binary probe reads the unknown-verb refusal.
+    if matches!(verb, "node-origin") {
+        return fno_agents::node_origin::run_node_origin(&args[1..]);
+    }
+
     if matches!(verb, "detect") {
         return fno_agents::scrape::run_detect(&args[1..]);
     }
@@ -1356,7 +1390,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
             }
         }
     }
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(fno_agents::scrape::fno_bin())
         .args(&args)
         .output()
         .map_err(|e| {
@@ -1409,7 +1443,7 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
 /// to it. Returns the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("fno")
+    let err = std::process::Command::new(fno_agents::scrape::fno_bin())
         .arg("agents")
         .args(args)
         .env("FNO_AGENTS_RUNTIME", "python")
@@ -2428,10 +2462,12 @@ fn run_reap(rest: &[String]) -> i32 {
     // (x-91eb) The mux sideline sweep: the registry pass above reaps rows,
     // but ghost panes are the surface an operator SEES. The sweep body stays
     // the one prune verb (reused, not reimplemented); `--no-mux` skips it.
+    // The manual verb keeps `--include-used-shells`: closing a human's spent
+    // shells is an attended choice, never the daemon's default.
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        run_mux_sweep(dry_run)
+        fno_agents::gc::mux_tab_sweep(dry_run, true)
     };
     print!(
         "{}",
@@ -2444,45 +2480,6 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     );
     0
-}
-
-/// (x-91eb) Shell out to the existing prune verb - one sweep body, reused,
-/// not reimplemented. Fail-closed: a spawn failure, a non-zero exit, or an
-/// unparsable receipt is `Unread`, never a measured zero (AC3-EDGE).
-fn run_mux_sweep(dry_run: bool) -> fno_agents::reap_render::MuxSweep {
-    let mut cmd = std::process::Command::new("fno");
-    cmd.args([
-        "mux",
-        "workspace",
-        "prune",
-        "--tabs-only",
-        "--include-used-shells",
-        "--json",
-    ]);
-    if dry_run {
-        cmd.arg("--dry-run");
-    }
-    match cmd.output() {
-        Ok(out) => {
-            let code = out.status.code();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match (code, fno_agents::reap_render::parse_prune_receipt(&stdout)) {
-                (Some(0), Some(receipt)) => fno_agents::reap_render::MuxSweep::Ran { receipt },
-                (code, _) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
-                    fno_agents::reap_render::MuxSweep::Unread {
-                        exit_code: code,
-                        stderr_first,
-                    }
-                }
-            }
-        }
-        Err(e) => fno_agents::reap_render::MuxSweep::Unread {
-            exit_code: None,
-            stderr_first: e.to_string(),
-        },
-    }
 }
 
 /// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
@@ -3883,7 +3880,7 @@ fn fetch_discovered_sessions(
         // No outer deadline to subtract from: this path has no caller-supplied
         // budget, so the wait it may have spent changes nothing about the run.
         |_spent| {
-            let mut cmd = Command::new("fno");
+            let mut cmd = Command::new(fno_agents::scrape::fno_bin());
             cmd.args(&argv);
             cmd.env("FNO_AGENTS_RUNTIME", "python");
             // Fail-open by contract, and the same rule the latch needs: only a

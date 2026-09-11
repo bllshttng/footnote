@@ -28,9 +28,13 @@ from typer.testing import CliRunner  # noqa: E402
 
 from fno.cli import app  # noqa: E402
 from fno.graph.archive import (  # noqa: E402
+    _archive_bucket_counts,
+    _last_sweep_line,
+    _receipt_reason_order,
     merge_into_archive,
     partition_for_archive,
     remint_archive_collisions,
+    retire_stale_postmortems,
     stamp_archived_at,
 )
 
@@ -230,8 +234,6 @@ def test_roadmap_restricted_held_counts_only_that_roadmap(tmp_path, monkeypatch)
 
 
 def test_receipt_passes_through_an_unknown_skip_reason():
-    from fno.graph.cli import _archive_bucket_counts, _receipt_reason_order
-
     held = _archive_bucket_counts([{"_skip": "some-future-reason"}])
     assert held["some-future-reason"] == 1
     assert held["too-recent"] == 0  # zero-fill holds for the known four
@@ -305,6 +307,128 @@ def test_apply_emits_swept_event_with_moved_and_held_counts(tmp_path, monkeypatc
     assert data["held_too_recent"] == 1
     assert data["held_referenced"] == 0
     assert data["older_than_days"] == 30
+
+
+# -- receipt: last-sweep freshness marker -----------------------------------
+
+
+def test_last_sweep_line_reports_newest_archived_at(tmp_path):
+    from datetime import datetime as dt, timezone as tz
+
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-1", "archived_at": "2026-09-09T10:00:00Z"},
+        {"id": "ab-2", "archived_at": "2026-09-10T09:00:00Z"},  # newest wins
+    ]}) + "\n")
+    now = dt(2026, 9, 10, 12, 0, tzinfo=tz.utc)
+    line = _last_sweep_line(archive, now)
+    assert line == "2026-09-10T09:00:00Z (3h ago)"
+
+
+def test_last_sweep_line_names_each_honest_branch(tmp_path):
+    from datetime import datetime as dt, timezone as tz
+
+    now = dt(2026, 9, 10, 12, 0, tzinfo=tz.utc)
+    missing = tmp_path / "absent.json"
+    assert _last_sweep_line(missing, now) == "none on record"
+
+    unstamped = tmp_path / "pre-stamp.json"
+    unstamped.write_text('{"entries": [{"id": "ab-1"}]}\n')
+    assert _last_sweep_line(unstamped, now) == "none stamped"
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{not json")
+    assert _last_sweep_line(corrupt, now) == "unknown (archive unreadable)"
+
+
+def test_dry_run_receipt_carries_last_sweep_marker(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-open0001", "plan_path": "p.md"}])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-1", "archived_at": "2026-09-10T09:00:00Z"},
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "archive"])
+    assert r.exit_code == 0, r.output
+    assert "last sweep: 2026-09-10T09:00:00Z" in r.output
+
+
+# -- retirement: stale postmortem receipts -----------------------------------
+
+
+def _pm_receipt(node_id: str, days_old: int, **extra) -> dict:
+    from datetime import datetime as dt, timedelta, timezone as tz
+
+    created = (datetime.now(tz.utc) - timedelta(days=days_old)).isoformat()
+    return {
+        "id": node_id,
+        "status": "idea",
+        "slug": f"postmortem-doneprgreen-{node_id}",
+        "title": f"postmortem DonePRGreen: {node_id}",
+        "created_at": created,
+        "details": "gist\n\nSource: postmortem:x.md\n\n"
+                   "<!-- retro-triage source_pr=None finding_hash=ab12cd34 -->",
+        **extra,
+    }
+
+
+def test_retire_closes_only_stale_unclaimed_receipts():
+    from datetime import datetime as dt, timezone as tz
+
+    now = dt(2026, 9, 10, tzinfo=tz.utc)
+    entries = [
+        _pm_receipt("ab-old00001", 40),                       # retired
+        _pm_receipt("ab-young0001", 5),                       # too young, stays
+        _pm_receipt("ab-claim0001", 40, locked_by="s1"),      # claimed, stays
+        _pm_receipt("ab-queued001", 40, queued_at=now.isoformat()),  # ack-pending, stays
+        _pm_receipt("ab-defer0001", 40, status="deferred"),   # human disposition, stays
+        _pm_receipt("ab-notrail01", 40, details="no trailer here"),  # not a receipt, stays
+        {"id": "ab-open0002", "status": "ready"},             # not a receipt, stays
+    ]
+    patched, retired = retire_stale_postmortems(entries, now)
+    by_id = {e["id"]: e for e in patched}
+    assert [e["id"] for e in retired] == ["ab-old00001"]
+    assert by_id["ab-old00001"]["status"] == "done"
+    assert by_id["ab-old00001"]["retired"] == "stale-postmortem-receipt"
+    assert by_id["ab-old00001"]["completed_at"]
+    assert by_id["ab-young0001"]["status"] == "idea"
+    assert by_id["ab-claim0001"]["status"] == "idea"
+    assert by_id["ab-queued001"]["status"] == "idea"
+    assert by_id["ab-defer0001"]["status"] == "deferred"
+    assert by_id["ab-notrail01"]["status"] == "idea"
+
+
+def test_apply_retires_receipts_and_reports_them(tmp_path, monkeypatch):
+    from datetime import datetime as dt, timedelta, timezone as tz
+
+    created = (dt.now(tz.utc) - timedelta(days=40)).isoformat()
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "ab-old00001", "status": "idea", "created_at": created,
+         "details": "<!-- retro-triage source_pr=None finding_hash=ab12cd34 -->"},
+        {"id": "ab-live0001", "status": "idea", "created_at": created,
+         "details": "a real idea with no trailer"},
+    ])
+    r = runner.invoke(app, ["backlog", "archive", "--apply", "--older-than-days", "30"])
+    assert r.exit_code == 0, r.output
+    assert "Retired 1 stale postmortem receipt(s)" in r.output
+    live = {e["id"]: e for e in json.loads(g.read_text())["entries"]}
+    assert live["ab-old00001"]["status"] == "done"
+    assert live["ab-old00001"]["retired"] == "stale-postmortem-receipt"
+    assert live["ab-live0001"]["status"] == "idea"
+
+
+def test_dry_run_reports_would_retire_count(tmp_path, monkeypatch):
+    from datetime import datetime as dt, timedelta, timezone as tz
+
+    created = (dt.now(tz.utc) - timedelta(days=40)).isoformat()
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-old00001", "status": "idea", "created_at": created,
+               "details": "<!-- retro-triage source_pr=None finding_hash=ab12 -->"}])
+    r = runner.invoke(app, ["backlog", "archive"])
+    assert r.exit_code == 0, r.output
+    assert "would retire 1 stale postmortem receipt(s)" in r.output
+    live = {e["id"]: e for e in json.loads(g.read_text())["entries"]}
+    assert live["ab-old00001"]["status"] == "idea"  # dry-run never mutates
 
 
 def test_apply_with_nothing_to_move_still_emits_zero_moved_event(tmp_path, monkeypatch):

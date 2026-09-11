@@ -1171,7 +1171,7 @@ def _redispatch(
                     # owns that half.
                     killed = subprocess.run(
                         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                         "--session", m.group(1), m.group(2)],
+                         "--server", m.group(1), m.group(2)],
                         cwd=cwd, capture_output=True, timeout=30, check=False,
                     )
                     if killed.returncode != 0:

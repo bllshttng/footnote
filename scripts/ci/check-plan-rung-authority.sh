@@ -49,102 +49,20 @@ violation() {
     fail=1
 }
 
-# ---------------------------------------------------------------------------
-# 1. Bash must not re-derive a plan's rung.
-#
-# Scoped to PLAN-named paths on purpose. Most `^status:` reads in this repo are
-# against `.fno/target-state.md`, whose vocabulary (IN_PROGRESS / COMPLETE) has
-# nothing to do with plan rungs; banning the pattern outright would be almost
-# entirely false positives and would get switched off within a month.
-# ---------------------------------------------------------------------------
-echo "--- Bash: no plan-status re-parsing ---"
-# `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
-# stamping a plan at a chosen rung), it does not classify one. The defect is
-# reading a rung, not setting one.
-# ALLOWLIST BY FILE, not by pattern. An earlier version required `^status:` and
-# a `$PLAN_PATH`-shaped variable on the SAME physical line, which any of these
-# walk straight past:
-#
-#     grep '^status:' \
-#         "$PLAN_PATH"                 # line continuation
-#     plan="$1"; grep '^status:' "$plan"   # local variable name
-#
-# A guard a two-line reformat defeats is the decorative guard this check exists
-# to remove. So: flag EVERY shell `^status:` extraction, then subtract the files
-# known to read a different artifact. Adding a new reader now forces a choice -
-# route through `fno do plan rung`, or add the file here with a reason - instead of
-# passing silently.
-#
-# `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
-# stamping a plan at a chosen rung), it does not classify one.
-#
-# Scoped to PRODUCTION shell - `tests/` is excluded on purpose. A test that
-# greps `^status: in_review` is asserting on output a stamper produced, not
-# classifying a plan for dispatch; folding those in would mean allowlisting a
-# dozen files today and one more per future test, which is how a guard becomes
-# noise and then gets switched off. The invariant worth enforcing is narrower
-# and sharper: no production shell script decides readiness for itself.
-#
-# Each allowlisted file reads a DIFFERENT status axis - `.fno/target-state.md`
-# (IN_PROGRESS / COMPLETE / BLOCKED) or the Plan-Mode sidecar (pending /
-# consumed) - so none is a second readiness implementation.
-ALLOWED_STATUS_READERS="
-hooks/target-stopfailure.sh
-hooks/target-postcompact-reinject.sh
-hooks/target-subagent-guard.sh
-hooks/worktree-remove.sh
-hooks/helpers/init-target-state.sh
-scripts/setup/archive-worktree.sh
-scripts/lib/archive-artifacts.sh
-scripts/lib/handoff-generator.sh
-scripts/lib/worktree-lifecycle.sh
-skills/target/scripts/detect-pending-plan.sh
-scripts/ci/check-plan-rung-authority.sh
-"
-offenders=""
-while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    case "$ALLOWED_STATUS_READERS" in
-        *"$f"*) continue ;;
-    esac
-    offenders="${offenders}${f}
-"
-done <<EOF
-$(
-    git ls-files -z -- 'hooks/*.sh' 'scripts/*.sh' 'skills/*.sh' 2>/dev/null \
-        | xargs -0 grep -lE '\^status:' 2>/dev/null \
-        | while IFS= read -r cand; do
-              # Keep the file only if at least one `^status:` line is a READ.
-              if grep -E '\^status:' "$cand" 2>/dev/null | grep -qv 'sed -i'; then
-                  echo "$cand"
-              fi
-          done
-)
-EOF
-offenders="$(printf '%s' "$offenders" | grep -v '^$' || true)"
-if [ -n "$offenders" ]; then
-    violation "a shell script reads \`status:\` itself; call \`fno do plan rung\` instead" \
-        "$offenders" \
-        "If this file reads a DIFFERENT status axis (the target-state manifest or" \
-        "the Plan-Mode sidecar), add it to ALLOWED_STATUS_READERS with its reason."
-else
-    note "OK: no unlisted shell script extracts \`status:\`"
-fi
+# The detector patterns live in variables so a scan and its self-test control
+# run the SAME regex: a pattern edit cannot desync a control from the scan it
+# guards.
+# `\^` is deliberate: the detector hunts the shell pattern TEXT `^status:`
+# inside script sources, not lines that start with `status:`.
+STATUS_READ_RE='\^status:'
+STATUS_LITERAL='"status"'
+RUST_PLAN_READER_RE='((std::)?fs::read(_to_string)?\([^)]*plan|read_to_string\([^)]*plan|read_plan|load_plan|parse_plan)'
 
-# ---------------------------------------------------------------------------
-# 2. Rust must not grow a plan-status reader.
-#
-# Freeze the known plan-document readers.
-# Both consume activation-specific markers, never `status:`.
-# ---------------------------------------------------------------------------
-echo "--- Rust: no plan-status reader ---"
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
-crates/fno-agents/src/kill_criteria.rs"
-
-# The spelling detector below catches ordinary plan readers. This semantic
-# fallback correlates a file read, YAML deserialize, and status extraction inside
-# one Rust function, so a generic local name cannot hide the prohibited flow.
-# A flow split across helper functions remains outside a shell check's reach.
+# Rust frontmatter-status flow detectors (scan 2 below + self-test control 3).
+# The spelling detector alone cannot catch a reader under a generic local
+# name, so this semantic fallback correlates a file read, YAML deserialize,
+# and status extraction inside one Rust function. A flow split across helper
+# functions remains outside a shell check's reach.
 rust_status_deserializer_types() {
     awk '
         /Deserialize/ { derives_deserialize = 1 }
@@ -235,10 +153,239 @@ rust_reads_frontmatter_status() {
     ' "$source"
 }
 
+# ---------------------------------------------------------------------------
+# 0. Detector-liveness self-test.
+#
+# Every scan below answers by ABSENCE: silence reads as "no reader exists".
+# Silence has two live explanations besides the true one - the detector never
+# ran, or its pattern no longer matches what it hunts. The second is not
+# hypothetical: renaming the delivery reader's `read_plan_refs` function
+# silenced the spelling detector and the guard passed on a false zero until
+# the frozen-inventory ratchet, a different leg, caught it by luck.
+#
+# So before any zero is trusted, each detector is fed a known-reader fixture
+# and must HIT it. A silent control is a `violation` naming the blind
+# detector, because every verdict below it is untrusted. The frontmatter flow
+# has two independent trigger arms (`"status"` literal, or use of a
+# status-carrying Deserialize type), so control 3 pins each arm separately
+# and proves DISCRIMINATION with a clean fixture that must stay unflagged.
+#
+# Fixtures live in a mktemp sandbox, never under hooks/, scripts/, skills/ or
+# crates/: the real scans must not be able to count the controls themselves.
+# ---------------------------------------------------------------------------
+echo "--- Self-test: detector liveness controls ---"
+selftest_dir="$(mktemp -d)"
+trap 'rm -rf "$selftest_dir"' EXIT
+
+# Control 1 - the Bash leg: same `^status:` + read-filter chain as scan 1.
+cat > "$selftest_dir/status_reader.sh" <<'FIXTURE'
+plan_path="$1"
+grep '^status:' "$plan_path"
+FIXTURE
+bash_leg_hit="$(
+    grep -lE "$STATUS_READ_RE" "$selftest_dir/status_reader.sh" 2>/dev/null \
+        | while IFS= read -r cand; do
+              if grep -E "$STATUS_READ_RE" "$cand" 2>/dev/null | grep -qv 'sed -i'; then
+                  echo "$cand"
+              fi
+          done
+)"
+if [ -n "$bash_leg_hit" ]; then
+    : # control fired
+else
+    violation "detector blind: the Bash \`^status:\` scan matched no known-reader fixture; every zero below is untrusted"
+fi
+
+# Control 2 - the Rust spelling pattern: same regex as the scan in section 2.
+cat > "$selftest_dir/plan_reader.rs" <<'FIXTURE'
+fn fixture_load_plan(plan_path: &str) -> String {
+    std::fs::read_to_string(plan_path).unwrap()
+}
+FIXTURE
+if grep -qE "$RUST_PLAN_READER_RE" "$selftest_dir/plan_reader.rs" 2>/dev/null; then
+    : # control fired
+else
+    violation "detector blind: the Rust plan-reader spelling scan matched no known-reader fixture; every zero below is untrusted"
+fi
+
+# Control 3a - the frontmatter flow's typed arm: a status-carrying
+# Deserialize struct whose type is USED inside the reading fn.
+cat > "$selftest_dir/status_flow_typed.rs" <<'FIXTURE'
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct FixturePlan {
+    status: String,
+}
+
+fn fixture_plan_status(plan_path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(plan_path).ok()?;
+    let plan: FixturePlan = serde_yaml::from_str(&raw).ok()?;
+    Some(plan.status)
+}
+FIXTURE
+if rust_reads_frontmatter_status "$selftest_dir/status_flow_typed.rs" 2>/dev/null; then
+    : # control fired
+else
+    violation "detector blind: the frontmatter-status flow (typed arm) flagged no known-reader fixture; every zero below is untrusted"
+fi
+
+# Control 3b - the frontmatter flow's literal arm: a direct `"status"`
+# lookup with no status type in the file.
+cat > "$selftest_dir/status_flow_literal.rs" <<'FIXTURE'
+fn fixture_plan_status(plan_path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(plan_path).ok()?;
+    let plan: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+    plan.get("status").and_then(|value| value.as_str()).map(String::from)
+}
+FIXTURE
+if rust_reads_frontmatter_status "$selftest_dir/status_flow_literal.rs" 2>/dev/null; then
+    : # control fired
+else
+    violation "detector blind: the frontmatter-status flow (literal arm) flagged no known-reader fixture; every zero below is untrusted"
+fi
+
+# Control 3c - discrimination: the same shape with the status axis removed
+# must stay unflagged, else the flow is a pattern that flags everything.
+cat > "$selftest_dir/clean_flow.rs" <<'FIXTURE'
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct FixturePlan {
+    title: String,
+}
+
+fn fixture_plan_title(plan_path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(plan_path).ok()?;
+    let plan: FixturePlan = serde_yaml::from_str(&raw).ok()?;
+    Some(plan.title)
+}
+FIXTURE
+if rust_reads_frontmatter_status "$selftest_dir/clean_flow.rs" 2>/dev/null; then
+    violation "detector undiscriminating: the frontmatter-status flow flagged a fixture that reads no status"
+else
+    : # clean fixture correctly unflagged
+fi
+
+# Control 4 - the registered-reader status-literal scan: same grep as the
+# scan at the end of section 2. The kill_criteria porcelain carve-out is a
+# scan-side subtraction, not a self-test concern.
+cat > "$selftest_dir/registered_reader.rs" <<'FIXTURE'
+fn fixture_registered_reader(plan_path: &str) -> String {
+    let raw = std::fs::read_to_string(plan_path).unwrap();
+    let value: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+    value["status"].as_str().unwrap_or_default().to_string()
+}
+FIXTURE
+if [ -n "$(grep -nF "$STATUS_LITERAL" "$selftest_dir/registered_reader.rs" 2>/dev/null)" ]; then
+    : # control fired
+else
+    violation "detector blind: the registered-reader status-literal scan matched no known-reader fixture; every zero below is untrusted"
+fi
+
+if [ "$fail" -eq 0 ]; then
+    note "OK: detector controls fired"
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Bash must not re-derive a plan's rung.
+#
+# Scoped to PLAN-named paths on purpose. Most `^status:` reads in this repo are
+# against `.fno/target-state.md`, whose vocabulary (IN_PROGRESS / COMPLETE) has
+# nothing to do with plan rungs; banning the pattern outright would be almost
+# entirely false positives and would get switched off within a month.
+# ---------------------------------------------------------------------------
+echo "--- Bash: no plan-status re-parsing ---"
+# `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
+# stamping a plan at a chosen rung), it does not classify one. The defect is
+# reading a rung, not setting one.
+# ALLOWLIST BY FILE, not by pattern. An earlier version required `^status:` and
+# a `$PLAN_PATH`-shaped variable on the SAME physical line, which any of these
+# walk straight past:
+#
+#     grep '^status:' \
+#         "$PLAN_PATH"                 # line continuation
+#     plan="$1"; grep '^status:' "$plan"   # local variable name
+#
+# A guard a two-line reformat defeats is the decorative guard this check exists
+# to remove. So: flag EVERY shell `^status:` extraction, then subtract the files
+# known to read a different artifact. Adding a new reader now forces a choice -
+# route through `fno do plan rung`, or add the file here with a reason - instead of
+# passing silently.
+#
+# `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
+# stamping a plan at a chosen rung), it does not classify one.
+#
+# Scoped to PRODUCTION shell - `tests/` is excluded on purpose. A test that
+# greps `^status: in_review` is asserting on output a stamper produced, not
+# classifying a plan for dispatch; folding those in would mean allowlisting a
+# dozen files today and one more per future test, which is how a guard becomes
+# noise and then gets switched off. The invariant worth enforcing is narrower
+# and sharper: no production shell script decides readiness for itself.
+#
+# Each allowlisted file reads a DIFFERENT status axis - `.fno/target-state.md`
+# (IN_PROGRESS / COMPLETE / BLOCKED) or the Plan-Mode sidecar (pending /
+# consumed) - so none is a second readiness implementation.
+ALLOWED_STATUS_READERS="
+hooks/target-stopfailure.sh
+hooks/target-postcompact-reinject.sh
+hooks/target-subagent-guard.sh
+hooks/worktree-remove.sh
+hooks/helpers/init-target-state.sh
+scripts/setup/archive-worktree.sh
+scripts/lib/archive-artifacts.sh
+scripts/lib/handoff-generator.sh
+scripts/lib/worktree-lifecycle.sh
+skills/target/scripts/detect-pending-plan.sh
+scripts/ci/check-plan-rung-authority.sh
+"
+offenders=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$ALLOWED_STATUS_READERS" in
+        *"$f"*) continue ;;
+    esac
+    offenders="${offenders}${f}
+"
+done <<EOF
+$(
+    git ls-files -z -- 'hooks/*.sh' 'scripts/*.sh' 'skills/*.sh' 2>/dev/null \
+        | xargs -0 grep -lE "$STATUS_READ_RE" 2>/dev/null \
+        | while IFS= read -r cand; do
+              # Keep the file only if at least one `^status:` line is a READ.
+              if grep -E "$STATUS_READ_RE" "$cand" 2>/dev/null | grep -qv 'sed -i'; then
+                  echo "$cand"
+              fi
+          done
+)
+EOF
+offenders="$(printf '%s' "$offenders" | grep -v '^$' || true)"
+if [ -n "$offenders" ]; then
+    violation "a shell script reads \`status:\` itself; call \`fno do plan rung\` instead" \
+        "$offenders" \
+        "If this file reads a DIFFERENT status axis (the target-state manifest or" \
+        "the Plan-Mode sidecar), add it to ALLOWED_STATUS_READERS with its reason."
+else
+    note "OK: no unlisted shell script extracts \`status:\`"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Rust must not grow a plan-status reader.
+#
+# Freeze the known plan-document readers.
+# Both consume activation-specific markers, never `status:`.
+# ---------------------------------------------------------------------------
+echo "--- Rust: no plan-status reader ---"
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
+crates/fno-agents/src/kill_criteria.rs"
+
+# The spelling detector below catches ordinary plan readers; the semantic
+# fallback (`rust_reads_frontmatter_status`, defined with the self-test
+# helpers above) catches the same flow under a generic local name.
 actual=$(
     while IFS= read -r source; do
         [ -n "$source" ] || continue
-        if grep -qE '((std::)?fs::read(_to_string)?\([^)]*plan|read_to_string\([^)]*plan|read_plan|load_plan|parse_plan)' "$source" \
+        if grep -qE "$RUST_PLAN_READER_RE" "$source" \
             || rust_reads_frontmatter_status "$source"; then
             echo "$source"
         fi
@@ -267,7 +414,7 @@ fm_status=""
 while IFS= read -r reader; do
     [ -n "$reader" ] || continue
     matches="$(
-        grep -nF '"status"' "$reader" 2>/dev/null || true
+        grep -nF "$STATUS_LITERAL" "$reader" 2>/dev/null || true
     )"
     if [ "$reader" = "crates/fno-agents/src/kill_criteria.rs" ]; then
         matches="$(

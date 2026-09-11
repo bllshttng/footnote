@@ -3775,7 +3775,7 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     let entries = state::load_registry(&home.registry_json()).unwrap();
     entry = entries.entries.first().unwrap();
     let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
-    receipt.effects = vec![crate::gc_native::stop_outcome_effect(true)];
+    receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
     let mut receipts = std::collections::BTreeMap::new();
     receipts.insert(entry.name.clone(), receipt);
     let order = gc_sweep::RetireOrder {
@@ -3851,7 +3851,7 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
     let mut receipt = crate::receipt::build_reap_receipt(&e, None).unwrap();
     receipt.native_locator = Some(json!({ "transcripts": [transcript.to_string_lossy()] }));
     receipt.effects = vec![
-        crate::gc_native::stop_outcome_effect(true),
+        crate::gc_native::stop_outcome_effect(true, None),
         crate::daemon::CascadeOutcome::Removed.effect_record("active-surface"),
         crate::gc_sweep::resume_evidence_effect(&receipt),
     ];

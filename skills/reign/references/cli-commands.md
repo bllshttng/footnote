@@ -90,7 +90,7 @@ Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.
 
-`fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. When the daemon is wedged, the working reap path is the in-process call. It skips the daemon and returns at once: `python -c "from fno.agents.dispatch import rm_agent; rm_agent('<name>', force=True)"`.
+`fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. The old in-process escape (`python -c "... rm_agent ..."`) is gone: rm has no Python implementation. The remedy is the daemon restart verb, `fno agents restart`: it SIGTERMs the stale daemon and lazy-starts a fresh one, and PTY workers survive the restart. Re-run the rm on the fresh daemon.
 
 `fno agents list` reads every transcript to derive per-row state. On a fleet of dozens it has taken over 120 seconds. Budget for that before you block a reign on the read.
 
@@ -153,7 +153,7 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 |---|---|
 | `fno do pr status <n>` | `ready` means green AND `optional_reviews_unresolved == 0`. Advisory, never the exit code. Costs GraphQL quota through its `reviewThreads` read. |
 | `fno do pr merge <n>` | Gates on the `review_coverage` event read from local `events.jsonl`. Never reads threads. |
-| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` | CI state over REST. Free of the GraphQL budget every `pr status` read shares. |
+| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and `/commits/<sha>/status` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see. Free of the GraphQL budget. |
 | `fno-agents review-coverage` | The standalone coverage producer. Exit 4 carries `graphql_exhausted` on stdout. |
 
 ## Backlog

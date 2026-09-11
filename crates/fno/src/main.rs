@@ -2,17 +2,20 @@
 //!
 //! - bare `fno` on a TTY -> mux client (spawn a server if absent, attach)
 //! - bare `fno` off a TTY -> a one-line notice, exit 0 (never a TUI into a pipe)
-//! - `fno --session <name>` on a TTY -> mux client for a named session
+//! - `fno --server <name>` on a TTY -> mux client for a named server
+//! - `fno --session <name>` -> deprecated spelling of `--server` (still works, warns)
 //! - `fno --server <socket>` -> mux server (internal; what the client spawns)
-//! - `fno mux server [--session <name>]` -> mux server (public, scriptable)
-//! - `fno mux ls | attach <name> | kill-server [<name>]` -> session management
+//! - `fno mux server [--server <name>]` -> mux server (public, scriptable)
+//! - `fno mux ls | attach <name> | kill-server [<name>]` -> server management
 //! - anything else -> forward to the provisioned Python CLI (`bootstrap`)
 //!
-//! `--session` is intercepted ONLY as the exact leading pair
-//! `["--session", <name>]` (Locked 7): every other leading `--session` shape
-//! is MuxUsage, never a silent forward to Python - the Python namespace only
-//! carries a deprecated per-subcommand alias, never a leading flag, so the
-//! interception is collision-free.
+//! The leading `--server`/`--session` pair is intercepted ONLY as the exact
+//! pair `[flag, <name>]` (Locked 7): every other shape is MuxUsage, never a
+//! silent forward to Python - the Python namespace only carries a deprecated
+//! per-subcommand alias, never a leading flag, so the interception is
+//! collision-free. A `--server` value containing `/` keeps the internal
+//! ServerSocket role (what `client.rs` spawns with an absolute path); any
+//! other value is the attach.
 
 use std::env;
 use std::ffi::OsString;
@@ -42,8 +45,9 @@ fn mux_tombstone(verb: &str) -> Option<&'static str> {
 }
 
 /// What this invocation is, decided purely from args + TTY-ness. Session
-/// resolution (flag > env > default) happens in `main`, not here, so the
-/// decision table stays pure.
+/// resolution (flag > env > default) happens in `main`, not here; the one
+/// side effect is the `--session` deprecation note, which names a flag and
+/// stays silent on every `--server` shape.
 #[derive(Debug, PartialEq, Eq)]
 enum Role {
     /// Attach (spawning the server if absent). `Some(name)` when an explicit
@@ -175,7 +179,10 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     while let Some(a) = it.next() {
         match a.to_str()? {
             "--web" => web = true,
-            "--session" => args.session = it.next()?.to_str()?.to_string(),
+            tok @ ("--server" | "--session") => {
+                mux_cli::note_server_flag(tok);
+                args.session = it.next()?.to_str()?.to_string()
+            }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
@@ -194,32 +201,43 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Role::NotTty
             }
         }
-        Some(Some("--session")) => match args.get(1).and_then(|a| a.to_str()) {
-            // Exactly ["--session", <name>]: an attach. Anything else
-            // (bare flag, trailing args) is usage - never forwarded (AC3-ERR).
-            Some(name) if args.len() == 2 => {
-                if is_tty {
-                    Role::Client(Some(name.to_string()))
-                } else {
-                    Role::NotTty
+        Some(Some(flag @ ("--session" | "--server"))) => {
+            // Exactly [flag, <name>]: an attach. Anything else (bare flag,
+            // trailing args) is usage - never forwarded (AC3-ERR).
+            match args.get(1).and_then(|a| a.to_str()) {
+                Some(name) if args.len() == 2 => {
+                    // A `--server` value containing `/` keeps the internal
+                    // ServerSocket role (client.rs spawns it with an absolute
+                    // path); any other value is the attach that
+                    // `fno --session <name>` performs today (x-f209).
+                    if flag == "--server" && name.contains('/') {
+                        return Role::ServerSocket(OsString::from(name));
+                    }
+                    if flag == "--session" {
+                        mux_cli::note_server_flag(flag);
+                    }
+                    if is_tty {
+                        Role::Client(Some(name.to_string()))
+                    } else {
+                        Role::NotTty
+                    }
                 }
+                _ => Role::MuxUsage,
             }
-            _ => Role::MuxUsage,
-        },
-        Some(Some("--server")) => match args.get(1) {
-            Some(p) if args.len() == 2 => Role::ServerSocket(p.clone()),
-            _ => Role::MuxUsage,
-        },
+        }
         Some(Some("mux")) => match args.get(1).and_then(|a| a.to_str()) {
             Some("server") => {
                 let mut session = proto::DEFAULT_SESSION.to_string();
                 let mut rest = args[2..].iter();
                 while let Some(a) = rest.next() {
                     match a.to_str() {
-                        Some("--session") => match rest.next().and_then(|s| s.to_str()) {
-                            Some(s) => session = s.to_string(),
-                            None => return Role::MuxUsage,
-                        },
+                        Some(flag @ ("--server" | "--session")) => {
+                            mux_cli::note_server_flag(flag);
+                            match rest.next().and_then(|s| s.to_str()) {
+                                Some(s) => session = s.to_string(),
+                                None => return Role::MuxUsage,
+                            }
+                        }
                         _ => return Role::MuxUsage,
                     }
                 }
@@ -324,7 +342,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
 fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let env_session = env::var("FNO_SESSION").ok();
+    let env_session = mux_cli::env_server();
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
         Role::NotTty => {
@@ -337,12 +355,12 @@ fn main() {
         }
         Role::MuxUsage => {
             eprintln!(
-                "usage: fno [--session <name>] | fno version [--json] \
-                 | fno mux server [--session <name>] \
+                "usage: fno [--server <name>] | fno version [--json] \
+                 | fno mux server [--server <name>] \
                  | fno mux ls [--json] | fno mux attach <name> \
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
-                 | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
+                 | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
@@ -480,6 +498,40 @@ mod tests {
         assert_eq!(
             decide_role(&os(&["--session", "work", "backlog", "list"]), false),
             Role::MuxUsage
+        );
+    }
+
+    #[test]
+    fn server_axis_top_level_server_flag_attaches_or_spawns_internal() {
+        // x-f209 AC4-HP/EDGE: `--server <name>` is the attach that
+        // `--session <name>` performs today; a value containing `/` keeps the
+        // internal ServerSocket role the client spawns.
+        assert_eq!(
+            decide_role(&os(&["--server", "work"]), true),
+            Role::Client(Some("work".into()))
+        );
+        assert_eq!(decide_role(&os(&["--server", "work"]), false), Role::NotTty);
+        assert_eq!(
+            decide_role(&os(&["--server", "/tmp/x.sock"]), true),
+            Role::ServerSocket("/tmp/x.sock".into())
+        );
+        assert_eq!(
+            decide_role(&os(&["--server"]), true),
+            Role::MuxUsage,
+            "a bare flag is usage, never a forward"
+        );
+    }
+
+    #[test]
+    fn server_axis_mux_server_takes_server_flag() {
+        // x-f209: `mux server --server <name>`; --session keeps working.
+        assert_eq!(
+            decide_role(&os(&["mux", "server", "--server", "work"]), false),
+            Role::ServerSession("work".into())
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "server", "--session", "work"]), false),
+            Role::ServerSession("work".into())
         );
     }
 

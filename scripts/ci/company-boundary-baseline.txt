@@ -24,9 +24,9 @@
 # See docs/architecture/company-boundaries.md.
 cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/claims/cli.py:1066: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
-cli/src/fno/claims/cli.py:1334: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1357: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:1087: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
+cli/src/fno/claims/cli.py:1355: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1378: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 #
 # Added 2026-09-03 (x-1182). `fno agents claim list --silent-after` reads a
 # claim's own transcript tail to answer "has this worker gone quiet", the
@@ -39,4 +39,13 @@ cli/src/fno/claims/roster.py:26: L1 core -> L5 runtime / from fno.agents.watchdo
 cli/src/fno/claims/roster.py:32: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 cli/src/fno/claims/roster.py:58: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
 cli/src/fno/claims/roster.py:67: L1 core -> L5 runtime / from fno.agents.watchdog import (
+
+# Added 2026-09-10. The maintain abandoned-do-row leg's prover answers "is
+# this do row's session gone" from transcript truth: finished_with_the_tree
+# plus tail_facts, the same readers the fleet watchdog uses. tail_facts IS
+# the transcript reader and there is no lower-layer copy to call instead,
+# the same shape as the roster.py entries above. The detector takes the
+# prover as an injected parameter, so tests drive it hermetically; the
+# edge lives only where the sweep composes its instrument.
+cli/src/fno/graph/maintain.py:2064: L1 core -> L5 runtime / from fno.agents.watchdog import finished_with_the_tree, tail_facts
 layer cycle: L0 platform -> L5 runtime -> L0 platform

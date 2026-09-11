@@ -637,7 +637,7 @@ def test_ac8_con_mux_stop_requires_exact_pane_absence():
     assert proof.confirmed_dead is False
     assert proof.evidence_count == 0
     assert calls[0][-6:] == [
-        "mux", "pane", "kill", "--session", "stable-session", "19"
+        "mux", "pane", "kill", "--server", "stable-session", "19"
     ]
 
 

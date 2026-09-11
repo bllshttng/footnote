@@ -186,7 +186,14 @@ set -euo pipefail
 # freed 11 bytes on this branch. Reclaimed rather than left, because
 # unreclaimed slack is how this file reached 55 bytes of headroom with no
 # commit to blame. Zero spare again.
-CEILING_BYTES=40150
+# Raised 40150 -> 41630 for x-74aa: the pitfalls corpus gains the READ-SIDE
+# twin of the assert-a-positive-marker entry (a verdict that did not confirm
+# which store it read) and its graduates-to now names the
+# check-node-occupancy-readers gate. The entry the plan inlines IS the
+# session-start reach channel, so the preamble is its only legal home; the
+# corpus has no tradeable bytes left (see the refusal text), and HEAD sat 8
+# bytes under the old ceiling. Ceiling set at measured + band/2.
+CEILING_BYTES=41630
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

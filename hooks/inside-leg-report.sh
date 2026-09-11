@@ -186,10 +186,11 @@ is_pane_host() {
   # Every pin path component is env-controlled, so a hostile env could smuggle
   # `/` or `..` to steer the write outside the dir. FNO_PANE/FNO_PANE_EPOCH are
   # numeric by contract (pty.rs), so require digits (degrade-to-emit otherwise);
-  # FNO_SESSION is a free-form name, so sanitize its separators. Deterministic,
-  # so a host and its nested claude still compute the same pin path.
+  # FNO_SERVER (FNO_SESSION on pre-rename panes) is a free-form name, so
+  # sanitize its separators. Deterministic, so a host and its nested claude
+  # still compute the same pin path.
   [[ "$FNO_PANE" =~ ^[0-9]+$ && "$FNO_PANE_EPOCH" =~ ^[0-9]+$ ]] || return 0
-  local safe_session="${FNO_SESSION:-_}"; safe_session="${safe_session//[\/.]/_}"
+  local safe_session="${FNO_SERVER:-${FNO_SESSION:-_}}"; safe_session="${safe_session//[\/.]/_}"
   local pin="${dir}/${safe_session}-${FNO_PANE}-${FNO_PANE_EPOCH}"
   # noclobber makes the create fail if the pin exists -> exactly one winner.
   if ( set -o noclobber; printf '%s\n' "$SESSION_ID" >"$pin" ) 2>/dev/null; then

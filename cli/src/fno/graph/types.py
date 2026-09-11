@@ -79,14 +79,9 @@ def _derive_status(data: dict) -> str:
     if data.get("completed_at"):
         return "done"
     if data.get("superseded_by"):
-        # One authority for the pending shape. recompute_statuses and the
-        # readiness overlay both answer `blocked` here, and this function's
-        # contract is to mirror them; answering in_progress made the same row
-        # read two ways depending on which path last touched it.
-        from fno.graph.statuses import pending_supersession_reason
-
-        if pending_supersession_reason(data):
-            return "blocked"
+        # The superseded_by edge is the terminal fact (x-e8f3): supersession
+        # evidence lives in the record and the reconcile receipts, never in
+        # status. Mirrors recompute_statuses answering superseded here.
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
@@ -249,6 +244,10 @@ class Entry(BaseModel):
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
 
+    # Request origin: birth-time, never rewritten later.
+    request_origin: Optional[str] = None
+    origin_evidence: Optional[str] = None
+
     # Append-only lifecycle provenance (x-b6e4): one {phase, harness, session_id,
     # effort, at} record per phase boundary a session crossed. Unique per
     # (phase, harness, session_id); the same session may appear across phases and
@@ -349,8 +348,7 @@ class Entry(BaseModel):
 
         Precedence (mirrors recompute_statuses single-entry portion):
           completed_at set    -> "done"
-          verified superseded_by set -> "superseded"
-          pending supersession      -> "blocked"
+          superseded_by set   -> "superseded"
           deferred_at set     -> "deferred"
           pr_number set       -> "in_review"
           non-empty blocked_by -> "blocked"

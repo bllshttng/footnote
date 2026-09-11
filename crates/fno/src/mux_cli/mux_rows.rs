@@ -20,7 +20,7 @@ pub fn rows(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
     };
     if let Some(verb) = rest.first() {
-        eprintln!("fno mux rows: unknown argument {verb} (flags: --json, --session)");
+        eprintln!("fno mux rows: unknown argument {verb} (flags: --json, --server)");
         return EXIT_USAGE;
     }
     run_on_existing_server(

@@ -36,19 +36,18 @@ Provider matrix:
 ```
 cli.py
    ├─ cmd_stop(name)         → dispatch.stop_agent(name)
-   ├─ cmd_rm(name, --force)  → dispatch.rm_agent(name, force=False)
+   ├─ cmd_rm(name, --force)  → Rust runtime only (no Python rm; refuses by name
+   │                           without the fno-agents binary)
    ├─ cmd_reconcile(--json)  → dispatch.reconcile_agents()
    └─ cmd_attach(name)       → dispatch.attach_agent(name)
 
 dispatch.py
    ├─ stop_agent     ─ per-agent flock → claude_stop → events.agent_stopped
-   ├─ rm_agent       ─ per-agent flock → claude_rm   → update_registry → events.agent_removed
    ├─ reconcile_agents ─ no flock; per-entry update_registry; one-shot capability checks (claude-on-PATH, codex-session-index)
    └─ attach_agent   ─ no flock; claude_attach with inherited stdio
 
 harnesses/claude.py
    ├─ claude_stop(short_id, timeout=30)         → (exit_code, stderr)
-   ├─ claude_rm(short_id, timeout=30)           → (exit_code, stderr)
    ├─ claude_attach(short_id)                   → exit_code  (no capture, no timeout)
    └─ claude_logs_reachable(short_id, timeout=10) → bool
 
@@ -57,6 +56,8 @@ harnesses/codex.py
    ├─ session_index_exists(path=None)           → bool
    └─ load_known_session_ids(path=None)         → set[str]   (UUID regex extraction)
 ```
+
+The rm live-row gate, harness cascade, and `agent_removed` event live in the Rust `handle_rm_with` (crates/fno-agents/src/daemon.rs). The Python twin is deleted. The no-binary refusals live in `rust_runtime.refuse_without_binary`.
 
 ## Design rules
 

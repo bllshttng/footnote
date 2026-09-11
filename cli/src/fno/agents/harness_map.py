@@ -34,6 +34,7 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 """
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from copy import deepcopy
@@ -711,6 +712,79 @@ def lost_verb_refusal(message: str) -> Optional[str]:
                 f"'$fno:{verb} ...'"
             )
     return None
+
+
+def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
+    """The refusal for a verb-shaped seed whose verb cannot expand, or None.
+
+    An intact ``$fno:verb`` seed still lands as prose when the footnote plugin
+    is not enabled in the codex home this machine resolves. ``missing`` and
+    ``wrong-channel`` are the measured-absent states and refuse; an unreadable
+    state (no codex CLI on PATH) fails open, because the spawn fails on its
+    own there.
+    """
+    if harness != "codex" or not message.strip().startswith(("/", "$fno:")):
+        return None
+    from fno.setup.codex_plugin import CodexPluginError, inspect_freshness
+
+    try:
+        status = inspect_freshness().get("status")
+    except (CodexPluginError, OSError, ValueError):
+        return None
+    if status in ("missing", "wrong-channel"):
+        return (
+            f"the seed invokes {message.strip().split()[0]!r} but the footnote "
+            "plugin is not enabled for codex on this machine, so the verb would "
+            "not fire and the worker would read the seed as prose. Install it "
+            "with 'fno config setup codex-plugin' and spawn again."
+        )
+    return None
+
+
+def verb_fired_marker(message: str) -> Optional[str]:
+    """The command that proves a ``/fno:target <node>`` seed actually fired.
+
+    The marker is the claim naming the spawned session as holder; a busy worker fired nothing.
+    """
+    first = message.strip().splitlines()[0].split()
+    if len(first) < 2 or first[1].startswith(("-", "/", "$")):
+        return None
+    if first[0].lstrip("/$") != "fno:target":
+        return None
+    return f"fno agents claim status node:{first[1]}"
+
+
+def render_seed(message: str, harness: str) -> str:
+    """Prose verbatim; a verb-shaped seed gate-checked then normalized."""
+    if not message.strip().startswith(("/", "$fno:")):
+        return message
+    refusal = cannot_fire_refusal(message, harness)
+    if refusal:
+        raise DispatchResolveError(refusal)
+    return normalize_command(message, harness)
+
+
+def spawn_seed_receipt_fields(effective_message: str) -> dict[str, str]:
+    """The receipt fields a delivered seed contributes; prose seeds get none.
+
+    ``verb_fired`` is ``pending`` because a busy worker fired nothing; the
+    marker names the command whose pass settles it.
+    """
+    fields = {"effective_message": effective_message, "verb_fired": "pending"}
+    marker = verb_fired_marker(effective_message)
+    if marker:
+        fields["verb_marker"] = marker
+    return fields
+
+
+def spawn_seed_receipt_fragment(effective_message: Optional[str]) -> str:
+    """The JSON fragment form of :func:`spawn_seed_receipt_fields`; "" for prose."""
+    if effective_message is None:
+        return ""
+    return "".join(
+        f", {json.dumps(key)}: {json.dumps(value)}"
+        for key, value in spawn_seed_receipt_fields(effective_message).items()
+    )
 
 
 def _loop_extension_installed(harness: str) -> bool:

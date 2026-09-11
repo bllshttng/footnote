@@ -14,7 +14,11 @@
 //! the session provenance (phase, harness, session id, started_at) survives,
 //! stamped `ended_by: "reap-sweep"` because the sweep infers the end instant
 //! rather than observing it. A row the settle cannot fill on a node still in
-//! flight keeps under `open do row on done node`.
+//! flight keeps under `open do row on done node`. That stranded population
+//! (an open do row is what holds its node out of this settle's own gate) has
+//! its own lane: `fno backlog maintain` detects it in Python, where the
+//! transcript resolver lives, and reaps a row only after the prover proves
+//! the session gone. Widen THIS gate never; extend that lane instead.
 //!
 //! Retirement removes the session from its harness's ACTIVE surface only
 //! (the agent list, the session index); the native history is never deleted,
@@ -33,6 +37,19 @@ use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason,
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
+
+/// (x-1b90 change 3) How long a row has sat unresolved: now minus
+/// `last_message_at`, else `created_at`; a stamp that cannot parse names no
+/// age (0 keeps the line shape without inventing a number).
+fn unresolved_hold_secs(e: &state::RegistryEntry, now: i64) -> i64 {
+    let parsed = e
+        .last_message_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(state::rfc3339_like_to_secs)
+        .or_else(|| state::rfc3339_like_to_secs(&e.created_at));
+    parsed.map_or(0, |at| (now - at as i64).max(0))
+}
 use crate::receipt::{
     build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
 };
@@ -90,7 +107,9 @@ pub struct GcSummary {
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// The transcript could not be resolved through the row's own store.
-    pub kept_transcript_unresolved: Vec<String>,
+    /// (x-1b90 change 3) Rows of `{ id, held_s, nodes_done }`: the hold
+    /// names its age, and an old hold on done work asks for a decision.
+    pub kept_transcript_unresolved: Vec<UnresolvedHold>,
     /// The graph could not be read this pass. Never a retirement on a failed
     /// read.
     pub kept_graph_unreadable: Vec<String>,
@@ -128,6 +147,36 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
+    /// The registry file could not be read this pass. Never a retirement on
+    /// a failed read; the tick names this instead of a quiet no_rows.
+    pub registry_unreadable: bool,
+}
+
+impl GcSummary {
+    /// Every `kept_*` bucket summed: the rows the pass judged but did not
+    /// retire. Zero alongside an empty `retired` means the pass classified
+    /// no row at all (the retire tick's `no_rows` skip reason).
+    pub fn kept_total(&self) -> usize {
+        self.kept_shared_tree.len()
+            + self.kept_live_descendants.len()
+            + self.kept_operator.len()
+            + self.kept_crowned.len()
+            + self.kept_not_spawn.len()
+            + self.kept_no_provenance.len()
+            + self.kept_node_conflict.len()
+            + self.kept_pr_contradicts.len()
+            + self.kept_planning_unclosed.len()
+            + self.kept_open_work.len()
+            + self.kept_active.len()
+            + self.kept_transcript_unresolved.len()
+            + self.kept_graph_unreadable.len()
+            + self.kept_open_do_row.len()
+            + self.kept_dirty.len()
+            + self.kept_unmerged.len()
+            + self.kept_unprobed.len()
+            + self.kept_no_receipt.len()
+            + self.kept_receipts.len()
+    }
 }
 
 /// One state file selected for deletion by the shared age policy.
@@ -137,6 +186,22 @@ pub struct StateReapEntry {
     pub bytes: u64,
     pub age_s: u64,
 }
+
+/// (x-1b90 change 3) One transcript-unresolved hold: the row, how long it
+/// has sat unresolved (now minus `last_message_at`, else `created_at`), and
+/// whether every node the row names reads done. The hold is right; what it
+/// lacked was a clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnresolvedHold {
+    pub id: String,
+    pub held_s: i64,
+    pub nodes_done: bool,
+}
+
+/// (x-1b90 change 3) When an unresolved hold is this old AND the row's work
+/// is all done, the render asks for a decision: `fno agents rm <name>` - an
+/// rm that, since change 1, proves the death it prints.
+pub(crate) const UNRESOLVED_HOLD_DECIDE_S: i64 = 6 * 3600;
 
 /// One state file retained because its safety proof was incomplete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -507,7 +572,7 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
             Ok(settled) => return (settled, Vec::new()),
             Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
                 let _ = err;
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(settle_backoff_ms(attempt)));
             }
             Err(SettleRefusal::Retry(err)) => {
                 let reason =
@@ -520,6 +585,24 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
         }
     }
     unreachable!("every loop arm returns")
+}
+
+/// Full-jitter exponential delay before settle retry attempt `attempt + 1`,
+/// the shape x-1601 landed on the Python side (`_tx_backoff_secs`): sweepers
+/// are correlated by construction, so the flat 250 ms re-lined every loser
+/// up at the same instant. Uniform in [0, min(cap, base << attempt)].
+const SETTLE_BACKOFF_BASE_MS: u64 = 250;
+const SETTLE_BACKOFF_CAP_MS: u64 = 4_000;
+
+fn settle_backoff_ms(attempt: usize) -> u64 {
+    let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+    let mut buf = [0u8; 8];
+    // A failed entropy draw sleeps 0: the immediate retry this replaces,
+    // never a panic in a sweep thread.
+    if getrandom::fill(&mut buf).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(buf) % (bound + 1)
 }
 
 /// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
@@ -916,7 +999,15 @@ pub(crate) fn run(
     if !dry_run {
         expire_reap_receipts(home, retain_days, &mut summary);
     }
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let (registry, registry_read) = match state::load_registry(&home.registry_json()) {
+        Ok(r) => (r, true),
+        Err(_) => (Default::default(), false),
+    };
+    if !registry_read {
+        // A read that failed is not a census of zero: the tick must render a
+        // failed sweep, not a quiet no_rows.
+        summary.registry_unreadable = true;
+    }
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }
@@ -1038,6 +1129,10 @@ pub(crate) fn run(
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let work = verdict.work.clone();
+        // (x-1b90 change 3) Every node the row names reads done - the exact
+        // condition under which an old unresolved hold may ask for a
+        // decision. Computed before `work` moves into the GcRow.
+        let nodes_done = matches!(work, WorkState::AllDone { .. });
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -1151,7 +1246,11 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
-                    summary.kept_transcript_unresolved.push(id)
+                    summary.kept_transcript_unresolved.push(UnresolvedHold {
+                        id,
+                        held_s: unresolved_hold_secs(e, now),
+                        nodes_done,
+                    })
                 }
                 Some(KeepReason::NodeConflict { a, b }) => {
                     summary.kept_node_conflict.push((id, a, b))
@@ -1516,15 +1615,31 @@ pub(crate) fn stage_session_retirement(
             "receipt did not persist: {err}"
         )));
     }
-    // Effect 1: the confirmed stop of the held process.
-    let stopped = stop_confirmed(e);
-    receipt
-        .effects
-        .push(crate::gc_native::stop_outcome_effect(stopped));
+    // Effect 1: the confirmed stop of the held process. Pane-substrate rows
+    // stop through the pid-proving helper (x-1b90 change 1): the roster and
+    // the worker socket never held the pane, so both today's arms confirm a
+    // stop that never happened. The detail is the receipt's measurement, so
+    // the routing decision lives here where the effect is built - never in
+    // the seam closure, whose bool answer cannot carry it.
+    let pane_stop = if e.substrate.as_deref() == Some("pane") {
+        Some(crate::pane_stop::stop_pane_process_confirmed(e))
+    } else {
+        None
+    };
+    let stopped = pane_stop
+        .as_ref()
+        .map(|s| s.confirmed)
+        .unwrap_or_else(|| stop_confirmed(e));
+    receipt.effects.push(crate::gc_native::stop_outcome_effect(
+        stopped,
+        pane_stop.as_ref().map(|s| s.detail.clone()),
+    ));
     if !stopped {
         let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
-            "the stop did not confirm; row kept for retry".into(),
+            pane_stop
+                .map(|s| s.detail)
+                .unwrap_or_else(|| "the stop did not confirm; row kept for retry".into()),
         ));
     }
     // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent
@@ -2467,6 +2582,25 @@ pub(crate) fn default_ledger_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settle_backoff_is_full_jitter_within_the_attempt_bound() {
+        // The x-1601 shape: uniform in [0, min(cap, base << attempt)], so two
+        // sweepers never re-line up on the same instant the way the flat 250
+        // ms sleep did.
+        for attempt in 0..7 {
+            let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+            for _ in 0..64 {
+                let delay = settle_backoff_ms(attempt);
+                assert!(delay <= bound, "attempt {attempt}: {delay} > {bound}");
+            }
+        }
+        // The cap holds at the ceiling no matter how far the shift climbs.
+        assert_eq!(
+            SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << 20),
+            SETTLE_BACKOFF_CAP_MS
+        );
+    }
 
     fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
         let base = std::env::temp_dir().join(format!(

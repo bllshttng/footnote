@@ -1720,7 +1720,7 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch, stop_rc=1, stop_out=refusal)
         assert recovery._redispatch(self._cand()) is True
         kill = self._index_of(
-            calls, ["fno-py", "mux", "pane", "kill", "--session", "main", "10"]
+            calls, ["fno-py", "mux", "pane", "kill", "--server", "main", "10"]
         )
         assert kill is not None, "the named pane-kill verb ran"
         fr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"])

@@ -741,9 +741,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("events-discipline lint", ".", "bash scripts/lint/events-discipline.sh"),
     ("events-discipline lint self-test", ".", "bash tests/lint/test-events-discipline.sh"),
     ("No quarantined events.invalid.jsonl rows", ".", "bash scripts/lint/no-invalid-events.sh"),
-    ("ruff + mypy (both repo-wide)", "cli",
-     "uv run ruff check --no-respect-gitignore src/\n"
-     "uv run mypy src/"),
+    ("ruff + mypy (both repo-wide)", ".", "bash scripts/ci/check-python-static.sh"),
     ("Smoke tests", ".", "bash cli/tests/smoke/run-all.sh"),
     ("no hardcoded paths", ".", "bash scripts/ci/check-no-hardcoded-paths.sh"),
     ("placement rule", ".", "bash scripts/ci/check-placement-rule.sh"),

@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+from collections import namedtuple
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -2051,3 +2052,113 @@ def run_validity_sweep(
         stale=sum(1 for r in rows if r.stale),
         warnings=warnings,
     )
+
+
+AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason")
+
+
+def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
+    """Proof of session death from transcript truth; False holds with a named reason. Never raises."""
+    try:
+        from fno.provenance.observed import FILE_BACKED_HARNESSES, resolve_transcript_path
+        from fno.agents.watchdog import finished_with_the_tree, tail_facts
+
+        if harness not in FILE_BACKED_HARNESSES:
+            return False, "harness not file-backed"
+
+        facts = tail_facts(session_id, cwd, agent=harness)
+        if facts is None:
+            if resolve_transcript_path(harness, session_id, cwd) is None:
+                return False, "transcript unresolved"
+            return False, "transcript unreadable"
+        if not finished_with_the_tree(facts, now_s, quiet_after_s):
+            return False, "transcript active"
+        quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
+        return True, f"transcript quiet {quiet_m}m, tail not engaged"
+    except Exception:  # noqa: BLE001 - a proof must never break the sweep
+        return False, "transcript unreadable"
+
+
+def detect_abandoned_do_rows(
+    entries, *, live_claimed, live_worked, prover, now_s, quiet_after_s
+):
+    """Stamp every non-terminal, unclaimed open-do-row node gone or held; vetoes outrank the prover."""
+    from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
+
+    out: list[AbandonedDoRow] = []
+    for e in entries:
+        nid = e.get("id") if isinstance(e, dict) else None
+        if (not isinstance(nid, str) or not nid or e.get("locked_by")
+                or e.get("status") in TERMINAL_RUNGS or e.get("superseded_by")):
+            continue
+        for row in e.get("sessions") or []:
+            if not is_open_do_row(row):
+                continue
+            harness, sid = row.get("harness"), row.get("session_id")
+            if nid in live_claimed or live_worked.get(nid):
+                why = ("live claim" if nid in live_claimed
+                       else f"live roster worker {', '.join(live_worked[nid])}")
+                out.append(AbandonedDoRow(nid, harness, sid, "held", why))
+            else:
+                gone, reason = prover(harness, sid, e.get("cwd"),
+                                      quiet_after_s=quiet_after_s, now_s=now_s)
+                out.append(AbandonedDoRow(nid, harness, sid,
+                                          "gone" if gone else "held", reason))
+    return out
+
+
+def abandoned_leg(entries, claimed, graph_path, apply):
+    """Detect + reap + render for cmd_maintain; returns ``(lines, warning)``."""
+    try:
+        from fno.config import load_settings
+        hours = load_settings().backlog.maintain.abandoned_do_row_hours
+    except Exception:
+        hours = 24
+    try:
+        from fno.graph.statuses import live_worked_node_ids
+        rows = detect_abandoned_do_rows(
+            entries, live_claimed=claimed,
+            live_worked=live_worked_node_ids(strict=True, entries=entries),
+            prover=do_row_session_gone,
+            now_s=datetime.now(timezone.utc).timestamp(),
+            quiet_after_s=hours * 3600,
+        )
+    except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
+        return [], f"abandoned-do-row leg skipped: {exc}"
+
+    reaped, reaped_rows, truncated = {}, 0, 0
+    if apply:
+        gone = [r for r in rows if r.verdict == "gone"]
+        truncated = max(0, len(gone) - AUTO_DEFER_BLAST_CAP)
+        from fno.graph.store import reap_open_session_record
+
+        for cand in gone[:AUTO_DEFER_BLAST_CAP]:
+            try:
+                rep = reap_open_session_record(
+                    graph_path, cand.node, phase="do",
+                    harness=cand.harness, session_id=cand.session_id,
+                )
+                reaped[cand.node] = {"row_removed": bool(rep.get("row_removed")),
+                                     "status_after": rep.get("status_after")}
+                reaped_rows += 1
+            except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                reaped[cand.node] = {"error": str(exc)}
+
+    lines = [f"abandoned-do-rows reaped {reaped_rows} of {len(rows)} candidate(s)"
+             if apply else f"abandoned-do-row candidates {len(rows)}"]
+    for r in rows:
+        tag = f"{r.harness} {str(r.session_id)[:8]}"
+        rep = reaped.get(r.node)
+        if rep and "error" in rep:
+            lines.append(f"  warning: do-row reap of {r.node} failed: {rep['error']}")
+        elif rep:
+            lines.append(f"  reaped do row {r.node} ({tag}): row_removed "
+                         f"{str(rep['row_removed']).lower()}, status_after "
+                         f"{rep['status_after']} ({r.reason})")
+        else:
+            verb = "would reap" if r.verdict == "gone" else "held"
+            lines.append(f"  {verb} do row {r.node} ({tag}): {r.reason}")
+    if truncated:
+        lines.append(f"  NOTE: abandoned-do-row blast cap hit - {truncated} gone "
+                     f"row(s) not reaped (cap {AUTO_DEFER_BLAST_CAP}); re-run to continue")
+    return lines, None

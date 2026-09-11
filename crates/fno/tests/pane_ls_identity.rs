@@ -25,6 +25,7 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
         tab_ordinal: None,
         fno_id: fno_id.map(str::to_string),
         orphaned_worker: false,
+        release: None,
         harness_session_id: None,
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,

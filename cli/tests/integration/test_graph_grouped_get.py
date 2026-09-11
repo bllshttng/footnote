@@ -134,6 +134,8 @@ def test_default_view_matches_recorded_flat_fixture(tmp_graph):
   "source_node_id": null,
   "source_plan_path": null,
   "source_inbox_msg": null,
+  "request_origin": null,
+  "origin_evidence": null,
   "spawned_by_session": null,
   "spawned_by_harness": null,
   "spawned_by_cwd": null,

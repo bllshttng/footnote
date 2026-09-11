@@ -1756,7 +1756,7 @@ PYEOF
               echo "UNBLOCKS_AFTER: parent generation releases node:${_NODE_ID} or stale-claim recovery reclaims it" >&1
             fi
           else
-            touch "$STATE_DIR/.target-cancelled"
+            printf 'author: init\nreason: claim_held_by_other\n' > "$STATE_DIR/.target-cancelled"
             _EVENT_DATA="$(python3 -c 'import json,sys; print(json.dumps({"lane":"target","path":sys.argv[1],"reason":"claim_held_by_other"}))' "$STATE_DIR/.target-cancelled" 2>/dev/null || true)"
             if [[ -n "$_EVENT_DATA" ]]; then
               fno doctor event emit -t cancel_signal_set -s hook -d "$_EVENT_DATA" >/dev/null 2>&1 || \

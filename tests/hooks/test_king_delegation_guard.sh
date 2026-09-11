@@ -42,6 +42,8 @@ elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "manifest-path" ]; the
   fi
 elif [ "$1" = "config" ] && [ "$2" = "get" ]; then
   cat "$KGD_KNOB" 2>/dev/null || true
+elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
+  echo "$KGD_HANDOFF"
 elif [ "$1" = "do" ] && [ "$2" = "plan" ] && [ "$3" = "path" ]; then
   echo "$KGD_PLANS/probe.md"
 else
@@ -54,6 +56,7 @@ export KGD_REG_FIXTURE="$TMP/registry.json"
 export KGD_KNOB="$TMP/knob.txt"
 export KGD_PLANS="$TMP/plans"
 export KGD_MANIFEST_ARGS="$TMP/manifest-args.log"
+export KGD_HANDOFF="$TMP/handoffs/20260910-crown-fno.md"
 mkdir -p "$KGD_PLANS"
 : > "$KGD_KNOB"
 : > "$KGD_MANIFEST_ARGS"
@@ -197,6 +200,31 @@ OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/quoted plan.md\"")")"; RC=$
 OUT="$(run_guard "$(bash_payload "fno agents spawn '/fno:target x-9' --node x-9 --substrate thread 2>/dev/null")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: spawn with 2>/dev/null allowed" \
   || fail "Bash floor: spawn devnull rc=$RC out=$OUT"
+
+# ── Handoff exemption: the crown's own canon doc stays writable ──────────────
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"gaps"}}' "$SID" "$TMP/repo" "$KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: Write to the crown's canon doc allowed" \
+  || fail "handoff Write rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(edit_payload "$KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: Edit of the crown's canon doc allowed" \
+  || fail "handoff Edit rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "cat >> $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: cat redirect append allowed" \
+  || fail "handoff cat rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "printf ruling | tee -a $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: tee append allowed" \
+  || fail "handoff tee rc=$RC out=$OUT"
+
+# A sibling under the same directory is NOT the resolved doc: still denied.
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/handoffs/evil.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "handoff: sibling path still denied" \
+  || fail "handoff sibling rc=$RC out=${OUT:0:300}"
 
 OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \

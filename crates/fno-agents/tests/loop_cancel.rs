@@ -178,6 +178,8 @@ fn sentinel_refusal_records_cause_path_and_age() {
         path: Some(sentinel.clone()),
         age_secs: Some(2 * 60 * 60),
         clear_hint: "fno agents king cancel --scope k --clear".to_string(),
+        author: None,
+        reason: None,
     };
     let mut queue = OneUnitQueue::new();
     let budget = LoopBudget::new(2).unwrap();
@@ -204,6 +206,43 @@ fn sentinel_refusal_records_cause_path_and_age() {
         sentinel.to_string_lossy().to_string()
     );
     assert_eq!(event["data"]["cancel_age_seconds"], 2 * 60 * 60);
+}
+
+/// An attributed sentinel surfaces its author and reason in the refusal
+/// event, so a cancelled walk explains itself instead of naming only a file.
+#[test]
+fn attributed_sentinel_refusal_records_author_and_reason() {
+    let dir = TempDir::new().unwrap();
+    let events = dir.path().join(".fno/events.jsonl");
+    let sentinel = dir.path().join(".fno/kings/k.cancelled");
+    let cancelled = Cancelled {
+        cause: "sentinel",
+        path: Some(sentinel.clone()),
+        age_secs: Some(60),
+        clear_hint: "fno agents king cancel --scope k --clear".to_string(),
+        author: Some("operator".to_string()),
+        reason: Some("wrong direction".to_string()),
+    };
+    let mut queue = OneUnitQueue::new();
+    let budget = LoopBudget::new(2).unwrap();
+    let journal = Journal::new_raw(events.clone(), dir.path().join("global.jsonl"));
+    let outcome = run_loop(
+        &mut queue,
+        &NoDispatch,
+        &budget,
+        &journal,
+        &move || Some(cancelled.clone()),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.reason, TerminationReason::Interrupted);
+    let event = read_events(&events)
+        .into_iter()
+        .find(|event| event["type"] == "loop_terminated")
+        .expect("cancel refusal must emit loop_terminated");
+    assert_eq!(event["data"]["cancel_author"], "operator");
+    assert_eq!(event["data"]["cancel_reason"], "wrong direction");
 }
 
 #[test]

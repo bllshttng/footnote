@@ -38,7 +38,13 @@ fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
     if pid <= 1 || pid_confirmed_dead(pid) || pid_is_zombie(pid) {
         return false;
     }
-    recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
+    recorded_start.is_none_or(|start| match pid_start_time(pid as u32) {
+        Some(observed) => observed == start,
+        // An unreadable start time is a probe failure, not proof of pid
+        // reuse. Condemning the holder on it deletes a live starter's marker,
+        // which is the two-server shape (x-6d3c).
+        None => true,
+    })
 }
 
 /// Sequence stamp for tmp names: unique per attempt within a process, where
@@ -141,24 +147,16 @@ pub(crate) fn claim_startup(socket: &Path) -> std::io::Result<StartupClaim> {
                 if probe_status(socket) == ProbeOutcome::Alive {
                     return Ok(StartupClaim::Running);
                 }
-                let marker = startup_sidecar_path(socket);
-                let still_starting = match std::fs::read_to_string(&marker) {
-                    Ok(raw) => parse_pid_sidecar(&raw)
-                        .map(|(pid, start)| startup_guard_live(pid, start))
-                        .unwrap_or(false),
-                    Err(_) => false,
-                };
-                if still_starting {
-                    if Instant::now() >= deadline {
-                        return Err(startup_in_progress(socket));
-                    }
-                    std::thread::sleep(WAIT_STARTUP_POLL);
-                    continue;
+                // The holder is unqueryable: mid-startup (bound, not yet
+                // serving) or wedged. The waiter never clears its marker - a
+                // read error here is not a death proof, and deleting a live
+                // starter's marker is the two-server shape (x-6d3c): the next
+                // bind reads the starter's silence as stale and unlinks its
+                // live socket. A dead holder's marker is cleared by the next
+                // acquire, which deletes only on positive death proof.
+                if Instant::now() >= deadline {
+                    return Err(startup_in_progress(socket));
                 }
-                // Holder gone mid-startup: clear its marker and retry the
-                // claim. A peer reclaiming the same stale marker may have
-                // removed it first - gone is gone, the loop just retries.
-                let _ = std::fs::remove_file(&marker);
                 std::thread::sleep(WAIT_STARTUP_POLL);
             }
         }

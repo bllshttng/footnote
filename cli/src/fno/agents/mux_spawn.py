@@ -4,13 +4,14 @@
 front half - name validation, provider selection, per-agent flock, collision
 check, role routing, billing guard - is the same machinery the daemon/bg paths
 use; only the HOSTING call differs. Instead of the fno-agents daemon spawning
-a PTY worker, this subprocesses ``fno mux pane run --session <s> --cwd <cwd>
+a PTY worker, this subprocesses ``fno mux pane run --server <s> --cwd <cwd>
 -- env <mesh env> <provider argv>`` (the G1 script API), parses the
 machine-readable pane id off stdout, and writes the registry row with the
 ``mux: {session, pane_id}`` ref (create-after-spawn: a failed spawn writes NO
 row, and there is never a silent daemon-PTY fallback - AC1-ERR).
 
-The mux server itself sets ``FNO_SESSION``/``FNO_PANE`` in the pane child env
+The mux server itself sets ``FNO_SERVER`` (and the legacy ``FNO_SESSION``)
+with ``FNO_PANE`` in the pane child env
 (crates/fno pty.rs); the mesh identity (``FNO_AGENT_SELF``/``FNO_AGENT_HARNESS``)
 rides an ``env(1)`` wrapper because ``pane run`` carries argv, not env.
 
@@ -49,7 +50,7 @@ from fno.agents.dispatch import (
     _touch_log_path,
     validate_spawn_name,
 )
-from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,
@@ -80,10 +81,6 @@ from fno.agents.crown import (
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
 #: generous next to reality, tight next to a wedged mux.
 _MUX_SUBPROCESS_TIMEOUT_S = 30
-
-#: The default mux session when neither --session nor FNO_SESSION names one
-#: (mirrors crates/fno proto::DEFAULT_SESSION).
-_DEFAULT_SESSION = "main"
 
 #: Per-harness spelling for a model selected by the route table. The route
 #: table owns the model choice; this map only adapts its provider/model id to a
@@ -202,16 +199,10 @@ def _shell_integration() -> str:
         return "mux-panes"
 
 
-def resolve_mux_session(explicit: Optional[str] = None) -> str:
-    """flag > FNO_SESSION > "main" (Locked 7, mirrors mux_cli resolve_session).
+# Moved to fno.agents.mux_server (x-f209, file budget); re-exported here.
+from fno.agents.mux_server import mux_server_env as mux_server_env  # noqa: E402
+from fno.agents.mux_server import resolve_mux_session  # noqa: E402
 
-    An in-pane spawn inherits its own session via FNO_SESSION, so
-    agents-spawn-agents lands siblings in the same session by default.
-    """
-    if explicit:
-        return explicit
-    env = os.environ.get("FNO_SESSION", "")
-    return env if env else _DEFAULT_SESSION
 
 
 def happy_routed_panes_enabled() -> bool:
@@ -1962,7 +1953,7 @@ def _pane_own_squad_and_tab(
     ``PaneInfo`` carries both, so the pane names its own squad and there is
     nothing to predict.
     """
-    panes = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+    panes = _run_mux(["mux", "pane", "ls", "--server", session, "--json"], runner)
     try:
         rows = json.loads(panes.stdout or "[]") if panes.returncode == 0 else []
         row = next(
@@ -1996,7 +1987,7 @@ def _group_tab_rows(
     listed = _run_mux(
         [
             "mux", "tab", "ls",
-            "--session", session,
+            "--server", session,
             "--workspace", f"id:{squad_id}",
             "--json",
         ],
@@ -2092,7 +2083,7 @@ def _join_own_tab(
     joined = _run_mux(
         [
             "mux", "tab", "join",
-            "--session", session,
+            "--server", session,
             "--src", f"id:{own_tab}",
             "--at", str(anchor_pane),
             "--dir", "right",
@@ -2116,7 +2107,7 @@ def _rename_own_tab(
     renamed = _run_mux(
         [
             "mux", "tab", "rename",
-            "--session", session,
+            "--server", session,
             "--workspace", f"id:{squad_id}",
             "--tab", f"id:{own_tab}",
             "--name", name,
@@ -2146,7 +2137,7 @@ def _reap_spawned_pane(
     start_before = _process_start_time(child_pid) if child_pid is not None else None
     try:
         cleanup = _run_mux(
-            ["mux", "pane", "kill", "--session", session, str(pane_id)],
+            ["mux", "pane", "kill", "--server", session, str(pane_id)],
             runner,
         )
     except DispatchAskError as exc:
@@ -2175,7 +2166,7 @@ def _lookup_child_pid(
     row's ``pid`` so reconcile/GC can probe liveness). ``None`` on any miss -
     the pane is live regardless."""
     try:
-        proc = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+        proc = _run_mux(["mux", "pane", "ls", "--server", session, "--json"], runner)
         if proc.returncode != 0:
             return None
         for row in json.loads(proc.stdout or "[]"):
@@ -2240,7 +2231,7 @@ def _reconcile_unanswered_run(
     proc: Optional["subprocess.CompletedProcess[str]"] = None
     detail = ""
     try:
-        proc = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+        proc = _run_mux(["mux", "pane", "ls", "--server", session, "--json"], runner)
     except DispatchAskError as exc:
         detail = str(exc)
     else:
@@ -2337,7 +2328,7 @@ def _pane_absent_from_listing(
     """
     try:
         proc = _run_mux(
-            ["mux", "pane", "ls", "--session", str(mux["session"]), "--json"],
+            ["mux", "pane", "ls", "--server", str(mux["session"]), "--json"],
             runner,
             timeout=timeout,
         )
@@ -2371,7 +2362,7 @@ def _mux_pane_alive(
     try:
         proc = _run_mux(
             [
-                "mux", "pane", "wait", "--session", str(mux["session"]),
+                "mux", "pane", "wait", "--server", str(mux["session"]),
                 str(mux["pane_id"]), "--timeout", "0",
             ],
             runner,
@@ -2485,7 +2476,7 @@ def _read_pane_tail(
     try:
         proc = _run_mux(
             [
-                "mux", "pane", "read", "--session", str(mux["session"]),
+                "mux", "pane", "read", "--server", str(mux["session"]),
                 str(mux["pane_id"]), "--lines", str(_PANE_TAIL_LINES),
             ],
             runner,
@@ -2910,7 +2901,7 @@ def _pane_osc_title(
     """Read the pane title carried by mux metadata; unreadable means unknown."""
     try:
         proc = _run_mux(
-            ["mux", "pane", "ls", "--session", session, "--json"], runner
+            ["mux", "pane", "ls", "--server", session, "--json"], runner
         )
         if proc.returncode != 0:
             return None
@@ -2943,7 +2934,7 @@ def _await_interactive_readiness(
     try:
         probe = _run_mux(
             [
-                "mux", "pane", "wait", "--session", session,
+                "mux", "pane", "wait", "--server", session,
                 str(pane_id), "--timeout", "1",
             ],
             runner,
@@ -2962,7 +2953,7 @@ def _await_interactive_readiness(
     try:
         painted = _run_mux(
             [
-                "mux", "pane", "read", "--session", session,
+                "mux", "pane", "read", "--server", session,
                 str(pane_id), "--lines", "20",
             ],
             runner,
@@ -3059,14 +3050,14 @@ def _send_permission_response(
         return False
     pane = str(pane_id)
     claim = _run_mux(
-        ["mux", "pane", "claim", pane, "--pid", str(os.getpid()), "--session", session],
+        ["mux", "pane", "claim", pane, "--pid", str(os.getpid()), "--server", session],
         runner,
     )
     if claim.returncode != 0:
         return False
     try:
         fresh = _run_mux(
-            ["mux", "pane", "read", pane, "--lines", "20", "--session", session],
+            ["mux", "pane", "read", pane, "--lines", "20", "--server", session],
             runner,
         )
         if fresh.returncode != 0:
@@ -3086,7 +3077,7 @@ def _send_permission_response(
                 # the enveloped lane's read-back gate refuses exactly the pane
                 # state this caller requires. It is the archetypal keystroke
                 # case, not an oversight (node x-3a64).
-                ["mux", "pane", "send", pane, "--text", raw, "--session", session, "--raw"],
+                ["mux", "pane", "send", pane, "--text", raw, "--server", session, "--raw"],
                 runner,
             )
             if sent.returncode != 0:
@@ -3094,7 +3085,7 @@ def _send_permission_response(
         return True
     finally:
         _run_mux(
-            ["mux", "pane", "release", pane, "--pid", str(os.getpid()), "--session", session],
+            ["mux", "pane", "release", pane, "--pid", str(os.getpid()), "--server", session],
             runner,
         )
 
@@ -3175,7 +3166,7 @@ def _reprobe_pane_observation(
     """
     try:
         screen = _run_mux(
-            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            ["mux", "pane", "read", "--server", session, str(pane_id), "--lines", "40"],
             runner,
         )
     except DispatchAskError:
@@ -3296,7 +3287,7 @@ def _submit_spawn_seed(
     """
     try:
         screen = _run_mux(
-            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            ["mux", "pane", "read", "--server", session, str(pane_id), "--lines", "40"],
             runner,
         )
     except DispatchAskError:
@@ -3329,7 +3320,7 @@ def _submit_spawn_seed(
                 # --raw: a bare submit keystroke clearing a modal. There is no
                 # text to attribute and the modal IS the prompt the enveloped
                 # lane refuses (node x-3a64).
-                ["mux", "pane", "send", "--session", session, str(pane_id), "--text", "", "--submit", "--raw"],
+                ["mux", "pane", "send", "--server", session, str(pane_id), "--text", "", "--submit", "--raw"],
                 runner,
             )
         except DispatchAskError:
@@ -3358,7 +3349,7 @@ def _submit_spawn_seed(
             return "unconfirmed", "agy trust gate submit refused", "", observation
         try:
             screen = _run_mux(
-                ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+                ["mux", "pane", "read", "--server", session, str(pane_id), "--lines", "40"],
                 runner,
             )
         except DispatchAskError:
@@ -3423,7 +3414,7 @@ def _submit_spawn_seed(
             # probe-gated question (node x-3a64 task 5). Until that probe answers,
             # this arm types the seed verbatim rather than forcing a shape the
             # harness may refuse.
-            ["mux", "pane", "send", "--session", session, str(pane_id), "--text", payload, "--submit", "--raw"],
+            ["mux", "pane", "send", "--server", session, str(pane_id), "--text", payload, "--submit", "--raw"],
             runner,
         )
     except DispatchAskError:
@@ -3472,7 +3463,7 @@ def _select_or_create_bounded_tab(
     workspace: str | None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
 ) -> int:
-    args = ["mux", "tab", "ls", "--session", session, "--json"]
+    args = ["mux", "tab", "ls", "--server", session, "--json"]
     if workspace:
         args += ["--workspace", workspace]
     tabs = _strict_json_list(args, runner, noun="tab listing")
@@ -3481,7 +3472,7 @@ def _select_or_create_bounded_tab(
         pane_ids = tab.get("pane_ids")
         if isinstance(tab_id, int) and isinstance(pane_ids, list) and len(pane_ids) < 4:
             return tab_id
-    create_args = ["mux", "tab", "create", "--session", session, "--json"]
+    create_args = ["mux", "tab", "create", "--server", session, "--json"]
     if workspace:
         create_args += ["--workspace", workspace]
     proc = _run_mux(create_args, runner)
@@ -3858,7 +3849,7 @@ def dispatch_spawn_pane(
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, provider)
+            message = render_seed(message, provider)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
@@ -4075,7 +4066,7 @@ def dispatch_spawn_pane(
             "pane",
             "run",
             "--claim",
-            "--session",
+            "--server",
             session,
             "--cwd",
             str(cwd),
@@ -4262,7 +4253,7 @@ def dispatch_spawn_pane(
                     expected_tab_id=int(tab_id[3:]) if tab_id else None,
                     placement_receipt=placement_receipt,
                     list_panes=lambda: _strict_json_list(
-                        ["mux", "pane", "ls", "--session", session, "--json"],
+                        ["mux", "pane", "ls", "--server", session, "--json"],
                         runner,
                         noun="pane listing",
                     ),

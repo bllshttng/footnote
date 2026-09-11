@@ -2403,6 +2403,11 @@ pub struct PaneInfo {
     /// tab. `#[serde(default)]`: a v68 payload reads false.
     #[serde(default)]
     pub orphaned_worker: bool,
+    /// (x-1b90) When the release tier fired, the evidence the release rode:
+    /// `reaped <harness> <session id> at <ts>: <basis>`. Additive like
+    /// `orphaned_worker`; absent on every other pane and every other tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
     /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
     /// session the row answers as, the succession chain it retired, and the
     /// fork edge of a parallel branch. `fno_id` stays the stable thread join;

@@ -263,6 +263,8 @@ Dry-run by default: prints how many would move and why some are held back. ``--a
 
 Every run's receipt names all four held-back buckets plus the soft-edge strip count, and every run emits a ``graph_archive_swept`` event, dry-run included: a leg that runs daily and reports bare "ok" is indistinguishable from one that never ran - the count that matters is often the held-back one, not the moved one.
 
+Two receipt additions close the "did the sweep stop?" gap. The receipt ends with a ``last sweep:`` line dated from the archive's newest ``archived_at`` stamp (the marker a sweep writes when it moves rows), because the archive's newest ``completed_at`` always trails today by the age gate and reads as a stall to anyone comparing it to the clock. And ``--apply`` first retires stale postmortem receipts: open ``idea`` rows minted by the retro postmortem pass (the ``retro-triage source_pr=None`` trailer in their details) that no human touched within 30 days are closed as ``done`` with a ``retired: stale-postmortem-receipt`` marker. Queued, claimed, deferred, and any non-idea row is untouched. Retirement composes with the sweep: the closed receipt becomes an ordinary terminal row the age gate removes from the working graph a month later. Without the rule, finalize's per-session completion evals pile up forever - 61 open receipts once produced 750 of the graph's near-duplicate pairs.
+
 ## cmd_unarchive
 
 Move one node from graph-archive.json back into the working graph.
@@ -569,10 +571,11 @@ Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
 
 Verify predecessor cause surfaces against one merged PR's file set.
 
-    Returns positive receipts for predecessors that remain pending. A
-    predecessor never becomes terminal from the relationship alone: every
-    declared repo-relative surface must appear in the merged PR's changed-file
-    evidence.
+    Returns positive receipts for predecessors that remain pending. Surfaces
+    govern the EVIDENCE stamp only: a predecessor's status went
+    terminal from the superseded_by edge alone, so a receipt here never
+    changes whether the row reads as live work - it records which declared
+    paths a merged PR did or did not touch.
 
     ``evidence_complete=False`` says the file list is known to be short of the
     PR's real one. A surface missing from a truncated list is an absence with
@@ -586,9 +589,10 @@ Successor id -> successor node, for pending predecessors already owed proof.
     ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
     successor. A successor that closed at any other moment - an earlier sweep, a
     hand-run ``fno backlog done``, or a supersede recorded against a node that
-    had already shipped - never passes through that path. Its predecessors stay
-    pending, pending reads as blocked, and nothing in the system ever revisits
-    them: the only escape was ``unsupersede``.
+    had already shipped - never passes through that path. Its predecessors keep
+    an unverified record, but the superseded_by edge already terminals their
+    status, so the row never reads as live work while the evidence
+    stays open.
 
     This finds those rows so the sweep can settle them against the evidence the
     successor already carries.
@@ -639,7 +643,7 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
 ## cmd_ready (the selection, served natively)
 
-Which backlog nodes may be dispatched right now, and in what order. The decision lives in `crates/fno-agents/src/backlog_ready.rs` (`backlog_ready::select`), served by the keeper's `ready` verb; `fno backlog ready` and `fno backlog next` are clients. The verb accepts the filter flags (`project`, `all`, `roadmap_id`, `parent`, `mission`, `include_ideas`, `include_deferred`, `repo_root`), an optional `staleness_days` override, and an optional `entries` array - rows ride IN, the one decision answers both backends (the external-tracker branch feeds `_joined_open_candidates` through it). Without the override the keeper reads `config.backlog.staleness_days` from the `config.toml` beside the graph, falling back to the 21-day default. With no `claimed` array the verb resolves live claims itself and FAILS CLOSED: an unreadable claims root refuses the whole selection (the same contract `live_claimed_node_ids(strict=True)` gave the Python leg), never an empty set read as "nothing is claimed". The reply carries survivors plus per-node drops, first-filter attribution, with guard drops naming `dead-ancestor:<id>`, `design-stage`, `idea-stage`, `stale-quarantine`, `contained:<id>`, or the hold verdict's guard reason; `advance --explain` renders from them (AC4). A missing `--parent` node refuses (exit 1, `ReadyParentMissingError` client-side). An unreachable keeper refuses selection: `fno backlog ready` exits non-zero naming the keeper, never a locally recomputed fallback (AC6). The `next` observer merge (`_with_observer`) still re-verifies observer rows through the Python `selection_guards`: a divergence detector over the reply, not a second selection leg. Under `next --claim`, the lock fields land on the graph entry the winner id resolves to - the selection rows are serialized summaries, not references into the commit snapshot.
+Which backlog nodes may be dispatched right now, and in what order. The decision lives in `crates/fno-agents/src/backlog_ready.rs` (`backlog_ready::select`), served by the keeper's `ready` verb; `fno backlog ready` and `fno backlog next` are clients. The verb accepts the filter flags (`project`, `all`, `roadmap_id`, `parent`, `mission`, `include_ideas`, `include_deferred`, `repo_root`), an optional `staleness_days` override, and an optional `entries` array - rows ride IN, the one decision answers both backends (the external-tracker branch feeds `_joined_open_candidates` through it). Without the override the keeper reads `config.backlog.staleness_days` from the `config.toml` beside the graph, falling back to the 21-day default. With no `claimed` array the verb resolves live claims itself and FAILS CLOSED: an unreadable claims root refuses the whole selection (the same contract `live_claimed_node_ids(strict=True)` gave the Python leg), never an empty set read as "nothing is claimed". The reply carries survivors plus per-node drops, first-filter attribution, with guard drops naming `dead-ancestor:<id>`, `design-stage`, `idea-stage`, `stale-quarantine`, `contained:<id>`, or the hold verdict's guard reason; `advance --explain` renders from them (AC4). A missing `--parent` node refuses (exit 1, `ReadyParentMissingError` client-side). An unreachable keeper refuses selection: `fno backlog ready` exits non-zero naming the keeper, never a locally recomputed fallback (AC6). The `next` observer merge (`_with_observer`) still re-verifies observer rows through the Python `selection_guards`: a divergence detector over the reply, not a second selection leg. Under `next --claim`, the lock fields land on the graph entry the winner id resolves to - the selection rows are serialized summaries, not references into the commit snapshot. The reply is a JSON array on stdout. A line-prefix parser reads it as zero rows forever, indistinguishable from a quiet board.
 
 ## selection_guards
 

@@ -23,7 +23,9 @@ use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
-use crate::pane_relaunch::{mesh_identity_assignments, mux_pane_run_argv};
+use crate::pane_relaunch::{
+    build_resume_argv, mesh_identity_assignments, mux_pane_run_argv, pane_relaunch_target,
+};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
@@ -1768,73 +1770,6 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
     persist_manifest_identity(&id, home).map(Some)
 }
 
-/// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
-/// Returns `None` for an unsupported provider AND for an unreadable capability
-/// contract, but the caller only ever sees the second kind through a narrow
-/// door. `interactive_resume_supported` also reads the packaged contract and
-/// `unwrap_or(false)`s a failure, so an unreadable contract refuses as "not
-/// supported" before this function runs. What actually reaches the caller's
-/// "resume contract is invalid" message is a contract that LOADS and declares
-/// the form, then fails to render it: a malformed token template.
-fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
-    // The declared form is the whole identity: cursor-agent's interactive_resume
-    // tokens already end in --trust, and a second one is a duplicated flag,
-    // never a stronger one. Python's builder renders the same form with no
-    // cursor arm, so runtimes stay byte-identical by rendering and nothing else.
-    let mut argv = crate::harness_capabilities::render_session_argv(
-        provider,
-        "interactive_resume",
-        Some(session_id),
-    )
-    .ok()?;
-    // codex's bounded sandbox re-resolves from config on `resume`, so the git +
-    // plan grants ride as `-c` tokens spliced right after the `codex` binary
-    // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
-    // lane that does not. `-c` is kept because one grant builder serves both.)
-    if provider == "codex" {
-        // `.filter` so an empty cwd is treated as absent, exactly as Python's
-        // `if cwd` does for both the grant and --cd. Without it this splices a
-        // bare `--cd ""`, which codex cannot start on, and the parity test does
-        // not exercise the empty string.
-        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
-            let grant_len = grant.len();
-            if !grant.is_empty() {
-                argv.splice(1..1, grant);
-            }
-            // Without --cd, codex asks session-directory vs current-directory
-            // and defaults to the SESSION directory: the canonical checkout
-            // recorded at spawn, not the worktree the row works in. Unattended
-            // that prompt is a hang. Attended it is a wrong default a human
-            // must catch.
-            //
-            // Conditional, per codex's own docs: the prompt appears only when
-            // the process cwd differs from the session's saved directory. The
-            // config key `tui.resume_cwd` answers it globally, and --cd
-            // outranks that. This lane wants --cd because it is per
-            // invocation and names the directory outright.
-            //
-            // Spliced BEFORE the subcommand, beside the grant, which is the
-            // only global-before-subcommand precedent in this tree. The spawn
-            // lanes are not it: they spell the flag `-C`, after `exec` in the
-            // headless lane and on a bare `codex` in the pane lane. Both
-            // positions parse on codex 0.149.1, so this is a choice about
-            // where a reader expects a global, not a fix.
-            //
-            // NO permission bypass rides here, deliberately. A registry row
-            // records no sandbox posture, so this lane cannot tell a bounded
-            // worker from a yolo one, and an unconditional bypass would resume
-            // every bounded worker with approvals off. See the Python twin.
-            // Right after the grant, so the token order matches the Python
-            // twin exactly. `test_rust_verb_parity` compares the two argvs
-            // element for element, so "both are globals" is not enough here.
-            let at = (1 + grant_len).min(argv.len());
-            argv.splice(at..at, ["--cd".to_string(), cwd.to_string()]);
-        }
-    }
-    Some(argv)
-}
-
 fn interactive_resume_supported(provider: &str) -> bool {
     crate::harness_capabilities::HarnessContract::packaged()
         .ok()
@@ -2356,7 +2291,7 @@ where
 /// POSIX shell quoting matching Python's `shlex.quote`: empty -> `''`; a string
 /// of only "safe" chars (`[\w@%+=:,./-]`) is returned as-is; otherwise it is
 /// single-quoted with embedded `'` escaped as `'"'"'`.
-fn shlex_quote(s: &str) -> String {
+pub(crate) fn shlex_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
@@ -2715,7 +2650,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // support before session_id so an unknown harness surfaces "not supported",
     // then check identity before rendering so a supported harness with no bound
     // session reports the missing binding instead of an invalid argv.
-    let (argv, claim_uuid) = if harness == "claude" {
+    let (argv, mut claim_uuid) = if harness == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
@@ -2858,7 +2793,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(session) = mux_session.as_deref() {
             // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
             // from inside the route file reaches the printed command (AC5).
-            let pane = mux_pane_run_argv(session, cwd, &printed_argv, &identity);
+            let pane = mux_pane_run_argv(session, cwd, &printed_argv, &identity, Some(&row_name));
             let pane_q = pane
                 .iter()
                 .map(|a| shlex_quote(a))
@@ -2970,12 +2905,30 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 127;
     }
 
-    // Guard a dead-row `claude --resume` with the session single-writer claim
-    // before exec (--print-command already returned above, so it never claims).
-    // The in-terminal exec keeps this pid, so a PID-only claim (ttl=None) lives
-    // as long as claude does. The mux path exits after pane dispatch, so it
-    // passes a TTL: without one the claim would go Stale on the dead holder and
-    // a second resumer would steal it before the resumed claude is probe-live.
+    // The pane target decides the claim, not the other way round (x-eb79): a
+    // row with a mux ref AND a session id takes the pane path whatever its
+    // harness, so it claims first - the id the relaunch resumes is the
+    // dead-arm uuid on claude, the recorded session id elsewhere. A row with
+    // no mux ref keeps the in-terminal exec and acquires NO claim: the naive
+    // widening of every non-claude arm would put a pid-scoped claim on a path
+    // that never took one, and a thread-lane codex resume would start exiting
+    // 11 where it used to exec.
+    let resume_id = claim_uuid
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .unwrap_or(session_id);
+    let pane_target = pane_relaunch_target(mux_session.as_deref(), resume_id);
+    if claim_uuid.is_none() && pane_target.is_some() {
+        claim_uuid = Some(session_id.to_string());
+    }
+
+    // Guard a session resume with the single-writer claim before launching
+    // (--print-command already returned above, so it never claims). The
+    // in-terminal exec keeps this pid, so a PID-only claim (ttl=None) lives
+    // as long as the exec'd CLI does. The mux path exits after pane dispatch,
+    // so it passes a TTL: without one the claim would go Stale on the dead
+    // holder and a second resumer would steal it before the resumed worker is
+    // probe-live.
     if let Some(uuid) = &claim_uuid {
         let ttl = if mux_session.is_some() {
             Some(MUX_RESUME_CLAIM_TTL_MS)
@@ -2988,26 +2941,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // Pane relaunch (claude only): the mux owns the cwd (--cwd) and the pane,
-    // and this process returns after the launch so the operator's terminal
-    // stays free. stdin is null'd so a mux pane run that reads stdin cannot
-    // stall against this terminal. The claim above carries a TTL (not a pid) on
-    // this path, so it stays Live across the launch-to-probe-live window; once
-    // the resumed claude is probe-live the truth probe (not the claim) stops a
+    // Pane relaunch: the mux owns the cwd (--cwd) and the pane, and this
+    // process returns after the launch so the operator's terminal stays free.
+    // stdin is null'd so a mux pane run that reads stdin cannot stall against
+    // this terminal. The claim above carries a TTL (not a pid) on this path,
+    // so it stays Live across the launch-to-probe-live window; once the
+    // resumed worker is probe-live the truth probe (not the claim) stops a
     // second relaunch. Emit only on a successful launch so a failed pane start
     // does not record a misleading agent_resumed.
-    //
-    // Scoped to claude: the session claim that guards this path is claude-only,
-    // and launching a non-claude pane worker on an unguarded pane would widen
-    // that pre-existing no-claim gap. A non-claude pane row falls through to
-    // the in-terminal exec below (its prior behavior).
-    let mux_session = if harness == "claude" {
-        mux_session
-    } else {
-        None
-    };
-    if let Some(session) = mux_session.as_deref() {
-        let pane = mux_pane_run_argv(session, cwd, &argv, &identity);
+    if let Some(session) = pane_target {
+        let pane = mux_pane_run_argv(session, cwd, &argv, &identity, Some(&row_name));
         let mut pane_command = std::process::Command::new("fno");
         pane_command.args(&pane).stdin(std::process::Stdio::null());
         // x-d285: the account namespace rides the pane relaunch. The mux CLI
@@ -3325,7 +3268,13 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
                 return 13;
             }
         };
-        let pane = mux_pane_run_argv(&mux_ref.session, &plan.cwd, &plan.argv, &identity);
+        let pane = mux_pane_run_argv(
+            &mux_ref.session,
+            &plan.cwd,
+            &plan.argv,
+            &identity,
+            Some(&plan.name),
+        );
         let mut pane_command = std::process::Command::new("fno");
         pane_command.args(&pane).stdin(std::process::Stdio::null());
         for (key, value) in &plan.env {
