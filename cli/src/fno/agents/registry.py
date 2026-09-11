@@ -2508,13 +2508,10 @@ def registry_rows_by_cwd(
     """Raw registry rows indexed by each row's own ``cwd``, plus an ok flag.
 
     The ONE occupancy join for every reader that asks "which worker holds
-    this tree" (x-dead task 0.2, folding x-73df): ``unfinished_work`` and
-    ``worktree_status``/``worktree_stranded`` used to keep three copies of
-    this index, and two of them resolved the registry path differently. A
-    missing registry is a legitimate empty fleet and is ok; one that exists
-    and fails to parse is a genuine read failure, which reads every candidate
-    unmeasurable. ``WORKTREE_STATUS_REGISTRY`` keeps overriding the path so
-    the existing test fixtures stay honest.
+    this tree" (x-dead task 0.2, folding x-73df); three copies used to live
+    in unfinished_work and the worktree status legs. A missing registry is a
+    legitimate empty fleet (ok); one that exists and fails to parse reads
+    every candidate unmeasurable.
     """
     import json
     import os

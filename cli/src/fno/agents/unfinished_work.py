@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from fno.worktree_stranded import resolve_node_id
+from fno.agents.registry import registry_rows_by_cwd
 
 # --- kinds and dimension vocabulary ----------------------------------------
 
@@ -712,14 +713,6 @@ def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
         return None
 
 
-def _read_registry_rows(path: Optional[Path] = None) -> tuple[dict, bool]:
-    """cwd -> [registry row, ...] plus an ok flag; the ONE shared occupancy
-    join (x-dead task 0.2)."""
-    from fno.agents.registry import registry_rows_by_cwd
-
-    return registry_rows_by_cwd(path)
-
-
 def _session_handle(row: dict) -> Optional[str]:
     return row.get("harness_session_id") or row.get("short_id") or None
 
@@ -813,7 +806,7 @@ def collect_observations(
     registry_by_cwd, registry_ok = (
         (dict(registry_rows[0]), bool(registry_rows[1]))
         if registry_rows is not None
-        else _read_registry_rows()
+        else registry_rows_by_cwd()
     )
     if not registry_ok:
         warnings.append("registry unreadable")
