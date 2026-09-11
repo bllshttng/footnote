@@ -13,7 +13,7 @@ from fno.agents.cli import agents_app
 def cmd_peek(
     handle: Optional[str] = typer.Argument(
         None,
-        help="Peer handle (same as `fno agents mail send`: alias or bare hex short-id). Omit with --all.",
+        help="Peer handle (alias or bare hex short-id, as in `mail send`). Omit with --all.",
     ),
     lines: int = typer.Option(
         15, "--lines", "-n", help="Show the last N transcript records (default 15; 0 for none)."

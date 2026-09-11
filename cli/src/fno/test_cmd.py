@@ -338,11 +338,9 @@ def _child_env(root: Path) -> dict:
 def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     """Run each command with output captured to `log`; print the terse verdict.
 
-    The header (command + log path) prints BEFORE the run so a long suite never
-    looks stalled - a watcher can `tail -f` the log. The log's own last line is
-    always ``EXIT=<rc>``, so a reader recovers the real code even where an
-    outer tee or harness flattens this process's exit. Returns the first
-    non-zero child exit code, else 0.
+    The header prints BEFORE the run so a watcher can `tail -f` the log. The
+    log's last line is always ``EXIT=<rc>``: a reader recovers the real code
+    even where an outer tee or harness flattens this process's exit.
     """
     timeout = test_timeout_seconds()
     rc = 0

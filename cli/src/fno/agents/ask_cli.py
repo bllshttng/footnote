@@ -45,18 +45,16 @@ def cmd_ask(
         "--yolo",
         "-Y",
         help=(
-            "Dangerous-mode bypass: codex gets "
-            "--dangerously-bypass-approvals-and-sandbox; claude no-ops with a "
-            "stderr note. Opt-in; you own the blast radius."
+            "Dangerous-mode bypass: codex --dangerously-bypass-approvals-and-"
+            "sandbox; claude no-ops with a stderr note. You own the blast radius."
         ),
     ),
     to_project: str | None = typer.Option(
         None,
         "--to-project",
         help=(
-            "Anycast to whoever works on this project; ask is synchronous, so "
-            "exactly one live peer is required (use `send --to-project` for "
-            "the durable-queue path)."
+            "Anycast to whoever works on this project; exactly one live peer "
+            "is required (ask is synchronous)."
         ),
     ),
     any_live: bool = typer.Option(

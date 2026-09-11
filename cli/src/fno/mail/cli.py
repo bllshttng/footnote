@@ -1055,9 +1055,8 @@ def cmd_reply(
     sender_session: str | None = typer.Option(
         None, "--sender-session",
         help=(
-            "Full session id to answer when the stored sender handle is "
-            "ambiguous (a legacy head-8 is a shared clock bucket). A value "
-            "that is not one of the candidates sends nothing."
+            "Full session id when the stored sender handle is ambiguous; a "
+            "non-candidate value sends nothing."
         ),
     ),
     style_exception: str | None = typer.Option(

@@ -208,10 +208,9 @@ def ask(
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point. `session_truth` classifies from the transcript
+    The capture is the point: `session_truth` classifies from the transcript
     tail, so an unrecorded question stops existing the moment another turn
-    lands - and in a mail-driven mesh the very next turn is usually the agent
-    answering some mail.
+    lands.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.events import QUESTION_CAP, operator_question

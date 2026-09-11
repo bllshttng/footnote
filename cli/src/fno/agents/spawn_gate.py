@@ -1981,9 +1981,8 @@ def probe_capacity() -> dict:
             "every dispatch lane at cap: " + ", ".join(full),
             lanes=lanes,
         )
-    # The same readings the refusal paths name, so an accepted verdict carries
-    # the headroom that admitted it: a trigger is only actionable beside its
-    # reading.
+    # An accepted verdict names the readings that admitted it: a trigger is
+    # only actionable beside its reading.
     from fno.doctor_footprint import _admission_config
 
     accepted: dict[str, object] = {
