@@ -38,6 +38,58 @@ EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
+# Durable fleet incident stop (x-77db): refused before every bypass branch,
+# FNO_SPAWN_GATE=0 included. 80/81 are taken in this table (king share,
+# registry schema), so the fleet codes sit at 82/83 - the NAME in the
+# refusal, not the number, is the cross-gate contract.
+EXIT_FLEET_STOP = 82
+EXIT_FLEET_STOP_UNAVAILABLE = 83
+
+
+def _fleet_incident_gate() -> None:
+    """First admission boundary of the pane gate (x-77db): the native verdict
+    is consulted before the FNO_SPAWN_GATE=0 bypass below. This side owns no
+    state and no JSON interpretation beyond the verdict's own `state` field -
+    the file and its schema stay in fleet_incident.rs."""
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        _warn(
+            "spawn-gate: fno-agents binary not found; incident state cannot be"
+            " read and admission fails closed (fleet-stop-unavailable)"
+        )
+        _refuse(
+            EXIT_FLEET_STOP_UNAVAILABLE,
+            reason="fleet-stop-unavailable",
+            detail="fno-agents binary not found",
+        )
+    proc = subprocess.run(
+        [str(binary), "fleet-incident", "check", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    try:
+        verdict = json.loads(proc.stdout or "{}")
+    except ValueError:
+        verdict = {"state": "unavailable", "reason": f"bad verdict payload: {proc.stdout!r}"}
+    state = verdict.get("state")
+    if state == "stopped":
+        _refuse(
+            EXIT_FLEET_STOP,
+            reason="fleet-stop",
+            generation=verdict.get("generation"),
+            detail=verdict.get("reason"),
+        )
+    if state != "clear":
+        _refuse(
+            EXIT_FLEET_STOP_UNAVAILABLE,
+            reason="fleet-stop-unavailable",
+            detail=verdict.get("reason"),
+        )
 
 #: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
 #: HERE because these tokens are the gate's vocabulary; the CLI imports this
@@ -1479,6 +1531,9 @@ def run_gate(
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
+    # x-77db: the incident stop gates BEFORE the operator bypass below - a
+    # circuit breaker a flag can bypass is not a circuit breaker.
+    _fleet_incident_gate()
     # FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     # precedent): test suites exercising spawn plumbing must not queue behind
     # the REAL machine's live workers, and it doubles as an operator escape.

@@ -822,6 +822,31 @@ fn dispatch_mission(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
+    // x-77db: the durable fleet incident stop gates BEFORE the advance
+    // subprocess, and the file is re-read EVERY tick - a daemon that starts
+    // mid-incident takes this branch on its first tick, proving the stop is
+    // durable state rather than a missed announcement. Reconciliation and tick
+    // reporting continue; only new dispatch is refused. An unreadable state
+    // fails closed with its own reason, never as clear.
+    let incident = crate::fleet_incident::verdict();
+    if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
+        let (state, generation, detail) = match &incident {
+            crate::fleet_incident::Verdict::Stopped(r) => (
+                "fleet-stop",
+                Some(r.generation),
+                format!("generation {}", r.generation),
+            ),
+            crate::fleet_incident::Verdict::Unavailable(d) => {
+                ("fleet-stop-unavailable", None, d.clone())
+            }
+            crate::fleet_incident::Verdict::Clear(_) => unreachable!(),
+        };
+        let _ = journal.append(
+            "active_backlog_skip",
+            json!({"reason": state, "mission": cfg.mission, "generation": generation, "detail": detail}),
+        );
+        return (MissionDispatch::Continue, DispatchFacts::default());
+    }
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             // --continuation: never reactivate the mission and retire an inactive
@@ -2552,6 +2577,74 @@ mod tests {
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-a")));
+    }
+
+    #[test]
+    fn dispatch_mission_refuses_to_mint_work_while_a_fleet_stop_is_active() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The stub's observer marker is the positive control: if the gate
+        // fails and advance RUNS, this file exists and the test fails on it.
+        let marker = tmp.path().join("advance-ran");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending: Vec<PendingDispatch> = Vec::new();
+
+        // The stop lives in the agents home the verdict reader resolves; a
+        // stopped record, not a missing one.
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        let home = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 5,
+            changed_at: "2026-09-11T00:00:00Z".into(),
+            changed_by: "op".into(),
+            reason: "wedged lock".into(),
+            source: Some("file".into()),
+        };
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home)),
+            serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+
+        let (outcome, facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+
+        // Restore before asserts so a panic does not leak the pin.
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+
+        // AC3-DAEMON: the tick continues (reconciliation/tick reporting alive),
+        // advance was NEVER invoked, and the skip row names fleet-stop + the
+        // generation the stop was written at.
+        assert_eq!(outcome, MissionDispatch::Continue);
+        assert!(pending.is_empty(), "no child may enter pending");
+        assert!(facts.ready == 0);
+        assert!(!marker.exists(), "advance must not run while stopped");
+        let skips: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["data"]["reason"] == "fleet-stop")
+            .collect();
+        assert!(
+            skips
+                .iter()
+                .any(|v| v["data"]["generation"] == 5 && v["data"]["mission"] == cfg.mission),
+            "skip row must carry state generation and mission: {skips:?}"
+        );
     }
 
     #[test]

@@ -1537,3 +1537,71 @@ class TestReignTyped:
 
         assert _reign_typed_message("brief", None, None, False) == ("brief", False)
         assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
+
+
+# ---------------------------------------------------------------------------
+# AC3-HP/EDGE: the durable fleet incident gate (x-77db)
+# ---------------------------------------------------------------------------
+
+def _write_incident_state(tmp_path: Path, state: str) -> Path:
+    """Point FNO_AGENTS_HOME at a home whose fleet-stop.json holds `state`."""
+    home = tmp_path / "agents-home"
+    home.mkdir(exist_ok=True)
+    (home / "fleet-stop.json").write_text(json.dumps({
+        "version": 1,
+        "state": state,
+        "generation": 3,
+        "changed_at": "2026-09-11T00:00:00Z",
+        "changed_by": "op",
+        "reason": "wedged lock",
+    }))
+    return home
+
+
+def test_fleet_incident_stop_refuses_before_the_operator_bypass(
+    tmp_path, monkeypatch
+):
+    """AC3-HP: FNO_SPAWN_GATE=0 must NOT reach past the incident gate."""
+    home = _write_incident_state(tmp_path, "stopped")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-stop", "headless")
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
+
+
+def test_fleet_incident_force_flag_also_refuses(tmp_path, monkeypatch):
+    """AC3-HP: --force past capacity does not past a fleet stop."""
+    home = _write_incident_state(tmp_path, "stopped")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-force", "headless", force=True)
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
+
+
+def test_fleet_incident_unavailable_fails_closed(tmp_path, monkeypatch):
+    """AC3-EDGE: an unreadable record is a CANNOT-TELL refusal, named as such."""
+    home = _write_incident_state(tmp_path, "sorta-open")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-bogus", "headless")
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE
+
+
+def test_fleet_incident_clear_admits(tmp_path, monkeypatch):
+    """The clear verdict admits: the gate seam itself refuses nothing."""
+    home = _write_incident_state(tmp_path, "clear")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+    monkeypatch.setattr(
+        spawn_gate,
+        "_refuse",
+        lambda *a, **k: pytest.fail("a clear verdict must refuse nothing"),
+    )
+
+    assert spawn_gate._fleet_incident_gate() is None
