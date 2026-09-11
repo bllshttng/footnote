@@ -2,8 +2,8 @@
 """PreToolUse guard: refuse a recursive `grep` when this repository contains a
 Cargo build cache.
 
-The fault is specific to this repo layout. Harness-native worktrees live below
-`.claude/worktrees/`, and each carries its own `crates/*/target` build cache.
+The fault is specific to this repo layout. Harness-native worktrees live
+inside the checkout, and each carries its own `crates/*/target` build cache.
 `grep -r`/`-R` ignore `.gitignore`, so a search scoped to `crates/` - or with
 no path at all - descends into every nested worktree's object files. On
 2026-09-09 nine concurrent `grep -r` processes ran on one 12-core box, three at
