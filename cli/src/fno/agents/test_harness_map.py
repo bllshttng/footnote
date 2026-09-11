@@ -1138,6 +1138,24 @@ def test_internal_slash_guard_lives_inside_normalize_command():
     assert "'/' not in first_word[1:]" not in resolve_src
 
 
+@pytest.mark.parametrize(
+    ("harness", "expected"),
+    [("claude", "/fno:target x-caf8"), ("opencode", "/fno:target x-caf8")],
+)
+def test_normalize_command_rewrites_dollar_seed_for_slash_surfaces(harness, expected):
+    """x-413d: the sigil says WHO WROTE the seed, never which harness runs
+    it. A codex-authored `$fno:verb` seed rendered for a slash surface
+    arrives in that harness's native spelling, namespace preserved (agy
+    strips it, per its /fno: input rule)."""
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("$fno:target x-caf8", harness) == expected
+    assert normalize_command("$fno:target x-caf8", "agy") == "/target x-caf8"
+    # Codex keeps its own spelling; prose is never rewritten.
+    assert normalize_command("$fno:target x-caf8", "codex") == "$fno:target x-caf8"
+    assert normalize_command("do a $fno:blueprint", "claude") == "do a $fno:blueprint"
+
+
 # The measured rows from the operator's one-call table (bare verbs an operator
 # drives at a codex prompt line). The roster here is the minimal shipped
 # surface the rows exercise; the real-reader tests below pin the loader.

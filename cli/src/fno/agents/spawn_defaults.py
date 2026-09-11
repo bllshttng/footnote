@@ -695,45 +695,115 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
         return False
 
 
+def _verb_shape_ok(tok: str) -> bool:
+    """The verb-token shape shared by every reader: a leading ``/`` or ``$``
+    sigil, no second ``/`` inside the token (an absolute path never matches),
+    an optional ``fno:`` namespace, and a lowercase-word remainder."""
+    if len(tok) < 2 or tok[0] not in "/$":
+        return False
+    body = tok[1:]
+    if "/" in body:
+        return False
+    if body.startswith("fno:"):
+        body = body[len("fno:"):]
+    return bool(_PROFILE_KEY_RE.match(body))
+
+
+def _verb_body(tok: str) -> str:
+    """``tok`` (already shape-checked) minus its sigil and ``fno:`` namespace."""
+    body = tok[1:]
+    if body.startswith("fno:"):
+        body = body[len("fno:"):]
+    return body
+
+
 def is_verb_seed(seed: Optional[str]) -> bool:
-    """Whether ``seed``'s first token is a leading slash-verb, by a pure
-    string rule: must start with ``/`` and contain no further ``/`` (an
-    absolute path never matches); strip the ``/`` and an optional ``fno:``
+    """Whether ``seed``'s FIRST token is a verb-shaped command, by a pure
+    string rule: a leading ``/`` or ``$`` sigil, no further ``/`` in the token
+    (an absolute path never matches); strip the sigil and an optional ``fno:``
     namespace; the remainder must be lowercase ``^[a-z0-9][a-z0-9_-]*$``.
 
-    Shared by ``_profile_key`` (which profile row a spawn's seed selects) and
-    the permission-mode built-in rung (x-7198): a slash-verb seed is
-    fire-and-forget work, a seedless or prose seed is a conversation. The
-    attended/unattended axis is DECLARED, never inferred (the response-time
-    instrument was retracted: fno mail is injected as user-shaped text, so no
-    measurement can tell operator chatter from fleet chatter)."""
+    This is the FIRE test, and index 0 is load-bearing: it answers "is this
+    seed a bare command" for the permission-mode built-in rung (x-7198) and
+    the payload-normalization gates, where only a position-0 command may be
+    rewritten or run unattended. A verb inside prose must not pass. The
+    routing question - which verb does this seed name, anywhere in the text -
+    is :func:`_verb_token`. The attended/unattended axis is DECLARED, never
+    inferred (the response-time instrument was retracted: fno mail is
+    injected as user-shaped text, so no measurement can tell operator chatter
+    from fleet chatter)."""
     if not seed:
         return False
     parts = seed.split()
     if not parts:
         return False
-    tok = parts[0]
-    if not tok.startswith("/") or "/" in tok[1:]:
-        return False
-    rest = tok[1:]
-    if rest.startswith("fno:"):
-        rest = rest[len("fno:"):]
-    return bool(_PROFILE_KEY_RE.match(rest))
+    return _verb_shape_ok(parts[0])
 
 
-def _profile_key(seed: Optional[str]) -> Optional[str]:
-    """Derive the profile key from a seed's first token (see ``is_verb_seed``).
+def _verb_token(seed: Optional[str]) -> Optional[str]:
+    """The first verb-shaped token ANYWHERE in ``seed``, sigil and optional
+    ``fno:`` namespace stripped to the bare verb word; None when the seed
+    carries no verb-shaped token. A scan, not a first-token test: routing a
+    profile never executes anything, so ``do a /fno:blueprint`` names the
+    blueprint stage while staying an attended conversation."""
+    if not seed:
+        return None
+    for tok in seed.split():
+        if _verb_shape_ok(tok):
+            return _verb_body(tok)
+    return None
 
-    A seed with no leading slash-verb - every king seed, and a seedless spawn -
-    resolves to the literal key ``crown`` instead of None, so
-    ``[agents.profiles.crown]`` reaches a crown spawn exactly like every other
-    stage row."""
-    if not is_verb_seed(seed):
+
+def _known_verb_keys(profiles: object, settings: object) -> Set[str]:
+    """The vocabulary a verb-shaped seed must name: the configured profile
+    rows, the shipped footnote verb roster, and the dispatch-verb registry.
+    A verb-shaped token outside it is a typo refusing loudly (x-413d) instead
+    of spawning on the crown fallback."""
+    known = {str(k) for k in profiles} if isinstance(profiles, Mapping) else set()
+    try:
+        from fno.agents.harness_map import footnote_verbs
+
+        known |= set(footnote_verbs())
+    except Exception:  # noqa: BLE001 - an unreadable roster must not brick spawning
+        pass
+    registry = getattr(getattr(settings, "dispatch", None), "verbs", None)
+    if isinstance(registry, Mapping):
+        try:
+            from fno.config._dispatch_verbs import canonical_verb_key
+
+            for key in registry:
+                canon = canonical_verb_key(str(key)).lstrip("/")
+                if canon:
+                    known.add(canon)
+        except Exception:  # noqa: BLE001
+            pass
+    return known
+
+
+def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optional[str]:
+    """Classify a spawn seed into the profile key its verb names. THREE
+    outcomes (x-413d):
+
+    - a verb-shaped token that resolves - either sigil, anywhere in the seed,
+      through ``_VERB_ALIASES`` - returns the canonical profile key;
+    - NO verb-shaped token - every king seed, a seedless spawn, a filesystem
+      path, plain prose - returns the literal key ``crown``, so
+      ``[agents.profiles.crown]`` reaches a crown spawn exactly like every
+      other stage row;
+    - a verb-shaped token ``known`` rejects returns None. Crown is the
+      else-branch of a classifier, never a fallback for verb spawns: the old
+      two-valued version resolved every parse failure to crown, which made a
+      codex dollar seed indistinguishable from a genuine crown spawn and four
+      config axes (model, effort, substrate, permission mode) silently wrong.
+      The caller must refuse, naming ``_verb_token(seed)``. ``known=None``
+      (shape-only mode) never returns None."""
+    tok = _verb_token(seed)
+    if tok is None:
         return "crown"
-    rest = seed.split()[0][1:]  # type: ignore[union-attr]
-    if rest.startswith("fno:"):
-        rest = rest[len("fno:"):]
-    return _VERB_ALIASES.get(rest, rest)
+    key = _VERB_ALIASES.get(tok, tok)
+    if known is not None and tok not in known and key not in known:
+        return None
+    return key
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
@@ -1072,8 +1142,19 @@ def inject_spawn_defaults(
     # the injection below - so the provider-scoped model rule, effort degrade, and
     # unknown-provider refusal all run once, on the merged fields.
     seed = _seed_of(out[1:])
-    verb = _profile_key(seed)
     profiles = getattr(agents, "profiles", None) or {}
+    verb = _profile_key(seed, _known_verb_keys(profiles, settings))
+    if verb is None:
+        # x-413d: a verb-shaped seed naming no known verb used to fall through
+        # to the crown profile silently. Refuse naming the token instead.
+        print(
+            f"fno agents spawn: seed {seed!r} names verb-shaped token "
+            f"{_verb_token(seed)!r} but no shipped footnote verb or configured "
+            f"profile answers it",
+            file=err,
+        )
+        print("fno agents spawn: refusing; no worker launched", file=err)
+        raise SystemExit(2)
     profile_verb = verb
     profile = profiles.get(verb) if verb else None
     if profile is None and verb:
