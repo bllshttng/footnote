@@ -581,37 +581,6 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
 
 
-def identify_spawned_keepers() -> list[dict]:
-    """Identify keepers spawned here plus the canonical seat."""
-    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
-    socks.add(store_socket_for(Path(GRAPH_JSON)))
-    rows: list[dict] = []
-    for sock in sorted(socks):
-        try:
-            rows.append(_Keeper(sock).identify())
-        except StoreUnavailable:
-            continue
-    return rows
-
-
-def restart_spawned_keepers() -> list[dict]:
-    """Restart identified keepers so a backend config flip takes effect."""
-    rows = identify_spawned_keepers()
-    for row in rows:
-        try:
-            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
-        except (KeyError, StoreUnavailable):
-            continue
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and any(
-        store_socket_for(Path(row["graph"])).exists() for row in rows
-    ):
-        time.sleep(0.05)
-    for row in rows:
-        _client_for(Path(row["graph"]))
-    return identify_spawned_keepers()
-
-
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)

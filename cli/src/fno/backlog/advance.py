@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Optional
+from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -321,6 +321,34 @@ def _slot_queue_retry_at(stdout: str) -> Optional[float]:
 _MAX_ANCESTOR_WALK = 64
 
 
+def first_dead_ancestor(
+    entry: dict,
+    entries_by_id: dict,
+    *,
+    is_dead: Callable[[dict], bool],
+) -> Optional[str]:
+    """First ancestor satisfying ``is_dead`` walking the parent edge, else None.
+
+    One walk, one dead predicate: selection excludes on superseded/deferred,
+    the strand receipts on any terminal ancestor. Cycle- and depth-capped.
+    """
+    seen: set[str] = set()
+    cur = entry.get("parent")
+    steps = 0
+    while cur and steps < _MAX_ANCESTOR_WALK:
+        if cur in seen:
+            break  # cycle - stop, no verdict
+        seen.add(cur)
+        anc = entries_by_id.get(cur)
+        if anc is None:
+            break  # missing parent - no verdict
+        if is_dead(anc):
+            return cur
+        cur = anc.get("parent")
+        steps += 1
+    return None
+
+
 def selection_guards(
     entry: dict,
     entries_by_id: dict,
@@ -350,29 +378,20 @@ def selection_guards(
         if isinstance(owner, str) and owner:
             return f"contained:{owner}"
 
-        seen: set[str] = set()
-        cur = entry.get("parent")
-        steps = 0
-        while cur and steps < _MAX_ANCESTOR_WALK:
-            if cur in seen:
-                break  # cycle - stop, no verdict
-            seen.add(cur)
-            anc = entries_by_id.get(cur)
-            if anc is None:
-                break  # missing parent - no verdict, select normally
-            # Field-based, not just derived `status`: read_graph returns the
-            # persisted status and does NOT recompute, so a superseded/deferred
-            # ancestor whose `status` was not re-persisted still reads its own
-            # bucket here via the underlying fields. Checking both is robust to
-            # either read path.
-            if (
-                anc.get("status") in ("superseded", "deferred")
-                or anc.get("superseded_by")
-                or anc.get("deferred_at")
-            ):
-                return f"dead-ancestor:{cur}"
-            cur = anc.get("parent")
-            steps += 1
+        # Field-based, not just derived `status`: read_graph does NOT recompute,
+        # so a superseded/deferred ancestor whose `status` was not re-persisted
+        # still reads its own bucket here via the underlying fields.
+        dead = first_dead_ancestor(
+            entry,
+            entries_by_id,
+            is_dead=lambda a: bool(
+                a.get("status") in ("superseded", "deferred")
+                or a.get("superseded_by")
+                or a.get("deferred_at")
+            ),
+        )
+        if dead:
+            return f"dead-ancestor:{dead}"
 
         from fno.graph import maintain as _maintain
         from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung, plan_rung
