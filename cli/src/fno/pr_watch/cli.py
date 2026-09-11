@@ -97,22 +97,6 @@ def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
 _PR_WATCH_SCHEDULER = "launchd:sh.fno.pr-watcher"
 
 
-def _emit_tick_death(*, why: str, phase: str, duration_s: float, interval_s: int) -> None:
-    """Death record for a tick killed by a signal: the bootout that bounces
-    this job gives the tick no finally, so this is the only record it writes."""
-    if why == "self_killed":
-        reason = ("self-killed: its own post-merge sync ran an update that bounced "
-                  "this job mid-tick")
-    else:
-        reason = "killed by a signal mid-tick"
-    _emit_event("pr_watch_tick_end", {
-        "outcome": "error", "why": why, "duration_s": duration_s,
-        "phase": phase, "pid": os.getpid(),
-    })
-    _emit_tick_row("pr_watch_merge", interval_s=interval_s, skip_reason="error",
-                   detail=f"{reason}; started and did not complete, phase={phase}")
-
-
 def _emit_tick_row(arm: str, *, interval_s: int, acted: int = 0,
                    skip_reason: Optional[str] = None, detail: Optional[str] = None) -> None:
     """One arm row per phase outcome (never raises); rides ``_emit_event`` so
@@ -481,11 +465,21 @@ def tick() -> None:
         # scheduler. Die BY the signal after writing the death record.
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
-            _emit_tick_death(
-                why="self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed",
-                phase=current_tick_phase(),
-                duration_s=round(time.monotonic() - started, 3),
+            why = "self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed"
+            reason = ("self-killed: its own post-merge sync ran an update that "
+                      "bounced this job mid-tick" if why == "self_killed" else
+                      "killed by a signal mid-tick")
+            phase = current_tick_phase()
+            _emit_event("pr_watch_tick_end", {
+                "outcome": "error", "why": why,
+                "duration_s": round(time.monotonic() - started, 3),
+                "phase": phase, "pid": os.getpid(),
+            })
+            _emit_tick_row(
+                "pr_watch_merge",
                 interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
+                skip_reason="error",
+                detail=f"{reason}; started and did not complete, phase={phase}",
             )
             signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
@@ -515,8 +509,7 @@ def tick() -> None:
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
-                                   detail=f"deadline exceeded before phase {name} "
-                                          f"(no tick time left)")
+                                   detail=f"deadline exceeded before phase {name}")
                 if on_end is not None:
                     on_end(True, 0.0)
                 return False
@@ -531,14 +524,10 @@ def tick() -> None:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
             # Which budget fired if the alarm does (x-d211): a cap below the
-            # remaining wall starves one phase while the tick carries on; the
-            # wall itself is the tick deadline. A mid-tick self-kill is
-            # neither: the SIGTERM handler names that one.
-            wall_limited = (
-                ceiling_box["v"] is None
-                or name not in _PHASE_CAP_S
-                or _PHASE_CAP_S[name] >= left
-            )
+            # remaining wall starves one phase; the wall itself is the tick
+            # deadline. A mid-tick self-kill is neither (SIGTERM handler).
+            cap = _PHASE_CAP_S.get(name)
+            wall_limited = ceiling_box["v"] is None or cap is None or cap >= left
             slice_s = max(1.0, slice_s)
             body_cut = False
             phase_start = time.monotonic()
@@ -555,12 +544,9 @@ def tick() -> None:
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
-                                   detail=(
-                                       f"deadline exceeded in phase {name} "
-                                       f"at {int(slice_s)}s"
-                                       if wall_limited else
-                                       f"phase slice {int(slice_s)}s spent"
-                                   ))
+                                   detail=(f"deadline exceeded in phase {name} at "
+                                           f"{int(slice_s)}s" if wall_limited else
+                                           f"phase slice {int(slice_s)}s spent"))
             finally:
                 if alarm_ok:
                     try:
@@ -1275,9 +1261,9 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
-        # Scoped to the catch-up phase (x-d211): the sync shell it spawns
-        # inherits the marker, and the child `fno update` skips its trailing
-        # `do pr watch refresh` - that refresh bootouts THIS job mid-tick.
+        # Scoped to the catch-up phase (x-d211): its sync shell inherits the
+        # marker, so the child `fno update` skips the refresh that bootouts
+        # THIS job mid-tick.
         prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
         os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
         try:

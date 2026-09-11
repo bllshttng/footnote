@@ -677,10 +677,9 @@ def _run_tick(
     # Load once up-front; resets to {} on corruption (baseline discipline)
     state = store.load()
 
-    # x-d211: the rich scan orders least-recently-polled first (missing
-    # cursor, then oldest stamp; discovery order breaks ties; corrupt or
-    # non-string stamps sort as missing) so a budget break resumes where the
-    # last tick stopped instead of starving the tail.
+    # x-d211: least-recently-polled first (missing cursor, then oldest stamp;
+    # discovery order breaks ties; corrupt stamps sort as missing) so a budget
+    # break resumes where the last tick stopped.
     def _poll_order(indexed):
         idx, cand = indexed
         try:
@@ -842,10 +841,8 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
-        # x-d211: the budget break sits AFTER the cheap disposals, so a
-        # parked or terminal prefix cannot spend the tick while actionable
-        # PRs wait. Only a candidate that still owes the rich read is a
-        # legal break point.
+        # x-d211: after the cheap disposals - a parked or terminal prefix
+        # cannot spend the tick; only a candidate owing the rich read breaks.
         if (
             dispatch_deadline is not None
             and dispatch_deadline - time.monotonic()
@@ -888,9 +885,8 @@ def _run_tick(
                 )
                 entry = None
 
-            # x-d211: stamp the cursor on every successful rich observation so
-            # the next tick orders this PR behind never-polled candidates. The
-            # final store.persist() carries it.
+            # x-d211: stamp the cursor on every successful rich observation;
+            # the final store.persist() carries it to the next tick's order.
             if isinstance(entry, dict):
                 entry["last_polled_at"] = now_iso
 
