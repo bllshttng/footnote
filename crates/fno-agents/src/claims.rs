@@ -385,15 +385,18 @@ pub fn list_in(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
-    list_in_result(dirs, prefix, include_stale)
+    list_in_result(dirs, prefix, include_stale).map(|(records, _)| records)
 }
 
+/// Ok carries the records plus the directories whose `read_dir` succeeded,
+/// so a caller can tell a true empty from a scan that never reached a file.
 pub(crate) fn list_in_result(
     dirs: &[PathBuf],
     prefix: Option<&str>,
     include_stale: bool,
-) -> Result<Vec<ClaimRecord>, String> {
+) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
     let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut read_dirs = Vec::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
         std::collections::BTreeMap::new();
     for dir in dirs {
@@ -402,7 +405,10 @@ pub(crate) fn list_in_result(
             continue;
         }
         let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                read_dirs.push(dir.clone());
+                entries
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(format!("claims root {} unreadable: {error}", dir.display()));
@@ -445,7 +451,7 @@ pub(crate) fn list_in_result(
             }
         }
     }
-    Ok(best.into_values().map(|(_, rec)| rec).collect())
+    Ok((best.into_values().map(|(_, rec)| rec).collect(), read_dirs))
 }
 
 // ---------------------------------------------------------------------------
