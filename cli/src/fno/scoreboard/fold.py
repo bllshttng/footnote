@@ -1620,7 +1620,9 @@ def build_context_outcome_trace(
         pr_state in {"OPEN", "CLOSED", "MERGED"}
         or bool(merge_events)
         or bool(merged_at)
-        or merge_status in {"queued", "failed", "merged"}
+        # "queued"/"failed" are dead values: the only writer stamps "merged"
+        # or None, so anything else is not an observation.
+        or merge_status == "merged"
     )
     if merged_at is None and merge_events:
         merged_at = merge_events[-1].get("ts")

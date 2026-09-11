@@ -1080,35 +1080,35 @@ def test_same_timestamp_complete_snapshot_supersedes_incomplete() -> None:
     assert trace["context"]["measurement_complete"] is True
 
 
-def test_recorded_merge_failure_is_observed_and_falsifiable() -> None:
+@pytest.mark.parametrize("dead_status", ["queued", "failed"])
+def test_dead_merge_status_is_displayed_but_never_observed(dead_status: str) -> None:
+    # No writer produces these values (the only writer stamps "merged" or
+    # None), so a row carrying one is residue, not evidence. The raw string
+    # still shows as the display state, but it observes nothing.
     trace = build_context_outcome_trace(
         {"session_id": "s", "commit_sha": "head"},
-        {"id": "x-1", "merge_status": "failed"},
+        {"id": "x-1", "merge_status": dead_status},
         [],
     )
 
     assert trace["outcomes"]["merge"] == {
-        "observed": True,
-        "state": "failed",
-        "merged": False,
+        "observed": False,
+        "state": dead_status,
+        "merged": None,
         "at": None,
     }
-    assert trace["falsifiable"] is True
+    assert trace["falsifiable"] is False
 
 
-def test_queued_merge_is_observed_and_falsifiable() -> None:
+def test_merge_status_merged_is_observed_and_falsifiable() -> None:
     trace = build_context_outcome_trace(
         {"session_id": "s", "commit_sha": "head"},
-        {"id": "x-1", "merge_status": "queued"},
+        {"id": "x-1", "merge_status": "merged"},
         [],
     )
 
-    assert trace["outcomes"]["merge"] == {
-        "observed": True,
-        "state": "queued",
-        "merged": False,
-        "at": None,
-    }
+    assert trace["outcomes"]["merge"]["observed"] is True
+    assert trace["outcomes"]["merge"]["merged"] is True
     assert trace["falsifiable"] is True
 
 
