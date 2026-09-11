@@ -115,7 +115,7 @@ def test_an_undatable_transcript_never_renders_a_live_worker(cwd_tmp, roster, mo
     assert "basis" not in info
     r = runner.invoke(cli, ["status", NODE])
     assert "UNCLAIMED but a live worker" not in r.output
-    assert "could not be dated" in r.output
+    assert "undatable, UNKNOWN never live" in r.output
 
 
 def test_a_stale_working_word_yields_to_a_done_tail(cwd_tmp, roster, monkeypatch):
