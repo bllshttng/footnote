@@ -100,11 +100,15 @@ def plan_rulings(node_id: str, plans_dir: Path) -> dict[str, Any]:
     return result
 
 
-def ruling_lines(result: dict, prefix: str, node_id: str) -> list[str]:
-    """The stderr lines a reversal verb prints for one node's plan rulings.
+def ruling_lines(
+    result: dict, prefix: str, node_id: str, style: str = "reversal"
+) -> list[str]:
+    """The lines a reader prints for one node's plan rulings.
 
-    Both ``undefer`` and ``unsupersede`` print from here, so the two verbs
-    say the same words about the same ruling.
+    ``style="reversal"`` is the one-line shape undefer and unsupersede emit
+    on stderr; ``style="recall"`` is the two-line block the decisions verb
+    prints before its index answer. One formatter, so the surfaces cannot
+    drift over the same ruling.
     """
     if result.get("status") == "unavailable":
         return [
@@ -114,8 +118,15 @@ def ruling_lines(result: dict, prefix: str, node_id: str) -> list[str]:
     lines: list[str] = []
     for ruling in result.get("rulings") or []:
         by = ", ".join(ruling.get("by") or []) or "(unclaimed)"
-        lines.append(
-            f"{prefix}: {node_id} is rejected by {by} in "
-            f"{ruling.get('plan_path')}: {ruling.get('reason')}"
-        )
+        if style == "recall":
+            lines.append(
+                f"PLAN RULING  {ruling.get('node')}  rejected by {by}  "
+                f"{ruling.get('plan_path')}"
+            )
+            lines.append(f"    reason: {ruling.get('reason')}")
+        else:
+            lines.append(
+                f"{prefix}: {node_id} is rejected by {by} in "
+                f"{ruling.get('plan_path')}: {ruling.get('reason')}"
+            )
     return lines

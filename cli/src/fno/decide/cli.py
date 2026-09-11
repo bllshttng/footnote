@@ -63,21 +63,6 @@ def _subject_node_id(subject: str, entries: Optional[list] = None) -> Optional[s
         return None
 
 
-def _echo_plan_rulings(result: dict) -> None:
-    """The human plan-ruling lines, on the human path only.
-
-    Two lines per ruling, before the index rows: the ruled-out node's reader
-    meets the rejection before the (usually empty) index answer explains it.
-    An unavailable read warned at the scan site, in every mode.
-    """
-    for ruling in result.get("rulings") or []:
-        by = ", ".join(ruling["by"]) or "(unclaimed)"
-        typer.echo(
-            f"PLAN RULING  {ruling['node']}  rejected by {by}  {ruling['plan_path']}"
-        )
-        typer.echo(f"    reason: {ruling['reason']}")
-
-
 def _render_claim_receipt(node_id: str, event: dict) -> None:
     """Print advisory claim context for a recorded node decision."""
     key = f"node:{node_id}"
@@ -761,15 +746,9 @@ def _list_decisions(
         raise typer.Exit(2)
 
     try:
-        # No cap on the read. The cap is applied HERE so the total is known,
-        # and a truncated answer can say so - a silent cut on a recall verb is
-        # the same lie as a missing record.
-        #
-        # One soft graph read per subject query, passed down. A subject query
-        # resolves its node id four times on the way to an answer (the matcher,
-        # the near-miss scan, the plan-ruling lookup, the empty-answer hint);
-        # each one used to re-read the whole graph and archive, which is where
-        # the 34s empty answer came from.
+        # No cap on the read; the total is known here, so a truncated answer
+        # can say so. One soft graph read per subject query, passed down to
+        # every resolver that used to re-read it.
         entries = None
         if subject:
             from fno.decide import _graph_entries
@@ -805,13 +784,10 @@ def _list_decisions(
     # and a partial answer reads as a whole one.
     near = near_miss_subjects(subject, entries=entries) if subject else []
 
-    # Plan rulings: sibling plans whose consolidation.rejected names this node.
-    # The decision index cannot hold them (agent sessions cannot write it), so
-    # this scan is the only surface the ruled-out node's readers consult. It
-    # prints before the index rows, on the empty answer too: an empty index
-    # with a live plan ruling is exactly the case that hid a rejection for a
-    # day. plans_content_dir is imported inside the branch so a test can
-    # monkeypatch fno.paths.plans_content_dir.
+    # Plan rulings: sibling plans whose consolidation.rejected names this
+    # node. The index cannot hold them, so this scan is the one surface the
+    # ruled-out node's readers consult. Prints before the index answer, on
+    # the empty answer too.
     plan_rulings_result = None
     if subject:
         from fno.graph._constants import is_wellformed_node_id
@@ -825,9 +801,7 @@ def _list_decisions(
         if node_id:
             plan_rulings_result = plan_rulings(node_id, plans_content_dir())
             if plan_rulings_result["status"] == "unavailable":
-                # A degraded read names itself in every mode, JSON included:
-                # the machine reader gets the status field, and the human
-                # tailing the log still learns the scan never ran.
+                # A degraded read names itself in every mode, JSON included.
                 typer.echo(
                     f"backlog decisions: plan rulings not read "
                     f"({plan_rulings_result['dir']}: {plan_rulings_result['detail']})",
@@ -892,7 +866,10 @@ def _list_decisions(
             )
 
     if plan_rulings_result is not None:
-        _echo_plan_rulings(plan_rulings_result)
+        from fno.plan.rulings import ruling_lines
+
+        for line in ruling_lines(plan_rulings_result, "", "", style="recall"):
+            typer.echo(line)
 
     if not decisions:
         # Exit 0: a read that answered "none" is a successful read. Only a read
