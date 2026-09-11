@@ -627,23 +627,6 @@ def long_hold_rows() -> dict:
 
 
 
-def _render_long_hold_lines(long_holds: dict) -> list[str]:
-    """The text block after the lanes; silent when nothing is over 12m."""
-    if "error" in long_holds:
-        return [f"long holds read failed: {long_holds['error']}"]
-    rows = long_holds["rows"]
-    if not rows:
-        return []
-    out = [f"single-flight holds over {LONG_HOLD_S // 60}m:"]
-    out.extend(
-        f"  {r['key']}  holder {r['holder']}  pid {r['pid']} "
-        f"({r['pid_observed']})  held {_fmt_age(r['held_s'])}  "
-        f"requests {r['requests']}"
-        for r in rows
-    )
-    return out
-
-
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
@@ -693,9 +676,10 @@ def render_top(
     if lanes:
         out.extend(_render_lane_lines(lanes))
         out.append("")
-    hold_lines = _render_long_hold_lines(long_holds)
-    if hold_lines:
-        out.extend(hold_lines)
+    if "error" in long_holds:
+        out.append(f"long holds read failed: {long_holds['error']}")
+    elif long_holds["lines"]:
+        out.extend(long_holds["lines"])
         out.append("")
     # The retirable line leads with the lanes (x-1379): the same shape of
     # fact as a full lane - a cap refusing spawns the table calls healthy.

@@ -8,6 +8,7 @@ use crate::claims::{
     encode_key, is_same_machine, list_in_result, now_ms, probe_pid, ClaimRecord, PidProbe,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Twelve-minute reconcile runs are measured, per the FLIGHT_TTL_MS doc in
@@ -57,12 +58,49 @@ fn record_dir<'a>(dirs: &'a [PathBuf], rec: &ClaimRecord) -> Option<&'a Path> {
         .map(PathBuf::as_path)
 }
 
+/// Compact floored age, matching `top._fmt_age`: 45s / 12m / 3h.
+fn fmt_age_s(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
+}
+
+/// The text block `top` prints after its lanes; silent when nothing is over
+/// the budget. Rendered here so the rows and their presentation ship as one
+/// projection.
+fn render_lines(rows: &[LongHoldRow], min_hold_s: i64) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("single-flight holds over {}m:", min_hold_s / 60)];
+    for row in rows {
+        let pid = match row.pid {
+            Some(pid) => pid.to_string(),
+            None => "None".to_string(),
+        };
+        lines.push(format!(
+            "  {}  holder {}  pid {} ({})  held {}  requests {}",
+            row.key,
+            row.holder,
+            pid,
+            row.pid_observed,
+            fmt_age_s(row.held_s),
+            row.requests
+        ));
+    }
+    lines
+}
+
 /// `flight:` holds older than `min_hold_s` across the given claims
-/// directories, longest hold first.
-pub fn long_hold_rows(dirs: &[PathBuf], min_hold_s: i64) -> Result<Vec<LongHoldRow>, String> {
+/// directories, longest hold first, with the `top` text block.
+pub fn long_holds(dirs: &[PathBuf], min_hold_s: i64) -> Result<Value, String> {
     let records = list_in_result(dirs, Some("flight:"), true)?;
     let now = now_ms();
-    let mut rows = Vec::new();
+    let mut rows: Vec<LongHoldRow> = Vec::new();
     for rec in &records {
         let held_s = (now - rec.acquired_at).max(0) / 1000;
         if held_s <= min_hold_s {
@@ -81,12 +119,16 @@ pub fn long_hold_rows(dirs: &[PathBuf], min_hold_s: i64) -> Result<Vec<LongHoldR
         });
     }
     rows.sort_by(|a, b| b.held_s.cmp(&a.held_s));
-    Ok(rows)
+    let lines = render_lines(&rows, min_hold_s);
+    serde_json::to_value(&rows)
+        .map(|rows_json| serde_json::json!({ "rows": rows_json, "lines": lines }))
+        .map_err(|error| error.to_string())
 }
 
 /// `fno-agents claim long-holds [--min-hold-s <s>] --claims-dir <dir>` (the
-/// dir flag repeatable). Prints one JSON object `{"rows":[...]}`; exit 0, or
-/// 3 when a claims directory is unreadable.
+/// dir flag repeatable). Prints one JSON object `{"rows":[...],"lines":[...]}`
+/// (rows plus the ready-to-print `top` text block); exit 0, or 3 when a
+/// claims directory is unreadable.
 pub fn run_claim_long_holds(args: &[String]) -> i32 {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut min_hold_s = DEFAULT_MIN_HOLD_S;
@@ -117,9 +159,9 @@ pub fn run_claim_long_holds(args: &[String]) -> i32 {
         eprintln!("fno-agents: claim long-holds requires --claims-dir");
         return 2;
     }
-    match long_hold_rows(&dirs, min_hold_s) {
-        Ok(rows) => {
-            println!("{}", serde_json::json!({ "rows": rows }));
+    match long_holds(&dirs, min_hold_s) {
+        Ok(payload) => {
+            println!("{payload}");
             0
         }
         Err(error) => {
@@ -202,14 +244,22 @@ mod tests {
         )
         .unwrap();
 
-        let rows = long_hold_rows(&[claims_dir.clone()], DEFAULT_MIN_HOLD_S).unwrap();
+        let payload = long_holds(&[claims_dir.clone()], DEFAULT_MIN_HOLD_S).unwrap();
+        let rows = payload["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "only the 13m flight hold is a row");
         let row = &rows[0];
-        assert_eq!(row.key, "flight:abc");
-        assert_eq!(row.holder, "single-flight:x");
-        assert_eq!(row.pid_observed, "absent");
-        assert!(row.held_s >= 780, "held_s {}", row.held_s);
-        assert_eq!(row.requests, 3, "blank trailing line is not a request");
+        assert_eq!(row["key"], "flight:abc");
+        assert_eq!(row["holder"], "single-flight:x");
+        assert_eq!(row["pid_observed"], "absent");
+        assert!(row["held_s"].as_i64().unwrap() >= 780);
+        assert_eq!(row["requests"], 3, "blank trailing line is not a request");
+        let lines = payload["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 2, "caption plus one row line");
+        assert_eq!(lines[0], "single-flight holds over 12m:");
+        let rendered = lines[1].as_str().unwrap();
+        assert!(rendered.contains("flight:abc"), "{rendered}");
+        assert!(rendered.contains("absent"), "{rendered}");
+        assert!(rendered.contains("requests 3"), "{rendered}");
 
         // Longest first when two qualify.
         write_rec(
@@ -221,8 +271,11 @@ mod tests {
                 20,
             ),
         );
-        let rows = long_hold_rows(&[claims_dir], DEFAULT_MIN_HOLD_S).unwrap();
-        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        let rows = long_holds(&[claims_dir], DEFAULT_MIN_HOLD_S).unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let keys: Vec<&str> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
         assert_eq!(keys, vec!["flight:older", "flight:abc"]);
     }
 
@@ -235,9 +288,12 @@ mod tests {
         rec.machine_id = Some("other-machine".into());
         write_rec(&claims_dir, &rec);
 
-        let rows = long_hold_rows(&[claims_dir], DEFAULT_MIN_HOLD_S).unwrap();
+        let rows = long_holds(&[claims_dir], DEFAULT_MIN_HOLD_S).unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pid_observed, "off-host");
+        assert_eq!(rows[0]["pid_observed"], "off-host");
     }
 
     #[test]

@@ -730,7 +730,16 @@ class TestLongHolds:
             "held_s": 800,
             "requests": 3,
         }
-        payload_text = json.dumps({"rows": [row]})
+        payload_text = json.dumps(
+            {
+                "rows": [row],
+                "lines": [
+                    "single-flight holds over 12m:",
+                    "  flight:abc  holder single-flight:xyz  "
+                    "pid 123 (absent)  held 13m  requests 3",
+                ],
+            }
+        )
         monkeypatch.setattr(
             "fno.claims.verdict.resolve_binary",
             lambda: self._fake_binary(tmp_path, payload_text),
@@ -777,7 +786,7 @@ class TestLongHolds:
 
         monkeypatch.setattr(
             "fno.claims.verdict.resolve_binary",
-            lambda: self._fake_binary(tmp_path, json.dumps({"rows": []})),
+            lambda: self._fake_binary(tmp_path, json.dumps({"rows": [], "lines": []})),
         )
         payload = json.loads(top_mod.render_top(as_json=True))
         assert payload["long_holds"] == []
