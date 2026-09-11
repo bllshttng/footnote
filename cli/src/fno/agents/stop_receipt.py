@@ -44,11 +44,11 @@ def wake_set_refusal(name: str, short_id: str, existing: AgentEntry) -> Optional
         )
     except Exception:  # noqa: BLE001 - an unreadable registry answers nothing
         return None
-    if reread is None or reread.status not in _OWNERSHIP_LIVE_STATUSES:
-        return None
-    if (reread.harness_session_id, reread.short_id or "") != (
-        existing.harness_session_id,
-        short_id or "",
+    if (
+        reread is None
+        or reread.status not in _OWNERSHIP_LIVE_STATUSES
+        or (reread.harness_session_id, reread.short_id or "")
+        != (existing.harness_session_id, short_id or "")
     ):
         return None
     return (

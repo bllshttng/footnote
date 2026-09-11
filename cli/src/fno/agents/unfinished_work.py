@@ -762,13 +762,11 @@ def collect_observations(
     """Gather every observation the classifier needs. Read-only apart from
     one ``git fetch origin main`` per repository and the GitHub PR reads."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
-    if truth_resolver is not None:
-
-        def truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
-            return truth_resolver(handle), None
-
-    else:
-        truth_pair = _default_truth_pair
+    truth_pair = (
+        (lambda handle: (truth_resolver(handle), None))
+        if truth_resolver is not None
+        else _default_truth_pair
+    )
     warnings: list[str] = []
 
     def _budget_left() -> Optional[float]:

@@ -2530,12 +2530,8 @@ def registry_rows_by_cwd(
         return {}, False
     by_cwd: dict[str, list[dict]] = {}
     for row in data.get("agents", []):
-        if not isinstance(row, dict):
-            continue
-        cwd = row.get("cwd") or ""
-        if not cwd:
-            continue
-        by_cwd.setdefault(str(Path(cwd)), []).append(row)
+        if isinstance(row, dict) and row.get("cwd"):
+            by_cwd.setdefault(str(Path(row["cwd"])), []).append(row)
     return by_cwd, True
 
 
