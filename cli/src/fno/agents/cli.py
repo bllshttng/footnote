@@ -1289,10 +1289,10 @@ def cmd_spawn(
         None,
         "--wait",
         help=(
-            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h): "
-            "load_backstop, ram_floor, cpu_instrument_unreadable, "
-            "cpu_share_undecidable, fleet_cpu_share, provider_cap, max_live. "
-            "Anything else exits at once. Conflicts with --no-wait."
+            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h). "
+            "The waitable set is the gate's own capacity refusals ("
+            "WAITABLE_REFUSAL_REASONS); anything else exits at once with its "
+            "receipt. Conflicts with --no-wait."
         ),
     ),
     prompt_file: str | None = typer.Option(
@@ -2047,26 +2047,12 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
-    from fno.agents.spawn_gate import GateRefused, run_gate
+    from fno.agents.spawn_gate import WAITABLE_REFUSAL_REASONS, GateRefused, run_gate
 
-    # The reasons a --wait may outlast; anything else (policy or config)
-    # exits at once - waiting out a verdict the gate will not revisit is a
-    # hang wearing a retry's clothes.
-    waitable_reasons = frozenset(
-        {
-            "load_backstop",
-            "ram_floor",
-            "cpu_instrument_unreadable",
-            "cpu_share_undecidable",
-            "fleet_cpu_share",
-            "provider_cap",
-            "max_live",
-            # Under --wait each attempt runs no_wait, so the gate's own
-            # queueing refusals surface here and the CLI deadline bounds the wait.
-            "no_wait",
-            "no_wait_mutex_held",
-        }
-    )
+    # Anything outside the gate's own waitable set (policy or config)
+    # exits at once - waiting out a verdict the gate will not revisit is
+    # a hang wearing a retry's clothes.
+    waitable_reasons = WAITABLE_REFUSAL_REASONS
     wait_deadline = time.monotonic() + wait_seconds if wait is not None else None
     last_wait_note = 0.0
     while True:
@@ -2080,7 +2066,11 @@ def cmd_spawn(
             )
             break
         except GateRefused as exc:
-            reason = exc.receipt.get("reason") if isinstance(exc.receipt, dict) else None
+            reason = (
+                exc.receipt.get("reason")  # type: ignore[assignment]
+                if isinstance(exc.receipt, dict)
+                else None
+            )
             now = time.monotonic()
             if wait_deadline is None or reason not in waitable_reasons or now >= wait_deadline:
                 _release_dispatch_claims(node_reservation, node_claim)

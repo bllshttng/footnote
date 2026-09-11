@@ -4219,15 +4219,15 @@ def cmd_send(
             return
 
     # Name mode.
-    if not name or (message is None and body_text is None):
+    if body_text is not None:
+        message = body_text
+    if not name or message is None:
         print(
             "usage: fno agents mail send <name> <message>  "
             "(or --to-project <project> <message>)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
-    if body_text is not None:
-        message = body_text
 
     _vet_body(message, allow_reason=style_exception)
 

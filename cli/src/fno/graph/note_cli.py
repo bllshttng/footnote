@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -11,11 +10,12 @@ import typer
 
 from fno.decide import READ_HELP
 from fno.graph import cli as graph_cli
+from fno.graph.cli import cli
 
 
-# Route the graph path through graph_cli's namespace so the tests' existing
+# Registered through graph_cli's namespace so the tests' existing
 # `monkeypatch.setattr("fno.graph.cli._graph_path", ...)` seam keeps working.
-@graph_cli.cli.command("note")
+@cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: Optional[str] = typer.Argument(None, help="Progress note text (one line)."),

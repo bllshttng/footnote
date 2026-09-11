@@ -25,7 +25,6 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
-from fno.decide import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 # the external-backend verb classification: the sets live beside the data
 # they classify (the classification runner below fails the import when a

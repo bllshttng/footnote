@@ -39,6 +39,26 @@ EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
 
+#: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
+#: HERE because these tokens are the gate's vocabulary; the CLI retry loop
+#: imports this set rather than re-spelling it.
+WAITABLE_REFUSAL_REASONS = frozenset(
+    {
+        "load_backstop",
+        "ram_floor",
+        "cpu_instrument_unreadable",
+        "cpu_share_undecidable",
+        "fleet_cpu_share",
+        "provider_cap",
+        "max_live",
+        # Surfaced only when an attempt runs no_wait (spawn --wait forces
+        # that), so the CLI deadline - not this gate's 600s queue - bounds
+        # the wait.
+        "no_wait",
+        "no_wait_mutex_held",
+    }
+)
+
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
