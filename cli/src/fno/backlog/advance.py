@@ -1142,6 +1142,7 @@ def _node_effective_verb(node: dict) -> Optional[str]:
         verb=(node.get("dispatch_verb") or "").strip() or None,
         difficulty=node.get("difficulty"),
         plan_rung=_node_plan_rung(node).value,
+        node_id=node.get("id"),
     )
     return verb
 
