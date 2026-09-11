@@ -1011,14 +1011,14 @@ def status(
         undated = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
         if engaged:
             info["worked_by"] = [worker["name"] for worker in engaged]
-            # x-dead task 2.1: degraded coverage enters the verdict. A bare
-            # `live-worker` beside `roster_coverage: degraded` rendered a
-            # settled reading while 31 of 53 rows went unresolved; the hedge
-            # names the coverage in the basis itself.
-            if info.get("roster_rows_unresolved", 0) or undated:
-                info["basis"] = "live-worker-degraded-coverage"
-            else:
-                info["basis"] = "live-worker"
+            # x-dead task 2.1: degraded coverage enters the verdict, not a
+            # field beside it (31 of 53 rows went unresolved under a flat
+            # `live-worker`).
+            info["basis"] = (
+                "live-worker-degraded-coverage"
+                if info.get("roster_rows_unresolved", 0) or undated
+                else "live-worker"
+            )
         unresolved = info.get("roster_rows_unresolved", 0)
         if info.get("roster_unresolved_candidates"):
             # An unresolved row whose worktree names THIS node is an

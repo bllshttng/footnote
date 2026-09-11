@@ -306,6 +306,17 @@ def live_worked_node_ids(
             if not isinstance(node_id, str) or not node_id:
                 continue
             workers: list[str] = []
+
+            def _admit(name, verdict):
+                # x-dead: an undatable row is listed marked, never vanished
+                # and never read as positively live.
+                label = (
+                    name if verdict == REACHABLE
+                    else f"{name} (unmeasurable: transcript could not be dated)"
+                )
+                if isinstance(label, str) and label and label not in workers:
+                    workers.append(label)
+
             for row in entry.get("sessions") or []:
                 if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
                         and is_open_phase_row(row, row["phase"])):
@@ -314,29 +325,12 @@ def live_worked_node_ids(
                 if roster_row is None:
                     continue
                 verdict = _worker_reachability(roster_row).verdict
-                if verdict == REACHABLE:
-                    worker = roster_row.get("name")
-                    if isinstance(worker, str) and worker and worker not in workers:
-                        workers.append(worker)
-                elif verdict == UNKNOWN:
-                    # x-dead: an undatable row is listed marked, never
-                    # vanished and never read as positively live.
-                    name = roster_row.get("name")
-                    marker = f"{name} (unmeasurable: transcript could not be dated)"
-                    if isinstance(name, str) and marker not in workers:
-                        workers.append(marker)
+                if verdict in (REACHABLE, UNKNOWN):
+                    _admit(roster_row.get("name"), verdict)
             for extra in reading.workers_on(node_id):
                 verdict = _worker_reachability(extra).verdict
-                if verdict not in (REACHABLE, UNKNOWN):
-                    continue
-                name = extra.get("name")
-                if verdict == UNKNOWN:
-                    marker = f"{name} (unmeasurable: transcript could not be dated)"
-                    if marker not in workers:
-                        workers.append(marker)
-                    continue
-                if isinstance(name, str) and name and name not in workers:
-                    workers.append(name)
+                if verdict in (REACHABLE, UNKNOWN):
+                    _admit(extra.get("name"), verdict)
             for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
                 marker = f"{extra_name} (unmeasurable: no harness session id)"
                 if marker not in workers:

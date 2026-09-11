@@ -1,17 +1,10 @@
 """List Git worktrees annotated with their registered agent session.
 
-Cross-references each worktree path against ~/.fno/agents/registry.json's
-`cwd` field - the live agents registry the daemon already reconciles - rather
-than reading `.fno/target-state.md`'s `owner_pid`, which names the short-lived
-`fno do target init` CLI invocation and reads as dead within seconds of session
-start (verified live 2026-08-15: a worktree with an active session showed
-owner_pid already exited). The registry's `status` field (spawning/ready/
-idle/busy/live/restarting/orphaned/failed/exited/permanent_dead) is itself
-computed by measurement (the Rust daemon's reconciliation sweep), so this is
-a read, not a second liveness probe.
-
-Packaged here (not loaded from ``scripts/lib``) so an installed wheel keeps
-the behavior; ``scripts/lib/worktree-status.py`` is the thin repo entry point.
+Joins each worktree path on the agents registry's `cwd` field, never
+`.fno/target-state.md`'s `owner_pid` (the short-lived init CLI's pid, dead
+within seconds of session start); the registry `status` is a measurement the
+daemon already computed, so this is a read, not a second probe. Packaged
+outside scripts/lib so an installed wheel keeps the behavior.
 """
 
 from __future__ import annotations

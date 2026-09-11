@@ -113,18 +113,13 @@ def _worker_reachability(worker: dict):
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         facts = None
     if facts is None:
-        # No transcript at all: the supervisor word is the only evidence. An
-        # active word stays reachable (an unknowable age never demotes); a
-        # terminal word is positive evidence the row ended (a killed worker
-        # with a rotated transcript must still free its node); anything else
-        # is UNKNOWN.
+        # No transcript: the supervisor word is the only evidence. An active
+        # word stays reachable; a terminal word positively ended the row (a
+        # killed worker with a rotated transcript must still free its node).
         if state in ("working", "watching", "your-move"):
             return classify_reachability(truth_state=state, age_s=None, falsifier=None)
-        if state in _finished_row_states():
-            return classify_reachability(
-                truth_state=None, age_s=None, falsifier=f"finished-state:{state}"
-            )
-        return classify_reachability(truth_state=None, age_s=None, falsifier=None)
+        falsifier = f"finished-state:{state}" if state in _finished_row_states() else None
+        return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
     if facts.last_event_epoch is None:
         # A transcript PRESENT but undatable: the measured wrong answer read
         # this as engaged. It is UNKNOWN - a verdict about the instrument -
