@@ -1211,7 +1211,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None);
+        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None, None);
         assert_eq!(state, "active");
     }
 

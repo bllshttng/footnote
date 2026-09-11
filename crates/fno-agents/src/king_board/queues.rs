@@ -494,6 +494,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &claim_by_node,
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
             );
             state == "none" && claim.is_none()
         })
@@ -532,6 +533,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &claim_by_node,
             &inputs.holder_activity,
             inputs.scope_ids.as_ref(),
+            Some(&inputs.worked),
         );
         if state != "stalled" {
             continue;
@@ -607,6 +609,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &claim_by_node,
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
             );
             if state != "none" {
                 continue;
@@ -764,6 +767,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &claim_by_node,
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
             );
             if state != "none" {
                 continue;
