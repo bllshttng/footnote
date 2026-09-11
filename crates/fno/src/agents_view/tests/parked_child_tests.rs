@@ -120,7 +120,7 @@ fn served_liveness_beats_a_stale_status_when_fresh() {
     let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "orphaned", "liveness": "alive", "liveness_measured_at": "MEASURED_AT"}]}"#;
     let (rows, _) = derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(0)), NOW).unwrap();
     assert_eq!(rows[0].liveness, Liveness::Alive);
-    assert_eq!(rows[0].liveness_age_s, Some(0));
+    assert_eq!(rows[0].liveness_measured_at, Some(NOW));
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn a_word_90_seconds_old_still_serves_ac1_hp() {
     let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "orphaned", "liveness": "alive", "liveness_measured_at": "MEASURED_AT"}]}"#;
     let (rows, _) = derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(90)), NOW).unwrap();
     assert_eq!(rows[0].liveness, Liveness::Alive);
-    assert_eq!(rows[0].liveness_age_s, Some(90));
+    assert_eq!(rows[0].liveness_measured_at, Some(NOW - 90));
 }
 
 #[test]
@@ -142,8 +142,9 @@ fn stale_served_liveness_falls_back_to_the_status_ladder() {
     let (rows, _) =
         derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(3600)), NOW).unwrap();
     assert_eq!(rows[0].liveness, Liveness::Unmeasured);
-    // The age is still carried so the render can say "probe older than N s".
-    assert_eq!(rows[0].liveness_age_s, Some(3600));
+    // The measurement instant is still carried so the render can say
+    // "probe older than N s" against its own clock.
+    assert_eq!(rows[0].liveness_measured_at, Some(NOW - 3600));
 }
 
 #[test]

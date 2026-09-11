@@ -200,8 +200,12 @@ pub(super) fn no_pane_notice(a: &AgentRow) -> String {
             a.name,
             // (x-b5d1) The reading is absent, but a measurement may still
             // exist and be old - say how old, so "unmeasured" cannot be
-            // read as "just checked, nothing there".
-            match a.liveness_age_s {
+            // read as "just checked, nothing there". The row carries the
+            // measurement instant; the age is this client's now minus it.
+            match a
+                .liveness_measured_at
+                .map(|measured| crate::digest_overlay::now_secs().saturating_sub(measured))
+            {
                 Some(age) => format!("; last probe {age}s ago"),
                 None => String::new(),
             },

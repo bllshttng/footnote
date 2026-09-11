@@ -16987,7 +16987,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness,
-            liveness_age_s: None,
+            liveness_measured_at: None,
             harness: None,
         };
         let mut core = empty_core();
