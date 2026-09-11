@@ -2,6 +2,14 @@
 
 A worker pane (codex, agy, a pane-hosted claude) survives a mux restart as an idle row in the agent panel. Selecting that row resumes the session through the harness's own resume form. Nothing respawns silently at start. This is the record and the mechanism, and the reason respawn is refused.
 
+## Is this page for you?
+
+You are asking why a worker pane came back as an idle row instead of a live process, or whether anything can respawn without being asked. This page owns the idle-row and held-pane mechanics, the one-field membership record, and the resume gesture. Misreading it makes you wait on a process that does not exist yet: an idle row is a record, not a running session.
+
+Not for: choosing the startup policy or bulk-resuming a whole workspace, and anything about the tab count; those live in [workspace-restore](workspace-restore.md).
+
+The destructive edge: restore prunes a worker member whose registry row is gone, and a reaped name can never resume. Retire the registry row and the member's only door closes with it.
+
 ## The two resume mechanisms
 
 `claude attach <jobId>` reconnects a viewer to a session that is still running. A claude bg session is owned by claude's daemon, and the daemon kept it alive. `codex resume <session_id>` restarts a session from a rollout persisted on disk. Different mechanisms, the same user-visible result, and only the first needs a living process. "Codex has no daemon" is true and irrelevant.
