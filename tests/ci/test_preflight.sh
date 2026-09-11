@@ -146,7 +146,9 @@ FIX="$TMP/repo"; mkdir -p "$FIX/scripts/ci" "$FIX/scripts/lib" "$FIX/cli/src/fno
 git -C "$FIX" init -q
 git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
-cp "$REPO_ROOT/scripts/lib/events-validate.sh" "$FIX/scripts/lib/events-validate.sh"
+# The lib dir ships as a unit: events-validate.sh sources its sibling
+# fno-python.sh for interpreter resolution.
+cp "$REPO_ROOT/scripts/lib/events-validate.sh" "$REPO_ROOT/scripts/lib/fno-python.sh" "$FIX/scripts/lib/"
 cp "$REPO_ROOT/cli/src/fno/events/schema.yaml" "$FIX/cli/src/fno/events/schema.yaml"
 # Tracker gate stubs: the real gates need the full cli project and a live
 # registry; this fixture exercises preflight's orchestration (verdicts,
