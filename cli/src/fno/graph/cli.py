@@ -3241,7 +3241,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs or config.dispatch.verb_registry at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
