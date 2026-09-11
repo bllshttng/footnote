@@ -255,14 +255,10 @@ def _record(
             supersedes=supersedes,
             reads=list(read) or None,
         )
-    except (UnmeasuredClaimError, UnresolvableCitationError) as exc:
+    except (UnmeasuredClaimError, UnresolvableCitationError, VerbUnavailable) as exc:
         # Same ladder as the law door: the ruling was refused before any
         # write, so the caller must not re-run it expecting a different id.
-        typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
-        raise typer.Exit(3)
-    except VerbUnavailable as exc:
-        # The evidence gate cannot run, so the ruling is refused before any
-        # write, on the same ladder.
+        # VerbUnavailable rides it: a gate that cannot run refuses too.
         typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
         raise typer.Exit(3)
     except UnknownOriginError as exc:

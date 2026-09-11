@@ -125,16 +125,12 @@ def record_command(
             graduation=graduation_data,
             reads=list(read) or None,
         )
-    except VerbUnavailable as exc:
-        # The evidence gate cannot run, so the ruling is refused before any
-        # write: a read nobody can run is not evidence either.
-        typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
-        raise typer.Exit(3) from exc
-    except (InvalidGraduationError, ValueError) as exc:
+    except (InvalidGraduationError, ValueError, VerbUnavailable) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no
-        # recoverable decision. It must land on 3 with the rest: exit 1 is the
+        # recoverable decision; VerbUnavailable is the evidence gate refusing
+        # to run at all. Both must land on 3 with the rest: exit 1 is the
         # code reserved for "recorded, index write failed, do NOT re-run", so
-        # letting it escape told a caller the opposite of what happened.
+        # letting either escape told a caller the opposite of what happened.
         typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
         raise typer.Exit(3) from exc
     except WaiverAuthorityRefusedError as exc:
