@@ -1794,7 +1794,7 @@ def resolve_plugin_script(relpath: str) -> Path:
         _persist_plugin_root(pkg_root)
         return pkg_root / relpath
     persisted = _read_persisted_plugin_root()
-    if persisted is not None:
+    if persisted is not None and (persisted / relpath).exists():
         return persisted / relpath
     return resolve_repo_root() / relpath
 
