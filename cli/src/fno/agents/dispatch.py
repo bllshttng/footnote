@@ -68,6 +68,7 @@ from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
+from fno.agents.stop_receipt import emit_shellout_stop, wake_set_refusal
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -3893,16 +3894,6 @@ def _stop_agent_inner(
                 )
                 raise DispatchAskError(f"claude stop failed: {exc}", exit_code=1) from exc
 
-            def _emit_shellout_stop() -> None:
-                events.emit(
-                    "agent_stopped",
-                    name=name,
-                    provider="claude",
-                    claude_exit=exit_code,
-                    short_id=short_id,
-                    stopped_by="shellout",
-                )
-
             if exit_code != 0:
                 if stderr_text:
                     sys.stderr.write(stderr_text)
@@ -3911,54 +3902,21 @@ def _stop_agent_inner(
                 escalated = _escalate_to_pid()
                 if escalated is not None:
                     return escalated
-                _emit_shellout_stop()
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
                 raise DispatchAskError(
                     # retired-ok: reports which shellout failed on which session.
                     f"claude stop {short_id} exited {exit_code}",
                     exit_code=1,
                 )
 
-            _emit_shellout_stop()
-
+            # x-dead task 3.1: the shellout's receipt is verified before the
+            # word `stopped` prints.
             _mark_stopped_orphaned(name, existing)
-
-            # x-dead task 3.1: a verb that reports success while the thing is
-            # still counted as live is its own defect. Measured 2026-09-11: on
-            # an Agent-tool teammate row `claude stop` exited 0, the row never
-            # left the wake set, and `stopped: <name>` printed beside it. The
-            # refusal is also where the citizen-vs-teammate fact lives (task
-            # 3.2): an fno-spawned citizen tears down through this verb, an
-            # Agent-tool teammate needs `fno agents rm`.
-            from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES
-
-            try:
-                reread = next(
-                    (
-                        entry
-                        for entry in load_registry()
-                        if entry.harness == "claude"
-                        and (entry.name == name or name in entry.aliases)
-                    ),
-                    None,
-                )
-            except Exception:  # noqa: BLE001 - a registry read failure must not
-                reread = None  # turn a successful stop into a refusal
-            if (
-                reread is not None
-                and existing is not None
-                and getattr(reread, "status", "") in _OWNERSHIP_LIVE_STATUSES
-                and getattr(reread, "harness_session_id", "")
-                == getattr(existing, "harness_session_id", "")
-                and (getattr(reread, "short_id", "") or "") == (short_id or "")
-            ):
-                raise DispatchAskError(
-                    f"claude stop reported success but {name} ({short_id}) still "
-                    f"reads live in the registry. Citizen and teammate rows tear "
-                    f"down differently: an fno-spawned citizen pane/thread stops "
-                    f"through this verb, an Agent-tool teammate needs "
-                    f"`fno agents rm {name}`.",
-                    exit_code=1,
-                )
+            receipt = wake_set_refusal(name, short_id, existing)
+            if receipt is not None:
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
+                raise DispatchAskError(receipt, exit_code=1)
+            emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
 
             print(
                 f"stopped: {name} ({short_id})",

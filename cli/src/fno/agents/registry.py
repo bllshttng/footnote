@@ -2466,20 +2466,13 @@ def heal_own_cwd(
     cwd: str,
     registry_path: Optional[Path] = None,
 ) -> Optional[tuple[Optional[str], str]]:
-    """Stamp the directory the worker actually WORKS in (x-dead task 0.1).
+    """Stamp the directory the worker WORKS in (x-dead task 0.1).
 
-    The spawner mints the row with the SPAWN directory - it cannot know a
-    harness that relocates itself after launch (codex cuts its own worktree;
-    a target worker enters one mid-session) - but the worker speaks for
-    itself at SessionStart, where ``--cwd`` is where the harness session
-    runs. Every reader that joins the registry on ``cwd`` (the occupancy
-    index, the watchdog's owner question, the stranded classifier) joins
-    through this field, so a row recording the spawn directory contributes
-    no handle anywhere and a live worker reads as ownerless.
-
-    Returns ``(old_cwd, new_cwd)`` when the row moved, else ``None``; the
-    idempotent no-op never rewrites the file, mirroring ``heal_mux_ref``.
-    """
+The spawner mints the row with the spawn directory; the worker's own
+SessionStart heal makes the registry's cwd field answer "where does this
+worker work" for every reader that joins on it. Returns ``(old, new)`` when
+the row moved, else None; the idempotent no-op never rewrites the file.
+"""
     if not name or not harness or not cwd:
         return None
 

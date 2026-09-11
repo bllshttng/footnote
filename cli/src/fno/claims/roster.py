@@ -146,22 +146,3 @@ def _worker_reachability(worker: dict):
         age_s=age,
         falsifier=None,
     )
-
-
-def _transcript_activity(session_id: str, cwd: str):
-    try:
-        import time
-
-        from fno.agents.watchdog import (
-            QUIET_AFTER_S,
-            finished_with_the_tree,
-            harness_for_session,
-            tail_facts,
-        )
-
-        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
-        if facts is None:
-            return None
-        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
-    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
-        return None

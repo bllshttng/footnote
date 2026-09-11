@@ -88,7 +88,6 @@ from fno.tombstones import tombstone_group_cls
 RosterReading = _roster.RosterReading
 _finished_row_states = _roster._finished_row_states
 _worker_reachability = _roster._worker_reachability
-_transcript_activity = _roster._transcript_activity
 read_roster = _roster.read_roster
 
 

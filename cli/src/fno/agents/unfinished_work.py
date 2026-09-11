@@ -720,14 +720,6 @@ def report_roots() -> "list[Path]":
 # --- the IO seam ---------------------------------------------------------------
 
 
-def _default_truth(handle: str) -> Optional[float]:
-    from fno.agents.session_truth import resolve_session_truth
-
-    result = resolve_session_truth(handle)
-    age = result.get("last_activity_age_s")
-    return float(age) if isinstance(age, (int, float)) else None
-
-
 def _default_truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
     """One truth resolution, age AND basis (x-dead: an mtime-derived age must
     reach the classifier labelled, or the 2h33m stat lie reads as positive
