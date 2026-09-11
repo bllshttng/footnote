@@ -21,6 +21,26 @@ def test_defaults() -> None:
     assert b.enabled is True
     assert b.schedule_days == 7
     assert b.stale_days == 7
+    assert b.scratch_threshold == 3
+    assert b.scratch_window_days == 28
+
+
+def test_scratch_keys_degrade_to_defaults_with_warning(caplog) -> None:
+    from fno.config import EvalsBlock
+
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        b = EvalsBlock(scratch_threshold="many", scratch_window_days=-3)
+    assert b.scratch_threshold == 3
+    assert b.scratch_window_days == 28
+    assert "scratch_threshold" in caplog.text
+    assert "many" in caplog.text
+
+
+def test_scratch_threshold_accepts_a_positive_int() -> None:
+    from fno.config import EvalsBlock
+
+    assert EvalsBlock(scratch_threshold=5).scratch_threshold == 5
+    assert EvalsBlock(scratch_window_days=0).scratch_window_days == 0
 
 
 def test_bad_value_degrades_to_default_with_warning(caplog) -> None:
