@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 from fno.agents.discover import (
     _SUBAGENT_SCAN_WINDOW_S,
@@ -608,7 +608,8 @@ def long_hold_rows() -> dict:
         ["long-holds", "--min-hold-s", str(LONG_HOLD_S)],
         [global_claims_dir(), claims_dir(None)],
     )
-    return {"error": error} if error else payload
+    # run_op answers a payload exactly when the error is empty.
+    return cast("dict", payload) if error is None else {"error": error}
 
 
 
