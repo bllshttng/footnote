@@ -1197,10 +1197,9 @@ def list_decisions(
 
     ``subject=None`` returns every decision, which is the only way to reach a
     record written with no subject at all - what ``fno inbox outstanding clear
-    --answer`` writes for a question that names no node.
-
-    ``entries`` is the already-read graph, handed to the subject matcher so a
-    caller resolving the same subject through several readers reads it once.
+    --answer`` writes for a question that names no node. ``entries`` is an
+    already-read graph, so a caller resolving one subject through several
+    readers reads it once.
     """
     if state not in {
         None,
