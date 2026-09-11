@@ -429,6 +429,20 @@ def detect_retask(
     }
 
 
+def _refused(reason: str, **overrides: object) -> dict:
+    """The shared refusal receipt; overrides restate the true partial state."""
+    return {
+        "status": "refused",
+        "cleared": False,
+        "session_restamped": False,
+        "switch": "not_started",
+        "switch_verified": False,
+        "target_submit_confirmed": False,
+        "reason": reason,
+        **overrides,
+    }
+
+
 def _status_tier(harness: str, frame: str) -> Optional[dict[str, str]]:
     strategy = capabilities(harness)["model_switch_strategy"]
     pattern = strategy.get("status_pattern") or ""
@@ -506,14 +520,7 @@ def execute_retask(
         settle()
         return read_frame()
 
-    refusal = {
-        "status": "refused",
-        "cleared": False,
-        "session_restamped": False,
-        "switch": "not_started",
-        "switch_verified": False,
-        "target_submit_confirmed": False,
-    }
+    refusal = _refused("refused")
     strategy = capabilities(entry.harness)["model_switch_strategy"]
     if strategy["kind"] == "unsupported":
         return {**refusal, "reason": "unsupported_switch_strategy"}
@@ -736,16 +743,7 @@ def run_retask(
             env=env,
         )
     except DispatchResolveError as exc:
-        return {
-            "status": "refused",
-            "cleared": False,
-            "session_restamped": False,
-            "switch": "not_started",
-            "switch_verified": False,
-            "target_submit_confirmed": False,
-            "reason": "dispatch_verb_unresolved",
-            "detail": str(exc),
-        }
+        return _refused("dispatch_verb_unresolved", detail=str(exc))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]
@@ -931,15 +929,11 @@ def run_retask(
     except RetaskTransportError as exc:
         # Preserve the partial transaction state in the refusal receipt.
         restamped = restamped_session[0] != entry.harness_session_id
-        receipt = {
-            "status": "refused",
-            "cleared": clear_sent[0] or restamped,
-            "session_restamped": restamped,
-            "switch": "not_started",
-            "switch_verified": False,
-            "target_submit_confirmed": False,
-            "reason": str(exc),
-        }
+        receipt = _refused(
+            str(exc),
+            cleared=clear_sent[0] or restamped,
+            session_restamped=restamped,
+        )
         if exc.detail:
             receipt["detail"] = exc.detail
         if renamed_name[0] != entry.name:
