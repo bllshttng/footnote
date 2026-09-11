@@ -149,6 +149,7 @@ pub mod pi;
 pub mod protocol;
 pub mod provider;
 pub mod readiness;
+pub mod reap_release;
 pub mod reap_render;
 pub mod receipt;
 pub mod reentry;

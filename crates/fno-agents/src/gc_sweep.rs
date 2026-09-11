@@ -161,6 +161,43 @@ pub struct GcSummary {
     /// renderer prints the same number the verb enforced. `None` until
     /// stamped; an unstamped summary renders no escalation.
     pub hold_escalate_after_s: Option<u64>,
+    /// Rulings the sweep could not apply (x-e3cc): a release named a row
+    /// whose current hold no longer matched the one it captured. The row
+    /// keeps under its real hold; the reason rides here and in the JSON.
+    pub release_refused: Vec<String>,
+}
+
+/// The ruling a `reap --release <row>` carries into the sweep (x-e3cc): the
+/// row's classified hold, captured when the verb classified it. The sweep
+/// lifts one gate on the matching row only, and only while the row's
+/// current hold still equals the captured one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Release {
+    /// The row handle the release names (the `id` every bucket carries).
+    pub handle: String,
+    /// The hold reason the classifier answered for the row.
+    pub reason: String,
+    /// The hold detail at classification time.
+    pub detail: String,
+}
+
+impl Release {
+    /// The stop family (x-e3cc): `needs live stop` is the dry-run spelling
+    /// and `stop refused` the real-run spelling of the same missing-death-
+    /// evidence fact, so the two reasons answer for each other. Their
+    /// details are mode-dependent wording and are not compared.
+    fn is_stop_family(&self) -> bool {
+        self.reason == "needs live stop" || self.reason == "stop refused"
+    }
+
+    /// Does this release answer for a row currently held with `reason` and
+    /// `detail`?
+    fn matches(&self, reason: &str, detail: &str) -> bool {
+        if self.is_stop_family() && (reason == "needs live stop" || reason == "stop refused") {
+            return true;
+        }
+        self.reason == reason && self.detail == detail
+    }
 }
 
 /// One held row with its clock (x-e3cc): a correct hold with no age is
@@ -351,6 +388,9 @@ pub(crate) struct RetireOrder {
     /// open do row is the stale record of work that moved on, not a live
     /// assignment.
     pub(crate) released: bool,
+    /// A `reap --release` ruling applied to this row (x-e3cc): the event
+    /// names the release as the remover.
+    pub(crate) via_release: bool,
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
@@ -718,6 +758,99 @@ enum SettleRefusal {
     Fatal(String),
 }
 
+/// Fill ONE open do row with `ended_by: "reap-release"` (x-e3cc): the
+/// release verb's narrowed settle. Fill-if-absent over a fresh read, the
+/// same blocker gate the batch settle applies (a node whose additional PRs
+/// are not recorded merged is not fillable), and the same bounded retry
+/// before the write refuses. `Ok(false)` = the pair is not fillable: the
+/// row was already closed, or the node still carries a blocker - the
+/// caller keeps the row either way.
+fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<bool, String> {
+    let path = graph_path(home);
+    const ATTEMPTS: usize = 5;
+    for attempt in 0..ATTEMPTS {
+        let base = graph_store::file_content_version(&path);
+        let mut entries = match graph_store::read_defaulted(&path, false) {
+            Ok(e) => e,
+            Err(err) => return Err(format!("graph unreadable: {err}")),
+        };
+        // The same eligibility the batch settle applies: the pair must sit
+        // in the batch's own stale set.
+        let eligible = stale_open_do_rows(&entries)
+            .iter()
+            .any(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
+        if !eligible {
+            return Ok(false);
+        }
+        let now = crate::daemon::now_rfc3339_like();
+        let mut filled = false;
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|e| graph_store::entry_id(e) == Some(node))
+        {
+            if let Some(sessions) = entry.get_mut("sessions").and_then(Value::as_array_mut) {
+                for session in sessions.iter_mut() {
+                    let matches = graph_store::is_open_do_row(session)
+                        && session.get("session_id").and_then(Value::as_str) == Some(session_id);
+                    if matches {
+                        if let Some(obj) = session.as_object_mut() {
+                            obj.entry("ended_at".to_string())
+                                .or_insert_with(|| Value::String(now.clone()));
+                            obj.entry("ended_by".to_string())
+                                .or_insert_with(|| Value::String("reap-release".into()));
+                            filled = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !filled {
+            return Ok(false);
+        }
+        let outcome = graph_store::locked_mutate(
+            &path,
+            graph_store::MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: Some(base),
+                plan_rungs: None,
+                sqlite_authoritative: false,
+            },
+            graph_store::DEFAULT_LOCK_TIMEOUT,
+        );
+        match outcome {
+            Ok(_) => return Ok(true),
+            Err(
+                err
+                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+            ) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let _ = err;
+            }
+            Err(
+                err
+                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+            ) => {
+                return Err(format!(
+                    "settle write refused: {err} (after {ATTEMPTS} attempts)"
+                ))
+            }
+            Err(err) => return Err(format!("settle write refused: {err}")),
+        }
+    }
+    unreachable!("every loop arm returns")
+}
+
+/// The retire-basis prefix a release rides (x-e3cc): `released <reason>
+/// held <age>: <detail>; `. The age uses the same human clock the hold
+/// lines render.
+fn release_basis_prefix(reason: &str, age_s: Option<i64>, detail: &str) -> String {
+    let age = age_s
+        .map(crate::reap_render::human_duration)
+        .unwrap_or_else(|| "unmeasured".to_string());
+    format!("released {reason} held {age}: {detail}; ")
+}
+
 /// Drop each planned settle from the dry-run graph read, so the rehearsal
 /// reports the outcome the real pass would produce: a planned row no longer
 /// counts open.
@@ -1071,6 +1204,44 @@ pub(crate) fn run(
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
 ) -> GcSummary {
+    run_with_release(
+        home,
+        emitter,
+        grace_secs,
+        dry_run,
+        retain_days,
+        read_graph,
+        store_matches,
+        age_many,
+        stop_confirmed,
+        surface_removal,
+        agents_read,
+        tree_probe,
+        prune_tree,
+        None,
+    )
+}
+
+/// [`run`] with a release ruling (x-e3cc): the sweep lifts exactly one gate
+/// on the matching row, and only while its current hold still equals the
+/// one the release captured. Every other gate stays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_release(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_secs: i64,
+    dry_run: bool,
+    retain_days: u64,
+    read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
+    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
+    age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
+    stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+    tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
+    prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
+    release: Option<&Release>,
+) -> GcSummary {
     let mut summary = GcSummary::default();
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
@@ -1208,7 +1379,7 @@ pub(crate) fn run(
             continue;
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        let work = verdict.work.clone();
+        let mut work = verdict.work.clone();
         // (x-1b90 change 3) Every node the row names reads done - the exact
         // condition under which an old unresolved hold may ask for a
         // decision. Computed before `work` moves into the GcRow.
@@ -1216,25 +1387,103 @@ pub(crate) fn run(
         // The hold clock (x-e3cc): computed once per row, read by every hold
         // push below. A keep without an age is a reader that never ran.
         let (hold_age_s, hold_age_basis) = hold_clock(*age, &e.created_at, now);
+        // The release's per-row state (x-e3cc): the lifts and the note the
+        // retire basis carries. `None` note after all gates ran means a
+        // release named this row but matched none of its holds.
+        let release_for_row = release.filter(|r| r.handle == id);
+        let mut release_note: Option<String> = None;
+        let mut release_quiet_row = false;
+        let mut release_stop = false;
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
         if matches!(work, WorkState::AllDone { .. }) {
             if let Some(nodes) = graph.open_do.get(&sid.to_ascii_lowercase()) {
                 let node = nodes.first().cloned().unwrap_or_default();
-                summary.kept_open_do_row.push((id.clone(), node.clone()));
-                summary.holds.push(Hold {
-                    id: id.clone(),
-                    reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
-                    detail: settle_blocker_detail(graph, &node),
-                    age_s: hold_age_s,
-                    age_basis: hold_age_basis,
-                    escalated: false,
-                });
-                continue;
+                let reason = KeepReason::OpenDoRow { node: node.clone() }.as_str();
+                let detail = settle_blocker_detail(graph, &node);
+                // The release settles this one obligation through the
+                // settle's own door (x-e3cc): fill-if-absent, ended_by
+                // reap-release, the same blocker gate the batch settle
+                // applies. A write that refuses keeps the row.
+                if release_for_row.is_some_and(|r| r.matches(reason, &detail)) {
+                    match settle_one_do_row(home, &node, sid) {
+                        Ok(true) => {
+                            release_note = Some(release_basis_prefix(reason, hold_age_s, &detail));
+                        }
+                        Ok(false) => {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: the open do row on {node} is not fillable: {detail}"
+                            ));
+                            summary.kept_open_do_row.push((id.clone(), node.clone()));
+                            summary.holds.push(Hold {
+                                id,
+                                reason,
+                                detail,
+                                age_s: hold_age_s,
+                                age_basis: hold_age_basis,
+                                escalated: false,
+                            });
+                            continue;
+                        }
+                        Err(refused) => {
+                            summary.settle_refused.push((id.clone(), refused));
+                            summary.kept_open_do_row.push((id.clone(), node.clone()));
+                            summary.holds.push(Hold {
+                                id,
+                                reason,
+                                detail,
+                                age_s: hold_age_s,
+                                age_basis: hold_age_basis,
+                                escalated: false,
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    if let Some(r) = release_for_row {
+                        summary.release_refused.push(format!(
+                            "{id}: release refused: hold changed from {} ({}) to {reason} ({detail})",
+                            r.reason, r.detail
+                        ));
+                    }
+                    summary.kept_open_do_row.push((id.clone(), node.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason,
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
             }
         }
-        let confirm_hold = verdict.hold.clone();
+        let mut confirm_hold = verdict.hold.clone();
+        // x-e3cc: the release reads the conflict hold as agreement - the
+        // witness set (first source's node plus the dissenting node) is all
+        // done, so work reads AllDone over that set and the hold lifts. The
+        // not-done-witness refusal is the classify phase's job; this is the
+        // apply of a ruling already checked.
+        if let Some(r) = release_for_row {
+            if let Some(KeepReason::NodeConflict { a, b }) = &confirm_hold {
+                let detail = format!("{a} vs {b}");
+                let reason = KeepReason::NodeConflict {
+                    a: a.clone(),
+                    b: b.clone(),
+                }
+                .as_str();
+                if r.matches(reason, &detail) {
+                    let mut nodes = vec![verdict.route.node.clone().unwrap_or_default()];
+                    nodes.push(b.clone());
+                    nodes.dedup();
+                    work = WorkState::AllDone { nodes };
+                    confirm_hold = None;
+                    release_note = Some(release_basis_prefix(reason, hold_age_s, &detail));
+                }
+            }
+        }
         let merge_note = verdict.merge_note.clone();
         let age = *age;
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
@@ -1303,6 +1552,30 @@ pub(crate) fn run(
         // x-2774 change 8: the existence-specific probe on the row's own
         // pid. One kill(2) per row, no subprocess; only ESRCH counts.
         let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
+        // x-e3cc: the remaining two lifts. A release for a
+        // transcript-unresolved hold reads the missing age as quiet for this
+        // row only (grace_gate's release_quiet arm). A stop-family release
+        // satisfies the stop gate whether or not absence confirms; the stop
+        // is still issued below.
+        if let Some(r) = release_for_row {
+            if release_note.is_none()
+                && confirm_hold.is_none()
+                && r.matches(
+                    KeepReason::TranscriptUnresolved.as_str(),
+                    "absence is not quiet",
+                )
+            {
+                release_quiet_row = true;
+                release_note = Some(release_basis_prefix(
+                    KeepReason::TranscriptUnresolved.as_str(),
+                    hold_age_s,
+                    "absence is not quiet",
+                ));
+            } else if release_note.is_none() && confirm_hold.is_none() && r.is_stop_family() {
+                release_stop = true;
+                release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
+            }
+        }
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -1318,9 +1591,18 @@ pub(crate) fn run(
             superseded_by_live_peer,
             node_merged,
             pid_gone,
+            release_quiet: release_quiet_row,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
+            if let Some(r) = release_for_row {
+                if release_note.is_none() {
+                    summary.release_refused.push(format!(
+                        "{id}: release refused: hold changed from {} ({}) to {:?}",
+                        r.reason, r.detail, reason
+                    ));
+                }
+            }
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
@@ -1420,7 +1702,12 @@ pub(crate) fn run(
             // retirement even if the transcript mtime moved - the write came
             // from something else.
             let pid_gone_now = e.pid.is_some_and(crate::daemon::pid_is_gone);
-            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs) || pid_gone_now;
+            // The release lift (x-e3cc): a missing age reads quiet for this
+            // row only. An ANSWERED fresh age still keeps - activity is
+            // activity even under a ruling.
+            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs)
+                || pid_gone_now
+                || (release_quiet_row && fresh_age.is_none());
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
@@ -1442,10 +1729,18 @@ pub(crate) fn run(
         };
         // The 2026-09-08 shape (dry promised nine, real retired zero): a dry
         // run never promises a claude stop it holds no evidence for.
-        if dry_run && death.is_none() && e.harness_name() == "claude" {
+        if dry_run && death.is_none() && e.harness_name() == "claude" && !release_stop {
             let detail = "no terminal roster state and no dead pid; a dry run does not \
                  promise a stop it cannot prove"
                 .to_string();
+            if let Some(r) = release_for_row {
+                if release_note.is_none() {
+                    summary.release_refused.push(format!(
+                        "{id}: release refused: hold changed from {} ({}) to needs live stop ({detail})",
+                        r.reason, r.detail
+                    ));
+                }
+            }
             summary.needs_live_stop.push((id.clone(), detail.clone()));
             summary.holds.push(Hold {
                 id,
@@ -1457,10 +1752,20 @@ pub(crate) fn run(
             });
             continue;
         }
+        // The stop-family release still ISSUES the stop (x-e3cc): the seam
+        // runs, the receipt records the outcome, and the release satisfies
+        // the gate whether or not absence confirms. `None` when death
+        // evidence already answered or no release rides.
+        let release_stop_outcome: Option<bool> = if release_stop && death.is_none() {
+            Some(stop_confirmed(e))
+        } else {
+            None
+        };
         // Death evidence satisfies the stop. It wraps the callee's seam here,
         // in the caller that owns the snapshot, so the shared signature is
         // untouched.
-        let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
+        let stop_on_death =
+            |entry: &state::RegistryEntry| death.is_some() || release_stop || stop_confirmed(entry);
         // x-2774: the session-shaped release that let an OPEN-work row
         // retire. The obligation re-checks (stage and commit) yield to it.
         let released = row.session_released();
@@ -1579,12 +1884,20 @@ pub(crate) fn run(
         // that reads "quiet past grace" when the transcript was actually
         // inside grace misreports why the row went; the pid evidence is the
         // reason it went when it did.
-        let basis =
+        let mut basis =
             if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
                 format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
             } else {
                 basis
             };
+        // The release rides the audit line (x-e3cc): what was ruled, how old
+        // the hold was, and an unconfirmed stop named as such.
+        if let Some(note) = &release_note {
+            basis = format!("{note}{basis}");
+        }
+        if release_stop_outcome == Some(false) {
+            basis.push_str("; stop issued, unconfirmed");
+        }
         let worktree = if probed.owns_worktree {
             Some(e.cwd.clone())
         } else {
@@ -1605,6 +1918,7 @@ pub(crate) fn run(
                 tree,
                 worktree,
                 released,
+                via_release: release_note.is_some(),
             },
         );
     }
@@ -2045,9 +2359,8 @@ pub(crate) fn commit_retirements(
                     report.retired_names.remove(&e.name);
                     continue;
                 }
-                let _ = emitter.emit(
-                    "agent_row_reaped",
-                    &json!({
+                let _ = emitter.emit("agent_row_reaped", &{
+                    let mut event = json!({
                         "short_id": e.short_id,
                         "name": e.name,
                         "node_id": node_id,
@@ -2060,8 +2373,15 @@ pub(crate) fn commit_retirements(
                         // receipt and the node's sessions[] row keep the
                         // resumable handle.
                         "resumable": true,
-                    }),
-                );
+                    });
+                    // The release names itself as the remover (x-e3cc): a
+                    // retirement an operator ruling applied is auditable
+                    // as one.
+                    if order.via_release {
+                        event["remover"] = json!("reap --release");
+                    }
+                    event
+                });
                 report.retired.push((order.id.clone(), order.basis.clone()));
                 if order.tree == TreeAction::Prune {
                     // The same door a human removal walks (production: gate +

@@ -222,6 +222,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_receipts": pair(&summary.kept_receipts),
                 "holds": holds,
                 "hold_escalate_after_s": summary.hold_escalate_after_s,
+                "release_refused": summary.release_refused,
                 "dry_run": dry_run,
             })
         );
@@ -370,6 +371,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  held {id} (needs live stop: {reason}){}\n",
             hold_line(summary, id)
         ));
+    }
+    for refused in &summary.release_refused {
+        out.push_str(&format!("  {refused}\n"));
     }
     for (id, reason) in &summary.kept_no_receipt {
         out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));

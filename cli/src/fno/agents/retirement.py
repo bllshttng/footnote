@@ -93,6 +93,21 @@ def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
         out[row["id"]] = Retirement(None, None, False, f"stop refused: {row['reason']}")
     for row in summary.get("kept_no_receipt", []):
         out[row["id"]] = Retirement(None, None, False, f"no receipt: {row['reason']}")
+    # The hold clock (x-e3cc): every held row maps with its age and basis,
+    # so a reader of this projection answers the same question the reap
+    # report does. A row its own bucket already mapped keeps that verdict.
+    for row in summary.get("holds", []):
+        age = row.get("age_s")
+        age_text = "unmeasured" if age is None else f"held {age}s"
+        out.setdefault(
+            row["id"],
+            Retirement(
+                None,
+                None,
+                False,
+                f"{row['reason']}: {row['detail']}; {age_text}",
+            ),
+        )
     return out
 
 
