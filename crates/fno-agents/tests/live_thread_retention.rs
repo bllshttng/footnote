@@ -95,6 +95,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         superseded_by_live_peer: None,
         node_merged: false,
         pid_gone: false,
+        release_quiet: false,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(
