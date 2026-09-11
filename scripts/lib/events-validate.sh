@@ -3,9 +3,9 @@
 #
 # Thin adapter over the Python validator (fno.events.validate). Python is
 # the one owner of per-event validation; the hand-written bash body that
-# duplicated it is retired. This adapter transports the payload to
-# `python -m fno.events --validate-event` and relays its verdict, so the
-# shell contract below is the ONLY surface it must keep stable:
+# duplicated it is retired. This adapter hands the payload to that one
+# validator through the resolved interpreter and relays its verdict, so
+# the shell contract below is the ONLY surface it must keep stable:
 #
 #   validate_event TYPE JSON_PAYLOAD
 #       rc=0  valid
@@ -50,6 +50,28 @@ validate_event() {
         return 2
     fi
 
-    PYTHONPATH="$root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-        "$FNO_PYTHON" -m fno.events --validate-event "$type" <<<"$payload"
+    PYTHONPATH="$root/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$FNO_PYTHON" -c '
+import json, sys
+from fno.events import SchemaUnavailableError, ValidationError, validate
+try:
+    event = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    print("validate-event: payload is not valid JSON:", exc, file=sys.stderr)
+    sys.exit(2)
+if not isinstance(event, dict):
+    print("validate-event: payload must be a JSON object", file=sys.stderr)
+    sys.exit(2)
+if event.get("type") != sys.argv[1]:
+    print("validate-event: type hint does not match payload type:", event.get("type"), file=sys.stderr)
+    sys.exit(1)
+try:
+    validate(event)
+except SchemaUnavailableError as exc:
+    print("validate-event: schema unavailable:", exc, file=sys.stderr)
+    sys.exit(2)
+except ValidationError as exc:
+    print("validate-event:", exc, file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+' "$type" <<<"$payload"
 }

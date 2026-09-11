@@ -333,8 +333,7 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
-    # Schema-declared aliases refuse even beside canonical keys, so a retired
-    # key name cannot keep validating under the new contract.
+    # Schema-declared aliases refuse even beside canonical keys.
     for field in type_spec.get("data", {}).get("forbidden", []):
         if field in data:
             raise ValidationError(f"event type {type_name} forbids data field: {field}")

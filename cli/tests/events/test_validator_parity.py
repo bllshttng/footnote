@@ -15,9 +15,7 @@ adapter grew a second validation brain: delete it, do not realign it.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -81,27 +79,21 @@ def test_bash_validator_is_an_adapter_with_no_validation_brain() -> None:
     """
     script = BASH_VALIDATOR.read_text(encoding="utf-8")
 
-    assert "fno.events --validate-event" in script
+    assert "from fno.events import" in script
+    assert "validate(event)" in script
     assert "jq " not in script
     assert "EVENTS_SCHEMA_CACHE" not in script
     assert "required_fields=" not in script
 
 
-def _run_validate_event(event: dict | str, type_hint: str = "reign_checkin"):
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "cli/src") + os.pathsep + env.get("PYTHONPATH", "")
-    payload = event if isinstance(event, str) else json.dumps(event)
-    return subprocess.run(
-        [sys.executable, "-m", "fno.events", "--validate-event", type_hint],
-        input=payload,
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-        env=env,
-    )
+def _adapter_verdict(event: dict | str, type_hint: str | None = None):
+    type_str = type_hint or (event["type"] if isinstance(event, dict) else "reign_checkin")
+    payload = event if isinstance(event, str) else json.dumps(event, separators=(",", ":"))
+    cmd = f"source {BASH_VALIDATOR} && validate_event {type_str} {json.dumps(payload)}"
+    return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=REPO_ROOT)
 
 
-def test_validate_event_entrypoint_shell_contract() -> None:
+def test_adapter_shell_contract() -> None:
     valid = {
         "ts": "2026-09-10T12:00:00Z",
         "type": "reign_checkin",
@@ -109,20 +101,20 @@ def test_validate_event_entrypoint_shell_contract() -> None:
         "data": {"scope": "x-a792/fleet", "change": "merged PR 1710"},
     }
 
-    ok = _run_validate_event(valid)
+    ok = _adapter_verdict(valid)
     assert ok.returncode == 0, ok.stderr
 
-    alias = _run_validate_event(
+    alias = _adapter_verdict(
         {**valid, "data": {"scope": "s", "change": "c", "crown_scope": "s"}}
     )
     assert alias.returncode == 1
     assert "forbids data field: crown_scope" in alias.stderr
 
-    hint_mismatch = _run_validate_event(valid, type_hint="phase_transition")
+    hint_mismatch = _adapter_verdict(valid, type_hint="phase_transition")
     assert hint_mismatch.returncode == 1
     assert "does not match payload type" in hint_mismatch.stderr
 
-    garbage = _run_validate_event("{not json")
+    garbage = _adapter_verdict("{not json")
     assert garbage.returncode == 2
     assert "not valid JSON" in garbage.stderr
 
