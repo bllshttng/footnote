@@ -375,6 +375,10 @@ def _run_tick_command(monkeypatch, result):
     settings = MagicMock()
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm; pin the
+    # real cadence so the slices under test are seconds, not one.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -468,6 +472,9 @@ def test_master_switch_off_names_autonomy_not_pr_watch_in_the_message(monkeypatc
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = True
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.autonomy.enabled = False
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
@@ -501,6 +508,9 @@ def test_master_switch_off_also_stops_the_recovery_sweep(monkeypatch) -> None:
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = True
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.autonomy.enabled = False
     settings.recovery.enabled = True
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
@@ -537,6 +547,9 @@ def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> N
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = False
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -582,6 +595,9 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     settings = MagicMock()
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -596,7 +612,7 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     assert isinstance(res.exception, SystemExit), repr(res.exception)
 
 
-def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
+def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
     monkeypatch
 ) -> None:
     import typer
@@ -654,7 +670,10 @@ def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
     result = CliRunner().invoke(app, [])
 
     assert result.exit_code == 0, result.output
-    assert order == ["supervisor", "github"]
+    # x-c79d phase order: the PR legs (sweep) run first, the supervisor's
+    # watchdog phase follows on its own slice. The load-bearing half is the
+    # non-fatal exception below, not the ordering.
+    assert order == ["github", "supervisor"]
     assert recovery_calls[0]["provider_failover"] is False
     assert order.count("github") == 1
 

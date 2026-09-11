@@ -479,7 +479,8 @@ FIELD_META: dict[str, Meta] = {
     "pr_watch.tick_timeout_seconds": Meta(
         "never",
         "Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a"
-        " stalled tick can never suppress its successor.",
+        " stalled tick can never suppress its successor. Each phase also runs under its own"
+        " alarm slice inside that ceiling, so one slow phase cannot abort the phases after it.",
     ),
     "pr_watch.graphql_min_remaining": Meta(
         "never",

@@ -33,7 +33,7 @@ def _hermetic_post_merge(monkeypatch):
 
     monkeypatch.setattr(
         pmr, "_default_run_ritual_verb",
-        lambda pr, cwd: pmr.ColdRitualResult(ok=True, tail="ok"),
+        lambda pr, cwd, **_kw: pmr.ColdRitualResult(ok=True, tail="ok"),
     )
     monkeypatch.setattr(pmr, "emit_receipt", lambda *a, **k: True)
 
@@ -1351,7 +1351,7 @@ class TestTickOrchestrator:
         # Override the autouse success verb so the dispatch returns 'failed'.
         monkeypatch.setattr(
             pmr, "_default_run_ritual_verb",
-            lambda pr, cwd: pmr.ColdRitualResult(ok=False, tail="fail"),
+            lambda pr, cwd, **_kw: pmr.ColdRitualResult(ok=False, tail="fail"),
         )
 
         store_path = tmp_path / "state.json"
@@ -2435,6 +2435,67 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["phase"] == "sweep"
         assert ends[0]["duration_s"] >= 1.0
 
+    def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
+        """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
+        behind it down. king_wake and notify_watch still write their rows in
+        the same tick, the merge row reads timeout, and the end record names
+        the cut."""
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall(**_kw):
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
+        # Determinism, not contract: the arms behind the cut must be cheap, or
+        # a loaded runner cuts them too and this reads as a different failure.
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+        def _notify_row() -> None:
+            prcli._emit_tick_row("notify_watch", interval_s=300,
+                                 skip_reason="notify_off")
+
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", _notify_row, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
+        assert king_rows, "king_wake wrote no row after the sweep was cut"
+        assert notify_rows, "notify_watch wrote no row after the sweep was cut"
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows and merge_rows[-1].get("skip_reason") == "timeout"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends and ends[-1].get("cut") == ["sweep"]
+        assert "sweep" in ends[-1].get("phase_s", {})
+        assert "king_wake" in ends[-1].get("phase_s", {})
+
+    def test_ritual_timeout_follows_the_phase_deadline(self):
+        """AC6-EDGE (x-c79d): the cold ritual's subprocess timeout is the
+        sweep slice minus its reserve, never the bare 300s default."""
+        import time as _time
+
+        from fno.pr_watch import _dispatch as d
+
+        d.set_phase_deadline(_time.monotonic() + 120)
+        try:
+            assert d._ritual_timeout() <= 110
+        finally:
+            d.set_phase_deadline(None)
+        assert d._ritual_timeout() == 300.0
+
     def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
         """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
         from fno.pr_watch._dispatch import TickResult
@@ -2546,6 +2607,10 @@ class TestTickRecordsAndDeadline:
         tick_log = logging.getLogger("fno.pr_watch.cli")
         monkeypatch.setattr(tick_log, "handlers", [*tick_log.handlers, _Grab()])
         monkeypatch.setattr(tick_log, "level", logging.INFO)
+        # isEnabledFor caches per level, and setattr above bypasses setLevel's
+        # invalidation: an earlier test's INFO probe at the inherited WARNING
+        # level would otherwise keep suppressing INFO records here.
+        tick_log._cache.clear()
 
         settings = MagicMock()
         settings.pr_watch.enabled = True
@@ -3035,12 +3100,12 @@ class TestTickRecordsAndDeadline:
 # ---------------------------------------------------------------------------
 
 
-class TestFleetLegRunsBeforeThePRLegs:
-    """AC7: the failover trigger must be inside the tick deadline, not behind it.
+class TestFleetLegRunsAfterACutPRLeg:
+    """x-c79d: per-phase slices moved the fleet leg behind the PR legs.
 
-    The tick arms a SIGALRM and re-raises TickDeadlineExceeded, which propagates
-    before the old recovery phase was ever reached. A slow PR leg therefore
-    aborted the tick before the one leg that detects a capped worker.
+    The old ordering test proved recovery ran BEFORE a stalling PR leg; its
+    successor proves recovery still runs, on its own slice, AFTER the sweep
+    is cut mid-stall - and still writes its heartbeat.
     """
 
     def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn):
@@ -3060,6 +3125,18 @@ class TestFleetLegRunsBeforeThePRLegs:
         monkeypatch.setattr(
             agents_sweep, "run_sweep", lambda **_kw: ([], 0), raising=True,
         )
+        # Determinism, not contract: the arms between the cut sweep and the
+        # recovery phase must be cheap, or a loaded runner cuts recovery too.
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda: None, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
 
         if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
             monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
@@ -3086,16 +3163,19 @@ class TestFleetLegRunsBeforeThePRLegs:
         res = CliRunner().invoke(app, [])
         return res, events, hb
 
-    def test_ac7_hp_fleet_leg_ran_and_heartbeat_written_despite_a_pr_timeout(
+    def test_ac3_hp_recovery_runs_and_writes_heartbeat_after_a_cut_sweep(
         self, monkeypatch, tmp_path
     ):
+        import json as _json
         import time as _time
+
+        from fno.pr_watch import cli as prcli
 
         ran: list[str] = []
 
         def _stall(**_kw):
-            _time.sleep(1.5)
-            raise AssertionError("deadline did not interrupt the stalled tick")
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
 
         def _sweep(_cfg, emit=None, **_kw):
             ran.append("fleet")
@@ -3103,15 +3183,14 @@ class TestFleetLegRunsBeforeThePRLegs:
                 emit("worker_refused", {"short_id": "aaaa1111"})
             return 3
 
-        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
         res, events, hb = self._invoke(monkeypatch, tmp_path, _stall, _sweep)
 
-        # The tick still dies at its deadline - this change does not bound the
-        # gh leg, it only moves the trigger in front of it.
+        # The sweep was cut at its own slice; the tick still exits 75.
         assert res.exit_code == 75, res.output
-        assert ran == ["fleet"]
-        assert hb.exists(), "the fleet watermark must be written before the PR legs"
-        import json as _json
+        assert ran == ["fleet"], "recovery must run on its own slice after a cut sweep"
+        assert hb.exists(), "the fleet heartbeat must survive a cut sweep"
         payload = _json.loads(hb.read_text(encoding="utf-8"))
         assert payload["candidates"] == 3
         assert payload["refused"] == 1
