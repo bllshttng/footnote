@@ -2657,16 +2657,14 @@ def cmd_name(
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
-    Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is
-    Click's usage error, which an `fno` too old to know this verb also
-    returns - treating 2 as a refusal refuses the fleet on a stale install.
+    Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
+    error, which an `fno` too old to know this verb also returns - treating 2 as a
+    refusal refuses the fleet on a stale install.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
-    # One positional binds to PREFIX by Click's left-to-right rule, which would
-    # force every dispatch-form caller to pass an explicit empty string. Accept
-    # the one-positional form as the node instead: the bridge is mechanical, so
-    # the shape a scripter naturally writes is the shape that must work.
+    # One positional binds to PREFIX by Click's left-to-right rule; read it as
+    # the node instead, so the shape a scripter naturally writes just works.
     if node_id is None:
         prefix, node_id = None, prefix
     if not node_id:
@@ -2682,19 +2680,15 @@ def cmd_name(
             source=source or None,
             verb=verb or None,
         )
-    except BridgeUsageError as exc:
+    except (BridgeUsageError, AgentNameError) as exc:
         typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(2)
-    except AgentNameError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(NAME_REFUSED_EXIT)
+        raise typer.Exit(NAME_REFUSED_EXIT if isinstance(exc, AgentNameError) else 2)
     typer.echo(name)
 
 
-# `rename` moved to the Rust client (`agent.rename` over the daemon RPC); the
-# router entry in rust_runtime.py is what makes `fno agents rename` resolve
-# there. Python's rename_agent in registry.py stays: it is the transaction
-# library, not a command twin.
+# `rename` moved to the Rust client (`agent.rename` over the daemon RPC); the rust_runtime
+# router entry makes `fno agents rename` resolve there. Python's rename_agent stays: it is
+# the transaction library, not a command twin.
 
 
 @agents_app.command("retask", hidden=True)

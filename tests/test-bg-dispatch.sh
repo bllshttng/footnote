@@ -329,8 +329,8 @@ echo "=============================================="
 # (-p is fno's headless short now, but a bg dispatch must never carry it either.)
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 session=deadbeef01" \
-  && pass "AC5-HP: ready node launched with stable target-<full-id> name + session" \
+echo "$out" | grep -q "^launched ab-aaaa1111 name=t-ab-aaaa1111 session=deadbeef01" \
+  && pass "AC5-HP: ready node launched with stable t-<full-id> name + session" \
   || fail "AC5-HP: expected launched line, got: $out"
 grep -q -- "--harness claude" "$MOCKSTATE/ask.log" \
   && pass "AC5-HP: dispatch used fno agents spawn --harness claude" \
@@ -561,7 +561,7 @@ out="$(bash "$DISPATCH" ab-ffff6666 ab-7777aaaa 2>&1)"
 # status, not just the --no-reserve dry-run short-circuit.
 reset_mock; set_status ab-8888dddd idea; set_claim ab-8888dddd free
 out="$(bash "$DISPATCH" ab-8888dddd 2>&1)"
-echo "$out" | grep -q "^launched ab-8888dddd name=target-ab-8888dddd session=deadbeef01" \
+echo "$out" | grep -q "^launched ab-8888dddd name=t-ab-8888dddd session=deadbeef01" \
   && pass "gate: explicit idea node dispatches via a real launch (think->blueprint->do)" \
   || fail "gate: explicit idea not dispatched: $out"
 
@@ -613,9 +613,9 @@ echo "$out" | grep -q "^failed ab-aaaa1111 reason=.*claim-probe-error" && [[ "$(
 
 # ---- guard part 2: a LIVE same-name agent (booting, claim not yet live) is
 #      already-running, never re-dispatched (HIGH: the boot-window injection) ----
-reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; set_agent_live target-ab-aaaa1111 live
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; set_agent_live t-ab-aaaa1111 live
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"a live agent target-ab-aaaa1111" && [[ "$(ask_count)" -eq 0 ]] \
+echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"a live agent t-ab-aaaa1111" && [[ "$(ask_count)" -eq 0 ]] \
   && pass "guard: live same-name agent -> already-running, never re-dispatched" \
   || fail "guard: live same-name agent not caught: $out (asks=$(ask_count))"
 
@@ -634,9 +634,9 @@ echo "$out" | grep -q "^failed ab-aaaa1111 reason=\"agents-list probe failed" &&
   || fail "guard: agents-list garbage not fail-closed: $out (asks=$(ask_count))"
 
 # ---- a DEAD same-name row is removed, then dispatch creates fresh ----
-reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; set_agent_live target-ab-aaaa1111 dead
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; set_agent_live t-ab-aaaa1111 dead
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^launched ab-aaaa1111 " && grep -q "rm target-ab-aaaa1111" "$MOCKSTATE/rm.log" 2>/dev/null \
+echo "$out" | grep -q "^launched ab-aaaa1111 " && grep -q "rm t-ab-aaaa1111" "$MOCKSTATE/rm.log" 2>/dev/null \
   && pass "guard: dead same-name row removed, then fresh launch" \
   || fail "guard: dead-row cleanup failed: $out"
 
@@ -652,7 +652,7 @@ echo "$out" | grep -q "^failed ab-aaaa1111 reason=\"spawn exit 0 but no short_id
 # ---- spawn collision (racing worker took the name) => already-running ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free; : > "$MOCKSTATE/ask_collision"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"an agent named target-ab-aaaa1111 already exists (spawn collision)\"" \
+echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"an agent named t-ab-aaaa1111 already exists (spawn collision)\"" \
   && pass "guard: spawn name collision reported already-running" \
   || fail "guard: spawn collision mis-reported: $out"
 
@@ -1009,7 +1009,7 @@ if true; then
   else
     fail "x-3218 long node id name: ${#launched_name} chars: $out"
   fi
-  [[ "$launched_name" == "target-$LONGID"* ]] \
+  [[ "$launched_name" == "t-$LONGID"* ]] \
     && pass "x-3218 full node identity survives in the dispatched name" \
     || fail "x-3218 node identity dropped: $launched_name"
   [[ "$(ask_count)" == "1" ]] \
@@ -1094,7 +1094,7 @@ if true; then
   else
     fail "x-93a7 noisy long-id name: ${#launched_name} chars: $out"
   fi
-  [[ "$launched_name" == "target-$LONGID"* ]] \
+  [[ "$launched_name" == "t-$LONGID"* ]] \
     && pass "x-93a7 full node identity survives the noisy capture" \
     || fail "x-93a7 node identity dropped: $launched_name"
   [[ "$(ask_count)" == "1" ]] \
@@ -1105,7 +1105,7 @@ if true; then
   reset_mock
   set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
   out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 " \
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=t-ab-aaaa1111 " \
     && pass "x-3218 ordinary dispatch names are unchanged by the bridge" \
     || fail "x-3218 ordinary name drifted: $out"
 
