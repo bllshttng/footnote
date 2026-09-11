@@ -92,7 +92,18 @@ def test_stream_with_log_refuses(tmp_path, capsys):
             stream=True, log_override=tmp_path / "x.log", runner_args=()
         )
     assert exc.value.code == 2
-    assert "--stream" in capsys.readouterr().err
+    assert "--log" in capsys.readouterr().err
+
+
+def test_log_with_census_deferred_refuses(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        test_cmd.test_command.callback(
+            stream=False,
+            log_override=tmp_path / "x.log",
+            runner_args=("--census-deferred",),
+        )
+    assert exc.value.code == 2
+    assert "--log" in capsys.readouterr().err
 
 
 def _popen_fake(recorder, returncode: int = 0):
