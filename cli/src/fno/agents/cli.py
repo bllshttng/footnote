@@ -966,12 +966,9 @@ from fno.agents.spawn_lineage import (  # noqa: E402
     _stamp_spawned_session_row,
 )
 
-_WAIT_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smh]?)$", re.IGNORECASE)
-
-
 def _parse_wait_seconds(raw: str) -> float:
     """``--wait`` duration: seconds by default, s/m/h suffixes. Raises ValueError."""
-    match = _WAIT_DURATION_RE.fullmatch(raw.strip())
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", raw.strip(), re.IGNORECASE)
     if not match:
         raise ValueError(raw)
     return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
@@ -1217,16 +1214,14 @@ def cmd_spawn(
         None,
         "--at",
         help=(
-            "Pin the new pane next to the caller (`--at current` reads "
-            "FNO_PANE, fails closed). Requires --split."
+            "Pin the new pane next to the caller; `--at current` reads FNO_PANE, fails closed. Needs --split."
         ),
     ),
     tab: str | None = typer.Option(
         None,
         "--tab",
         help=(
-            "Mux tab selector (number, id:<n>, name:<s>, active/new, or a "
-            "group name). --substrate pane only."
+            "Mux tab selector (number, id:<n>, name:<s>, active/new, or group name). Pane only."
         ),
     ),
     bounded_placement: bool = typer.Option(
