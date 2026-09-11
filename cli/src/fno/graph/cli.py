@@ -1529,6 +1529,11 @@ def cmd_idea(
         None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -1539,6 +1544,10 @@ def cmd_idea(
     ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
     can carry parent/size/domain without a follow-up ``fno backlog update``.
     """
+    from fno.text_or_file import read_text_arg
+
+    details = read_text_arg(details, details_file, what="the details")
+
     if wave_of:
         if evidence is not None:
             typer.echo("Error: --wave-of cannot record a creation vote", err=True)
@@ -2926,7 +2935,12 @@ def cmd_intake(
 @cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
-    text: str = typer.Argument(..., help="Progress note text (one line)."),
+    text: Optional[str] = typer.Argument(None, help="Progress note text (one line)."),
+    body_file: Optional[Path] = typer.Option(
+        None,
+        "--body-file",
+        help="Read the note text from a file ('-' = stdin). Same length guidance applies.",
+    ),
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
     ),
@@ -2950,8 +2964,9 @@ def cmd_note(
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
     from fno.rust_binary import VerbUnavailable
+    from fno.text_or_file import read_text_arg
 
-    text = text.strip()
+    text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     if not text:
         typer.echo("Error: note text is empty", err=True)
         raise typer.Exit(code=1)
@@ -3210,6 +3225,11 @@ def cmd_update(
         "-d",
         help="Update free-form details/rationale (stored in `details`). Pass 'null' to clear.",
     ),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
+    ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
     difficulty: Optional[str] = typer.Option(
@@ -3352,6 +3372,7 @@ def cmd_update(
     ),
 ) -> None:
     from fno._flag_aliases import refuse_retired_model_tier
+    from fno.text_or_file import read_text_arg
     from fno.graph._constants import (
         PRIORITY_ORDER,
         normalize_difficulty,
@@ -3369,6 +3390,8 @@ def cmd_update(
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 
     refuse_retired_model_tier(_model_tier_tombstone)
+
+    details = read_text_arg(details, details_file, what="the details")
 
     _require_node_id(task_id)
 

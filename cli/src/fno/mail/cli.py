@@ -178,8 +178,11 @@ def _read_body(
     Without it the two verbs disagreed about their own call shape, and the
     failure was quiet in the worst way: click rejected the stray argument with
     exit 2 and echoed the body back, which reads like a delivery receipt rather
-    than a refusal.
+    than a refusal. File reads (and ``-`` for stdin) live in
+    ``fno.text_or_file.read_text_arg``.
     """
+    from fno.text_or_file import read_text_arg
+
     supplied = [x for x in (positional, body, body_file) if x is not None]
     if len(supplied) > 1:
         typer.echo(
@@ -187,10 +190,9 @@ def _read_body(
             err=True,
         )
         raise typer.Exit(code=1)
-    if body_file is not None:
-        return body_file.read_text(encoding="utf-8")
-    if body is not None:
-        return body
+    text = read_text_arg(body, body_file, what="the body")
+    if text is not None:
+        return text
     if positional is not None:
         return positional
     typer.echo(
@@ -3647,11 +3649,11 @@ def cmd_send(
     ),
     body: str | None = typer.Option(
         None, "--body", "-b",
-        help="With --kind: message body (alternative to the positional arg).",
+        help="Message body in ANY mode (alternative to the positional arg).",
     ),
     body_file: Path | None = typer.Option(
         None, "--body-file",
-        help="With --kind: read the message body from a file.",
+        help="Read the body from a file ('-' = stdin); binds in every mode.",
     ),
     ref_pr: int | None = typer.Option(
         None, "--ref-pr", help="With --kind: PR number reference for triage."
@@ -3670,34 +3672,21 @@ def cmd_send(
         False, "--raw",
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line so the "
-            "REPL slash parser fires it - the only way to make a verb the model "
-            "is barred from invoking actually run. One axis binds it: an actor "
-            "OTHER than the model must supply the trigger (cross-session, the "
-            "king-mediated path; self-injection is barred unless --to-self). Keeping "
-            "the reviewer off the author is the aim of this lane, not a second "
-            "axis it enforces: a self-attested review counts as coverage and "
-            "merges. Payload must start with / and be "
-            "a single line. Never queues durable. A payload-varying retry is a "
-            "two-variable experiment - report any refusal verbatim and stop."
+            "REPL slash parser fires it. Payload must start with / and be a "
+            "single line. Never queues durable. An actor OTHER than the model "
+            "must supply the trigger; self-injection is barred unless --to-self. "
+            "Mechanics and the reviewer-off-the-author rationale: "
+            "docs/architecture/review-lanes.md."
         ),
     ),
     check: bool = typer.Option(
         False, "--check",
         help=(
             "With --raw: report whether an injection path EXISTS and inject "
-            "nothing. Prints 'injectable: <lane>' (exit 0), 'not-injectable: "
-            "<reason>' (exit 1), or 'unmeasurable: <reason>' (exit 3) when it "
-            "could not resolve at all - that third answer is separate on purpose, "
-            "since an absent probe binary or an unreadable registry says nothing "
-            "about the session. A malformed payload stays a usage error (exit 2), "
-            "never a verdict about the session. Gate on "
-            "this before you TELL anyone to "
-            "self-inject: a session with no registry row, a non-keystroke lane, or "
-            "no control socket has no path at all, and advice naming a mechanism "
-            "that cannot fire is worse than no advice. It resolves through the "
-            "same path the real send uses, so it cannot say yes where the send "
-            "says no. It reports a PATH, never a landing: no probe can see whether "
-            "the prompt line is idle."
+            "nothing. 'injectable: <lane>' (exit 0), 'not-injectable: <reason>' "
+            "(exit 1), 'unmeasurable: <reason>' (exit 3), malformed payload "
+            "stays exit 2. It reports a PATH, never a landing; it resolves "
+            "through the same path the real send uses."
         ),
     ),
     to_self: bool = typer.Option(
@@ -3760,6 +3749,14 @@ def cmd_send(
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
+
+    # --body/--body-file bind in EVERY mode, not only --kind. One resolution
+    # here; each mode below falls back to its own positional slots.
+    from fno.text_or_file import read_text_arg
+
+    body_text = read_text_arg(body, body_file, what="the body")
+    if body_text is not None and message is None:
+        message = body_text
 
     # --to-king addresses a ROLE, resolved HERE at send time and handed to the
     # ordinary name lane. Any second address would decide the destination, and
@@ -3986,15 +3983,10 @@ def cmd_send(
             raise typer.Exit(code=2)
 
         recipient = to_project or name
-        # Body: --body-file wins, then --body, then the positional (which
-        # parks in `name` under --to-project, or in `message` in name mode).
-        if body is not None and body_file is not None:
-            print("error: provide --body or --body-file, not both", file=sys.stderr)
-            raise typer.Exit(code=2)
-        if body_file is not None:
-            content: str | None = body_file.read_text(encoding="utf-8")
-        elif body is not None:
-            content = body
+        # Body: --body-file/--body (resolved above), then the positional
+        # (which parks in `name` under --to-project, or in `message`).
+        if body_text is not None:
+            content: str | None = body_text
         elif to_project:
             content = message if message is not None else name
         else:
@@ -4185,7 +4177,10 @@ def cmd_send(
     # Project mode: the message is the sole positional, so `send --to-project X
     # "msg"` parks "msg" in the `name` slot - accept it from either slot.
     if to_project:
-        content = message if message is not None else name
+        content = (
+            body_text if body_text is not None
+            else (message if message is not None else name)
+        )
         if not content:
             print(
                 "usage: fno agents mail send --to-project <project> <message>",
@@ -4261,16 +4256,17 @@ def cmd_send(
         from fno.mail.job_address import is_job_token
 
         if is_job_token(name):
-            if message is None:
+            payload = body_text if body_text is not None else message
+            if payload is None:
                 print(f"usage: fno agents mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
-            _refuse_forged_envelope(message)
-            _enforce_body_cap(message)
-            _enforce_style(message, allow_reason=style_exception)
+            _refuse_forged_envelope(payload)
+            _enforce_body_cap(payload)
+            _enforce_style(payload, allow_reason=style_exception)
             from fno.mail.job_lane import job_lane_send
 
             job_lane_send(
-                message,
+                payload,
                 name,
                 from_name=stamp_from(from_name),
                 style_exception=style_exception,
@@ -4279,13 +4275,15 @@ def cmd_send(
             return
 
     # Name mode.
-    if not name or message is None:
+    if not name or (message is None and body_text is None):
         print(
             "usage: fno agents mail send <name> <message>  "
             "(or --to-project <project> <message>)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    if body_text is not None:
+        message = body_text
 
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)

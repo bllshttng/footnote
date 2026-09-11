@@ -1377,6 +1377,11 @@ def cmd_spawn(
         "--no-wait",
         help=("Fail immediately when max_live is reached instead of queueing for a free slot."),
     ),
+    prompt_file: str | None = typer.Option(
+        None,
+        "--prompt-file",
+        help="Read the prompt from a file ('-' = stdin) instead of the positional.",
+    ),
 ) -> None:
     """Spawn a new agent.
 
@@ -1402,6 +1407,11 @@ def cmd_spawn(
     """
     # --squad is a hidden back-compat alias for --workspace (US2); --workspace wins.
     squad = squad if squad is not None else squad_compat
+
+    if prompt_file is not None:
+        from fno.text_or_file import read_text_arg
+
+        message = read_text_arg(message or None, prompt_file, what="the prompt") or ""
 
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
     from fno.dispatch_flags import (
@@ -2889,6 +2899,11 @@ def cmd_ask(
             "default (WIP-scoped ask). The explicit opt-in."
         ),
     ),
+    prompt_file: str | None = typer.Option(
+        None,
+        "--prompt-file",
+        help="Read the prompt from a file ('-' = stdin) instead of the positional.",
+    ),
 ) -> None:
     """Send a message to a registered agent (follow-up only).
 
@@ -2920,6 +2935,11 @@ def cmd_ask(
     from fno.agents.rust_runtime import refuse_without_binary, route_to_rust, runtime_mode
 
     refuse_retired_provider(_provider_tombstone)
+
+    if prompt_file is not None:
+        from fno.text_or_file import read_text_arg
+
+        message = read_text_arg(message, prompt_file, what="the prompt")
 
     # ask is a follow-up to an existing session and never launches in workdir, so
     # it stays in the caller cwd (here=True): never the canonical default nor the
