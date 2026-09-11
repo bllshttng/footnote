@@ -569,8 +569,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
                     f"({proc.args!r}); is fno-agents-worker current? "
                     "`fno doctor` names lag",
                 ) from exc
-        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep
-        # polling and the request rides it. The seat is owned, not broken.
+        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
         try:
             probe = keeper._connect()
             probe.close()

@@ -185,10 +185,8 @@ def _revive_orphans(
 
 
 def _fold_keepers(keepers: dict, result: dict, failures: list) -> None:
-    """Fold `fno-agents restart`'s keepers summary (its last stdout line; an
-    older binary prints none and the leg is then absent) into the result:
-    fields here, spared keepers as failures. The human lines already sat on
-    the daemon child's stdout and were echoed verbatim."""
+    """Fold the daemon child's keepers summary into the result (absent for an
+    older binary); spared keepers are failures."""
     result["store_keepers"] = keepers.get("store_keepers", [])
     result["pane_keepers_stale"] = keepers.get("pane_keepers_stale", 0)
     for c in result["store_keepers"]:
@@ -288,9 +286,7 @@ def restart_command(
             spared = keepers is not None and any(
                 c.get("result") != "cycled" for c in keepers.get("store_keepers", [])
             )
-            if rc != 0 and spared:
-                pass  # the nonzero exit IS the spared keeper, not the daemon
-            elif rc == 0:
+            if rc == 0 or spared:  # a nonzero exit that IS the spared keeper
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")
             else:

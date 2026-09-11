@@ -592,9 +592,8 @@ def _wire_label(wires: list[int]) -> str:
 
 def _current_but_stale(rev_label: str, stale: int, restartable: int, pane_kept: int) -> str:
     return (
-        f"installed {rev_label} is current; {stale} running process(es) are older builds - "
-        f"restart cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build "
-        "until their panes end"
+        f"installed {rev_label} is current; {stale} running process(es) are older builds - restart "
+        f"cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end"
     )
 
 
@@ -767,14 +766,10 @@ def update_readiness(
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
     # Running-process census (x-f188 change 7): the third axis. The TUI
-    # renders these rows and computes nothing (Locked Decision 6).
-    # running_rows, never `running`: that name is the python interpreter
-    # string the python_tool field carries further down.
-    running_rows = [
-        {k: r.get(k) for k in ("component", "name", "verdict", "on_restart", "survives")}
-        for r in running_components(runner)
-        if r.get("verdict") == "stale"
-    ]
+    # renders these rows and computes nothing (Locked Decision 6); it reads
+    # its five fields off each row and ignores the rest. `running_rows`,
+    # never `running`: that name is the interpreter string python_tool carries.
+    running_rows = [r for r in running_components(runner) if r.get("verdict") == "stale"]
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
