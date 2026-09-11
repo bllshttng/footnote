@@ -324,11 +324,13 @@ def test_relatedness_builds_last_over_the_post_groom_graph():
 def test_quiet_night_legs_are_ok(monkeypatch):
     # The quiet paths all exit 0: reconcile prints "Backlog is in sync." and
     # returns, archive/maintain report nothing to do and return. The archive
-    # leg's own outcome carries a count (x-a023), everything else stays "ok".
+    # leg's own outcome carries a count (x-a023) and so does the reconcile
+    # leg's strand heal (x-a31a); everything else stays "ok".
     monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
     results = REAL_MECHANICAL(14)
     assert results["archive"] == "ok (archived 0, held back 0)"
-    assert results["reconcile"] == results["maintain"] == results["relatedness"] == "ok"
+    assert results["reconcile"] == "ok (re-parented 0)"
+    assert results["maintain"] == results["relatedness"] == "ok"
 
 
 def test_archive_leg_names_moved_and_held_counts(monkeypatch):
