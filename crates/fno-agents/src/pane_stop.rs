@@ -70,22 +70,25 @@ const TERM_POLL_TICKS: usize = 50;
 const KILL9_POLL_TICKS: usize = 20;
 const POLL_TICK_MS: u64 = 100;
 
+/// The production seam set, built ONCE so the real stop and the dry-run
+/// precheck can never drift into reading two different worlds.
+fn production_seams() -> PaneStopSeams {
+    PaneStopSeams {
+        pane_lookup: Box::new(pane_list_via_fno),
+        pane_kill: Box::new(run_mux_pane_kill),
+        pid_ours: Box::new(crate::daemon::pid_is_ours),
+        pid_gone: Box::new(crate::daemon::pid_is_gone),
+        pid_start: Box::new(crate::daemon::process_start_time),
+        session_holder: Box::new(session_holder_live),
+        signal: Box::new(signal_pid),
+        sleep: Box::new(|ms| std::thread::sleep(Duration::from_millis(ms))),
+    }
+}
+
 /// The production entry point: stop a pane row's process through the real
 /// pane listing, the real pane kill, and the real pid probes.
 pub(crate) fn stop_pane_process_confirmed(e: &RegistryEntry) -> PaneStop {
-    stop_pane_process_confirmed_with(
-        e,
-        &PaneStopSeams {
-            pane_lookup: Box::new(pane_list_via_fno),
-            pane_kill: Box::new(run_mux_pane_kill),
-            pid_ours: Box::new(crate::daemon::pid_is_ours),
-            pid_gone: Box::new(crate::daemon::pid_is_gone),
-            pid_start: Box::new(crate::daemon::process_start_time),
-            session_holder: Box::new(session_holder_live),
-            signal: Box::new(signal_pid),
-            sleep: Box::new(|ms| std::thread::sleep(Duration::from_millis(ms))),
-        },
-    )
+    stop_pane_process_confirmed_with(e, &production_seams())
 }
 
 /// The one pane-stop body, shared by the reap and `fno agents rm` (x-1b90
@@ -291,19 +294,7 @@ pub(crate) fn precheck_pane_stop_with(e: &RegistryEntry, seams: &PaneStopSeams) 
 
 /// The production seams of [`precheck_pane_stop_with`].
 pub(crate) fn precheck_pane_stop(e: &RegistryEntry) -> PanePrecheck {
-    precheck_pane_stop_with(
-        e,
-        &PaneStopSeams {
-            pane_lookup: Box::new(pane_list_via_fno),
-            pane_kill: Box::new(run_mux_pane_kill),
-            pid_ours: Box::new(crate::daemon::pid_is_ours),
-            pid_gone: Box::new(crate::daemon::pid_is_gone),
-            pid_start: Box::new(crate::daemon::process_start_time),
-            session_holder: Box::new(session_holder_live),
-            signal: Box::new(signal_pid),
-            sleep: Box::new(|ms| std::thread::sleep(Duration::from_millis(ms))),
-        },
-    )
+    precheck_pane_stop_with(e, &production_seams())
 }
 
 /// Map the harness-holder answer for the gone and recycled cases (x-58a5).

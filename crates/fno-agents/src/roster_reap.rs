@@ -760,11 +760,11 @@ mod tests {
         );
     }
 
-    // A fresh transcript keeps the row ONLY while the harness shows no
-    // terminal state: the roster's done is a finish line, not a turn
-    // boundary (x-b7f8). A working row inside grace still keeps.
+    // A fresh transcript does NOT save a row whose harness state reads
+    // terminal: the roster's done is a finish line, not a turn boundary
+    // (x-b7f8). A working row inside grace still keeps.
     #[test]
-    fn fresh_transcript_keeps_a_done_node_row() {
+    fn fresh_transcript_does_not_save_a_terminal_roster_row() {
         let dir = tmpdir("fresh");
         let transcript = dir.join("sid-1.jsonl");
         std::fs::write(&transcript, "{\"message\":{}}\n").unwrap();
