@@ -38,8 +38,8 @@ pub(crate) fn live_row_refusal(
              proceeds on its own once the row is gone. Forcing it through orphans a \
              live process and spends the row's resume handle. If stop answers no_op \
              (no addressable session behind the row), the row cannot prove liveness \
-             either way; the override for that case is documented in `fno agents rm \
-             --help`, not here."
+             either way; the override for that case is documented in \
+             `fno agents rm --help`, not here."
         )
     } else if harness_row_id_none {
         // claude_row_provably_absent short-circuits to `false` (not
