@@ -363,33 +363,32 @@ def test_strict_seam_refuses_when_the_decision_is_unavailable(
     assert "refusing; no worker launched" in err.getvalue()
 
 
-def test_strict_seam_refuses_a_disallowed_explicit_model(
+def test_strict_seam_lets_an_operator_pin_override_the_lanes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC4. GLM on blueprint-eligible work: the refusal names the coordinate."""
+    """AC4 (law d-dd8e2743). A typed --model no declared lane names is an
+    operator pin: it overrides strict routing instead of being refused, and
+    the spawn proceeds with the pinned model on argv."""
     _stub_route_slot(
         monkeypatch,
         {
             "status": "none",
             "candidate": None,
-            "refusal": "policy-coordinate-not-in-slot",
+            "verdict": "unarmed",
             "chain": [
                 "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)",
-                "slot=strict-refusal explicit model 'glm' is not in slot agents.profiles.blueprint's declared lanes",
+                "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)",
             ],
         },
     )
     err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _inject(
-            ["spawn", "--name", "p", "-m", "glm", "/target x"],
-            err=err,
-            routing=_Routing(enforce_inventory=True),
-        )
-    assert exc.value.code == 2
-    text = err.getvalue()
-    assert "strict-refusal" in text or "strict routing" in text
-    assert "glm" in text
+    out = _inject(
+        ["spawn", "--name", "p", "-m", "glm", "/target x"],
+        err=err,
+        routing=_Routing(enforce_inventory=True),
+    )
+    assert out[0] == "spawn"
+    assert "-m" in out and out[out.index("-m") + 1] == "glm"
 
 
 def test_strict_seam_qualifies_explicit_pins_and_preserves_the_command(

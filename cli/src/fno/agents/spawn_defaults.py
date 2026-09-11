@@ -1138,7 +1138,8 @@ def inject_spawn_defaults(
     suppressed: List[Tuple[str, str, str, str]] = []
     # The slot walk's structured extras (refusal, fingerprint), empty when unset.
     _slot_meta: dict = {}
-    # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies, never bypasses.
+    # Strict inventory: the resolver runs on EVERY spawn; a typed pin outranks
+    # the declared lanes, every other axis still qualifies against them.
     enforced = routing_enforcement_state(settings) == "enforced"
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:

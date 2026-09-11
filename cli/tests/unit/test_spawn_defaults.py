@@ -2088,10 +2088,12 @@ def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
 
 
 @requires_rust
-def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
-    """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
-    not spending a capped lane's budget. Both this function's docstring and the
-    shipped routing doc promise -P alongside --harness."""
+def test_explicit_vendor_pin_outranks_the_lanes_regardless_of_cap(monkeypatch):
+    """A typed -P is an operator pin (law d-dd8e2743): it outranks the lanes
+    outright, so a caller who typed it is never spending a capped lane's
+    budget - the pin never reaches the capacity walk that the cap lives in.
+    This supersedes the older, narrower 'escapes its own capped lane' shape:
+    the pin now wins even without a matching declared lane."""
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
 
@@ -2107,7 +2109,7 @@ def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
             _lane("claude", route="zai/glm-5.3[1m]"),
         ]}},
     )
-    assert "already names the lane" in err.getvalue()
+    assert "slot=operator-pin-override" in err.getvalue()
     assert out  # the spawn continues rather than exiting 2
 
 
@@ -2514,9 +2516,9 @@ def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
         env={},
     )
     assert out[out.index("--model") + 1] == "gpt-5.6-luna"
-    assert "slot=model-pin-override" in err.getvalue()
+    assert "slot=operator-pin-override" in err.getvalue()
     applied = err.getvalue()
-    assert "applied slot=" not in applied or "model-pin-override" in applied
+    assert "applied slot=" not in applied or "operator-pin-override" in applied
 
 
 # ---------------------------------------------------------------------------
