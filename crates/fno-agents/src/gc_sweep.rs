@@ -81,7 +81,10 @@ pub struct GcSummary {
     pub kept_shared_tree: Vec<(String, String)>,
     /// `(row id, descendant)`: a live registry row names this row's session
     /// in its own `spawned_by_session` - the parent is held, unretired,
-    /// until that child is gone.
+    /// until that child is gone. A parent whose own harness reports a
+    /// terminal state is not held: the lineage guard exists to keep a
+    /// running parent's surface alive for its children, and a terminal
+    /// parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
@@ -1673,7 +1676,12 @@ pub(crate) fn run_with_release(
         // lineage field says who spawned whom, and this is the only site
         // that consults it. Runs before staging so no active-surface
         // removal ever touches a row a live child names.
-        if !sid.is_empty() {
+        // x-b7f8: one conjunct - a parent whose own harness reports a
+        // terminal state is not held. The guard's harm (a parent's native
+        // surface archived while children still run) needs a RUNNING
+        // parent; the shared-worktree guard below still protects a live
+        // child's tree.
+        if !sid.is_empty() && row.session_terminal.is_none() {
             let sid_lower = sid.to_ascii_lowercase();
             if let Some(child) = registry.entries.iter().find(|other| {
                 other.name != e.name
@@ -1708,9 +1716,18 @@ pub(crate) fn run_with_release(
             // The release lift (x-e3cc): a missing age reads quiet for this
             // row only. An ANSWERED fresh age still keeps - activity is
             // activity even under a ruling.
+            // x-b7f8: for a terminal row the re-check asks one question -
+            // did the session write since classification. A smaller fresh
+            // age IS a new write (the session came back, perhaps through a
+            // mail inject); an equal-or-older one is not. An unresolved
+            // re-read keeps: absence is not quiet.
+            // ponytail: a write inside the same whole second as a
+            // classification that already read age 0 is not seen.
             let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs)
                 || pid_gone_now
-                || (release_quiet_row && fresh_age.is_none());
+                || (release_quiet_row && fresh_age.is_none())
+                || (row.session_terminal.is_some()
+                    && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
