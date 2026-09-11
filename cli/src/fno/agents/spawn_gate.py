@@ -1010,7 +1010,8 @@ def _refuse(
         exit_code=exit_code, name=spawn_name, substrate=substrate, gate="python"
     )
     _emit_gate_event("spawn_gate_refused", **event_data)
-    raise GateRefused(exit_code, receipt)
+    refusal = GateRefused(exit_code, receipt)
+    raise refusal
 
 
 def _refuse_provider_cap(
