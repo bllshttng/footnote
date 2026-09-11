@@ -18,6 +18,23 @@ use std::path::PathBuf;
 
 use crate::proto::{BacklogCard, CardState};
 
+/// Real `derive_queue` invocations this process made, test-only: the memo
+/// test counts derivations, not ticks. Resets via [`reset_derive_queue_calls`].
+#[cfg(test)]
+thread_local! {
+    static DERIVE_QUEUE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn derive_queue_calls() -> usize {
+    DERIVE_QUEUE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_derive_queue_calls() {
+    DERIVE_QUEUE_CALLS.with(|c| c.set(0));
+}
+
 /// Board-order cap: the sideline shows the head of the queue, not all 1900
 /// nodes. Bounds the wire frame and the render loop; the rest live on the full
 /// board (`fno backlog`). Kept generous so a real ready/blocked set is never
@@ -562,6 +579,11 @@ pub fn derive_queue(
     live: Option<&HashMap<String, String>>,
     scope: &BoardScope,
 ) -> Option<Queue> {
+    // Test-only call counter: the memo test counts real derivations, not
+    // ticks. The server bin builds this module without cfg(test), so the
+    // counter compiles away in production.
+    #[cfg(test)]
+    DERIVE_QUEUE_CALLS.with(|c| c.set(c.get() + 1));
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
         .get("entries")
@@ -1027,6 +1049,13 @@ pub struct ReaderState {
     /// Consecutive ticks whose read failed while the file was still there. Feeds
     /// [`Queue::stale`]; reset by any read that lands.
     read_failures: u32,
+    /// The derivation memo: the `derive_queue` outcome plus the claim overlay
+    /// it was derived with. Outer `None` = nothing memoized (never derived, or
+    /// the cache emptied); inner `None` = the derivation failed (a corrupt
+    /// cached document), which still counts as a failed read every tick so the
+    /// stale marker still arrives.
+    last_derive: Option<Option<Queue>>,
+    last_derive_live: Option<Option<HashMap<String, String>>>,
     /// Which projects this board renders (x-20f1). Fixed for the reader's life:
     /// the server resolves it once at birth, so a card set never changes shape
     /// under a live board for a reason the operator cannot see.
@@ -1099,35 +1128,61 @@ impl ReaderState {
                 (None, Some(_)) => self.read_failures = self.read_failures.saturating_add(1),
             }
         }
-        // Re-derived every tick (not only on a fresh read) so a claim
-        // appearing/releasing reaches the cards, their lanes, AND the lane counts
-        // even when the graph file itself never changed.
-        //
-        // A read that lands but will not PARSE counts as a failure too. It
-        // commits a stamp, so treating a committed stamp as success would reset
-        // the counter and leave a persistently corrupt graph showing old cards
-        // forever with no stale marker - the reader cannot derive current state
-        // either way, which is exactly what the marker is for.
-        let mut queue = match &self.cached_raw {
-            Some(raw) => match derive_queue(raw, live, &self.scope) {
-                Some(q) => {
-                    if fresh_read {
-                        self.read_failures = 0;
-                    }
-                    q
-                }
+        // Derived only when an input moved. A fresh read always derives (and
+        // re-memos); an unchanged stamp derives only when the live overlay
+        // moved past the memoized input, because claims appear and release
+        // without a graph write. Equal inputs reuse the memoized outcome -
+        // re-parsing the cached 15 MB document every second was the idle cost
+        // being removed here. A read that lands but will not PARSE counts as
+        // a failure too, and the memoized failure keeps counting every tick,
+        // so the stale marker still arrives after STALE_AFTER_FAILED_READS.
+        let memo_usable = !fresh_read
+            && self.last_derive.is_some()
+            && match (live, self.last_derive_live.as_ref()) {
+                (Some(l), Some(m)) => m.as_ref() == Some(l),
+                (None, None) => true,
+                _ => false,
+            };
+        let mut queue;
+        if memo_usable {
+            queue = match self.last_derive.as_ref().expect("memo checked above") {
+                Some(q) => q.clone(),
+                // A memoized failure is still a failure every tick.
                 None => {
                     self.read_failures = self.read_failures.saturating_add(1);
                     self.last_sent.clone().unwrap_or_default()
                 }
-            },
-            None => {
-                // A vanished file is a KNOWN state (an empty lane), not a
-                // failure to read one.
-                self.read_failures = 0;
-                Queue::default()
-            }
-        };
+            };
+        } else {
+            queue = match &self.cached_raw {
+                Some(raw) => {
+                    let derived = derive_queue(raw, live, &self.scope);
+                    self.last_derive = Some(derived.clone());
+                    self.last_derive_live = Some(live.cloned());
+                    match derived {
+                        Some(q) => {
+                            if fresh_read {
+                                self.read_failures = 0;
+                            }
+                            q
+                        }
+                        None => {
+                            self.read_failures = self.read_failures.saturating_add(1);
+                            self.last_sent.clone().unwrap_or_default()
+                        }
+                    }
+                }
+                None => {
+                    // A vanished file is a KNOWN state (an empty lane), not a
+                    // failure to read one. No memo: the next real read must
+                    // derive.
+                    self.read_failures = 0;
+                    self.last_derive = None;
+                    self.last_derive_live = None;
+                    Queue::default()
+                }
+            };
+        }
         queue.stale = self.read_failures >= STALE_AFTER_FAILED_READS;
         // A holder-only change (same cards, new/different claim holder) also
         // republishes: the holders map travels with the cards and feeds the
@@ -2078,6 +2133,83 @@ mod tests {
         // A parseable read clears it in place.
         let ok = Some((std::time::SystemTime::UNIX_EPOCH, 999));
         assert!(!st.tick(ok, || Some(good.clone()), None).unwrap().0.stale);
+    }
+
+    /// AC4-HP: an unchanged stamp AND an unchanged claim overlay derive
+    /// nothing - three ticks, one derivation. This is the test that failed
+    /// before the derivation memoized on its inputs.
+    #[test]
+    fn an_unchanged_stamp_and_overlay_derives_nothing() {
+        reset_derive_queue_calls();
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let no_claims = live(&[]);
+        let first = st.tick(s, || Some(raw.clone()), Some(&no_claims));
+        assert!(first.is_some(), "the first tick publishes");
+        assert_eq!(derive_queue_calls(), 1, "the fresh read derives once");
+        let second = st.tick(
+            s,
+            || panic!("unchanged stamp must not re-read"),
+            Some(&no_claims),
+        );
+        let third = st.tick(
+            s,
+            || panic!("unchanged stamp must not re-read"),
+            Some(&no_claims),
+        );
+        assert!(
+            second.is_none() && third.is_none(),
+            "equal inputs derive equal cards: nothing to publish"
+        );
+        assert_eq!(
+            derive_queue_calls(),
+            1,
+            "the memo serves the later ticks: no re-parse of the cached document"
+        );
+    }
+
+    /// AC4-EDGE, publish half: a claim appearing under an unchanged stamp
+    /// still derives and republishes - the memo never holds a changed
+    /// overlay hostage.
+    #[test]
+    fn an_overlay_change_still_republishes_over_the_memo() {
+        reset_derive_queue_calls();
+        let mut st = ReaderState::default();
+        let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let no_claims = live(&[]);
+        let claimed = live(&[("x-a", "target-session:abc")]);
+        assert!(st.tick(s, || Some(raw.clone()), Some(&no_claims)).is_some());
+        let flipped = st
+            .tick(s, || panic!("must not re-read"), Some(&claimed))
+            .unwrap()
+            .0;
+        assert_eq!(
+            flipped.cards[0].state,
+            CardState::InFlight,
+            "the overlay change derived through the memo"
+        );
+    }
+
+    /// AC4-EDGE, failure half: a corrupt cached document memoizes the failed
+    /// derivation, and the memoized failure still increments the counter
+    /// every tick, so the stale marker arrives after STALE_AFTER_FAILED_READS.
+    #[test]
+    fn a_memoized_corrupt_document_still_earns_the_stale_marker() {
+        reset_derive_queue_calls();
+        let mut st = ReaderState::default();
+        let garbage = "{ not json";
+        let s = Some((std::time::SystemTime::UNIX_EPOCH, garbage.len() as u64));
+        st.tick(s, || Some(garbage.to_string()), None);
+        for _ in 1..STALE_AFTER_FAILED_READS {
+            st.tick(s, || panic!("must not re-read"), None);
+        }
+        let held = st.last_sent.clone().unwrap();
+        assert!(
+            held.stale,
+            "the memoized None still counts as a failed read every tick"
+        );
     }
 
     #[test]
