@@ -42,6 +42,10 @@ pub struct StopReleaseReceipt {
     pub kept: Vec<StopKeptClaim>,
     pub scanned: usize,
     pub dirs: Vec<PathBuf>,
+    /// The directories the scan actually read, a subset of `dirs`: a zero
+    /// `scanned` over an empty `read_dirs` means the scan never reached a
+    /// file, not that the claims were gone.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 /// Holder prefixes whose suffix IS a harness session id, plus
@@ -143,10 +147,11 @@ pub fn release_for_stopped_session(
     dirs: &[PathBuf],
     events_dir: Option<&Path>,
 ) -> Result<StopReleaseReceipt, String> {
-    let records = list_in_result(dirs, None, true)?;
+    let (records, read_dirs) = list_in_result(dirs, None, true)?;
     let mut receipt = StopReleaseReceipt {
         scanned: records.len(),
         dirs: dirs.to_vec(),
+        read_dirs,
         ..Default::default()
     };
     for rec in &records {
@@ -357,6 +362,38 @@ mod tests {
 
     fn lockfile_of(dir: &Path, key: &str) -> PathBuf {
         dir.join(format!("{}.lock", encode_key(key)))
+    }
+
+    #[test]
+    fn zero_scan_over_a_missing_dir_reads_nothing_and_says_so() {
+        let td = TempDir::new().unwrap();
+        let missing_a = td.path().join("missing-a");
+        let missing_b = td.path().join("missing-b");
+        let target = StoppedHolder {
+            name: "w1".into(),
+            harness_session_id: None,
+        };
+        let receipt = release_for_stopped_session(&target, &[missing_a, missing_b], None).unwrap();
+        assert_eq!(receipt.read_dirs, Vec::<PathBuf>::new());
+        assert_eq!(receipt.dirs.len(), 2);
+        assert_eq!(receipt.scanned, 0);
+    }
+
+    #[test]
+    fn zero_scan_over_present_empty_dirs_reads_both_and_says_so() {
+        let td = TempDir::new().unwrap();
+        let empty_a = td.path().join("empty-a");
+        let empty_b = td.path().join("empty-b");
+        std::fs::create_dir_all(&empty_a).unwrap();
+        std::fs::create_dir_all(&empty_b).unwrap();
+        let target = StoppedHolder {
+            name: "w1".into(),
+            harness_session_id: None,
+        };
+        let receipt = release_for_stopped_session(&target, &[empty_a, empty_b], None).unwrap();
+        assert_eq!(receipt.read_dirs.len(), 2);
+        assert_eq!(receipt.dirs.len(), 2);
+        assert_eq!(receipt.scanned, 0);
     }
 
     #[test]

@@ -98,7 +98,7 @@ fn render_lines(rows: &[LongHoldRow], min_hold_s: i64) -> Vec<String> {
 /// `flight:` holds older than `min_hold_s` across the given claims
 /// directories, longest hold first, with the `top` text block.
 pub fn long_holds(dirs: &[PathBuf], min_hold_s: i64) -> Result<Value, String> {
-    let records = list_in_result(dirs, Some("flight:"), true)?;
+    let (records, _) = list_in_result(dirs, Some("flight:"), true)?;
     let now = now_ms();
     let mut rows: Vec<LongHoldRow> = Vec::new();
     for rec in &records {
