@@ -43,6 +43,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
 | `backlog.maintain.abandoned_do_row_hours` | int | `24` | advanced | Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone. |
+| `backlog.maintain.budget_seconds` | int | `300` | advanced | Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in. |
 | `backlog.maintain.validity_days` | int | `60` | advanced | Age (days) before a stale idea enters the validity sweep. |
 | `backlog.maintain.validity_batch_size` | int | `25` | advanced | Oldest-first validity-sweep batch size (clamped to 100). |
 | `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
