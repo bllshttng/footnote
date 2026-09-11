@@ -2349,18 +2349,17 @@ def _run_census_deferred(args: Sequence[str]) -> int:
 )
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)
 def test_command(stream: bool, log_override: Optional[Path], runner_args: tuple[str, ...]) -> None:
-    if log_override is not None and stream:
-        sys.stderr.write("--log captures to a file; drop --stream (or drop --log)\n")
-        raise SystemExit(2)
     args = list(runner_args)
+    if log_override is not None and (
+        stream or (args and args[0] in ("smoke", "--census-deferred"))
+    ):
+        sys.stderr.write(
+            "--log supports the python and rust suites; drop --log or the conflicting flag\n"
+        )
+        raise SystemExit(2)
     if args and args[0] == "rust":
         raise SystemExit(_run_rust(args[1:], stream=stream, log_override=log_override))
     if args and args[0] == "smoke":
-        if log_override is not None:
-            sys.stderr.write(
-                "--log supports the python and rust suites; smoke has no capture log\n"
-            )
-            raise SystemExit(2)
         raise SystemExit(_run_smoke(args[1:], stream=stream))
     if args and args[0] == "--census-deferred":
         raise SystemExit(_run_census_deferred(args[1:]))
