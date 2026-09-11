@@ -189,6 +189,11 @@ fn attached_idle_server_stays_under_the_cpu_budget() {
         .as_ref()
         .map(|l| l.panes.len())
         .unwrap_or_default();
+    eprintln!(
+        "idle cpu budget: delta={delta:.2}s (budget {BUDGET_SECS}s) panes={panes} \
+         registry_rows={REGISTRY_ROWS} journal_bytes={} graph_bytes={graph}",
+        seg1 + seg0
+    );
     assert!(
         delta <= BUDGET_SECS,
         "idle server burned {delta:.2}s CPU over the 20s window (budget {BUDGET_SECS}s): \
