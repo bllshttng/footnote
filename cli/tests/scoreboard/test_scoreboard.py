@@ -352,3 +352,29 @@ def test_render_shipped_caveat_shows_and_hides(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows2))
     res2 = runner.invoke(_app(), [])
     assert "the merge is the count" not in res2.output  # 1 of 1 = no gap
+
+
+# --- x-e159: undated events never enter a timed window ----------------------
+def test_undated_touch_excluded_from_window():
+    from datetime import timedelta
+
+    from fno.scoreboard.fold import _event_in_window
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=28)
+    assert _event_in_window({"kind": "human_touch"}, cutoff, now) is False
+    assert _event_in_window({"kind": "human_touch", "data": {}}, cutoff, now) is False
+    assert _event_in_window({"kind": "human_touch", "ts": _RECENT}, cutoff, now) is True
+
+
+def test_undated_touch_never_inflates_autonomy():
+    from datetime import timedelta
+
+    from fno.scoreboard.fold import _autonomy
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=28)
+    events = [{"kind": "human_touch"}, {"kind": "human_touch", "ts": _RECENT}]
+    out = _autonomy(events, {"x-1"}, cutoff, now)
+    assert out["available"] is True
+    assert out["touches"] == 1

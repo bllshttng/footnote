@@ -439,7 +439,9 @@ def _event_in_window(e: dict, cutoff, now) -> bool:
         data = e.get("data")
         ts_raw = data.get("ts") if isinstance(data, dict) else None
     dt = _parse_ts(ts_raw)
-    return dt is None or cutoff <= dt <= now  # undated events count in (best-effort)
+    # x-e159: an undated event has no window to belong to. Counting it in every
+    # window inflated each timed numerator; it stays out until it carries a ts.
+    return dt is not None and cutoff <= dt <= now
 
 
 # ── verifier calibration (W6 x-f063) ────────────────────────────────────────
