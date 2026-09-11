@@ -167,6 +167,7 @@ pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
+pub mod scratch;
 pub mod screen;
 pub(crate) mod served_liveness;
 pub mod session_names_fold;
@@ -1066,6 +1067,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // fire row whose journal entries are the operator-notice rate bound.
     "evals_scheduled_run",
     "evals_stale",
+    // Scratch-shape sweep (x-caf8, agents-emitted from the `scratch sweep`
+    // stage of the daily eval-sweep ignition): one row per new (job, shape)
+    // recurrence the jobs-dir walker found, and one row per node the sweep
+    // filed, folded, or seeded for a shape. The journal is the sweep's own
+    // dedupe index: a pair already observed in the window never re-emits.
+    "scratch_shape_observed",
+    "scratch_shape_filed",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook

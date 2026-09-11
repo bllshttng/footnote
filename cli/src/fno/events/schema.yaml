@@ -3175,6 +3175,68 @@ event_types:
           description: "Optional. The evals.schedule_days window the notice dedup rides."
     consumers: [operator]
 
+  - name: scratch_shape_observed
+    description: "The scratch-shape sweep (x-caf8) found a new (job, shape) recurrence: an authored py/sh script under a job tmp dir whose content rule matches one of the census brief's shapes. One row per pair, emitted only when the pair is not already recorded inside the window, so the journal is the sweep's own dedupe index and a re-run the same day emits nothing."
+    sources: [daemon, agents, test]
+    data:
+      required: [shape, fingerprint, job_id, path, lines]
+      properties:
+        shape:
+          type: string
+          description: "The census rule id (longtext_arg, fno_wrap_json, ci_probe, ..., copy_for_diff). First hit wins over the ordered rule table."
+        fingerprint:
+          type: string
+          description: "sha256 of the newest specimen's token stream with string literals, numbers and absolute paths blanked, so byte-near copies across jobs fold to one fingerprint."
+        job_id:
+          type: string
+          description: "The job directory name under the jobs dir; the other half of the (job, shape) recurrence key."
+        path:
+          type: string
+          description: "Newest specimen path for the pair."
+        lines:
+          type: integer
+          description: "Authored files folded into this pair at observation time."
+        verb_hint:
+          type: string
+          description: "Optional. The census remedy line for the shape: the existing verb plus the missing flag, or 'no verb today: ...'."
+        first_seen:
+          type: string
+          description: "Optional. RFC3339 UTC of the pair's oldest file mtime."
+        last_seen:
+          type: string
+          description: "Optional. RFC3339 UTC of the pair's newest file mtime."
+        monitor:
+          type: boolean
+          description: "Optional. True when any file in the pair is an emit-on-change while/until-sleep loop (the reign-mandated monitor idiom)."
+    consumers: [operator, scratch]
+
+  - name: scratch_shape_filed
+    description: "The scratch-shape sweep filed, folded, or seeded a backlog node for a recurring scratch shape. One row per file or fold; the newest row per shape is the sweep's filed-node index (a live node folds new evidence onto itself, a node done outside the window refiles with caused_by, a node done inside the window suppresses)."
+    sources: [daemon, agents, test]
+    data:
+      required: [shape, node_id, outcome]
+      properties:
+        shape:
+          type: string
+          description: "The census rule id the node covers."
+        node_id:
+          type: string
+          description: "The backlog node minted, folded onto, or seeded for the shape."
+        outcome:
+          type: string
+          enum: [filed, folded, seeded]
+          description: "filed = a new node was minted this run, folded = evidence appended to an existing live node via --wave-of, seeded = the row was written by hand to teach the sweep about a node filed before the sweep shipped."
+        jobs:
+          type: integer
+          description: "Optional. Distinct jobs behind the node at filing time."
+        files:
+          type: integer
+          description: "Optional. Authored files folded into the filing."
+        caused_by:
+          type: string
+          description: "Optional. The superseded node id when a done node past the window refiled."
+    consumers: [operator, scratch]
+
   - name: gh_probe
     description: "The stop gate's gh-availability probe conclusion, one row per fire. Tri-state: found, absent (NotFound and no file at the path), or spawn_trouble (gh exists but could not be spawned right now: ETXTBSY, EACCES, a missing interpreter). Spawn trouble reads as present, so a transient spawn failure can no longer degrade a session to advisory mode as 'gh absent'. Deliberately NOT the loop_check type: read_prior_fires counts loop_check rows as fire observations, and a fingerprint-less row would break the no-progress streak."
     sources: [hook]
