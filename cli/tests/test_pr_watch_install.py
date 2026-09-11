@@ -1273,7 +1273,7 @@ def test_liveness_old_tick_and_old_plist_still_dead():
 
 
 # ---------------------------------------------------------------------------
-# x-0635: a broken post-install tick end defeats the fresh-install grace
+# A broken post-install tick end defeats the fresh-install grace
 # ---------------------------------------------------------------------------
 
 
@@ -1317,6 +1317,7 @@ def test_liveness_malformed_last_end_keeps_grace():
     plist = tick + 2700
     now = tick + 3300
     for bad in (None, "timeout", {"outcome": "timeout", "ts": "not-a-ts"},
+                {"outcome": "timeout", "ts": 1789138947},
                 {"outcome": "timeout"}):
         v = _live(plist_mtime=plist, now=now, last_end=bad)
         assert v["verdict"] == "healthy-pending", bad

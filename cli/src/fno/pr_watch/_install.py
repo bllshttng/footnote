@@ -888,7 +888,7 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
 
 def _parse_ts(ts: Optional[str]) -> Optional[float]:
     """Parse a canonical UTC envelope timestamp to epoch seconds."""
-    if not ts:
+    if not isinstance(ts, str) or not ts:
         return None
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -935,10 +935,10 @@ def liveness_report(
         if end_epoch is not None and end_epoch > plist_mtime:
             broke = last_end
 
-    def broke_suffix() -> str:
+    def broke_suffix(end: dict) -> str:
         return (
-            f"post-install tick ended {broke.get('outcome')} "
-            f"({', '.join(tick_end_bits(broke))}) without completing"
+            f"post-install tick ended {end.get('outcome')} "
+            f"({', '.join(tick_end_bits(end))}) without completing"
         )
 
     def verdict(v: str, detail: str, fix: Optional[str] = None) -> dict:
@@ -972,9 +972,10 @@ def liveness_report(
     tick_epoch = _parse_ts(last_tick_ts)
     if tick_epoch is None:
         if broke is not None:
+            assert plist_mtime is not None
             return verdict(
                 "dead",
-                f"installed {int(now - plist_mtime)}s ago; {broke_suffix()}",
+                f"installed {int(now - plist_mtime)}s ago; {broke_suffix(broke)}",
                 "fno agents status",
             )
         return verdict(
@@ -988,7 +989,7 @@ def liveness_report(
         if broke is not None:
             return verdict(
                 "dead",
-                f"last tick {int(age)}s ago (> 2x interval {threshold}s); {broke_suffix()}",
+                f"last tick {int(age)}s ago (> 2x interval {threshold}s); {broke_suffix(broke)}",
                 "fno agents status",
             )
         return verdict(
