@@ -156,6 +156,9 @@ def _worker_reachability(worker: dict):
     age = int(max(0.0, time.time() - facts.last_event_epoch))
     if falsifier is not None and age <= TRANSCRIPT_EVIDENCE_S:
         falsifier = None
+    if falsifier is None and age > TRANSCRIPT_EVIDENCE_S and state in _finished_row_states():
+        # A terminal word with a silent tail is positive evidence of the end.
+        falsifier = f"finished-state:{state}"
     return classify_reachability(
         truth_state=classify_tail(facts.last_role, facts.last_text, age),
         age_s=age,
