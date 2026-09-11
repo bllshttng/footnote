@@ -96,7 +96,13 @@ fn ac2_hp_every_hold_line_carries_an_age_and_basis() {
         assert!(h.reason.contains(reason), "{id}: {:?}", h);
         assert!(h.age_s.is_some(), "{id}: {:?}", h);
         assert_eq!(h.age_basis, basis, "{id}: {:?}", h);
-        assert_hold_line(&summary, true, id, "[held ");
+        // The TU line renders main's x-1b90 clock (`for {age}`); the other
+        // holds render the [held ...] suffix.
+        if id == "turow" {
+            assert_hold_line(&summary, true, id, "transcript unresolved for");
+        } else {
+            assert_hold_line(&summary, true, id, "[held ");
+        }
     }
 }
 
@@ -232,7 +238,9 @@ fn ac2_edge_unmeasured_hold_never_escalates() {
     assert!(h.age_s.is_none(), "{h:?}");
     assert_eq!(h.age_basis, "unmeasured");
     assert!(!h.escalated, "{h:?}");
-    assert_hold_line(&summary, true, "unmrow", "[held unmeasured]");
+    // The projection carries the unmeasured basis even though the TU line
+    // renders main's clock.
+    assert_hold_line(&summary, true, "unmrow", "transcript unresolved for");
 }
 
 /// AC2-EDGE: an open do row blocked by an unrecorded additional PR names
@@ -361,7 +369,7 @@ fn ac3_hp_the_release_retires_the_ruled_row_and_keeps_the_rest() {
         summary
             .kept_transcript_unresolved
             .iter()
-            .any(|id| id == "midrow"),
+            .any(|h| h.id == "midrow"),
         "{:?}",
         summary.kept_transcript_unresolved
     );

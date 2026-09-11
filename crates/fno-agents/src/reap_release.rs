@@ -144,7 +144,6 @@ fn row_bucket(home: &AgentsHome, cwd: &Path, grace_secs: i64, handle: &str) -> S
         dry.kept_operator,
         dry.kept_crowned,
         dry.kept_no_provenance,
-        dry.kept_transcript_unresolved,
         dry.kept_graph_unreadable,
     ]
     .iter()
@@ -157,6 +156,13 @@ fn row_bucket(home: &AgentsHome, cwd: &Path, grace_secs: i64, handle: &str) -> S
     }
     if dry.kept_active.iter().any(|(id, _)| id == handle) {
         return "kept active".to_string();
+    }
+    if dry
+        .kept_transcript_unresolved
+        .iter()
+        .any(|h| h.id == handle)
+    {
+        return "kept transcript unresolved".to_string();
     }
     if dry.kept_node_conflict.iter().any(|(id, _, _)| id == handle) {
         return "kept node conflict".to_string();
