@@ -1,8 +1,7 @@
 """`fno inbox outstanding` - read what is waiting on a human; ask and clear questions.
 
-Machine-first, mirroring `fno backlog carveout`: stdout carries the value (the report,
-or a new question id), guidance and warnings go to stderr, and exit codes are
-predictable (0 ok / 1 read or write failure).
+Machine-first, mirroring `fno backlog carveout`: stdout carries the value,
+guidance goes to stderr, exit codes are predictable (0 ok / 1 failure).
 """
 
 from __future__ import annotations

@@ -1,38 +1,9 @@
 """``fno agents peek <handle>`` — the read-only twin of ``fno agents mail send``.
 
-**peek output is NOT a liveness signal.** A transcript is a file, and a dead
-session's file still reads fine, so recent-looking content here proves only that
-bytes were written at some point -- never that anyone is home now. This was
-misread as proof of life for a session that had been dead 43 minutes, alongside
-two other surfaces saying the same wrong thing. For a reachability verdict use
-``fno agents truth <handle>`` (or the ``reachability`` field on
-``fno agents list``), which is the one derivation with a declared basis and the
-falsifiers applied; see :mod:`fno.agents.reachability`.
-
-Reply is agent-native (``mail send`` resolves ``<handle>`` across every live
-source). Observe was tribal knowledge (``agents logs`` is registry-only; a live
-codex thread or unrostered ``claude --bg`` session had no single observe verb).
-``peek`` closes the asymmetry: the same union resolver as send for
-transcript-backed peers, plus a mux-pane arm for pane-substrate workers (the
-default substrate), whose content is a PTY rather than a transcript (x-680d).
-
-Two data paths, tried in order (design x-05da):
-
-1. **Status stream (fast-path, opportunistic).** The normalized
-   ``task_started`` / ``task_done`` / ``blocked`` / ``run_summary`` events a
-   worker emits to ``events.jsonl``. Cheap, cross-harness. Not shipped by every
-   worker yet, so absent → fall through with no error.
-2. **Transcript tail (fallback, ships now).** Resolve the handle to its
-   harness's on-disk transcript and tail the last N records. Works for every
-   worker today.
-
-The per-harness on-disk shape differs (claude/codex = one JSONL; opencode = a
-per-message dir joined against a per-message parts dir), so the extensible seam
-is ``recent_records`` dispatching on ``agent``.
-
-Read-only invariant: peek opens files for read and polls stat for ``--follow``.
-It never writes ``events.jsonl``, the peer transcript, the registry, or a
-mailbox — observing must not perturb the observed.
+Peek output is NOT a liveness signal: for a reachability verdict use
+``fno agents truth`` (or the ``reachability`` field on ``agents list``).
+Design, the two data paths, and the read-only invariant:
+docs/architecture/agents-peek.md.
 """
 from __future__ import annotations
 

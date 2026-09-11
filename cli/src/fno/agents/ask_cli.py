@@ -84,10 +84,8 @@ def cmd_ask(
     """Send a message to a registered agent (follow-up only).
 
     Requires the agent to exist; unknown names exit 16 pointing at
-    ``fno agents spawn``. Project mode requires exactly one live peer.
-    The reply prints verbatim on stdout. The follow-up runs on the Rust
-    runtime; this body keeps only the ``--to-project`` anycast resolution
-    the binary cannot do.
+    ``spawn``. The reply prints verbatim on stdout. Runs on the Rust
+    runtime; this body keeps only the ``--to-project`` resolution.
     """
     from fno import rust_binary
     from fno._flag_aliases import refuse_retired_provider
@@ -106,14 +104,13 @@ def cmd_ask(
 
         message = read_text_arg(message, prompt_file, what="the prompt")
 
-    # ask is a follow-up to an existing session and never launches in workdir, so
-    # it stays in the caller cwd (here=True): never the canonical default nor the
-    # redirect note, which would be a false diagnostic for a non-consuming op
-    # (x-85fe review). An explicit --cwd still wins inside the resolver.
+    # ask never launches in workdir, so it stays in the caller cwd
+    # (here=True): the canonical default or redirect note would be a false
+    # diagnostic for a non-consuming op (x-85fe review).
     workdir = _resolve_dispatch_workdir(cwd, fresh, here=True)
 
-    # Project mode: resolve to a single live peer, then ask by name. The message
-    # is the sole positional, so it may land in the `name` slot.
+    # Project mode: the message is the sole positional, so it may park in
+    # the `name` slot.
     if to_project:
         content = message if message is not None else name
         if not content:

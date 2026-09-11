@@ -1,9 +1,8 @@
 """One seam for "long text from an argument or a file".
 
 Every verb that takes prose positionally gains the same ``--*-file`` twin
-through :func:`read_text_arg`, so read-or-refuse lives in one place (the
-``gate_reads.py`` precedent: registered here so the file-budget gate keeps
-the calling CLIs shrinking).
+through :func:`read_text_arg` (the ``gate_reads.py`` precedent for the
+file-budget gate).
 """
 from __future__ import annotations
 
