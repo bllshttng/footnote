@@ -401,12 +401,16 @@ fn cases() -> Vec<Case> {
             expect_err: false,
         },
         // A plan-less idea is cold-dispatchable: admitted without --ideas.
+        // Carries an intake difficulty now: the no-difficulty guard drops an
+        // underivable row on the cold path, so the characterization case
+        // pins admission WITH a derivable verb.
         Case {
             name: "plan_less_idea",
             flags: &["-A"],
             entries: |c: &Ctx| vec![
                 serde_json::json!({"id": "x-pl1", "slug": "s1", "title": "Planless",
                     "priority": "p1", "project": "fno", "status": "idea", "type": "task",
+                    "difficulty": "low",
                     "created_at": c.iso(2)}),
             ],
             plans: &[],

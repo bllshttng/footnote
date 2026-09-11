@@ -98,8 +98,8 @@ pub struct ReadyOpts {
 /// One narrowed-out candidate: the first cascade filter that removed it plus
 /// the inner reason where the filter carries one (the selection-guard drops
 /// name `dead-ancestor:<id>`, `design-stage`, `idea-stage`,
-/// `stale-quarantine`, `contained:<id>` or the hold verdict's guard reason;
-/// every other drop reasons with its filter name).
+/// `stale-quarantine`, `contained:<id>`, `no-difficulty` or the hold
+/// verdict's guard reason; every other drop reasons with its filter name).
 #[derive(Debug, Clone)]
 pub struct Drop {
     pub id: String,
@@ -348,6 +348,17 @@ pub fn plan_rung(entry: &Value) -> &'static str {
 /// a linked decompose stub (rung `idea`) stays behind --include-ideas.
 fn is_cold_dispatchable(e: &Value) -> bool {
     get_str(e, "status") == Some("idea") && plan_rung(e) == "none"
+}
+
+/// `harness_map.resolve_effective_verb` answers a planless node only from
+/// these bands, trimmed and lowercased; any other value refuses at spawn.
+fn has_intake_difficulty(e: &Value) -> bool {
+    matches!(
+        get_str(e, "difficulty")
+            .map(|d| d.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("low" | "medium" | "high")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,8 +1223,13 @@ fn drops_for_filter(
             }
         }
         FILTER_SELECTION_GUARD => {
-            selection_guards(e, &ctx.by_id, ctx.opts.now_ms, ctx.staleness_days)
-                .map(|reason| reason)
+            selection_guards(e, &ctx.by_id, ctx.opts.now_ms, ctx.staleness_days).or_else(|| {
+                // A cold idea the verb derivation is certain to refuse must
+                // not spend a drain tick: drop it where every autonomous
+                // dispatcher reads, attributed for `advance --explain`.
+                (!ctx.opts.include_ideas && is_cold_dispatchable(e) && !has_intake_difficulty(e))
+                    .then(|| "no-difficulty".to_string())
+            })
         }
         _ => None,
     }
@@ -1405,4 +1421,73 @@ fn dependents_fanout(entries: &[Value]) -> BTreeMap<String, i64> {
         }
     }
     dependents
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn opts(include_ideas: bool) -> ReadyOpts {
+        ReadyOpts {
+            all: true,
+            include_ideas,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_difficulty_cold_idea_drops_and_next_ranked_row_wins() {
+        let entries = vec![
+            json!({"id": "x-a", "status": "idea", "priority": "p1"}),
+            json!({"id": "x-b", "status": "idea", "priority": "p2", "difficulty": "low"}),
+        ];
+        let reply = select(&entries, &opts(false)).unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert_eq!(reply.rows[0].get("id"), Some(&json!("x-b")));
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-a")
+            .expect("x-a dropped");
+        assert_eq!(drop.filter, "selection-guard");
+        assert_eq!(drop.reason, "no-difficulty");
+    }
+
+    #[test]
+    fn difficulty_with_surrounding_whitespace_survives() {
+        let entries = vec![
+            json!({"id": "x-a", "status": "idea", "priority": "p1", "difficulty": " Medium "}),
+        ];
+        let reply = select(&entries, &opts(false)).unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert_eq!(reply.rows[0].get("id"), Some(&json!("x-a")));
+        assert!(reply.drops.is_empty());
+    }
+
+    #[test]
+    fn include_ideas_lists_the_no_difficulty_idea_without_a_drop() {
+        let entries = vec![json!({"id": "x-a", "status": "idea", "priority": "p1"})];
+        let reply = select(&entries, &opts(true)).unwrap();
+        assert_eq!(reply.rows.len(), 1);
+        assert_eq!(reply.rows[0].get("id"), Some(&json!("x-a")));
+        assert!(reply.drops.iter().all(|d| d.reason != "no-difficulty"));
+    }
+
+    #[test]
+    fn dead_ancestor_wins_over_no_difficulty() {
+        let entries = vec![
+            json!({"id": "x-a", "status": "idea", "priority": "p1", "parent": "x-p"}),
+            json!({"id": "x-p", "status": "deferred", "priority": "p1"}),
+        ];
+        let reply = select(&entries, &opts(false)).unwrap();
+        assert!(reply.rows.is_empty());
+        let drop = reply
+            .drops
+            .iter()
+            .find(|d| d.id == "x-a")
+            .expect("x-a dropped");
+        assert_eq!(drop.filter, "selection-guard");
+        assert_eq!(drop.reason, "dead-ancestor:x-p");
+    }
 }
