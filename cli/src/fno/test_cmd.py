@@ -342,17 +342,13 @@ def _child_env(root: Path) -> dict:
     env["CARGO_BUILD_BUILD_DIR"] = (
         f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
     )
-    # Per-run TMPDIR: the SANDBOX itself, not a second directory. The fence
-    # allows state paths only under TMPDIR (fno.events._hermetic_allowed_roots),
-    # so a separate scratch root would refuse the sandbox HOME and every fixture
-    # under it. The sandbox is already one short throwaway dir per run, reaped
-    # at exit, and it joins the config-search ceiling for the same reason the
-    # inherited TMPDIR did: a fixture a test wrote under TMPDIR stays findable.
-    tmpdir = _sandbox()
-    env["TMPDIR"] = str(tmpdir)
-    env["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(
-        [env["FNO_CONFIG_SEARCH_ROOT"], str(tmpdir)]
-    )
+    # TMPDIR is deliberately left ambient. The fence allows journal roots
+    # under TMPDIR (fno.events._hermetic_allowed_roots), and the sandbox is
+    # created by mkdtemp under that same TMPDIR, so every sandbox path is
+    # already inside the allowed root without rewriting it. Rewriting it also
+    # pushes pytest's basetemp under the sandbox, and the lane-B keeper socket
+    # then crosses the 108-byte AF_UNIX limit on the runner (the reason
+    # neutralise's own ambient list refuses to touch TMPDIR).
     return env
 
 
