@@ -130,9 +130,9 @@ route = "zai/glm-5.3[1m]"
             return Result(returncode=0, stdout=json.dumps([
                 {"number": 1134, "state": "open", "merged": False}
             ]), stderr="")
-        if "state=closed" in path:
-            return Result(returncode=1, stdout="", stderr="network down")
-        raise AssertionError(f"unexpected exact fallback: {cmd}")
+        # x-c79d: the stale key is absent from the open listing, which is the
+        # whole answer now - no closed read backs it up.
+        raise AssertionError(f"unexpected closed or exact read: {cmd}")
 
     events_path = tmp_path / "events.jsonl"
 
@@ -180,11 +180,12 @@ route = "zai/glm-5.3[1m]"
         graphql_remaining_fn=lambda: (4800, "2026-08-24T00:00:00Z"),
     )
 
-    assert result.sweep_failures == 1
+    assert result.sweep_failures == 0
     event = json.loads(events_path.read_text(encoding="utf-8").strip())
     assert event["type"] == "pr_watch_tick"
-    assert event["data"]["swept_count"] == 1
-    assert event["data"]["swept"] == {"owner/repo": [1134]}
+    assert event["data"]["swept_count"] == 2
+    assert event["data"]["swept"] == {"owner/repo": [889, 1134]}
+    assert event["data"]["dropped"] == {"not_open": {"owner/repo": [889]}}
 
 
 # ---------------------------------------------------------------------------

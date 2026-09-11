@@ -736,14 +736,14 @@ def _run_tick(
             if key not in batch_states:
                 failed.add(key)
         for key, current in batch_states.items():
-            if current in ("OPEN", "CLOSED", "MERGED"):
+            if current in ("OPEN", "CLOSED", "MERGED", "NOT_OPEN"):
                 swept.add(key)
             elif key in query_keys:
                 failed.add(key)
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
-            if current in ("MERGED", "CLOSED"):
+            if current in ("MERGED", "CLOSED", "NOT_OPEN"):
                 _drop_cached_terminal(state, dropped, key, current)
                 batch_terminal.add(key)
             else:

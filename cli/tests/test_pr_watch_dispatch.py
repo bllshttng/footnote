@@ -264,32 +264,17 @@ class TestTrackedStateBatch:
 
         def runner(cmd, **_kwargs):
             calls.append(list(cmd))
-            # owner/one: tracked #2 closed+merged (absent from the open list,
-            # resolved by its closed batch) plus untracked open #99; owner/two:
-            # tracked #3 closed.
+            # owner/one: tracked #1 open plus untracked open #99; tracked #2
+            # is absent from the open listing (NOT_OPEN). owner/two: tracked
+            # #3 absent too.
             open_rows = {
                 "owner/one": [{"number": 1, "state": "open", "merged": False},
                               {"number": 99, "state": "open", "merged": False}],
                 "owner/two": [],
             }
-            per_key = {
-                "owner/one#2": {"number": 2, "state": "closed", "merged": True},
-                "owner/two#3": {"number": 3, "state": "closed", "merged": False},
-            }
             path = cmd[2]
-            if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
-                repo = path[len("repos/"): path.index("/pulls?")]
-                return _rest_ok(json.dumps(open_rows[repo]))
-            if path.startswith("repos/") and path.endswith("/pulls?state=closed&per_page=100&page=1"):
-                repo = path[len("repos/"): path.index("/pulls?")]
-                return _rest_ok(
-                    json.dumps([
-                        row for key, row in per_key.items() if key.startswith(f"{repo}#")
-                    ])
-                )
-            number = path.rsplit("/", 1)[-1]
-            repo = path[len("repos/"): -len(f"/pulls/{number}")]
-            return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
+            repo = path[len("repos/"): path.index("/pulls?")]
+            return _rest_ok(json.dumps(open_rows[repo]))
 
         states, sweep_failures = read_tracked_pr_states(
             {"owner/one#1", "owner/one#2", "owner/two#3"}, runner=runner
@@ -297,14 +282,13 @@ class TestTrackedStateBatch:
 
         assert states == {
             "owner/one#1": "OPEN",
-            "owner/one#2": "MERGED",
+            "owner/one#2": "NOT_OPEN",
             "owner/one#99": "OPEN",
-            "owner/two#3": "CLOSED",
+            "owner/two#3": "NOT_OPEN",
         }
         assert sweep_failures == 0
-        # One open-listing and one closed-listing per repository. No exact
-        # per-key fallback is needed when the terminal batch finds both keys.
-        assert len(calls) == 4
+        # One open listing per repository: no closed listing, no exact reads.
+        assert len(calls) == 2
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
         from fno.pr_watch._discover import read_tracked_pr_states
@@ -318,6 +302,46 @@ class TestTrackedStateBatch:
 
         assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
         assert sweep_failures == 1
+
+    def test_not_open_batch_keys_drop_without_a_closed_read(self, tmp_path):
+        """x-c79d: absence from a successful open listing is the terminal
+        answer. Three orphaned keys drop as not_open in one tick."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        for number in (1, 2, 3):
+            store.set(f"owner/repo#{number}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+            })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "NOT_OPEN" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        assert WatermarkStore(path=store_path).load() == {}
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 3
+        assert receipt["dropped_count"] == 3
+        assert receipt["dropped"] == {"not_open": {"owner/repo": [1, 2, 3]}}
+        assert receipt["failed_count"] == 0
 
 
 # ---------------------------------------------------------------------------
