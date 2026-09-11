@@ -1318,6 +1318,77 @@ mod tests {
     }
 
     #[test]
+    fn a_live_handover_lock_on_an_in_progress_node_reads_through_the_scan() {
+        // AC9-HP, read through scan_claims_dir: this is the test a
+        // lease-keyed skip in the scan cannot survive. The skip removed the
+        // row pre-classification, so an in_progress node in its launch window
+        // read driver-none and landed in unheld_progress - the exact silence
+        // the classify tests cannot see past.
+        let dir = std::env::temp_dir().join(format!("kb-board-handover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let now = crate::claims::now_ms();
+        let yaml = format!(
+            "schema_version: 1\nkey: \"node:x-lease\"\nholder: \"spawn-handover:t-w\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nreason: \"spawn handover window for node:x-lease\"\n",
+            now + 900_000
+        );
+        std::fs::write(dir.join("node%3Ax-lease.lock"), yaml).expect("write lock");
+        let rows = claims::scan_claims_dir(&dir);
+        assert_eq!(rows.len(), 1, "the live lock is one row: {rows:?}");
+        let node = json!({"id": "x-lease", "priority": "p0", "status": "in_progress"});
+        let mut inputs = inputs_with(json!([]), json!(rows), json!([node.clone()]));
+        inputs.entries = Some(vec![node]);
+        let working_probe = |age_s: f64| crate::truth_probe::TruthProbe {
+            state: "working".to_string(),
+            harness_title: None,
+            reachability: None,
+            basis: None,
+            last_activity_age_s: Some(age_s),
+            last_event_at: None,
+            last_message: None,
+            observed_model: Value::Null,
+        };
+        // A working worker 30s into its run: the launch window holds a live
+        // driver, so the node reads in NO queue row.
+        inputs
+            .holder_activity
+            .insert("t-w".to_string(), working_probe(30.0));
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        let stalled = queues
+            .iter()
+            .find(|q| q["name"] == "stalled_holder")
+            .unwrap();
+        assert_eq!(stalled["rows"].as_array().unwrap().len(), 0, "{stalled}");
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        assert_eq!(unheld["rows"].as_array().unwrap().len(), 0, "{unheld}");
+        // Positive control on the same lock: a working worker PAST the stall
+        // clock lists in stalled_holder. The row reached the queue, so the
+        // zero above is a verdict about the worker, not a lost row.
+        inputs.holder_activity.insert(
+            "t-w".to_string(),
+            working_probe(crate::king_board::classify::STALLED_AFTER_S + 1.0),
+        );
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        let stalled = queues
+            .iter()
+            .find(|q| q["name"] == "stalled_holder")
+            .unwrap();
+        let ids: Vec<&str> = stalled["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["x-lease"], "{stalled}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn mergeable_pr_is_scoped_by_the_binding_node() {
         // A scoped board returned PRs 1494 and 1490 outside the crown; the
         // undriven_pr sibling already filtered, mergeable_pr did not.

@@ -37,19 +37,17 @@ pub(crate) fn decode_key(filename: &str) -> String {
 }
 
 /// The requeue pseudo-holder (mirrors `TARGET_SESSION_HOLDER_PREFIX` in
-/// `fno.claims.core`): the invoking session that will take the node, not an
-/// agent. Both role prefixes mark workflow state, never a worker.
-const TARGET_SESSION_HOLDER_PREFIX: &str = "target-session:";
-
-/// A role-prefixed holder is workflow state (a launch window, a requeue
-/// reservation), not a worker driving the node.
-fn is_role_holder(holder: &str) -> bool {
-    holder.starts_with(crate::claim_verbs::HANDOVER_HOLDER_PREFIX)
-        || holder.starts_with(TARGET_SESSION_HOLDER_PREFIX)
-}
-
 /// One root's live + dead claim rows (core._list_claims_impl with
 /// include_stale=true): every `.lock` file, classified, dead states kept.
+///
+/// A role-prefixed row (a launch window, a requeue reservation) STAYS in the
+/// scan: it is workflow state, but the board's probe layer is what decides
+/// whether a worker stands behind it, and a lease must never answer that
+/// question itself (the x-9958 ruling: a lease must never suppress the row -
+/// x-caf7 held a fresh lease while deadlocked, and the x-db9c dispatch that
+/// commissioned this fix minted its own handover claim on the very node being
+/// fixed). A role row whose window lapsed with no worker taking over is the
+/// stale row `stale_claim` exists to name.
 pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
     let mut rows: Vec<Value> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -76,16 +74,6 @@ pub(crate) fn scan_claims_dir(dir: &Path) -> Vec<Value> {
             Ok(rec) => {
                 let state = crate::claims::classify(&rec, None);
                 let state = state.as_str();
-                // A role-prefixed row is the dispatcher's launch window or a
-                // requeue reservation, not a worker: live/suspect is its
-                // whole life by construction (the spawn pid is gone the
-                // moment the fork lands), so reading it as a stalled holder
-                // makes every king spawn flag itself within two minutes. An
-                // EXPIRED role holder stays in scope: a window that lapsed
-                // without a worker taking over IS a stall.
-                if matches!(state, "live" | "suspect") && is_role_holder(&rec.holder) {
-                    continue;
-                }
                 // The board consumes live/suspect (stalled_holder's locks,
                 // undriven_pr's driver read) and stale/corrupted (its own
                 // queue); `free` never has a file to scan.
@@ -178,7 +166,13 @@ mod tests {
     }
 
     #[test]
-    fn a_live_handover_row_never_reads_as_a_stalled_holder() {
+    fn a_live_handover_row_stays_in_the_scan() {
+        // The regression guard task 4 exists to pin: a live launch-window
+        // lease is a row the board probes, never one the scan drops. The
+        // lease-keyed skip this test retires (PR 1730) removed the row
+        // pre-classification, so an in_progress node in its launch window
+        // read driver-none and landed in unheld_progress - the exact
+        // silence the scan-level skip manufactured.
         let dir = std::env::temp_dir().join(format!("kb-claims-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -188,9 +182,11 @@ mod tests {
             handover_row("target-session:a6d2ce6a-1da0", 900_000, "node%3Ax-requeue");
         std::fs::write(dir.join(tname), tyaml).expect("write requeue claim");
         let rows = scan_claims_dir(&dir);
+        assert_eq!(rows.len(), 2, "role rows stay in scope: {rows:?}");
         assert!(
-            rows.is_empty(),
-            "role-prefixed row leaked into the board: {rows:?}"
+            rows.iter()
+                .all(|r| r["state"] == "live" || r["state"] == "suspect"),
+            "an unexpired window is never stale: {rows:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
