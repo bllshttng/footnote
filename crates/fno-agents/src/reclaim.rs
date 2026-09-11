@@ -1,5 +1,5 @@
-//! The machine janitor: `fno-agents reclaim`, surfaced as `fno doctor reclaim`
-//! (x-7ca7 task 4.1). Removes disk bloat footnote development piles up:
+//! The machine janitor: `fno-agents reclaim`, surfaced as `fno doctor reclaim`.
+//! Removes disk bloat footnote development piles up:
 //! plugin-cache build copies, leaked test HOMEs, stale test scratch, and
 //! unregistered worktree targets, then prunes the shared uv cache under a
 //! timeout. Everything removed is rebuilt or downloaded again on demand.
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::paths::AgentsHome;
+use crate::paths::{canonical_repo_root, dirs_home, AgentsHome};
 
 /// A running test keeps its own fake HOME; two hours means nobody is using it.
 const LEAKED_HOME_MINUTES: u64 = 120;
@@ -142,12 +142,6 @@ fn plugin_cache_copies() -> Vec<PathBuf> {
     found
 }
 
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
 fn is_old_leaked_home(entry: &Path, cutoff: SystemTime) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(entry) else {
         return false;
@@ -214,26 +208,13 @@ fn registered_worktrees() -> Vec<String> {
         .collect()
 }
 
-fn canonical_root() -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if root.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(root))
-    }
-}
-
 fn untracked_worktree_targets() -> Vec<PathBuf> {
     // Cargo output under a worktree dir git no longer tracks (a removed or
-    // half-made worktree). Only target/ goes: the rest may hold work.
-    let Some(repo) = canonical_root() else {
+    // half-made worktree). Only target/ goes: the rest may hold work. The
+    // repo root is the CANONICAL checkout (git lists it first from any
+    // worktree), so the lane answers the same from every checkout.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Some(repo) = canonical_repo_root(&cwd) else {
         return Vec::new();
     };
     let registered = registered_worktrees();
@@ -253,7 +234,16 @@ fn untracked_worktree_targets() -> Vec<PathBuf> {
             if !path.is_dir() {
                 continue;
             }
-            let registered_here = registered.iter().any(|r| Path::new(r) == path);
+            // Both sides canonicalised: macOS aliases /var to /private/var,
+            // and a raw spelling mismatch would read a LIVE worktree as
+            // unregistered and sweep its build tree.
+            let Ok(candidate) = path.canonicalize() else {
+                continue;
+            };
+            let registered_here = registered
+                .iter()
+                .filter_map(|r| std::fs::canonicalize(r).ok())
+                .any(|r| r == candidate);
             if registered_here {
                 continue;
             }

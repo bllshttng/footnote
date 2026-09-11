@@ -458,14 +458,14 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
-    // `reclaim` (x-7ca7): the machine janitor, daemon-free. Not a routable
+    // `reclaim`: the machine janitor, daemon-free. Not a routable
     // `fno agents` verb; the Python surface is `fno doctor reclaim`, a thin
     // wrapper that shells HERE, and the daemon's daily sweep calls the gate
     // in-process.
     if verb == "reclaim" {
         return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
     }
-    // `plugin-install` (x-7ca7): the filtered-stage installer for the plugin
+    // `plugin-install`: the filtered-stage installer for the plugin
     // harnesses, daemon-free. The Python surface `fno config plugin install`
     // shells HERE for claude, opencode and agy; codex stays on the Python
     // converge engine per the ship-phase ruling.

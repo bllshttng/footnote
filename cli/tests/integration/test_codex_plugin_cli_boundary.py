@@ -237,7 +237,7 @@ def _run_setup_command() -> list[str]:
 
 
 def _run_setup(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
-    # The `fno config setup codex-plugin` door retired (x-7ca7) in favor of
+    # The `fno config setup codex-plugin` door retired in favor of
     # `fno config plugin install codex`, which hardcodes the dev channel and
     # adds env-export side effects these hermetic fixtures must not touch.
     # What these tests exercise is CONVERGE's executable boundary, so they

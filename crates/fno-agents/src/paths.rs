@@ -458,6 +458,14 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+/// `$HOME`, or `/` when the environment lost it. Shared by the install and
+/// reclaim verbs, which both place state under the user's home.
+pub(crate) fn dirs_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 // ---------------------------------------------------------------------------
 // Project spaces: the per-repository state root OUTSIDE any checkout
 // ---------------------------------------------------------------------------

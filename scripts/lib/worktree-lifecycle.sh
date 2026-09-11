@@ -462,15 +462,16 @@ _cargo_target_inventory() {
         shopt -u nullglob
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
     # Build-base hash dirs: cargo writes intermediates at
-    # <base>/<h2>/<hash> under build.build-dir, outside every checkout, so
-    # the worktree walk above never sees them. Rows carry wt=build-base;
-    # _cargo_target_cleanup protects the dirs live workspaces resolve to and
-    # never deletes here when that resolution is unverifiable.
+    # <base>/<h2>/<h2>/<hash> under build.build-dir (the workspace hash is
+    # sharded two deep), outside every checkout, so the worktree walk above
+    # never sees them. Rows carry wt=build-base; _cargo_target_cleanup
+    # protects the dirs live workspaces resolve to and never deletes here
+    # when that resolution is unverifiable.
     local base hash
     base="$(_cargo_build_base)"
     if [[ -d "$base" ]]; then
         shopt -s nullglob
-        for hash in "$base"/*/*/; do
+        for hash in "$base"/*/*/*/; do
             [[ -d "$hash" ]] || continue
             hash="${hash%/}"
             [[ -f "$hash/CACHEDIR.TAG" ]] || continue

@@ -1,4 +1,4 @@
-"""``fno config plugin install <claude|codex|opencode|agy> [--force]`` (x-7ca7).
+"""``fno config plugin install <claude|codex|opencode|agy> [--force]``.
 
 Thin Typer front door over ``fno-agents plugin-install``: the Rust verb owns
 the stage build, the claude/opencode/agy arms, the env exports and the
@@ -46,7 +46,7 @@ def install(
     binary = _binary()
     argv = ["plugin-install"]
     if harness == "codex":
-        # The codex arm stays on the Python converge engine (ruling msg-18cf5f).
+        # The codex arm stays on the Python converge engine (ship-phase ruling).
         stage_out = subprocess.run(
             [str(binary), "plugin-install", "--stage-only"],
             capture_output=True,

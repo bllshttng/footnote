@@ -2392,7 +2392,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::merge_reap::consume_merge_cleanup_requests(
                             &home, &roots, &emitter, grace_secs,
                         );
-                        // Daily janitor (x-7ca7); gate and receipt in reclaim.rs.
+                        // Daily janitor; gate and receipt in reclaim.rs.
                         crate::reclaim::maybe_run_daily(&home);
                     });
                 }

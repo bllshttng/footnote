@@ -1,28 +1,22 @@
 //! `fno-agents plugin-install <harness> [--force]`, surfaced as
-//! `fno config plugin install` (x-7ca7). One local-dev install door for every
+//! `fno config plugin install`. One local-dev install door for every
 //! plugin harness. Everything installs from the FILTERED stage
 //! (`<state-root>/plugin-stage/fno`: git-tracked + untracked-but-not-ignored
 //! files only, rebuilt wholesale), never from the repo root, because harness
 //! caches copy what they are pointed at.
 //!
-//! Split per the ship-phase ruling (msg-18cf5f): THIS module owns stage
-//! build, claude, opencode and agy arms plus the env exports. The codex arm
-//! stays on the Python `converge` engine in the Python shim.
+//! This module owns stage build, claude, opencode and agy arms plus the env
+//! exports. The codex arm stays on the Python `converge` engine in the
+//! Python shim.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
 
-use crate::paths::AgentsHome;
+use crate::paths::{dirs_home, worktree_repo_root, AgentsHome};
 
 const BUILD_DIR_KEY: &str = "CARGO_BUILD_BUILD_DIR";
-const RC_MARK: &str = "# fno: cargo build-dir (x-7ca7)";
-
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
+const RC_MARK: &str = "# fno: cargo build-dir";
 
 fn state_root() -> PathBuf {
     std::env::var_os("FNO_RECLAIM_STATE_ROOT")
@@ -81,7 +75,14 @@ fn build_stage(cwd: &Path) -> Result<PathBuf, String> {
         Some(&root),
     )?;
     let dest = state_root().join("plugin-stage").join("fno");
-    let _ = std::fs::remove_dir_all(&dest);
+    match std::fs::remove_dir_all(&dest) {
+        Ok(()) => {}
+        // Already absent: nothing stale to overlay.
+        Err(_) if !dest.exists() => {}
+        // A partial removal followed by a plain copy would overlay stale
+        // files onto the fresh stage; refuse instead.
+        Err(e) => return Err(format!("stage: could not clear {}: {e}", dest.display())),
+    }
     std::fs::create_dir_all(&dest).map_err(|e| format!("stage: {e}"))?;
     let mut copied = 0usize;
     for rel in listed.split('\0').filter(|s| !s.is_empty()) {
@@ -154,10 +155,11 @@ fn install_claude(stage: &Path, force: bool) -> Result<String, String> {
 }
 
 fn install_opencode() -> Result<String, String> {
-    let Some(root) = canonical_root() else {
-        return Err("opencode: not inside the footnote repo".to_string());
-    };
+    let root = worktree_repo_root(&std::env::current_dir().unwrap_or_default());
     let src = root.join("cli/src/fno/setup/assets/opencode/footnote.js");
+    if !src.is_file() {
+        return Err("opencode: not inside the footnote repo".to_string());
+    }
     let dest_dir = dirs_home().join(".config/opencode/plugins");
     let dest = dest_dir.join("footnote.js");
     std::fs::create_dir_all(&dest_dir).map_err(|e| format!("opencode: {e}"))?;
@@ -165,28 +167,20 @@ fn install_opencode() -> Result<String, String> {
     Ok(format!("plugin -> {}", dest.display()))
 }
 
-fn canonical_root() -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if root.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(root))
-    }
-}
-
 fn export_claude_env() -> Result<(), String> {
     let path = dirs_home().join(".claude/settings.json");
-    let mut data: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+    // Absent: start from an empty object. Present but unparseable: refuse to
+    // write - the file is the user's, and an env-only rewrite would destroy it.
+    let mut data: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(&path)
+    {
+        Err(_) => Default::default(),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "claude env: {} is not valid JSON ({e}); not overwriting",
+                path.display()
+            )
+        })?,
+    };
     set_env_entry(&mut data, BUILD_DIR_KEY, build_dir_value());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("claude env: {e}"))?;
@@ -210,10 +204,17 @@ fn export_codex_env() -> Result<(), String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(".codex"))
         .join("config.toml");
-    let mut document: toml::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_else(|| toml::Value::Table(Default::default()));
+    // Same contract as the claude export: absent starts empty, unparseable
+    // refuses rather than replacing the user's config with a one-key table.
+    let mut document: toml::Value = match std::fs::read_to_string(&path) {
+        Err(_) => toml::Value::Table(Default::default()),
+        Ok(text) => toml::from_str(&text).map_err(|e| {
+            format!(
+                "codex env: {} is not valid TOML ({e}); not overwriting",
+                path.display()
+            )
+        })?,
+    };
     if !document.is_table() {
         document = toml::Value::Table(Default::default());
     }
@@ -246,17 +247,32 @@ fn export_rc_env() -> Option<PathBuf> {
         ".bashrc"
     });
     let mut text = std::fs::read_to_string(&rc).unwrap_or_default();
-    if text.contains(RC_MARK) {
-        return Some(rc);
+    let fresh_line = format!(
+        "{RC_MARK}\nexport {BUILD_DIR_KEY}=\"{}\"",
+        build_dir_value()
+    );
+    if let Some(mark_at) = text.find(RC_MARK) {
+        // The marked block is ours to keep current: rewrite it in place when
+        // the exported value drifted (a later cargo_targets_base change must
+        // reach the shell), instead of freezing the first exported path.
+        let line_end = text[mark_at..]
+            .find('\n')
+            .map(|i| mark_at + i)
+            .unwrap_or(text.len());
+        let value_end = text[line_end + 1..]
+            .find('\n')
+            .map(|i| line_end + 1 + i)
+            .unwrap_or(text.len());
+        let mut updated = String::with_capacity(text.len());
+        updated.push_str(&text[..mark_at]);
+        updated.push_str(&fresh_line);
+        updated.push_str(&text[value_end..]);
+        return std::fs::write(&rc, updated).ok().map(|_| rc);
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    let line = format!(
-        "{RC_MARK}\nexport {BUILD_DIR_KEY}=\"{}\"",
-        build_dir_value()
-    );
-    text.push_str(&line);
+    text.push_str(&fresh_line);
     text.push('\n');
     std::fs::write(&rc, text).ok()?;
     Some(rc)
@@ -356,20 +372,15 @@ fn env_exports_receipt() {
 }
 
 fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
-    let _ = force;
-    let mut cmd = Command::new("agy")
-        .args(["plugin", "install"])
-        .arg(stage)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("agy: {e}"))?;
-    let out = cmd.wait_with_output().map_err(|e| format!("agy: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "agy plugin install exited {}",
-            out.status.code().unwrap_or(-1)
-        ));
-    }
+    let _ = force; // agy imports the stage fresh on every install
+    run_checked(
+        &[
+            "agy".into(),
+            "plugin".into(),
+            "install".into(),
+            stage.display().to_string(),
+        ],
+        None,
+    )?;
     Ok("agy plugin imported, hooks.json carries the stop hook".to_string())
 }

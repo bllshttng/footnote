@@ -79,7 +79,7 @@ impl RunFailure {
 /// a bare `kill` to the leader orphans its subprocess tree (uv, git, gh under
 /// the real `fno` front door), which then keep writing into whatever HOME the
 /// caller staged - under test, a tempdir that dies with the test, recreating
-/// it after the drop (x-7ca7's 23.5 GB of leaked `.tmp*` fake-HOMEs).
+/// it after the drop (measured: 23.5 GB of leaked `.tmp*` fake-HOMEs).
 pub(crate) fn run_with_timeout(
     cmd: &[String],
     cwd: &Path,

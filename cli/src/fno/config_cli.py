@@ -64,7 +64,7 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         {"hidden": True},
     ),
     "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard", {"hidden": True}),
-    # x-7ca7: one local-dev install door for every plugin harness. VISIBLE on
+    # One local-dev install door for every plugin harness. VISIBLE on
     # purpose and distinct from the hidden `plugins` function-pack group: this
     # installs the footnote plugin itself, from the filtered stage, in one
     # action per harness (claude|codex|opencode|agy).

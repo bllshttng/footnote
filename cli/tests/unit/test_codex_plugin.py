@@ -1849,7 +1849,7 @@ def test_public_cli_reports_verified_release_and_restart_posture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The `setup codex-plugin` door retired; the public door is
-    # `fno config plugin install codex` (x-7ca7).
+    # `fno config plugin install codex`.
     from fno.plugin_install_cli import plugin_app
 
     monkeypatch.setattr(

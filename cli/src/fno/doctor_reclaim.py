@@ -1,4 +1,4 @@
-"""``fno doctor reclaim`` (x-7ca7): thin wrapper over ``fno-agents reclaim`` (the lanes live in Rust)."""
+"""``fno doctor reclaim``: thin wrapper over ``fno-agents reclaim`` (the lanes live in Rust)."""
 from __future__ import annotations
 
 import subprocess

@@ -88,7 +88,7 @@ struct Fleet {
 
 impl Drop for Fleet {
     // The fleet dir is a fake HOME; a panic must reap it too, or the leaked
-    // scratch outlives the run that made it (x-7ca7 wave 2).
+    // scratch outlives the run that made it.
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.dir).ok();
     }
