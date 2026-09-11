@@ -983,9 +983,7 @@ def cmd_spawn(
     passthrough: list[str] | None = typer.Argument(
         None,
         help=(
-            "Provider CLI flags after a `--` separator, pane substrate only: "
-            "they ride the composed argv through the same refusals as fno's "
-            "own flags."
+            "Provider CLI flags after a `--` fence; pane substrate only."
         ),
     ),
     name: str = typer.Option(
@@ -1001,9 +999,8 @@ def cmd_spawn(
         "--harness",
         "-H",
         help=(
-            "The CLI binary to launch (default: the invoking harness, then "
-            "claude). Undeclared binaries spawn into a pane with fno as the "
-            "viewport. For a one-shot: --substrate headless."
+            "The CLI binary to launch; default: the invoking harness, then "
+            "claude. One-shot: --substrate headless."
         ),
     ),
     vendor: str | None = typer.Option(
@@ -1012,8 +1009,7 @@ def cmd_spawn(
         "-P",
         help=(
             "The model VENDOR (zai or a model_routing.providers name), paired "
-            "with --model to name the route. NOT the CLI binary (-H). "
-            "Capital -P: -p is headless."
+            "with --model. NOT the CLI binary (-H). -p is headless."
         ),
     ),
     recorded_provider: str | None = typer.Option(
@@ -1039,9 +1035,8 @@ def cmd_spawn(
         "",
         "--substrate",
         help=(
-            "thread (the default where the harness seats one) | pane (mux-"
-            "hosted PTY) | headless (one-shot). Placement flags and a `--` "
-            "fence imply pane. Full map: docs/guides/agents-spawn-flags.md."
+            "thread (default where the harness seats one) | pane (mux PTY) | "
+            "headless (one-shot). Placement flags and a `--` fence imply pane."
         ),
     ),
     headless: bool = typer.Option(
@@ -1108,8 +1103,8 @@ def cmd_spawn(
         None,
         "--role",
         help=(
-            "Per-spawn model selection role. Auxiliary roles route to a "
-            "secondary provider when configured; the default stays primary."
+            "Per-spawn model-selection role; auxiliary roles route to a "
+            "secondary provider when configured."
         ),
     ),
     route: str | None = typer.Option(
@@ -1132,9 +1127,8 @@ def cmd_spawn(
         None,
         "--account",
         help=(
-            "Pin this ONE worker to a registered claude account without "
-            "touching the active ~/.claude slot. Fail-closed, claude only. "
-            "Semantics: docs/guides/agents-spawn-flags.md."
+            "Pin this ONE worker to a registered claude account; fail-closed, "
+            "claude only. Semantics: docs/guides/agents-spawn-flags.md."
         ),
     ),
     dispatch_account: str | None = typer.Option(
@@ -1173,9 +1167,8 @@ def cmd_spawn(
         "--resume",
         "-r",
         help=(
-            "Seed a NEW claude session from a transcript (uuid or 8-hex "
-            "short-id): content carries over, the id does NOT. To revive under "
-            "the SAME id: fno agents resume. claude + thread only."
+            "Seed a NEW claude session from a transcript: content carries "
+            "over, the id does NOT. Same-id revival: fno agents resume."
         ),
     ),
     add_dir: str | None = typer.Option(
@@ -1269,9 +1262,8 @@ def cmd_spawn(
         "--crown",
         "-k",
         help=(
-            "Grant an orchestrator crown over this territory: epic id(s), one "
-            "project, or several. Altitude derives from what you name; "
-            "refused on headless. Full contract: "
+            "Grant an orchestrator crown: epic id(s), one project, or "
+            "several. Refused on headless. Contract: "
             "docs/guides/agents-spawn-flags.md."
         ),
     ),
@@ -1324,12 +1316,11 @@ def cmd_spawn(
         None,
         "--wait",
         help=(
-            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h): "
-            "load_backstop, ram_floor, cpu_instrument_unreadable, "
+            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h). "
+            "Waitable: load_backstop, ram_floor, cpu_instrument_unreadable, "
             "cpu_share_undecidable, fleet_cpu_share, provider_cap, max_live. "
-            "Any other reason still exits at once with its receipt; the retry "
-            "keys on the receipt's reason field, never on its text. Mutually "
-            "exclusive with --no-wait."
+            "Any other reason exits at once with its receipt. Conflicts with "
+            "--no-wait."
         ),
     ),
     prompt_file: str | None = typer.Option(

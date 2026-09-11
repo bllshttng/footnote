@@ -3106,10 +3106,8 @@ def cmd_update(
         None,
         "--repo",
         help=(
-            "owner/name of the repo the PR lives in, when that differs from the "
-            "cwd checkout. A cwd-derived url is a guess; naming the repo makes "
-            "the stamp an assertion, which is also what lets it override a "
-            "recorded pr_url that names a different repo ()."
+            "owner/name of the repo the PR lives in, when that differs from "
+            "the cwd checkout; naming it makes the stamp an assertion."
         ),
     ),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
@@ -3160,7 +3158,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. 'null' clears.",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
@@ -3181,17 +3179,16 @@ def cmd_update(
         None,
         "--source-node",
         help=(
-            "Set the origin node this node came out of (id, slug, or bare hex). "
-            "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
+            "Origin node this node came out of (id, slug, or hex). 'null' "
+            "clears; a self-reference or an unresolved id refuses."
         ),
     ),
     related: Optional[List[str]] = typer.Option(
         None,
         "--related",
         help=(
-            "Replace the related list (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Pass 'null' to clear. Refuses a self-reference or an id "
-            "that does not resolve."
+            "Replace the related list (asserted, symmetric, non-blocking); "
+            "repeat or comma-separate. 'null' clears."
         ),
     ),
     blocked_by: Optional[List[str]] = typer.Option(

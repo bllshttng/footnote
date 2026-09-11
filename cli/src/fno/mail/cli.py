@@ -293,8 +293,8 @@ def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
     Fail-open: a disabled tier (0) or an unset body never blocks
-    coordination; the refusal teaches "pointer, not payload". Under
-    ``--raw --check`` an over-cap payload is a malformed CALL, hence exit 2.
+    coordination. Under ``--raw --check`` an over-cap payload is a malformed
+    CALL, hence exit 2.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:
@@ -323,17 +323,13 @@ _CROSS_SESSION_TAG_RE = re.compile(r"</?cross-session-message", re.IGNORECASE)
 
 
 def _refuse_forged_envelope(body: str) -> None:
-    """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
-    tag (x-4ce4), with a CLI-friendly error before the body ever reaches
-    ``wrap_fno_mail`` (which enforces the same invariant as the backstop for
-    every producer, not only these CLI entry points).
+    """Refuse a body carrying an ``<fno_mail`` open tag or ``</fno_mail>`` close
+    tag (x-4ce4), before it reaches ``wrap_fno_mail``.
 
-    The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
-    cannot forge one: a body containing a close tag followed by a fabricated
-    trailer would render as two envelopes to a reader, and the second could say
-    the opposite of the first. Refuse at send time and name the reason, rather
-    than silently stripping or escaping - the body is prose a human reads, and a
-    mangled body is worse than a refused send.
+    The trailer is only trustworthy if a peer cannot forge one: a close tag
+    plus a fabricated trailer renders as two envelopes, and the second could
+    say the opposite of the first. Refuse at send time; a mangled body is
+    worse than a refused send.
     """
     from fno.mail.envelope import ForgedEnvelopeError, refuse_if_forged
 
@@ -1071,13 +1067,10 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    The id is resolved against the durable bus FIRST: a directed message
-    (to_kind name/session/node) answers at its original sender, correlated
-    via in_reply_to. An id absent from the bus is then searched in THIS
-    session's transcript - the common path, not a fallback: a
-    live-confirmed delivery writes no durable thread, and
-    resolve_live_sender recovers the sender from the injected envelope.
-    Only an id absent from BOTH is a hard error.
+    The id resolves against the durable bus FIRST (directed mail answers
+    at its original sender), then in this session's transcript; only an
+    id absent from BOTH is a hard error. Routing contract:
+    docs/architecture/mail-reply-routing.md.
 
     The body is positional, or --body, or --body-file. Exactly one of the
     three; giving two is refused rather than resolved by precedence.
@@ -3691,17 +3684,14 @@ def cmd_send(
     """Send a message asynchronously to a registered agent or a project.
 
     Name mode requires the agent to exist (unknown names exit 16). Project
-    mode resolves over the registry: one live peer delivers live, none
-    queues durable, many errors with the candidate list unless ``--any``.
-    Crown mode resolves the crown holder at send time; nobody or a split
-    crown refuses. Delivery is live-inject-FIRST; the durable envelope is
-    the fallback tier. Address it by the ADDRESS column of ``fno agents
-    list`` - the NAME column is a spawn label, not a mailbox. A stranded
-    send: ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
+    mode resolves over the registry; crown mode resolves the holder at send
+    time. Delivery is live-inject-FIRST, the durable envelope the fallback.
+    Address it by the ADDRESS column of ``fno agents list`` - the NAME
+    column is a spawn label, not a mailbox. A stranded send:
+    ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
 
-    Stdout contract: exactly one line, ``msg-<id> delivered (hosted)`` or
-    ``msg-<id> queued (durable) [<reason>]``. Exit 0 for both; failures go
-    to stderr with a nonzero exit.
+    Stdout: one line, ``msg-<id> delivered (hosted)`` or
+    ``msg-<id> queued (durable) [<reason>]``. Exit 0 for both.
     """
     from fno.agents.dispatch import (
         DispatchAskError,
