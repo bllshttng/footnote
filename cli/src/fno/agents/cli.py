@@ -2658,13 +2658,12 @@ def cmd_name(
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
     Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
-    error, which an `fno` too old to know this verb also returns - treating 2 as a
-    refusal refuses the fleet on a stale install.
+    error, which an `fno` too old to know this verb also returns - reading 2 as a refusal
+    refuses the fleet on a stale install.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
-    # One positional binds to PREFIX by Click's left-to-right rule; read it as
-    # the node instead, so the shape a scripter naturally writes just works.
+    # One positional binds to PREFIX by Click's left-to-right rule; read it as the node.
     if node_id is None:
         prefix, node_id = None, prefix
     if not node_id:
