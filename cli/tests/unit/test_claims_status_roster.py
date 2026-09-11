@@ -8,6 +8,7 @@ node still fails closed as unknown.
 from __future__ import annotations
 
 import json
+import time as _time
 
 import pytest
 from typer.testing import CliRunner
@@ -80,3 +81,74 @@ def test_an_unresolved_row_naming_this_node_still_reads_unknown(cwd_tmp, roster)
     r = runner.invoke(cli, ["status", NODE])
     assert "t-here" in r.output
     assert "Confirm with: fno agents peek t-here" in r.output
+
+
+# --- x-dead: the crosscheck dates the transcript and hedges its basis ------
+
+
+def _workers(*workers: dict) -> RosterReading:
+    return RosterReading(True, len(workers), {NODE.removeprefix("node:"): list(workers)})
+
+
+def _install_facts(monkeypatch, epoch):
+    from fno.agents.watchdog import TailFacts
+
+    monkeypatch.setattr(
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=epoch, tail_text="", last_role="assistant",
+            last_text="working the task", pr_polls=None,
+        ),
+    )
+
+
+def test_an_undatable_transcript_never_renders_a_live_worker(cwd_tmp, roster, monkeypatch):
+    # Task 1.1, the measured wrong answer: a done row whose transcript could
+    # not be dated rendered "UNCLAIMED but a live worker is on this node".
+    # UNKNOWN is its own arm: no worked_by, and the line says so.
+    _install_facts(monkeypatch, None)
+    roster(_workers({"name": "bp-0396", "state": "done", "cwd": "/wt/ac1-node",
+                     "row_id": "bp-0396"}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    assert "basis" not in info
+    r = runner.invoke(cli, ["status", NODE])
+    assert "UNCLAIMED but a live worker" not in r.output
+    assert "could not be dated" in r.output
+
+
+def test_a_stale_working_word_yields_to_a_done_tail(cwd_tmp, roster, monkeypatch):
+    # Measured live 15:1xZ: t-b7f8-reaper-keep-rules read parked in
+    # `fno agents list` while this reader said live from the same row's
+    # stale `working` word. The transcript outranks the word.
+    _install_facts(monkeypatch, _time.time() - 3 * 3600)
+    roster(_workers({"name": "t-b7f8-reaper-keep-rules", "state": "working",
+                     "cwd": "/wt/ac1-node", "row_id": "t-b7f8"}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    r = runner.invoke(cli, ["status", NODE])
+    assert "UNCLAIMED but a live worker" not in r.output
+
+
+def test_degraded_coverage_hedges_the_basis(cwd_tmp, roster, monkeypatch):
+    # Task 2.1, the 31-of-53 specimen: a settled `basis=live-worker` beside
+    # `roster_coverage: degraded` hid the hedge. The basis itself now carries
+    # it, and the stderr line names the fraction.
+    _install_facts(monkeypatch, _time.time())
+    unresolved = [_unresolved(f"t-other-{i}", f"/wt/other-{i}") for i in range(31)]
+    roster(RosterReading(True, 53, {NODE.removeprefix("node:"): [
+        {"name": "t-live", "state": "working", "cwd": "/wt/ac1-node", "row_id": "t-live"},
+    ]}, "", {}, len(unresolved), tuple(unresolved)))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert info["worked_by"] == ["t-live"]
+    assert info["basis"] == "live-worker-degraded-coverage"
+    assert info["roster_coverage"] == "degraded"
+    r = runner.invoke(cli, ["status", NODE])
+    assert "UNCLAIMED but a live worker" in r.output
+    assert "coverage degraded: 31 of 53 rows unresolved" in r.output

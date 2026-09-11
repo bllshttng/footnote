@@ -3788,7 +3788,7 @@ mod tests {
         // Dead holder pid, expired TTL: Stale by pid evidence, not by the
         // clock. Positive marker: the basis names the pid probe's cause.
         let now = now_ms();
-                let (state, cause) =
+        let (state, cause) =
             classify_with_basis(&gate_record(-1, now, Some(now - 1)), Some(now), &|pid| {
                 probe_pid(pid)
             });
@@ -3830,7 +3830,7 @@ mod tests {
         // Only the expired arm changes; the unexpired arm keeps its
         // TTL-protected Suspect, matching the dispatch: precedent.
         let now = now_ms();
-                let (state, _cause) = classify_with_basis(
+        let (state, _cause) = classify_with_basis(
             &gate_record(-1, now, Some(now + 60_000)),
             Some(now),
             &|pid| probe_pid(pid),

@@ -741,9 +741,23 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         HashSet::new()
     };
     let mut undriven_rows: Vec<Value> = Vec::new();
+    // x-dead task 1.4b: the pr_nodes rows carry no `contained_in` (the field
+    // lives on the graph entry), so node_driver's contained arm cannot fire
+    // here on its own. Resolve it from the entries the board already holds.
+    let contained_ids: HashSet<String> = inputs
+        .entries
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|e| s_str(e, "contained_in").is_some_and(|c| !c.is_empty()))
+        .filter_map(|e| s_str(e, "id").map(str::to_string))
+        .collect();
     if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
         for node in &inputs.pr_nodes.rows() {
             if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
+                continue;
+            }
+            if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }
             let terminal = s_str(node, "status")

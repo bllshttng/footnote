@@ -2032,6 +2032,42 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     assert results[0].reason == "held: claim live held by test-holder"
 
 
+def test_xdead_undatable_transcript_is_not_fresh_activity(monkeypatch, tmp_path):
+    """Task 1.5, the 2h33m specimen: a transcript whose newest record is old
+    but whose mtime is fresh is NOT recently-active. The fallback that read
+    the mtime is deleted; no timestamped entry is no evidence."""
+    import os
+    import time
+
+    from pathlib import Path
+
+    projects = tmp_path / ".claude" / "projects" / "proj-abc"
+    projects.mkdir(parents=True)
+    sid = "0123abcd-0000-0000-0000-000000000000"
+    transcript = projects / f"{sid}.jsonl"
+    old = time.time() - 2 * 3600
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+    )
+    os.utime(transcript, (old, old))
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    # Positive control: the probe finds the file and reads it (it is the
+    # RECORD age, not the glob, that decides).
+    assert adv._transcript_recently_active(sid) is False
+
+    fresh = time.time()
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fresh - 120))
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+        + json.dumps({"timestamp": fresh_stamp, "message": {}}) + "\n"
+    )
+    os.utime(transcript, (fresh - 60, fresh - 60))
+    # A record INSIDE the idle window is the one thing that flips the answer.
+    assert adv._transcript_recently_active(sid) is True
+
+
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_dependents_preserve_family2_refusal_reason(iso, monkeypatch, reason):
     monkeypatch.setattr(adv, "_direct_dependents", lambda *_a: [_DEP])
