@@ -1400,3 +1400,74 @@ def test_render_truth_names_the_basis():
     assert line.endswith("by last-entry)")
     assert "2d" in line
 
+
+# ---------------------------------------------------------------------------
+# provider_refusal: the quota refusal the last assistant turn carries (x-e594)
+#
+# Ten workers died on usage-limit 429s and every one read `quiet` or `writing`,
+# because the renderers never consulted the refusal text already on the row.
+# The truth reading is where the taxonomy is applied once, and both status
+# lanes consume the field from here.
+# ---------------------------------------------------------------------------
+
+_QUOTA_BODY = (
+    "API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. "
+    "Your limit will reset at 2026-09-11 19:37:55]"
+)
+
+
+def test_ac1_quota_refusal_rides_the_truth_payload(tmp_path):
+    """AC1-HP: the measured corpse's tail - last assistant record is the
+    usage-limit 429 - classifies to provider_4xx_quota on the reading."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-e594-0000-0000-000000000001"
+    _write_claude_transcript(tmp_path, cwd, sid, ["on it", _QUOTA_BODY])
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["provider_refusal"] == "provider_4xx_quota"
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        # the same text in a USER turn: a mailed or pasted refusal is prose
+        # about a cap, never the worker's own refusal
+        ["on it", _QUOTA_BODY, ("user", _QUOTA_BODY)],
+        # the quota words start after the 120-char lead: prose about a cap
+        # deeper in a turn is not a refusal to classify on
+        ["on it", "word " * 40 + _QUOTA_BODY],
+        # a finished worker is an outcome, not a refusal
+        ["<promise>MISSION COMPLETE: shipped</promise>"],
+    ],
+)
+def test_ac2_non_qualifying_tails_leave_provider_refusal_null(tmp_path, turns):
+    """AC2-ERR: role, lead-window and done each keep the field null."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-e594-0000-0000-000000000002"
+    _write_claude_transcript(tmp_path, cwd, sid, turns)
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["provider_refusal"] is None
+
+
+def test_ac2_unknown_paths_carry_provider_refusal_none(tmp_path):
+    """AC2-ERR: every unknown path emits the key as None, so a Rust probe
+    parsing an older body and a fresh one agree on the absent case."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    def miss(_handle):
+        return None, []
+
+    result = resolve_session_truth("nope", resolve=miss, projects_root=tmp_path)
+    assert result["provider_refusal"] is None
+
