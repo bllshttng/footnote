@@ -12,7 +12,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from fno.footprint import parse_footprint
+from fno import doctor_footprint
+from fno.footprint import Footprint, parse_footprint
 from fno.cli import app
 
 # Import the mux_spawn -> dispatch chain at collection, before any test
@@ -1295,7 +1296,7 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
     # Git calls the config-root resolver may shell are not the cause-only
     # contract's subject; what it promises is ONE ps read and no roster walk.
     assert [call for call in calls if call[0] == "ps"] == [
-        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]
+        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"]
     ]
     assert not [call for call in calls if "agents" in call]
 
@@ -1512,7 +1513,7 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     # ps is the only subprocess left: the roster count reads the registry
     # in process, so there is no second shell-out to budget.
     assert [call for call in calls] == [
-        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
+        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"],
     ]
 
 
@@ -2047,6 +2048,153 @@ def test_cpu_admission_pins_the_shared_gate_fixture():
         assert adm.reason == expected["reason"], case["name"]
         assert adm.share_low == pytest.approx(expected["share_low"]), case["name"]
         assert adm.share_high == pytest.approx(expected["share_high"]), case["name"]
+
+
+def test_machine_pressure_pins_the_shared_fixture():
+    """x-d6ad AC11: the three payloads both suites consume. The Python decider
+    reproduces every verdict from the case inputs; the Rust machine_watch arm
+    reads the same file and must take the branch the verdict names."""
+    fixture_path = (
+        Path(__file__).parent.parent / "agents" / "fixtures" / "machine_pressure.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert len(fixture["cases"]) == 3
+    for case in fixture["cases"]:
+        inputs = case["inputs"]
+        reading = (
+            None
+            if inputs["measured_cpu_cores"] is None
+            else Footprint(
+                sustained_cpu_cores=0.0,
+                descendant_cpu_cores=0.0,
+                fleet_cpu_cores=0.0,
+                descendant_process_count=0,
+                direct_process_count=0,
+                transient_call_count=0,
+                process_count=0,
+                rss_gb=0.0,
+                measured_cpu_cores=inputs["measured_cpu_cores"],
+                top=[],
+                unparsed_lines=0,
+                machine_process_count=inputs["machine_process_count"],
+                runnable_count=inputs["runnable_count"],
+            )
+        )
+        pressure = doctor_footprint.machine_pressure(
+            reading,
+            capacity_cores=inputs["capacity_cores"],
+            busy_band=inputs["busy_band"],
+            load_15m=inputs["load_15m"],
+            throttle_minutes=inputs["throttle_minutes"],
+            failure=inputs.get("failure"),
+        )
+        expected = case["payload"]["machine"]
+        assert pressure.verdict == expected["verdict"], case["name"]
+        assert pressure.busy_fraction == expected["busy_fraction"], case["name"]
+        assert pressure.band == expected["band"], case["name"]
+        assert pressure.runnable == expected["runnable"], case["name"]
+        assert pressure.processes == expected["processes"], case["name"]
+        assert pressure.throttle_minutes == expected["throttle_minutes"], case["name"]
+        assert pressure.reason == expected["reason"], case["name"]
+
+
+def test_ac1_hp_hot_reason_names_band_before_load():
+    """x-d6ad AC1: the hot reason names the busy fraction and the band first,
+    then load and the runnable count."""
+    pressure = doctor_footprint.machine_pressure(
+        _reading_with_machine(11.0, 1010, 66),
+        capacity_cores=12.0,
+        busy_band=0.9,
+        load_15m=112.96,
+        throttle_minutes=60,
+    )
+    assert pressure.verdict == "hot"
+    assert pressure.busy_fraction == pytest.approx(0.917)
+    band_at = pressure.reason.index("band")
+    load_at = pressure.reason.index("load_15m")
+    runnable_at = pressure.reason.index("runnable")
+    assert band_at < load_at < runnable_at
+
+
+def test_ac2_hp_calm_reason_carries_load_beside_a_busy_fraction():
+    """x-d6ad AC2: load 112.96 sits beside a 43 percent busy box, and the
+    verdict stays calm."""
+    pressure = doctor_footprint.machine_pressure(
+        _reading_with_machine(5.186, 1010, 66),
+        capacity_cores=12.0,
+        busy_band=0.9,
+        load_15m=112.96,
+        throttle_minutes=60,
+    )
+    assert pressure.verdict == "calm"
+    assert pressure.busy_fraction == pytest.approx(0.432)
+    assert "43.2%" in pressure.reason
+    assert "113.0" in pressure.reason
+    assert "66 runnable of 1010 processes" in pressure.reason
+
+
+def test_ac10_hp_machine_census_is_machine_wide():
+    """x-d6ad AC10: machine_process_count and runnable_count count every
+    parsed row, distinct from the roster-scoped counts beside them."""
+    rows = [
+        "  50    1 R      10:00 90.0 1024 /bin/run-top",
+        "  51    1 S      10:00  0.0 1024 /bin/sleeper",
+        "  52    1 Z      10:00  0.0 1024 (defunct)",
+        "  53    1 RN     10:00 12.0 1024 cargo test",
+        "  54    1 S      10:00  0.0 1024 /bin/other",
+    ]
+    reading = parse_footprint("\n".join(rows), attributed_root_pids={50})
+    assert reading.machine_process_count == 5
+    assert reading.runnable_count == 2  # R and RN; Z is not runnable
+    # The roster-scoped counts sit beside them, unchanged in meaning.
+    assert reading.process_count == 1
+    assert reading.direct_process_count == 1
+    assert reading.measured_cpu_cores == pytest.approx(1.02)
+
+
+def test_parse_accepts_stateless_and_legacy_snapshots():
+    """The six-column shape without state and the legacy five-column shape
+    still parse; without a state column the runnable count reads zero."""
+    six_col = "  60    1 10:00 5.0 1024 /bin/one\n  61    1 10:00 0.0 1024 /bin/two"
+    reading = parse_footprint(six_col)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 0
+    legacy = "  70 10:00 5.0 1024 /bin/three"
+    reading = parse_footprint(legacy)
+    assert reading.machine_process_count == 1
+    assert reading.runnable_count == 0
+
+
+def test_parse_reads_a_headered_state_snapshot():
+    """A real headered `ps -Ao pid,ppid,state,etime,%cpu,rss,command` snapshot
+    routes to the state shape."""
+    headered = (
+        "  PID  PPID STAT     ELAPSED  %CPU   RSS COMMAND\n"
+        "   80     1 S+       10:00   5.0  1024 /bin/watcher\n"
+        "   81     1 R        10:00  90.0  1024 /bin/spinner"
+    )
+    reading = parse_footprint(headered)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 1
+    assert reading.measured_cpu_cores == pytest.approx(0.95)
+
+
+def _reading_with_machine(measured: float, processes: int, runnable: int) -> Footprint:
+    return Footprint(
+        sustained_cpu_cores=0.0,
+        descendant_cpu_cores=0.0,
+        fleet_cpu_cores=0.0,
+        descendant_process_count=0,
+        direct_process_count=0,
+        transient_call_count=0,
+        process_count=0,
+        rss_gb=0.0,
+        measured_cpu_cores=measured,
+        top=[],
+        unparsed_lines=0,
+        machine_process_count=processes,
+        runnable_count=runnable,
+    )
 
 
 # ---------------------------------------------------------------------------

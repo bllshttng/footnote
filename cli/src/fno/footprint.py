@@ -50,6 +50,11 @@ class Footprint(NamedTuple):
     spare_pool_process_count: int = 0
     spare_pool_cpu_cores: float = 0.0
     spare_pool_rss_gb: float = 0.0
+    # Whole-machine census (x-d6ad AC10): every parsed row and the rows whose
+    # ps state begins with R. Machine-wide on purpose, beside the roster-scoped
+    # ``process_count``/``direct_process_count`` above, which do not change.
+    machine_process_count: int = 0
+    runnable_count: int = 0
 
 
 class Admission(NamedTuple):
@@ -138,6 +143,8 @@ class _Process(NamedTuple):
     cpu_percent: float
     rss_kb: int
     command: str
+    # ps state letter(s), read only when the snapshot carries the state column.
+    state: str = ""
 
 
 #: The `worktrees/<name>` tail a cluster of commands shares - the one line
@@ -229,25 +236,42 @@ def parse_footprint(
     attributed_root_pids: set[int] | frozenset[int] | None = None,
     threshold_excluded_root_pids: set[int] | frozenset[int] | None = None,
 ) -> Footprint:
-    """Parse a file-backed ``ps -Ao pid,ppid,etime,%cpu,rss,command`` snapshot.
+    """Parse a file-backed ``ps -Ao pid,ppid,state,etime,%cpu,rss,command`` snapshot.
 
-    The legacy five-column shape is accepted for callers with old fixtures. It
-    has no parentage, so only directly attributable rows can be counted.
+    The six-column shape without ``state`` and the legacy five-column shape are
+    accepted for callers with old fixtures. The legacy shape has no parentage,
+    so only directly attributable rows can be counted; without ``state`` the
+    runnable count reads zero, never a guess.
     """
     processes: dict[int, _Process] = {}
     unparsed_lines = 0
     new_format = False
+    new_state_format = False
 
     for raw_line in ps_output.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if line.startswith("PID "):
-            new_format = len(line.split()) >= 2 and line.split()[1] == "PPID"
+            header = line.split()
+            new_format = len(header) >= 2 and header[1] == "PPID"
+            new_state_format = len(header) > 2 and header[2] == "STAT"
             continue
         try:
-            fields = line.split(None, 5)
-            if new_format:
+            state = ""
+            if new_format and new_state_format:
+                fields = line.split(None, 6)
+                if len(fields) != 7:
+                    raise ValueError("wrong new-format field count")
+                pid = int(fields[0])
+                ppid = int(fields[1])
+                state = fields[2]
+                elapsed = _elapsed_seconds(fields[3])
+                cpu_percent = float(fields[4])
+                rss = int(fields[5])
+                command = fields[6].strip()
+            elif new_format:
+                fields = line.split(None, 5)
                 if len(fields) != 6:
                     raise ValueError("wrong new-format field count")
                 pid = int(fields[0])
@@ -258,17 +282,33 @@ def parse_footprint(
                 command = fields[5].strip()
             else:
                 new_shape = False
-                if len(fields) == 6:
+                fields = line.split(None, 6)
+                if len(fields) == 7:
                     try:
                         pid = int(fields[0])
                         ppid = int(fields[1])
-                        elapsed = _elapsed_seconds(fields[2])
-                        cpu_percent = float(fields[3])
-                        rss = int(fields[4])
-                        command = fields[5].strip()
+                        state = fields[2]
+                        elapsed = _elapsed_seconds(fields[3])
+                        cpu_percent = float(fields[4])
+                        rss = int(fields[5])
+                        command = fields[6].strip()
                         new_shape = True
                     except (TypeError, ValueError):
                         new_shape = False
+                        state = ""
+                if not new_shape:
+                    fields = line.split(None, 5)
+                    if len(fields) == 6:
+                        try:
+                            pid = int(fields[0])
+                            ppid = int(fields[1])
+                            elapsed = _elapsed_seconds(fields[2])
+                            cpu_percent = float(fields[3])
+                            rss = int(fields[4])
+                            command = fields[5].strip()
+                            new_shape = True
+                        except (TypeError, ValueError):
+                            new_shape = False
                 if not new_shape:
                     fields = line.split(None, 4)
                     if len(fields) != 5:
@@ -284,7 +324,7 @@ def parse_footprint(
         except (TypeError, ValueError):
             unparsed_lines += 1
             continue
-        processes[pid] = _Process(pid, ppid, elapsed, cpu_percent, rss, command)
+        processes[pid] = _Process(pid, ppid, elapsed, cpu_percent, rss, command, state)
 
     excluded = frozenset(excluded_root_pids or ())
     attributed_roots = frozenset(attributed_root_pids or ())
@@ -396,4 +436,8 @@ def parse_footprint(
         spare_pool_process_count=spare_pool_count,
         spare_pool_cpu_cores=spare_pool_cpu_percent / 100,
         spare_pool_rss_gb=spare_pool_rss_kb / (1024 * 1024),
+        machine_process_count=len(processes),
+        runnable_count=sum(
+            1 for process in processes.values() if process.state.startswith("R")
+        ),
     )
