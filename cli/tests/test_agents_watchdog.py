@@ -922,7 +922,8 @@ def test_a_codex_row_with_a_genuinely_missing_transcript_still_ghosts_by_id():
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
     """A row carrying only a name cannot resolve a transcript or a claim, so a
     name-based row id is never minted for it: it would silently drop a live
-    same-named row at the dedup. Skipped loudly, like the claude roster."""
+    same-named row at the dedup. Named loudly with its node attribution
+    (x-ae54), and its node reads worked through the unmeasurable fold."""
     from fno.agents import registry as registry_mod
     from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import AgentEntry
@@ -943,7 +944,10 @@ def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path
     rows, warnings = watchdog.fleet_rows()
 
     assert rows == []
-    assert any("no session id" in w for w in warnings)
+    named = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(named) == 1
+    assert "node=x-535c" in named[0]
+    assert "name=codex-thread" in named[0]
 
 
 def test_reroute_delegates_to_the_full_failover(monkeypatch):
@@ -4618,3 +4622,70 @@ def test_unfinished_mail_gate_mails_an_incomplete_scan(tmp_path, monkeypatch):
     assert len(sent) == 1
     assert f"{uw.KIND_STARTED}={uw.UNKNOWN_DIM}" in sent[0]
     assert stamp == uw.snapshot_signature(snap)
+
+
+def test_an_attributable_no_sid_row_is_advisory_and_named(monkeypatch):
+    """A live registry row with no harness session id but a node attribution
+    rides an advisory line naming the row, so the worked overlay can skip the
+    one row instead of refusing the measure for every node (x-ae54)."""
+    from types import SimpleNamespace
+
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
+    row = SimpleNamespace(
+        harness="codex", status="live", harness_session_id=None,
+        session_id=None, short_id=None, name="bp-a238-king-brief",
+        node="x-a238", cwd="/tmp/nowhere",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    advisory = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(advisory) == 1
+    assert "node=x-a238" in advisory[0]
+    assert "name=bp-a238-king-brief" in advisory[0]
+    assert not any("carried no session id" in w for w in warnings)
+
+
+def test_an_unattributable_no_sid_row_still_warns_blocking(monkeypatch):
+    """Without a node attribution the row is unknowable liveness: the
+    blocking warning stays, so read_roster fails closed (x-ae54 posture)."""
+    from types import SimpleNamespace
+
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
+    row = SimpleNamespace(
+        harness="codex", status="live", harness_session_id=None,
+        session_id=None, short_id=None, name="bp-ghost", node=None,
+        cwd="/tmp/nowhere",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    assert any("carried no session id" in w for w in warnings)
+
+
+def test_a_claude_no_sid_row_in_a_linked_worktree_is_attributed(monkeypatch):
+    """The claude-side twin: cwd names a linked worktree, so the row rides the
+    same advisory attribution instead of the blocking count."""
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+    import fno.recovery as recovery_mod
+
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: (
+        [{"sessionId": "", "name": "t-ae54-worker", "cwd": "/repo/.claude/worktrees/x-ae54",
+          "state": "working"}],
+        [],
+    ))
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda _cwd: True)
+    monkeypatch.setattr(recovery_mod, "_node_id_from_worktree", lambda _cwd: "x-ae54")
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    advisory = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(advisory) == 1
+    assert "harness=claude node=x-ae54 name=t-ae54-worker" in advisory[0]

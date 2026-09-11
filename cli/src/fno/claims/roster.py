@@ -12,6 +12,7 @@ class RosterReading(NamedTuple):
     rows_by_session: Mapping = MappingProxyType({})
     rows_unresolved: int = 0
     unresolved_rows: tuple = ()
+    unmeasurable_by_node: Mapping = MappingProxyType({})
 
     def workers_on(self, node_id: str) -> list:
         return self.workers_by_node.get(node_id, [])
@@ -29,9 +30,24 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
         return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
 
-    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
+    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
 
-    blocking = [w for w in warnings if not w.startswith(ADVISORY_WARNING_PREFIX)]
+    unmeasurable: dict = {}
+    blocking = []
+    for w in warnings:
+        idx = w.find(UNMEASURABLE_ROW_PREFIX)
+        if idx == -1:
+            if not w.startswith(ADVISORY_WARNING_PREFIX):
+                blocking.append(w)
+            continue
+        fields = {}
+        for tok in w[idx + len(UNMEASURABLE_ROW_PREFIX):].split():
+            if "=" in tok:
+                key, _, value = tok.partition("=")
+                fields[key] = value
+        if fields.get("node"):
+            unmeasurable.setdefault(fields["node"], []).append(fields.get("name") or "unknown")
+
     if blocking:
         return RosterReading(False, 0, {}, blocking[0])
 
@@ -51,7 +67,7 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
             unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved))
+    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved), unmeasurable)
 
 
 def _finished_row_states() -> frozenset:

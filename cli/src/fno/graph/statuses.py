@@ -277,8 +277,16 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
 def live_worked_node_ids(
     *, strict: bool = False, entries: list[dict] | None = None
 ) -> dict[str, list[str]]:
-    """Return open-phase nodes whose session rows name live roster workers.
-    Missing markers are not live work; unreadable roster state fails closed.
+    """Return open-phase nodes whose roster workers are live.
+
+    Three sources per node, all named in the worker list: the session-row
+    join (graph session id to roster row), the node-attributed fold (a live
+    registry worker whose graph session row was never written - the
+    spawn-time skip in spawn_lineage), and the unmeasurable fold (a live row
+    with no harness session id, attributed to its node by fleet_rows). An
+    unmeasurable row the roster CANNOT attribute to a node still refuses the
+    whole overlay: unknowable liveness fails closed. Attributable ones skip
+    themselves, so one worker never blanks the measure for every node.
     """
     try:
         from fno.claims.roster import _really_finished, read_roster
@@ -287,12 +295,6 @@ def live_worked_node_ids(
 
         if entries is None:
             entries = read_graph_strict(graph_json())
-        if not any(isinstance(row, dict) and isinstance(row.get("phase"), str)
-                   and is_open_phase_row(row, row["phase"])
-                   for entry in entries if isinstance(entry, dict)
-                   for row in entry.get("sessions") or []
-                   if entry.get("status") not in TERMINAL_RUNGS):
-            return {}
         reading = read_roster()
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
@@ -304,6 +306,7 @@ def live_worked_node_ids(
             node_id = entry.get("id")
             if not isinstance(node_id, str) or not node_id:
                 continue
+            workers: list[str] = []
             for row in entry.get("sessions") or []:
                 phase = row.get("phase") if isinstance(row, dict) else None
                 if not isinstance(phase, str) or not is_open_phase_row(row, phase):
@@ -312,7 +315,19 @@ def live_worked_node_ids(
                 if roster_row and not _really_finished(roster_row):
                     worker = roster_row.get("name")
                     if isinstance(worker, str) and worker:
-                        worked.setdefault(node_id, []).append(worker)
+                        workers.append(worker)
+            for extra in reading.workers_on(node_id):
+                if _really_finished(extra):
+                    continue
+                name = extra.get("name")
+                if isinstance(name, str) and name and name not in workers:
+                    workers.append(name)
+            for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
+                marker = f"{extra_name} (unmeasurable: no harness session id)"
+                if marker not in workers:
+                    workers.append(marker)
+            if workers:
+                worked[node_id] = workers
         return worked
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:
