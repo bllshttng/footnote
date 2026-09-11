@@ -78,7 +78,13 @@ when that is set. On a maintainer setup with an Obsidian vault enabled it
 resolves to a backlog file under the vault instead, so sibling worktrees share
 one file and writes are flock-serialized on that target.
 
-## Provider behavior note
+## Is this page for you?
+
+You run the daily triage pass, or you cannot tell whether a captured thought deserves a graph node or an inbox row. This page owns the two-source picker and the promotion ladder from `fu-` inbox item to `ab-` node. Misreading it bloats the wrong store: a one-line follow-up becomes a graph node nobody will groom, or real work dies in an inbox nobody picks.
+
+Not for: the day-to-day verbs once a node exists. That is [backlog-usage.md](backlog-usage.md). Why the board ranks two nodes the way it does: [architecture/backlog-board-ordering.md](architecture/backlog-board-ordering.md).
+
+## The picker
 
 The deferrals-capture pass that feeds the inbox is advisory. Since the
 control-plane collapse it runs and logs but does not
