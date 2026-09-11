@@ -8,7 +8,7 @@ Six surfaces used to answer "is this agent live" and they answered four differen
 
 ## The rules, all load-bearing
 
-Positive evidence comes only from transcript activity age; no other signal may raise a verdict toward `reachable` (the registry's own PID SEMANTICS rule generalized: a live process may still be unreachable, so process liveness can falsify and can never establish). Falsifiers are monotone toward `unreachable`; one may lower a verdict and never raise one. `unknown` is terminal and no consumer may coerce it to either pole. Basis and age are part of the value; a bare `live` is unprintable. Positive evidence expires: transcript activity certifies liveness only inside `TRANSCRIPT_EVIDENCE_S`, past which an active tail demotes to `unknown` (basis `stale-transcript`), never `unreachable` (x-c1a3).
+Positive evidence comes only from transcript activity age; no other signal may raise a verdict toward `reachable` (the registry's own PID SEMANTICS rule generalized: a live process may still be unreachable, so process liveness can falsify and can never establish). Falsifiers are monotone toward `unreachable`; one may lower a verdict and never raise one. `unknown` is terminal and no consumer may coerce it to either pole. Basis and age are part of the value; a bare `live` is unprintable. Positive evidence expires: transcript activity certifies liveness only inside `TRANSCRIPT_EVIDENCE_S`, past which an active tail demotes to `unknown` (basis `stale-transcript`), never `unreachable`.
 
 ## Why silence is never `unreachable`
 
