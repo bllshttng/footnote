@@ -18,6 +18,18 @@ Direct edits are blocked by `hooks/graph-write-protect.sh`.
 
 Create implementation plans scaled to the task. The output shape is always one plan `.md` (`plan == PR == node`); the input decides the path (mutate a `/think` doc in place, or create a fresh doc from an idea). Which gates fire is a READ of the input and the plan, not a guess - the dispatch table below names each trigger.
 
+## Substrate
+
+Read the argument left to right: an optional leading `subagent` token (stripped before Plan Claims Ingestion reads the node id), then the input (node id, design-doc path, or feature description). No token: run it here, inline.
+
+`subagent` runs the whole skill in a subagent of this session - a plan takes 5 to 11 minutes instead of a 40 to 60 minute lane, and it still takes the claim, writes the row and runs every gate:
+
+1. Run `fno backlog session open <node> --json`. A nonzero exit is the answer. Relay the refusal line and launch nothing.
+2. For several nodes at once, run `fno config assert-subagent-budget --width <n>` first. A refusal means one at a time.
+3. Launch one subagent with the Agent tool. Its whole prompt is: `Use the Skill tool to run fno:blueprint with args "<node>". Follow the skill to its end, including the blueprint close and its readback. Do not edit source files. Report the plan path and the readback line.` Add nothing to it. A rule typed into a prompt is the drift this token removes. A node-specific constraint goes on the node with `fno backlog update <node> --dispatch-brief "..."`, where step 2a reads it.
+4. When it returns, read back two positive markers. `fno backlog get <node>` holds a `blueprint` session row with this session's id and an `ended_at`. `fno agents claim status node:<node> --json` no longer names `blueprint-session:<this session id>`.
+5. When either marker is missing, the subagent did not finish. Run `fno agents claim release node:<node> --holder blueprint-session:<session id>` (never with `--stamp-do`) and report the failure. Never backfill the row with `fno backlog session add`. A row records a completion, and nothing completed.
+
 ## Gates (read by state)
 
 Each gate loads only when its trigger fires. The bodies (with verbatim scripts) live in [references/blueprint-gates.md](references/blueprint-gates.md); read a gate's section there when the trigger below is true. Do NOT run a gate whose trigger is false - a plan that fires no DB/executor/model/impeccable gate never mentions them.
@@ -143,6 +155,7 @@ fi
    fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.
+2a. **Verify the premise** - applies to node-seeded and raw-prose input; a supplied design doc already carries cited findings. Read the whole node with `fno backlog get <id>`, including `dispatch_brief` and `progress_notes`; a later correcting note wins over the details. Name the one claim the plan rests on (what a line does, a count, a stall). Measure it again at its source, with a positive control, before writing. When it holds, cite the reading in Context. When it does not, record the real reading with `fno backlog note <id> "<reading>"`, then plan the real defect or halt and say the node is wrong. A plan on a premise nobody re-measured sends a worker after a defect that does not exist.
 2c. **Schema citation gate** - When a `## Database Schema` section exists in the
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
@@ -466,6 +479,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 
 | Modifier | Effect |
 |---|---|
+| `subagent` | Run the whole skill in a subagent of this session, see [Substrate](#substrate). |
 | `quick` | Emit ## Execution Strategy as one parallel wave, one task per numbered change (stamp status + kill_criteria) |
 | `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [references/epic-decomposition.md](references/epic-decomposition.md). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
@@ -566,6 +580,7 @@ A NON-path-shaped argument is a raw feature description, not a missing-doc case:
 
 Environment-specific traps that defy reasonable assumptions.
 
+- **A hand-typed planning prompt in the Agent tool skips the claim, the session row and every gate.** Use `/fno:blueprint subagent <node>` instead. On 2026-09-10 four such prompts produced plans that took no claim, wrote no row, and fail `validate-plan.sh`.
 - **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint x-8af8` claims that node only if the plan writes a literal `claims: x-8af8` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
 - **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
 - **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.
