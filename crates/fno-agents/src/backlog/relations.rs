@@ -32,8 +32,15 @@ pub fn save(connection: &Connection, node_id: &str, relations: &Relations) -> Re
             params![node_id],
         )
         .map_err(|error| error.to_string())?;
+    // The primary key collapses duplicate (node, related, type) triples, so
+    // a repeated id inside one list would fail the whole write; keep the
+    // first occurrence and skip the rest instead.
+    let mut written: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     if let Some(blockers) = &relations.blocked_by {
         for (seq, blocker_id) in blockers.iter().enumerate() {
+            if !written.insert((blocker_id.clone(), "blocks".to_string())) {
+                continue;
+            }
             connection
                 .execute(
                     "INSERT INTO relations (node_id, related_node_id, type, listed_on, seq)
@@ -45,6 +52,9 @@ pub fn save(connection: &Connection, node_id: &str, relations: &Relations) -> Re
     }
     if let Some(related) = &relations.related {
         for (seq, item) in related.iter().enumerate() {
+            if !written.insert((item.clone(), "related".to_string())) {
+                continue;
+            }
             connection
                 .execute(
                     "INSERT INTO relations (node_id, related_node_id, type, listed_on, seq)
@@ -56,6 +66,9 @@ pub fn save(connection: &Connection, node_id: &str, relations: &Relations) -> Re
     }
     if let Some(superseded) = &relations.supersedes {
         for (seq, item) in superseded.iter().enumerate() {
+            if !written.insert((item.clone(), "supersedes".to_string())) {
+                continue;
+            }
             connection
                 .execute(
                     "INSERT INTO relations (node_id, related_node_id, type, listed_on, seq)

@@ -342,6 +342,13 @@ fn write_changed(connection: &Connection, before: &[Value], after: &[Value]) -> 
     }
     let before_map = by_id(before);
     let after_map = by_id(after);
+    let ordinals: std::collections::BTreeMap<&str, i64> = after
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, row)| {
+            crate::graph_store::entry_id(row).map(|id| (id, ordinal as i64))
+        })
+        .collect();
     let mut ids: Vec<String> = before_map.keys().chain(after_map.keys()).cloned().collect();
     ids.sort();
     ids.dedup();
@@ -357,10 +364,7 @@ fn write_changed(connection: &Connection, before: &[Value], after: &[Value]) -> 
                     .map_err(|error| format!("changed row {id} is invalid JSON: {error}"))?;
                 let mut node =
                     Node::from_json(&row).map_err(|error| format!("changed row {id}: {error}"))?;
-                node.ordinal = after
-                    .iter()
-                    .position(|row| crate::graph_store::entry_id(row) == Some(id.as_str()))
-                    .unwrap_or(0) as i64;
+                node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
             }
             None => delete_aggregate(connection, &id)?,
