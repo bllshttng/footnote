@@ -19,6 +19,7 @@ import typer
 from fno.king.lane import read_lane
 from fno.outstanding.core import OutstandingError, collect, render
 from fno.outstanding.mine import mine_app
+from fno.user import display_name
 
 outstanding_app = typer.Typer(
     help=(
@@ -231,7 +232,7 @@ def ask(
             line = (
                 f"outstanding: refused: live law already rules on '{key}' "
                 f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
-                "--lane law --state live. Act on the law; do not ask the operator."
+                f"--lane law --state live. Act on the law; do not ask {display_name()}."
             )
             if not subject:
                 line += " If the question is about another subject, name it with --subject."
