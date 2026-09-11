@@ -4655,7 +4655,7 @@ event_types:
         why:
           type: string
           enum: [deadline_exceeded, slice_starved, self_killed, killed]
-          description: "Which timeout mechanism fired (x-d211): the tick's wall deadline (measured 480-487s), a phase slice budget spent while the tick carried on (30s/100s), a kill delivered by this tick's own sync child bouncing the job mid-tick (measured 183.1s and 440.7s after a binary rewrite; not a budget outcome), or any other signal kill."
+          description: "Which timeout mechanism fired (x-d211): the tick's wall deadline (measured 480-487s), a phase slice budget spent while the tick carried on (30s/100s), a kill delivered while this tick's own sync child ran and its update's job bounce is the probable source (measured 183.1s and 440.7s after a binary rewrite; not a budget outcome), or any other signal kill."
         sweep_failures:
           type: integer
           description: "Repo listing failures (present when a sweep ran)."

@@ -588,7 +588,7 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 _WHY_PHRASES = {
     "deadline_exceeded": "deadline exceeded",
     "slice_starved": "phase slice starved",
-    "self_killed": "self-killed by its own update mid-tick",
+    "self_killed": "killed mid-sync (update bounce probable)",
     "killed": "killed by a signal",
 }
 

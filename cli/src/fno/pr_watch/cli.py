@@ -460,11 +460,14 @@ def tick() -> None:
 
         # x-d211: a bootout kills this process by signal; without a handler
         # the tick dies with no record. Die BY the signal after recording.
+        # While the marker is set the sync child is running, so its update's
+        # bounce is the probable source - probable, not proven: an operator
+        # bootout inside the window reads the same way.
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
             why = "self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed"
-            reason = ("self-killed: its own post-merge sync ran an update that "
-                      "bounced this job mid-tick" if why == "self_killed" else
+            reason = ("killed mid-sync; its own update bouncing this job is the "
+                      "probable source" if why == "self_killed" else
                       "killed by a signal mid-tick")
             phase = current_tick_phase()
             _emit_event("pr_watch_tick_end", {

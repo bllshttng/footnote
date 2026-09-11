@@ -2498,7 +2498,8 @@ class TestTickRecordsAndDeadline:
         assert death["phase"]
         rows = [d for t, d in events if t == "control_plane_tick"
                 and d.get("arm") == "pr_watch_merge"]
-        assert rows and "self-killed" in rows[-1]["detail"]
+        assert rows and "mid-sync" in rows[-1]["detail"]
+        assert "probable" in rows[-1]["detail"]
         assert "started and did not complete" in rows[-1]["detail"]
         assert rows[-1]["detail"].count("phase=") == 1
         assert killed == [signal_mod.SIGTERM]
