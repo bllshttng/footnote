@@ -117,7 +117,7 @@ def test_heal_token_accepts_hidden_cross_project_recovery_flag(
 # `history` joins as the advertised session-history reader.
 _ADVERTISED_AGENTS_VERBS = {
     "spawn", "list", "logs", "watch", "attach", "stop", "resume", "status",
-    "watchdog", "history",
+    "watchdog", "history", "gate-status",
 }
 
 
