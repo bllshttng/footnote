@@ -611,7 +611,7 @@ The release never names a holder, and `--holder` is optional on the verb for tha
 
 The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each. The harness hook budget is 60s, and the margin is under 6s. A killed hook emits no verdict at all.
 
-That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either: it reads file presence only, and the first Python read of a lapsed hold deletes it, so nothing expired lingers for the hook to misread. A wrong deny costs one command.
+That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either. It reads file presence only; the first Python read deletes a lapsed hold, so nothing expired lingers for the hook to misread. A wrong deny costs one command.
 
 ### Failing safe in both directions
 
