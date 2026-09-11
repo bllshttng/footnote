@@ -254,9 +254,10 @@ def run_sync_canonical(
             if len(blocking) > _DIRTY_SHOW_CAP:
                 shown += f" (+{len(blocking) - _DIRTY_SHOW_CAP} more)"
             date = datetime.now(timezone.utc).date().isoformat()
+            paths = " ".join(f"'{p}'" for p in blocking)
             recovery = (
                 f"git -C {canonical} stash push -u -m \"fno post-merge sync {date} "
-                f"PR #{pr_number} {sha[:12]}\" -- {' '.join(blocking)}"
+                f"PR #{pr_number} {sha[:12]}\" -- {paths}"
             )
             typer.echo(
                 "post-merge sync: canonical checkout is dirty - the pull would refuse:\n"

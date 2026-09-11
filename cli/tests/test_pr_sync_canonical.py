@@ -327,7 +327,7 @@ def test_default_shell_runner_bounds_captured_output(tmp_path):
     assert len(res.stdout) <= _CAPTURE_TAIL_CHARS * 4  # bounded, not the full ~34KB
 
 
-# --- dirty-canonical gate (x-929f) ----------------------------------------
+# --- dirty-canonical gate -------------------------------------------------
 
 
 def _dirty_runner(porcelain: str):
@@ -353,7 +353,7 @@ def test_dirty_canonical_overlap_refuses_with_recovery_line(tmp_path, capsys):
     assert "AGENTS.md" in err  # the overlapping dirt is named
     assert ".candidate.50371" not in err  # dirt the merge does not touch is not blocking
     assert 'stash push -u -m "fno post-merge sync' in err  # attributed stash line
-    assert "-- AGENTS.md" in err  # pathspec carries only the blocking paths
+    assert "-- 'AGENTS.md'" in err  # pathspec carries only the blocking paths
     assert "will retry" in err
     assert shell.calls == []  # sync_command never ran
     assert not (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
@@ -405,8 +405,24 @@ def test_dirty_blocking_list_capped_at_five_in_display(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "merge0.py" in err and "merge4.py" in err
     assert "(+2 more)" in err
-    assert "merge5.py --" not in err  # recovery pathspec still carries ALL paths
-    assert "-- merge0.py merge1.py merge2.py merge3.py merge4.py merge5.py merge6.py" in err
+    assert "merge5.py' --" not in err  # recovery pathspec still carries ALL paths
+    assert (
+        "-- 'merge0.py' 'merge1.py' 'merge2.py' 'merge3.py' "
+        "'merge4.py' 'merge5.py' 'merge6.py'" in err
+    )
+
+
+def test_dirty_blocking_path_with_space_stays_paste_ready(tmp_path, capsys):
+    shell = _Shell()
+    rc = _run(
+        tmp_path,
+        gh_json=_gh_row(files=[{"path": "docs/my notes.md"}]),
+        runner=_dirty_runner(" M docs/my notes.md\n"),
+        shell_runner=shell,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "'docs/my notes.md'" in err  # single-quoted, so the pasted pathspec survives
 
 
 def test_staleness_names_dirty_canonical_capped_at_five(tmp_path):
