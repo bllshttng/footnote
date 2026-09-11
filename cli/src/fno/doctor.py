@@ -2319,9 +2319,8 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
-    # Wire-floor freshness (x-e6dd): this verdict is the WIRE, not the build
-    # (x-f188): a below-floor server cannot be attached to by this client at
-    # all. Build staleness is the census below. Advisory only.
+    # Wire-floor freshness (x-e6dd): the WIRE verdict, not the build one
+    # (x-f188); build staleness is the census below. Advisory only.
     for sess in result.get("mux_server_stale") or []:
         out(
             f"fno doctor: mux server '{sess}' is below the wire compatibility floor; "
@@ -4090,8 +4089,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # PROCESS. Never changes status/exit.
     result["mux_server_stale"] = _update.stale_mux_servers()
 
-    # Advisory running-process census (x-f188): one row per long-lived
-    # process, stale rows rendered below. Never changes status/exit.
+    # Advisory running-process census (x-f188); never changes status/exit.
     result["running_components"] = _update.running_components()
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.

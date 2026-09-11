@@ -449,9 +449,7 @@ def restart_command(
     if json_out:
         typer.echo(json.dumps(result))
     else:
-        # One honest verdict line, always last on stdout (x-f188 change 6):
-        # a success-shaped log must never precede a failure the reader only
-        # finds behind a nonzero exit.
+        # One honest verdict line, always last on stdout (x-f188).
         if failures:
             typer.echo(f"fno agents restart: FAILED - {'; '.join(failures)}")
         else:
