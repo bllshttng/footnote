@@ -266,6 +266,36 @@ impl KingQueue {
     /// The reign's work test for this crown: see `scope_undelivered_count`.
     fn scope_undelivered(&self) -> Result<i64, LoopError> {
         scope_undelivered_count(&self.fno_bin, &self.cwd, &self.scope)
+            .map_err(|e| LoopError::Queue(e.to_string()))
+    }
+}
+
+/// Why the drain read could not answer. `TimedOut` is its own kind at the
+/// render site: a killed child means the read's bound was too small for the
+/// job (wait for a quieter fire, rerun); every other failure means the
+/// command is broken (debug it). The two demand opposite operator responses,
+/// and conflating them is how a hang reads as a blip forever.
+#[derive(Debug, Clone)]
+pub(crate) enum ScopeDrainError {
+    /// The drain child outlived its bound and was killed. The bound is the
+    /// configured ceiling clamped to the fire's remaining budget.
+    TimedOut { bound: std::time::Duration },
+    /// Spawn failure, non-zero exit, unparseable payload. The string quotes
+    /// the command failure.
+    Failed(String),
+}
+
+impl std::fmt::Display for ScopeDrainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScopeDrainError::TimedOut { bound } => write!(
+                f,
+                "the king drain read timed out after {}ms and was killed (a spent fire budget leaves a late read only its {}ms floor); wait for a quieter fire or rerun the drain",
+                bound.as_millis(),
+                crate::loopcheck::STOPGATE_BOUND_FLOOR.as_millis()
+            ),
+            ScopeDrainError::Failed(detail) => write!(f, "{detail}"),
+        }
     }
 }
 
@@ -279,12 +309,14 @@ pub(crate) fn scope_undelivered_count(
     fno_bin: &str,
     cwd: &Path,
     scope: &str,
-) -> Result<i64, LoopError> {
+) -> Result<i64, ScopeDrainError> {
+    // The drain is the reserved read: measure against the fire's full
+    // remaining budget, not the pre-drain clamp the other reads get.
     scope_undelivered_count_with_timeout(
         fno_bin,
         cwd,
         scope,
-        crate::loopcheck::stopgate_read_timeout(),
+        crate::loopcheck::stopgate_drain_timeout(),
     )
 }
 
@@ -293,7 +325,7 @@ fn scope_undelivered_count_with_timeout(
     cwd: &Path,
     scope: &str,
     timeout: std::time::Duration,
-) -> Result<i64, LoopError> {
+) -> Result<i64, ScopeDrainError> {
     let out = crate::loopcheck::bounded_read(
         std::ffi::OsStr::new(fno_bin),
         &["agents", "king", "drain", scope],
@@ -301,13 +333,16 @@ fn scope_undelivered_count_with_timeout(
         "king drain",
         timeout,
     )
-    .map_err(|error| {
-        LoopError::Queue(format!("king drain for {scope} failed: {}", error.render()))
+    .map_err(|error| match error.timeout_bound() {
+        Some(bound) => ScopeDrainError::TimedOut { bound },
+        None => {
+            ScopeDrainError::Failed(format!("the king drain command failed: {}", error.render()))
+        }
     })?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr_tail);
-        return Err(LoopError::Queue(format!(
-            "king drain for {scope} failed ({}): {}",
+        return Err(ScopeDrainError::Failed(format!(
+            "the king drain command failed ({}): {}",
             out.status,
             detail.trim().chars().take(200).collect::<String>()
         )));
@@ -315,8 +350,8 @@ fn scope_undelivered_count_with_timeout(
     let stdout = String::from_utf8_lossy(&out.stdout);
     let trimmed = stdout.trim();
     let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
-        LoopError::Queue(format!(
-            "king drain for {scope} returned no JSON (exit {}): {}",
+        ScopeDrainError::Failed(format!(
+            "the king drain command returned no JSON (exit {}): {}",
             out.status,
             trimmed.chars().take(200).collect::<String>()
         ))
@@ -325,8 +360,8 @@ fn scope_undelivered_count_with_timeout(
         .get("undelivered")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| {
-            LoopError::Queue(format!(
-                "king drain payload for {scope} carries no undelivered count"
+            ScopeDrainError::Failed(format!(
+                "the king drain payload carries no undelivered count"
             ))
         })
 }

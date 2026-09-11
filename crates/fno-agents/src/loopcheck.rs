@@ -8243,17 +8243,19 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
-    // Publish the per-thread read bound and the fire's budget deadline before
-    // any read can fire. Zero (and absent) both mean "the production
-    // default". Thread-local, not process-global: the test harness fires
-    // `decide` in-process on parallel threads, and one fire must never reset
-    // or inherit a neighboring fire's injected bound mid-read.
-    STOPGATE_READS.with(|cell| {
-        *cell.borrow_mut() = (
-            parsed.read_timeout_ms.unwrap_or(0),
-            Some(std::time::Instant::now() + STOPGATE_FIRE_BUDGET),
-        );
-    });
+    // Publish the per-thread read bound, the fire's budget deadline, and the
+    // king drain's reserved slice before any read can fire. Zero (and absent)
+    // both mean "the production default".
+    let reserve_ms = if parsed.driver == "king" {
+        stopgate_drain_reserve_ms()
+    } else {
+        0
+    };
+    stopgate_stamp_fire(
+        parsed.read_timeout_ms.unwrap_or(0),
+        std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
+        reserve_ms,
+    );
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -10641,77 +10643,13 @@ fn run_bounded(
     }
 }
 
-/// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
-/// checks, reviews, inline comments, commits, quota, coverage reads,
-/// fingerprint reads, nudges/coverage writes, the king board, and every
-/// local `git` read the gate makes. One named bound so a single wedged child
-/// can never outlive the stop fire; the fidelity ceiling (60s) and the
-/// advisory-hint ceiling (10s) stay separate because they gate different
-/// things and drift independently.
-const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+mod read_bounds;
 
-/// Aggregate wall-clock budget for ONE fire's external reads. The harness
-/// kills the stop hook at 60s (hooks/git-protection.py records the budget and
-/// the Stop hook carries no override), so N sequential reads each legal at
-/// 30s could burn multiples of that and die mid-fire with no decision -
-/// recreating the exact no-decision path this transport exists to close.
-/// Reads that start after the budget is spent still run, but at the floor
-/// bound, so the fire ends fast with a decision naming what it could not
-/// wait for.
-const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
-
-/// A spent budget must still bound every remaining read, so the effective
-/// ceiling never reaches zero: this floor keeps a late read killable in
-/// bounded time instead of degenerating into an unbounded wait.
-const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
-
-thread_local! {
-    /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
-    /// the production default) and its budget deadline, stamped when `decide`
-    /// begins. Thread-local, not process-global: the test harness fires
-    /// `decide` in-process on parallel threads, and one fire must never reset
-    /// or inherit a neighboring fire's injected bound mid-read.
-    static STOPGATE_READS: std::cell::RefCell<(u64, Option<std::time::Instant>)> =
-        const { std::cell::RefCell::new((0, None)) };
-}
-
-/// Effective bound for one stop-gate read: the configured ceiling (flag or
-/// production default) clamped to whatever remains of this fire's aggregate
-/// budget, floored so the answer is always a positive killable bound.
-pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
-    STOPGATE_READS.with(|cell| {
-        let (override_ms, _) = *cell.borrow();
-        let configured = if override_ms > 0 {
-            std::time::Duration::from_millis(override_ms)
-        } else {
-            STOPGATE_READ_TIMEOUT
-        };
-        clamp_to_fire_deadline(configured)
-    })
-}
-
-/// Clamp a configured read ceiling to this fire's budget deadline, so no
-/// single long read can spend more than the fire still has. Used both for
-/// stop-gate reads (via `stopgate_read_timeout`) and for the fidelity
-/// probe's separate 60s ceiling - the budget is the fire's, not the read's.
-fn clamp_to_fire_deadline(configured: std::time::Duration) -> std::time::Duration {
-    STOPGATE_READS.with(|cell| match cell.borrow().1 {
-        Some(d) => {
-            let remaining = d.saturating_duration_since(std::time::Instant::now());
-            clamp_to_fire_budget(configured, remaining)
-        }
-        None => configured,
-    })
-}
-
-/// Pure clamp so the deadline math is testable without a clock: never above
-/// what remains of the budget, never below the floor.
-fn clamp_to_fire_budget(
-    configured: std::time::Duration,
-    remaining: std::time::Duration,
-) -> std::time::Duration {
-    configured.min(remaining).max(STOPGATE_BOUND_FLOOR)
-}
+pub(crate) use read_bounds::{
+    clamp_to_fire_budget, clamp_to_fire_deadline, stopgate_drain_reserve_ms,
+    stopgate_drain_timeout, stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR,
+    STOPGATE_FIRE_BUDGET,
+};
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
 /// killed child can never render through the ordinary failed-read wording -
@@ -10786,6 +10724,15 @@ impl GhReadError {
             stderr_tail: detail.to_string(),
             elapsed: None,
             spawn_kind: Some(spawn_kind),
+        }
+    }
+
+    /// The kill bound when this error is a timeout, so a render site can
+    /// classify without parsing the rendered prose.
+    pub(crate) fn timeout_bound(&self) -> Option<std::time::Duration> {
+        match self.kind {
+            ReadErrorKind::TimedOut => self.elapsed,
+            _ => None,
         }
     }
 
@@ -11801,12 +11748,21 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         // (2026-09-06 ruling): a board reading clean while nodes sit driven
         // but unshipped is a quiet beat, never a finish line. An unreadable
         // drain read must not certify the scope drained, so it skips this
-        // exit and the dry-fire ceiling below bounds the wait.
-        let undelivered = if manifest.scope.is_empty() {
-            0
+        // exit and the dry-fire ceiling below bounds the wait. The error
+        // rides with the sentinel: a timeout and a failed command demand
+        // opposite operator responses, and flattening both to "unreadable"
+        // is how a hang reads as a blip forever.
+        let (undelivered, drain_error) = if manifest.scope.is_empty() {
+            (0, None)
         } else {
-            crate::loop_king::scope_undelivered_count(&parsed.fno_bin, &parsed.cwd, &manifest.scope)
-                .unwrap_or(i64::MAX)
+            match crate::loop_king::scope_undelivered_count(
+                &parsed.fno_bin,
+                &parsed.cwd,
+                &manifest.scope,
+            ) {
+                Ok(n) => (n, None),
+                Err(e) => (i64::MAX, Some(e)),
+            }
         };
         if undelivered == 0 {
             let message = if board.unreadable + board.over_budget > 0 {
@@ -11816,10 +11772,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             };
             return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
         }
-        let message = if undelivered == i64::MAX {
-            "board quiet but scope delivery is unreadable; blocking completion".to_string()
-        } else {
-            format!("board quiet; {undelivered} scope nodes still undelivered")
+        let message = match &drain_error {
+            Some(e) => {
+                format!("board quiet but scope delivery is unreadable: {e}; blocking completion")
+            }
+            None => format!("board quiet; {undelivered} scope nodes still undelivered"),
         };
         emit(
             "king_loop_check",
