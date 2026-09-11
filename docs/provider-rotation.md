@@ -8,6 +8,12 @@ See [What this substrate does NOT do](#what-this-substrate-does-not-do).
 
 ---
 
+## Is this page for you?
+
+You manage provider records, credential staging, or the dispatch env, or you are untangling the word `provider` across five axes. This page owns `fno config accounts` and the substrate's boundary: records, staging, and env construction, never automated rotation or failover. Misreading it makes you wait for a swap this substrate will never do.
+
+Not for: the full axis vocabulary, effort included. That is [architecture/axis-vocabulary.md](architecture/axis-vocabulary.md).
+
 ## The axes
 
 Several different things used to share the word `provider`. This document covers harness, provider, model, and account: see [docs/architecture/axis-vocabulary.md](architecture/axis-vocabulary.md) for the full set, including effort.

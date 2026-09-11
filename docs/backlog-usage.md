@@ -9,6 +9,12 @@ A practical guide to driving `fno backlog` day to day. For the internals
 (lane key, rank model, WIP caps, board rendering) see
 [architecture/backlog-board-ordering.md](architecture/backlog-board-ordering.md).
 
+## Is this page for you?
+
+You create, update, rank, or close backlog cards from a terminal, or you wonder why a verb refused. This page owns the day-to-day verbs and the node lifecycle. Misreading it costs a lost edit: a field you change by hand does not move the card. The board renders from node fields, never from the board file.
+
+Not for: why one card sits above another, or how the render pipeline works. That is [architecture/backlog-board-ordering.md](architecture/backlog-board-ordering.md). Sorting deferred work at intake is [backlog-triage.md](backlog-triage.md).
+
 ## Mental model: the board is derived
 
 You never drag a card. Both boards (`graph.md` Obsidian Kanban and the

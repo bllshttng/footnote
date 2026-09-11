@@ -424,7 +424,7 @@ FIELD_META: dict[str, Meta] = {
     "mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
     "mux.restore.hold_workers": Meta("advanced", "Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).", default_source="default"),
-    "mux.restore.policy": Meta("advanced", "Startup restore policy for worker members: hold (rebuild named held panes, default), idle (members stay idle rows), or resume (run the bulk restore and resume every member through its own harness). Overrides hold_workers when set.", default_source="default"),
+    "mux.restore.policy": Meta("advanced", "Startup restore policy for worker members: hold (rebuild named held panes, resume on focus, skip tabs whose every slot binds a done worker, default), idle (members stay idle rows), or resume (relaunch every member that is not tombstoned, gone, or reap-retired, finished work included). The policy never decides the tab count by itself: tabs rebuild from the stored tab trees under every value, so no value restores zero tabs. Overrides hold_workers when set.", default_source="default"),
     "mux.status_row": Meta("advanced", "Show the mux status row at the bottom of the terminal (default on).", default_source="default"),
     "mux.theme": Meta(
         "advanced",

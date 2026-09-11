@@ -3,6 +3,12 @@
 
 footnote runs as a host runtime on several AI coding CLIs. This is the public summary of what works where; the exhaustive substrate facts (per-event hook mappings, frontmatter matrices, directory conventions, variable substitution) are maintained internally.
 
+## Is this page for you?
+
+You pick a harness for a dispatch, or you ask whether a feature (parallel subagents, a resume lane, a hook) exists on a given CLI. This page owns that summary table and its scope. Misreading it dispatches work a harness cannot carry, and the run dies at the first unsupported surface.
+
+Not for: per-CLI command syntax or hook wiring detail. Those are the harness's own docs and [architecture/multi-cli-hooks.md](architecture/multi-cli-hooks.md).
+
 ## CLIs in scope
 
 | CLI | Role for footnote | Parallel subagents |

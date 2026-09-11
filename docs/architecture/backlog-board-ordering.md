@@ -5,6 +5,12 @@ status: accepted
 
 # Backlog Board Ordering (swimlanes + curated rank + WIP cap)
 
+## Is this page for you?
+
+You ask why one card sits above another, or why the HTML and Kanban boards disagree with your terminal. This page owns the ordering function every board and the work selector share. Misreading it costs a wasted edit: you straighten the rendered board file and the next mutation renders your change away.
+
+Not for: the verbs that create, update, rank, or close a node. That is [../backlog-usage.md](../backlog-usage.md). It also does not answer why `advance` did not dispatch a card. Dispatch ordering is the loop's, not the board's.
+
 ## Overview
 
 Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function. The HTML renderer also owns the roadmap and public-backlog card markup. Those projections share its escaping and field policy instead of authoring cards separately.

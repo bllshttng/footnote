@@ -4,6 +4,12 @@ This document describes the `fno agents claim` primitive, its on-disk format, th
 key namespace, and the relationship to the older coordination paths it
 replaces.
 
+## Is this page for you?
+
+You debug a claim refusal ("already held"), or you design anything that must give one worker one node. This page owns the claim primitive and what it replaced. Misreading it makes you reach for the older coordination paths, and then two workers hold one node.
+
+Not for: who dispatches work or where a worker runs. That is the spawn substrate and the loop docs. The caller rule this page enforces: target init claims the node, and callers never claim manually.
+
 ## Problem
 
 Before this work, three partially-overlapping coordination mechanisms ran

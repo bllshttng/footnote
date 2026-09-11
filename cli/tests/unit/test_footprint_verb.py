@@ -1564,11 +1564,16 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
 
 
 def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
-    monkeypatch, no_worker_roots
+    monkeypatch, no_worker_roots, tmp_path
 ) -> None:
     """x-e040: the roster is an enrichment. On roster failure the measurement
     still prints, with the threshold degraded away and the reason named. The
     old contract killed the whole report (exit 4, no reading)."""
+    # A cold HOME sends config resolution climbing to the canonical root,
+    # whose resolver shells `git worktree list` through the SAME global
+    # subprocess module this test pins. Pin the root so the startup probe is
+    # an env read, and the pinned budget below stays the verdict's alone.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     from fno import doctor_footprint
 
     calls: list[list[str]] = []

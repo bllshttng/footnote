@@ -2,6 +2,12 @@
 
 After self-merging a PR, the same 3-step ritual used to get hand-pasted into a session, with only the per-project path/name/cwd swapped: (1) close + stamp the backlog node, (2) write prose follow-up todos to that project's vault `inbox.md`, (3) triage anything worth doing now into the backlog. The `/fno:post-merge` skill collapses that paste into one verb whose paths resolve from settings, never from the invocation.
 
+## Is this page for you?
+
+You merged a PR and ask what closes the node, files the prose follow-ups, and triages the rest. This page owns the automatic ritual and the two gaps it closes. Misreading it leaves a merged PR with an open node and follow-ups nobody wrote down.
+
+Not for: the merge itself and its gates. That is [control-plane-loop.md](control-plane-loop.md). The node lifecycle verbs are in [../backlog-usage.md](../backlog-usage.md).
+
 Extends the retro / auto-triage feature ([retro-auto-triage.md](retro-auto-triage.md)), which filed graph nodes mechanically but never wrote the per-project prose `inbox.md` (the LLM-judgment step).
 
 ## Two gaps this closes
