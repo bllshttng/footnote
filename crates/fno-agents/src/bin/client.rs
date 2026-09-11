@@ -3639,6 +3639,7 @@ fn format_success(
             if let Some(outcome) = outcome {
                 line.push_str(&format!(" (turn {outcome})"));
             }
+            line.push_str(&claims_release_suffix(result));
             Some(line)
         }
         "rm" => {
@@ -3749,7 +3750,7 @@ fn format_success(
                 && notes.is_empty()
                 && result.get("pane_removed").is_none_or(Value::is_null)
             {
-                return Some(format!("removed: {name}"));
+                return Some(format!("removed: {name}{}", claims_release_suffix(result)));
             }
             let has_survivor = notes
                 .iter()
@@ -3765,8 +3766,9 @@ fn format_success(
                 format!("{surfaces}; {}", notes.join("; "))
             };
             Some(format!(
-                "removed: {name} ({detail}){}",
-                adopt_hint.unwrap_or_default()
+                "removed: {name} ({detail}){}{}",
+                adopt_hint.unwrap_or_default(),
+                claims_release_suffix(result)
             ))
         }
         "rename" => fno_agents::rename::receipt(name, result),
@@ -3889,6 +3891,37 @@ fn render_list_json(
         "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
+}
+
+/// The `; released N claim(s); kept <key> (<observed>)` suffix a stop/rm line
+/// carries when the daemon released or kept claims for the stopped worker
+/// (x-9c91 change 5d). Empty when the receipt names neither, so a stop that
+/// released nothing renders byte-identical to today.
+fn claims_release_suffix(result: &Value) -> String {
+    let Some(claims) = result.get("claims") else {
+        return String::new();
+    };
+    let (Some(released), Some(kept)) = (
+        claims.get("released").and_then(Value::as_array),
+        claims.get("kept").and_then(Value::as_array),
+    ) else {
+        return String::new();
+    };
+    if released.is_empty() && kept.is_empty() {
+        return String::new();
+    }
+    let mut suffix = format!("; released {} claim(s)", released.len());
+    for kept_claim in kept {
+        suffix.push_str(&format!(
+            "; kept {} ({})",
+            kept_claim.get("key").and_then(Value::as_str).unwrap_or("?"),
+            kept_claim
+                .get("observed")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+    }
+    suffix
 }
 
 /// Shell out to the Python `fno agents discovered-json` helper for the P1

@@ -546,6 +546,41 @@ pub fn space_dir(cwd: &Path) -> PathBuf {
     spaces_root_dir().join(space_slug(&root))
 }
 
+/// [`space_dir`] for best-effort callers, resolved from a ONE-READ snapshot
+/// of the pins: `None` when no state root is declared. A hermetic test
+/// process must not resolve an ambient `$HOME` (the guard refuses exactly
+/// that), and the snapshot keeps a parallel test's pin cleanup from flipping
+/// the resolution mid-read. The stop/rm claims release skips on `None`
+/// instead of failing the stop.
+pub fn space_dir_opt(cwd: &Path) -> Option<PathBuf> {
+    let spaces = std::env::var_os("FNO_SPACES_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let agents_home = std::env::var_os(HOME_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let root = match (spaces, agents_home) {
+        (Some(dir), _) => dir,
+        (None, Some(home)) => home
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| home.clone())
+            .join("spaces"),
+        // No pin at all: under test that is an undeclared process (skip);
+        // in production the durable default is the real answer.
+        (None, None) => {
+            if cfg!(test) && !test_root_declared() {
+                return None;
+            }
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".fno").join("spaces"))?
+        }
+    };
+    let repo_root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
+    Some(root.join(space_slug(&repo_root)))
+}
+
 /// The per-worktree slice: `<space>/worktrees/<name>/` from a linked
 /// worktree, the space root itself from canonical. Session-keyed state
 /// (target-state.md, run-log.jsonl) resolves here; mirrors Python

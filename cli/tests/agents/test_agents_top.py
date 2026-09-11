@@ -697,3 +697,96 @@ def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, r
     for line in result.output.splitlines():
         if "fresh-worker" in line or "stale-worker" in line:
             assert " live" not in f" {line}", line
+
+
+class TestLongHolds:
+    """AC7 (x-9c91): single-flight holds over 12m are visible in `top`.
+    The computation is the Rust `claim long-holds` op; the row logic is
+    tested at that surface. These tests pin the client wiring and render."""
+
+    @staticmethod
+    def _fake_binary(tmp_path, payload: str, exit_code: int = 0):
+        import stat
+
+        script = tmp_path / "fake-fno-agents"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"sys.stdout.write({payload!r})\n"
+            "sys.stderr.write('op failed')\n"
+            f"sys.exit({exit_code})\n"
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        return script
+
+    def test_AC7_HP_long_hold_row_in_json_and_text(self, tmp_path, monkeypatch):
+        from fno.agents import top as top_mod
+
+        row = {
+            "key": "flight:abc",
+            "holder": "single-flight:xyz",
+            "pid": 123,
+            "pid_observed": "absent",
+            "held_s": 800,
+            "requests": 3,
+        }
+        payload_text = json.dumps(
+            {
+                "rows": [row],
+                "lines": [
+                    "single-flight holds over 12m:",
+                    "  flight:abc  holder single-flight:xyz  "
+                    "pid 123 (absent)  held 13m  requests 3",
+                ],
+            }
+        )
+        monkeypatch.setattr(
+            "fno.claims.verdict.resolve_binary",
+            lambda: self._fake_binary(tmp_path, payload_text),
+        )
+
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert len(payload["long_holds"]) == 1
+        hold = payload["long_holds"][0]
+        assert hold["key"] == "flight:abc"
+        assert hold["pid"] == 123
+        assert hold["pid_observed"] == "absent"
+        assert hold["held_s"] >= 780
+        assert hold["requests"] == 3
+
+        out = top_mod.render_top()
+        assert "single-flight holds over 12m:" in out
+        assert "flight:abc" in out
+        assert "absent" in out
+
+    def test_AC7_ERR_binary_failure_sets_error_and_warning(self, tmp_path, monkeypatch):
+        from fno.agents import top as top_mod
+
+        monkeypatch.setattr(
+            "fno.claims.verdict.resolve_binary",
+            lambda: self._fake_binary(tmp_path, "{}", exit_code=3),
+        )
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert "long_holds" not in payload
+        assert "op failed" in payload["long_holds_error"]
+        assert any("long holds read failed" in w for w in payload["warnings"])
+        assert "long holds read failed" in top_mod.render_top()
+
+    def test_AC7_ERR_missing_binary_sets_error_and_warning(self, monkeypatch):
+        from fno.agents import top as top_mod
+
+        monkeypatch.setattr("fno.claims.verdict.resolve_binary", lambda: None)
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert "long_holds" not in payload
+        assert "fno-agents binary not found" in payload["long_holds_error"]
+        assert "long holds read failed" in top_mod.render_top()
+
+    def test_no_long_holds_still_reads_as_an_empty_list(self, tmp_path, monkeypatch):
+        from fno.agents import top as top_mod
+
+        monkeypatch.setattr(
+            "fno.claims.verdict.resolve_binary",
+            lambda: self._fake_binary(tmp_path, json.dumps({"rows": [], "lines": []})),
+        )
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert payload["long_holds"] == []

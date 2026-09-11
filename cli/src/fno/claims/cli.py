@@ -1552,6 +1552,8 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
        finding.
     """
     cache: dict = {}
+    # One token per None answer, folded into kept_suspect_unprobed_by.
+    reasons: dict = {}
 
     def _reading() -> RosterReading:
         """Take (and cache) the shared reading; retry once on a degraded read."""
@@ -1573,6 +1575,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     def _probe(claim, native_verdict=None) -> Optional[bool]:
         native = native_verdict
         if native is None:
+            reasons[claim.key] = "native-verdict-missing"
             return None
 
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
@@ -1585,8 +1588,10 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # the pane answer is cached per worker for the sweep's lifetime,
             # like the shared roster reading.
             if native is not None and native.get("state") == ClaimState.LIVE.value:
+                reasons[claim.key] = "handover-live"
                 return None
             if _handover_pane_probe_blocked(claim):
+                reasons[claim.key] = "handover-pane-probe-blocked"
                 return None
             worker = claim.holder[len(HANDOVER_HOLDER_PREFIX) :]
             node_id = claim.key[len("node:") :] if claim.key.startswith("node:") else ""
@@ -1594,14 +1599,17 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             if pane_key not in cache:
                 cache[pane_key] = _mux_pane_absent_for(worker, node_id)
             if cache[pane_key] is not True:
+                reasons[claim.key] = "handover-pane-not-absent"
                 return None
             return True
         session_id = _holder_session_id(claim.holder)
         if not session_id:
             # A holder shape this lane cannot parse names no session to look up.
+            reasons[claim.key] = "holder-session-unparsed"
             return None
         seen: RosterReading = _reading()
         if not seen.consulted:
+            reasons[claim.key] = "roster-read-degraded"
             return None
         row = seen.row_for_session(session_id)
         if row is None:
@@ -1611,11 +1619,16 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # writer stamped it. A finished tree is abandonment proven by
             # FINDING the end, never by failing to find the worker.
             if native is not None and native.get("state") == ClaimState.LIVE.value:
+                reasons[claim.key] = "row-absent-native-live"
                 return None
             cwd = _claim_worktree_cwd(claim)
             if not cwd:
+                reasons[claim.key] = "row-absent-no-cwd"
                 return None
-            return True if _transcript_says_finished(session_id, cwd) else None
+            if not _transcript_says_finished(session_id, cwd):
+                reasons[claim.key] = "row-absent-transcript-unfinished"
+                return None
+            return True
         if row.get("state") not in _finished_row_states():
             return False
         # The row state alone does NOT authorize a reap. `_TERMINAL_STATES`
@@ -1625,8 +1638,12 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         # live worker's claim, which is the `reaped_a_live_worker` kill
         # criterion. So the row narrows the candidates and the transcript
         # decides, which is the instrument the watchdog itself trusts.
-        return _transcript_says_finished(session_id, row.get("cwd") or "")
+        if not _transcript_says_finished(session_id, row.get("cwd") or ""):
+            reasons[claim.key] = "row-transcript-unfinished"
+            return False
+        return True
 
+    setattr(_probe, "reasons", reasons)
     return _probe
 
 
@@ -1694,14 +1711,27 @@ def reap_cmd(
                 f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
                 "(dry-run; pass --apply)"
             )
-        # The suspect buckets are split because "kept: 2 suspect" is the line
-        # that taught the operator this verb was useless: it could not say
-        # whether those two were protected by a measurement or merely unmeasured.
+        # "roster not consulted" only ever renders beside the token that
+        # measured the degraded read, never as a blanket unprobed label.
         suspect = f"{summary['kept_suspect']} suspect"
         if summary["kept_suspect_alive"]:
             suspect += f", {summary['kept_suspect_alive']} suspect (worker alive)"
+        unprobed_by = summary.get("kept_suspect_unprobed_by") or {}
         if summary["kept_suspect_unprobed"]:
-            suspect += f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
+            detail = ", ".join(
+                f"{token} {count} (roster not consulted)"
+                if token == "roster-read-degraded"
+                else f"{token} {count}"
+                for token, count in sorted(unprobed_by.items())
+            )
+            suffix = f": {detail}" if detail else ""
+            suspect += f", {summary['kept_suspect_unprobed']} suspect (probe unanswered{suffix})"
+        if summary.get("kept_unclassified"):
+            dirs = ", ".join(
+                f"{path} {count}"
+                for path, count in sorted((summary.get("unclassified_dirs") or {}).items())
+            )
+            suspect += f", {summary['kept_unclassified']} unclassified (no native verdict: {dirs})"
         typer.echo(
             f"kept: {summary['kept_live']} live, {suspect}, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
@@ -1775,17 +1805,54 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
-    """The former `claim force-release`. Archived to .expired/."""
+    """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
+    naming the path read and any other default root that holds the file
+    (the x-cff2 specimen released nothing while printing success)."""
     try:
-        _claims_core.force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
+        outcome = _claims_core.force_release_claim(
+            key=key, reason=reason, root=_node_aware_root(key)
+        )
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    receipt = {"key": key, "reason": reason, "path": str(outcome.path)}
+    if outcome.archived:
+        if json_output:
+            typer.echo(json.dumps({**receipt, "archived": True, "force_released": True}))
+        else:
+            typer.echo(f"force-released: {key} (archived {outcome.path})")
+        return
+
+    encoded = _claims_io.encode_key(key)
+    others = [
+        (raw, cdir / f"{encoded}.lock")
+        for raw, cdir in _claims_io.dedup_claims_roots(
+            [_claims_io.global_claims_root(), None]
+        )
+        if (cdir / f"{encoded}.lock") != outcome.path
+        and (cdir / f"{encoded}.lock").exists()
+    ]
     if json_output:
-        typer.echo(json.dumps({"key": key, "force_released": True, "reason": reason}))
+        typer.echo(
+            json.dumps(
+                {
+                    **receipt,
+                    "archived": False,
+                    "force_released": False,
+                    "other_roots": [
+                        {"path": str(path), "root": "default" if raw is None else str(raw)}
+                        for raw, path in others
+                    ],
+                }
+            )
+        )
     else:
-        typer.echo(f"force-released: {key}")
+        typer.echo(f"nothing released: no claim file at {outcome.path}")
+        for raw, path in others:
+            reach = "the default root (omit --root)" if raw is None else f"--root {raw}"
+            typer.echo(f"a claim file for this key exists at {path} ({reach})")
+    raise typer.Exit(code=1)
 
 
 __all__ = ["cli"]
