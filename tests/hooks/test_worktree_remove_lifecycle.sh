@@ -870,6 +870,69 @@ fi
 rm -f "$OUT_W3"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
 
+echo "== 6. the sweep lock resolves its own directory, honestly =="
+
+# 6a. The regression: from a subdirectory the lock must still land in the
+# real common dir and the sweep must produce its normal listing. The lock
+# path is `git rev-parse --path-format=absolute --git-common-dir`; a join of
+# the raw relative answer onto the toplevel only holds at the toplevel.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+mkdir -p "$S/sub"
+OUT_SUB=$(mktemp -t sub-out.XXXXXX)
+ERR_SUB=$(mktemp -t sub-err.XXXXXX)
+( cd "$S/sub" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_SUB" 2>"$ERR_SUB" )
+if grep -q "^STATUS" "$OUT_SUB" && ! grep -q "could not acquire sweep lock" "$ERR_SUB" \
+    && ! grep -q "No such file or directory" "$ERR_SUB"; then
+    pass "sweep runs from a subdirectory, no lock error"
+else
+    fail "sweep from subdirectory" "out=[$(cat "$OUT_SUB")] err=[$(cat "$ERR_SUB")]"
+fi
+rm -f "$OUT_SUB" "$ERR_SUB"
+rm -rf "$S" "$BARE"
+
+# 6b. An unusable lock directory refuses honestly: non-zero exit, and the
+# message names the real cause instead of calling it contention. A caller
+# who reads "after retries" waits out a race that does not exist.
+NONREPO=$(mktemp -d -t wt-nonrepo.XXXXXX)
+OUT_NR=$(mktemp -t nr-out.XXXXXX)
+ERR_NR=$(mktemp -t nr-err.XXXXXX)
+( cd "$NONREPO" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_NR" 2>"$ERR_NR" ); rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "not lock contention" "$ERR_NR" && ! grep -q "after retries" "$ERR_NR"; then
+    pass "unusable lock dir refuses honestly"
+else
+    fail "unusable lock dir refusal" "rc=$rc err=[$(cat "$ERR_NR")]"
+fi
+rm -f "$OUT_NR" "$ERR_NR"
+rm -rf "$NONREPO"
+
+# 6c. Genuine contention keeps its honest shape: a live holder is reported
+# by pid and exits 0, so the honest refusal above can never collapse every
+# lock outcome into one message.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6c.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+echo "$$" > "$LOCKDIR/pid"   # this test's own pid: alive for the whole run
+OUT_C=$(mktemp -t cont-out.XXXXXX)
+ERR_C=$(mktemp -t cont-err.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_C" 2>"$ERR_C" ); rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "another sweep (pid" "$ERR_C"; then
+    pass "genuine contention still reports pid, exit 0"
+else
+    fail "genuine contention shape" "rc=$rc err=[$(cat "$ERR_C")]"
+fi
+rm -f "$OUT_C" "$ERR_C"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

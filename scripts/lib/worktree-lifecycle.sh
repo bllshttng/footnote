@@ -792,8 +792,9 @@ _cargo_target_offload() {
     [[ "$diag_file" == "/dev/null" ]] || rm -f "$diag_file"
 }
 
-# One sweep at a time, shared by cleanup and cargo-offload. Caller sets
-# MAIN_DIR first; the function leaves the trap armed on success.
+# One sweep at a time, shared by cleanup and cargo-offload. The lock lives
+# in the git common dir, resolved absolutely so the answer holds from any
+# cwd; the function leaves the trap armed on success.
 _acquire_sweep_lock() {
     # --- mutual exclusion --------------------------------------------------
     # A sweep is idempotent read-only-ish work (the --merged path only mutates
@@ -805,11 +806,19 @@ _acquire_sweep_lock() {
     # outright. Portable mkdir lock (atomic on every POSIX filesystem) so
     # there's no flock dependency; the status) case is never wrapped in this,
     # it stays a fast, always-answering read.
-    _GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)"
-    case "$_GIT_COMMON_DIR" in
-        /*) ;;
-        *) _GIT_COMMON_DIR="$MAIN_DIR/$_GIT_COMMON_DIR" ;;
-    esac
+    _GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    _lock_why=""
+    if [[ -z "$_GIT_COMMON_DIR" ]]; then
+        _lock_why="git rev-parse --git-common-dir answered nothing from cwd $PWD"
+    elif [[ ! -d "$_GIT_COMMON_DIR" ]]; then
+        _lock_why="$_GIT_COMMON_DIR is not a directory"
+    elif [[ ! -w "$_GIT_COMMON_DIR" ]]; then
+        _lock_why="$_GIT_COMMON_DIR is not writable"
+    fi
+    if [[ -n "$_lock_why" ]]; then
+        echo "worktree cleanup: no usable sweep lock directory: $_lock_why. This is not lock contention; retrying will not help." >&2
+        exit 1
+    fi
     _WT_SWEEP_LOCK="$_GIT_COMMON_DIR/fno-wt-sweep.lock"
     # The sweep's own birth certificate, for the budget-expiry grace
     # below: a directory OLDER than this file predates the sweep and can
@@ -937,7 +946,7 @@ _acquire_sweep_lock() {
         sleep 0.2
     done
     if [[ -z "$_wt_lock_acquired" ]]; then
-        echo "worktree cleanup: could not acquire sweep lock after retries; exiting" >&2
+        echo "worktree cleanup: could not acquire sweep lock after retries at $_WT_SWEEP_LOCK; exiting" >&2
         exit 0
     fi
     # Sweep-leftover debris: a steal interrupted between the mv and its
