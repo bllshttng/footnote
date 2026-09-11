@@ -392,6 +392,7 @@ def _tick_settings(**over):
         tick_timeout_seconds=None,
         interval_seconds=600,
         graphql_min_remaining=200,
+        wedged_after_ticks=3,
     )
     s.recovery = SimpleNamespace(enabled=False)
     s.autonomy = SimpleNamespace(enabled=True)

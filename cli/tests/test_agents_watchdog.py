@@ -2859,7 +2859,7 @@ def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
     monkeypatch.setattr(_install, "_LAUNCH_AGENTS_DIR", tmp_path)
     monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
     settings = SimpleNamespace(
-        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600),
+        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600, wedged_after_ticks=3),
         recovery=SimpleNamespace(watchdog=_wd("report"), enabled=True),
         autonomy=SimpleNamespace(enabled=True),
     )
