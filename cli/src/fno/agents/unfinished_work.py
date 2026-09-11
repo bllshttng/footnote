@@ -41,7 +41,6 @@ and the scheduled tick consume.
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 from dataclasses import dataclass
@@ -129,6 +128,9 @@ class OwnerProbe:
     ``pid_alive``: True/False only from a positive process probe; None when
     no pid was recorded or the probe could not answer. ``transcript_age_s``:
     seconds since the session's transcript last moved, None when unreadable.
+    ``last_activity_basis``: how that age was taken (``mtime`` = a file stamp,
+    which the shared predicate refuses as positive evidence); None when the
+    probe could not answer or the caller injected a synthetic age.
     ``claim_state``: the claim view this handle holds, when it holds one.
     ``stored_exited``: the ONE stored status that is itself a probe result
     (reconcile writes it only after confirming the child was gone)."""
@@ -136,6 +138,7 @@ class OwnerProbe:
     handle: str
     pid_alive: Optional[bool] = None
     transcript_age_s: Optional[float] = None
+    last_activity_basis: Optional[str] = None
     claim_state: Optional[str] = None
     stored_exited: bool = False
 
@@ -150,22 +153,42 @@ def owner_verdict(
 ) -> str:
     """``live`` | ``gone`` | ``unknown`` for one owner candidate.
 
-    Positive evidence only, in both directions. Live: a live pid, or a
-    transcript that moved inside the activity window. Gone: a positively dead
-    pid, an expired lease, or the confirmed-exit stamp. Everything else,
+    Derived through the ONE shared liveness predicate
+    (``classify_reachability``), never a private vocabulary (x-dead):
+    falsifiers first (a positively dead pid, the confirmed-exit stamp - but
+    never while the transcript is fresh, because a harness resume kills the
+    pid while the session keeps writing), then positive evidence (a live pid,
+    or transcript activity inside the owner window). Everything else,
     including every unreadable read, is unknown, and unknown never reads as
-    ownerless."""
-    if probe.pid_alive is True:
+    ownerless. The one clock-word outside the predicate is a STALE claim:
+    only TTL expiry proves a lease dead (suspect keeps TTL protection, and
+    the claims machinery itself refuses to steal it)."""
+    from fno.agents.reachability import REACHABLE, UNREACHABLE, classify_reachability
+
+    fresh = probe.transcript_age_s is not None and probe.transcript_age_s <= live_activity_s
+    if probe.stored_exited and not fresh:
+        falsifier: Optional[str] = "exit-recorded"
+    elif probe.pid_alive is False and not fresh:
+        falsifier = "process-gone"
+    else:
+        falsifier = None
+    reading = classify_reachability(
+        truth_state="working" if probe.transcript_age_s is not None else None,
+        age_s=(
+            int(probe.transcript_age_s) if probe.transcript_age_s is not None else None
+        ),
+        falsifier=falsifier,
+        fresh_s=live_activity_s,
+        pid_alive=True if probe.pid_alive is True else None,
+        last_activity_basis=probe.last_activity_basis,
+    )
+    if reading.verdict == REACHABLE:
         return LIVE
-    if probe.transcript_age_s is not None and probe.transcript_age_s <= live_activity_s:
-        return LIVE
-    if probe.pid_alive is False:
+    if reading.verdict == UNREACHABLE:
         return GONE
     # Only TTL expiry (stale) proves a lease dead: suspect keeps TTL
     # protection, and the claims machinery itself refuses to steal it.
     if probe.claim_state == "stale":
-        return GONE
-    if probe.stored_exited:
         return GONE
     return OWNER_UNKNOWN
 
@@ -705,6 +728,22 @@ def _default_truth(handle: str) -> Optional[float]:
     return float(age) if isinstance(age, (int, float)) else None
 
 
+def _default_truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
+    """One truth resolution, age AND basis (x-dead: an mtime-derived age must
+    reach the classifier labelled, or the 2h33m stat lie reads as positive
+    transcript evidence). The injectable ``truth_resolver`` contract keeps
+    returning a bare age, so injected probes carry no basis."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    result = resolve_session_truth(handle)
+    age = result.get("last_activity_age_s")
+    basis = result.get("last_activity_basis")
+    return (
+        (float(age) if isinstance(age, (int, float)) else None),
+        (str(basis) if basis else None),
+    )
+
+
 def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
     if pid is None:
         return None
@@ -719,32 +758,11 @@ def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
 
 
 def _read_registry_rows(path: Optional[Path] = None) -> tuple[dict, bool]:
-    """cwd -> [registry row, ...] plus an ok flag. A missing registry is a
-    legitimate empty fleet and is ok; one that exists and fails to parse is
-    a genuine read failure, which reads every candidate unmeasurable."""
-    import os
+    """cwd -> [registry row, ...] plus an ok flag; the ONE shared occupancy
+    join (x-dead task 0.2)."""
+    from fno.agents.registry import registry_rows_by_cwd
 
-    from fno import paths as _paths
-
-    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
-    target = Path(override) if override else (path or _paths.agents_registry_path())
-    if not target.exists():
-        return {}, True
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}, False
-    if not isinstance(data, dict):
-        return {}, False
-    by_cwd: dict[str, list[dict]] = {}
-    for row in data.get("agents", []):
-        if not isinstance(row, dict):
-            continue
-        cwd = row.get("cwd") or ""
-        if not cwd:
-            continue
-        by_cwd.setdefault(str(Path(cwd)), []).append(row)
-    return by_cwd, True
+    return registry_rows_by_cwd(path)
 
 
 def _session_handle(row: dict) -> Optional[str]:
@@ -796,7 +814,13 @@ def collect_observations(
     """Gather every observation the classifier needs. Read-only apart from
     one ``git fetch origin main`` per repository and the GitHub PR reads."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
-    truth = truth_resolver or _default_truth
+    if truth_resolver is not None:
+
+        def truth_pair(handle: str) -> tuple[Optional[float], Optional[str]]:
+            return truth_resolver(handle), None
+
+    else:
+        truth_pair = _default_truth_pair
     warnings: list[str] = []
 
     def _budget_left() -> Optional[float]:
@@ -917,6 +941,7 @@ def collect_observations(
                         else _default_pid_alive(claim_view.get("pid"))
                     ),
                     transcript_age_s=cached.transcript_age_s,
+                    last_activity_basis=cached.last_activity_basis,
                     claim_state=(claim_view or {}).get("state"),
                     stored_exited=cached.stored_exited,
                 )
@@ -931,10 +956,12 @@ def collect_observations(
             if _session_handle(row) == handle
         )
         pid = (claim_view or {}).get("pid")
+        age, basis = truth_pair(handle)
         probe = OwnerProbe(
             handle=handle,
             pid_alive=_default_pid_alive(pid),
-            transcript_age_s=truth(handle),
+            transcript_age_s=age,
+            last_activity_basis=basis,
             claim_state=claim_state,
             stored_exited=stored_exited,
         )

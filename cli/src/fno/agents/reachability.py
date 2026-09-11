@@ -111,6 +111,12 @@ TRANSCRIPT = "transcript"
 NO_EVIDENCE = "no-evidence"
 #: Basis when a transcript resolved but has gone quiet. NOT a death sentence.
 SILENT = "silent"
+#: Positive process evidence: the pid answered and is alive. Carries the owner
+#: question's verdict on its own - a parked worker between turns holds its tree.
+PROCESS = "process"
+#: An active-looking state whose only age is a file mtime. Never positive
+#: evidence (x-dead): parse the records, take the max, never stat.
+MTIME_ONLY = "mtime-only"
 
 #: The older wire vocabulary `--status` filtered on, before x-c672 replaced
 #: the `live` token with served activity. Kept only as the historical note for
@@ -197,6 +203,8 @@ def classify_reachability(
     age_s: Optional[int],
     falsifier: Optional[str],
     fresh_s: float = TRANSCRIPT_EVIDENCE_S,
+    pid_alive: Optional[bool] = None,
+    last_activity_basis: Optional[str] = None,
 ) -> Reachability:
     """Pure classifier. ``falsifier`` is a basis string, or None for "did not fire".
 
@@ -205,10 +213,29 @@ def classify_reachability(
     deliberate and it is the most dangerous line in this module: if an unreadable
     pid were allowed to falsify, every permission error would become a death
     sentence and the reaping hazard would return through the back door.
+
+    ``pid_alive is True`` is positive process evidence (basis ``process``): the
+    owner question ("does a live worker hold this tree") may answer from a live
+    pid alone, because a parked worker between turns holds its tree while its
+    transcript is quiet. The NEGATIVE never rides this parameter - a dead pid
+    arrives as a ``falsifier`` (``pid_falsifier``), keeping every verdict
+    monotone: falsifier first, then positive evidence, then absence.
+
+    ``last_activity_basis="mtime"`` refuses positive evidence (x-dead, measured
+    2026-09-11): a transcript mtime moved 2h33m past its newest record because
+    the file is touched with no record appended. An active-looking state whose
+    only age is a file stamp lands UNKNOWN with basis ``mtime-only``; only a
+    parsed record can certify liveness. A live pid outranks it (process evidence
+    is not transcript evidence).
     """
     if falsifier is not None:
         return Reachability(UNREACHABLE, falsifier, age_s)
+    if pid_alive is True:
+        return Reachability(REACHABLE, PROCESS, age_s)
     if truth_state in _ACTIVE_STATES:
+        if last_activity_basis == "mtime":
+            # Never positive: an mtime is a file stamp, not activity.
+            return Reachability(UNKNOWN, MTIME_ONLY, age_s)
         # An unknowable age stays REACHABLE. Only POSITIVE evidence of staleness
         # demotes; a missing age is not evidence, and the monotone rule in this
         # module's header forbids lowering on absence.
@@ -491,6 +518,7 @@ def reachability(
         truth_state=truth.get("state"),
         age_s=truth.get("last_activity_age_s"),
         falsifier=pid_falsifier(pid, pid_start_time),
+        last_activity_basis=truth.get("last_activity_basis"),
     )
 
 

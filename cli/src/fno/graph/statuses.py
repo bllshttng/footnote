@@ -284,7 +284,8 @@ def live_worked_node_ids(
     by fleet_rows). Unattributable liveness still refuses.
     """
     try:
-        from fno.claims.roster import _really_finished, read_roster
+        from fno.agents.reachability import REACHABLE, UNKNOWN
+        from fno.claims.roster import _worker_reachability, read_roster
         from fno.graph.store import read_graph_strict
         from fno.paths import graph_json
 
@@ -310,13 +311,30 @@ def live_worked_node_ids(
                         and is_open_phase_row(row, row["phase"])):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])
-                worker = roster_row and not _really_finished(roster_row) and roster_row.get("name")
-                if isinstance(worker, str) and worker and worker not in workers:
-                    workers.append(worker)
+                if roster_row is None:
+                    continue
+                verdict = _worker_reachability(roster_row).verdict
+                if verdict == REACHABLE:
+                    worker = roster_row.get("name")
+                    if isinstance(worker, str) and worker and worker not in workers:
+                        workers.append(worker)
+                elif verdict == UNKNOWN:
+                    # x-dead: an undatable row is listed marked, never
+                    # vanished and never read as positively live.
+                    name = roster_row.get("name")
+                    marker = f"{name} (unmeasurable: transcript could not be dated)"
+                    if isinstance(name, str) and marker not in workers:
+                        workers.append(marker)
             for extra in reading.workers_on(node_id):
-                if _really_finished(extra):
+                verdict = _worker_reachability(extra).verdict
+                if verdict not in (REACHABLE, UNKNOWN):
                     continue
                 name = extra.get("name")
+                if verdict == UNKNOWN:
+                    marker = f"{name} (unmeasurable: transcript could not be dated)"
+                    if marker not in workers:
+                        workers.append(marker)
+                    continue
                 if isinstance(name, str) and name and name not in workers:
                     workers.append(name)
             for extra_name in reading.unmeasurable_by_node.get(node_id, ()):

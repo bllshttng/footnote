@@ -2543,7 +2543,9 @@ def _transcript_recently_active(session_id: str) -> bool:
     The transcript is the last truth that outlives a dead daemon (liveness
     probes and stored status fields have both lied). "Moved" is the newest
     TIMESTAMPED entry, not the mtime that untimestamped trailing records keep
-    young (x-54cf). No timestamped entry falls back to the mtime; no
+    young (x-54cf). No timestamped entry is NO evidence, so that transcript
+    answers nothing and is skipped - the mtime fallback read a file touched
+    2h33m after its newest record as live (x-dead, measured 2026-09-11). No
     transcript at all is activity-nothing; an unreadable glob is
     activity-UNKNOWN and reads False, so the caller treats it as dead only
     when the harness store also went quiet - the transcript is the second
@@ -2558,7 +2560,7 @@ def _transcript_recently_active(session_id: str) -> bool:
         for transcript in projects.glob(f"*/{session_id}.jsonl"):
             epoch = newest_entry_epoch(transcript)
             if epoch is None:
-                epoch = transcript.stat().st_mtime
+                continue  # an undatable transcript is not a fresh one
             if time.time() - epoch <= _JOINER_IDLE_WINDOW:
                 return True
     except OSError:
@@ -3119,6 +3121,18 @@ def _observe_node_claim(
         occupied = True
         worker = ", ".join(workers)
     block_reason = "worked-authority-unavailable" if worked_error else None
+    if occupied and block_reason is None:
+        # x-dead task 2.2: the bare words `blocked`/`already-claimed` starved
+        # the auto_continue arm for 97 minutes because both read as ordinary
+        # conditions. Name what was consulted and what it found; an
+        # unmeasurable node and a genuinely held node must not share a string.
+        parts: list[str] = []
+        if claim_state in ("live", "suspect"):
+            parts.append(f"claim {claim_state} held by {holder}")
+        if worker:
+            parts.append(f"worked overlay: {worker}")
+        if parts:
+            block_reason = "held: " + "; ".join(parts)
     dead_action = (
         None
         if occupied or not enforce_failure_limit

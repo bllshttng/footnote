@@ -92,6 +92,7 @@ def _reading_for_entry(entry: Any) -> Optional["Reachability"]:
             truth_state=truth.get("state"),
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
+            last_activity_basis=truth.get("last_activity_basis"),
         )
     except Exception:
         return None
@@ -581,6 +582,36 @@ def _report_observation(
     )
 
 
+def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
+    """x-dead task 0.1: the worker stamps the cwd it actually runs in.
+
+    The spawner mints the row with the spawn directory; this heal makes the
+    registry's cwd field answer "where does this worker work" for every
+    reader that joins on it. Fail-soft by contract: any failure emits a
+    ``session_cwd_heal_failed`` warning event and never blocks session start.
+    """
+    from fno.agents.registry import heal_own_cwd
+
+    try:
+        moved = heal_own_cwd(name=agent_self, harness=harness, cwd=cwd)
+    except Exception as exc:  # fail-open: never block session start (AC7-ERR)
+        events.emit(
+            "session_cwd_heal_failed",
+            provider=harness,
+            name=agent_self,
+            error=str(exc),
+        )
+        return
+    if moved is not None:
+        events.emit(
+            "session_cwd_healed",
+            provider=harness,
+            name=agent_self,
+            old=moved[0],
+            new=moved[1],
+        )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
     # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
@@ -616,9 +647,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.agent_self:
-        return _restamp(
+        rc = _restamp(
             args.agent_self, args.harness, args.session_id, source=args.source
         )
+        _heal_row_cwd(agent_self=args.agent_self, harness=args.harness, cwd=args.cwd)
+        return rc
 
     try:
         vendor = resolve_lane_vendor([args.harness], env=os.environ, harness=args.harness)

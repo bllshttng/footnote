@@ -87,7 +87,7 @@ from fno.tombstones import tombstone_group_cls
 
 RosterReading = _roster.RosterReading
 _finished_row_states = _roster._finished_row_states
-_really_finished = _roster._really_finished
+_worker_reachability = _roster._worker_reachability
 _transcript_activity = _roster._transcript_activity
 read_roster = _roster.read_roster
 
@@ -870,7 +870,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     }
 
 
-def _roster_verdict_line(info: dict) -> str:
+def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> str:
     """One line naming what was consulted and what it found.
 
     Each string is produced by exactly one outcome, so a caller asserts a
@@ -878,10 +878,13 @@ def _roster_verdict_line(info: dict) -> str:
     absence has two explanations and cannot tell them apart, which is the
     defect this whole cross-check exists to remove.
 
-    Four outcomes, not three: a node whose only roster rows are finished
+    Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
-    would train every reader to ignore the alarm.
+    would train every reader to ignore the alarm; and rows the predicate
+    could not date read UNKNOWN, never live-by-default (x-dead).
     """
+    from fno.agents.reachability import REACHABLE, UNKNOWN
+
     # The claim's OWN state, never the hardcoded word free. The cross-check runs
     # for every unheld state, and `stale` is one of them, so a line saying free
     # over a payload saying stale made stdout and stderr disagree about the same
@@ -891,10 +894,22 @@ def _roster_verdict_line(info: dict) -> str:
         return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
 
-    engaged = [w for w in workers if not _really_finished(w)]
+    if worker_verdicts is None:
+        worker_verdicts = {
+            w.get("name") or "": _worker_reachability(w).verdict for w in workers
+        }
+    engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
+    unmeasurable = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         return f"UNCLAIMED but a live worker is on this node: {rendered}"
+    if unmeasurable:
+        rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in unmeasurable)
+        return (
+            f"{state}, no positively-live worker; {len(unmeasurable)} row(s) could "
+            f"not be dated and read UNKNOWN, never live: {rendered}. "
+            f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
+        )
     unresolved = info.get("roster_rows_unresolved", 0)
     if unresolved:
         scanned = (
@@ -978,10 +993,23 @@ def status(
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
         workers = info.get("roster_workers") or []
-        engaged = [worker for worker in workers if not _really_finished(worker)]
+        from fno.agents.reachability import REACHABLE, UNKNOWN
+
+        worker_verdicts = {
+            w.get("name") or "": _worker_reachability(w).verdict for w in workers
+        }
+        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
+        undated = [w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN]
         if engaged:
             info["worked_by"] = [worker["name"] for worker in engaged]
-            info["basis"] = "live-worker"
+            # x-dead task 2.1: degraded coverage enters the verdict. A bare
+            # `live-worker` beside `roster_coverage: degraded` rendered a
+            # settled reading while 31 of 53 rows went unresolved; the hedge
+            # names the coverage in the basis itself.
+            if info.get("roster_rows_unresolved", 0) or undated:
+                info["basis"] = "live-worker-degraded-coverage"
+            else:
+                info["basis"] = "live-worker"
         unresolved = info.get("roster_rows_unresolved", 0)
         if info.get("roster_unresolved_candidates"):
             # An unresolved row whose worktree names THIS node is an
@@ -1002,7 +1030,7 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        line = _roster_verdict_line(info)
+        line = _roster_verdict_line(info, worker_verdicts)
         # Witness named when one answered: a verdict from a failing probe
         # stays auditable on the loud line.
         if info.get("session_basis"):

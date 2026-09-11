@@ -2459,6 +2459,94 @@ def heal_mux_ref(
     return before, new_mux
 
 
+def heal_own_cwd(
+    *,
+    name: str,
+    harness: str,
+    cwd: str,
+    registry_path: Optional[Path] = None,
+) -> Optional[tuple[Optional[str], str]]:
+    """Stamp the directory the worker actually WORKS in (x-dead task 0.1).
+
+    The spawner mints the row with the SPAWN directory - it cannot know a
+    harness that relocates itself after launch (codex cuts its own worktree;
+    a target worker enters one mid-session) - but the worker speaks for
+    itself at SessionStart, where ``--cwd`` is where the harness session
+    runs. Every reader that joins the registry on ``cwd`` (the occupancy
+    index, the watchdog's owner question, the stranded classifier) joins
+    through this field, so a row recording the spawn directory contributes
+    no handle anywhere and a live worker reads as ownerless.
+
+    Returns ``(old_cwd, new_cwd)`` when the row moved, else ``None``; the
+    idempotent no-op never rewrites the file, mirroring ``heal_mux_ref``.
+    """
+    if not name or not harness or not cwd:
+        return None
+
+    def _find(entries: list[AgentEntry]) -> Optional[AgentEntry]:
+        for e in entries:
+            if e.harness == harness and (e.name == name or name in e.aliases):
+                return e
+        return None
+
+    # Pre-read so the idempotent no-op never rewrites the file; the updater
+    # re-decides under the lock so a racing writer cannot double-write.
+    row = _find(load_registry(path=registry_path))
+    if row is None or row.cwd == cwd:
+        return None
+    before = row.cwd
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = _find(entries)
+        if target is not None and target.cwd != cwd:
+            target.cwd = cwd
+        return entries
+
+    persisted = update_registry(_updater, path=registry_path)
+    healed = _find(persisted)
+    if healed is None or healed.cwd != cwd:
+        return None
+    return before, cwd
+
+
+def registry_rows_by_cwd(
+    path: Optional[Path] = None,
+) -> tuple[dict[str, list[dict]], bool]:
+    """Raw registry rows indexed by each row's own ``cwd``, plus an ok flag.
+
+    The ONE occupancy join for every reader that asks "which worker holds
+    this tree" (x-dead task 0.2, folding x-73df): ``unfinished_work`` and
+    ``worktree_status``/``worktree_stranded`` used to keep three copies of
+    this index, and two of them resolved the registry path differently. A
+    missing registry is a legitimate empty fleet and is ok; one that exists
+    and fails to parse is a genuine read failure, which reads every candidate
+    unmeasurable. ``WORKTREE_STATUS_REGISTRY`` keeps overriding the path so
+    the existing test fixtures stay honest.
+    """
+    import json
+    import os
+
+    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
+    target = Path(override) if override else (path or agents_registry_path())
+    if not target.exists():
+        return {}, True
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, False
+    by_cwd: dict[str, list[dict]] = {}
+    for row in data.get("agents", []):
+        if not isinstance(row, dict):
+            continue
+        cwd = row.get("cwd") or ""
+        if not cwd:
+            continue
+        by_cwd.setdefault(str(Path(cwd)), []).append(row)
+    return by_cwd, True
+
+
 #: Outcome of one SessionStart id observation (see
 #: :func:`record_session_observation`).
 SESSION_OBSERVATION_OUTCOMES = (

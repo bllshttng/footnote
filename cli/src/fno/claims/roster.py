@@ -88,6 +88,66 @@ def _finished_row_states() -> frozenset:
     return _TERMINAL_STATES - _WAKE_STATES
 
 
+def _worker_reachability(worker: dict):
+    """One roster row through the ONE shared predicate (x-dead task 1.1).
+
+    Replaces ``_really_finished``'s two-state collapse, where a transcript
+    that could not be dated read as ENGAGED - the measured wrong answer that
+    rendered "UNCLAIMED but a live worker is on this node" over a done row.
+    The mapping: REACHABLE means engaged, UNREACHABLE means finished, and
+    UNKNOWN (no transcript, no readable epoch) is its own arm at every
+    caller - an undatable transcript is a verdict about the INSTRUMENT, not
+    about the worker.
+
+    The transcript outranks the supervisor's word for EVERY row, not only
+    terminal ones: a finished worker's row never leaves `working` (measured
+    live 2026-09-11 15:1xZ on t-b7f8-reaper-keep-rules - `fno agents list`
+    said parked while this reader said live from the same row), so an active
+    word beside a `done` tail is the stale word, not the worker. An
+    UNDATABLE transcript falls back to the supervisor word for a non-terminal
+    row (an unknowable age never demotes), and reads UNKNOWN for a terminal
+    one - never engaged-by-default.
+    """
+    from fno.agents.reachability import classify_reachability
+
+    state = worker.get("state")
+    try:
+        import time
+
+        from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
+
+        facts = tail_facts(
+            worker.get("row_id") or "", worker.get("cwd") or "",
+            agent=harness_for_session(worker.get("row_id") or ""),
+        )
+    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
+        facts = None
+    if facts is None:
+        # No transcript at all: the supervisor word is the only evidence. An
+        # active word stays reachable (an unknowable age never demotes); a
+        # terminal word is positive evidence the row ended (a killed worker
+        # with a rotated transcript must still free its node); anything else
+        # is UNKNOWN.
+        if state in ("working", "watching", "your-move"):
+            return classify_reachability(truth_state=state, age_s=None, falsifier=None)
+        if state in _finished_row_states():
+            return classify_reachability(
+                truth_state=None, age_s=None, falsifier=f"finished-state:{state}"
+            )
+        return classify_reachability(truth_state=None, age_s=None, falsifier=None)
+    if facts.last_event_epoch is None:
+        # A transcript PRESENT but undatable: the measured wrong answer read
+        # this as engaged. It is UNKNOWN - a verdict about the instrument -
+        # never engaged-by-default and never positively finished.
+        return classify_reachability(truth_state=None, age_s=None, falsifier=None)
+    age = int(max(0.0, time.time() - facts.last_event_epoch))
+    return classify_reachability(
+        truth_state=classify_tail(facts.last_role, facts.last_text, age),
+        age_s=age,
+        falsifier=None,
+    )
+
+
 def _transcript_activity(session_id: str, cwd: str):
     try:
         import time
@@ -105,9 +165,3 @@ def _transcript_activity(session_id: str, cwd: str):
         return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         return None
-
-
-def _really_finished(worker: dict) -> bool:
-    if worker.get("state") not in _finished_row_states():
-        return False
-    return _transcript_activity(worker.get("row_id") or "", worker.get("cwd") or "") is not False
