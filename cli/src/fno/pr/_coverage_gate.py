@@ -671,7 +671,7 @@ def _ordinary_verdict(
     # unsatisfiable by construction. Its rounds_used lifts the printed
     # count when the re-derivation landed under the cap.
     row_spent = isinstance(cov, dict) and cov.get("rounds_exhausted") is True
-    if row_spent:
+    if isinstance(cov, dict) and row_spent:
         rounds = max(rounds, _merge._safe_int(cov.get("rounds_used")))
     if rounds >= max_rounds or row_spent:
         # The waiver names what it waived. Past the cap this arm preempts
