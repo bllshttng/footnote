@@ -148,8 +148,8 @@ def test_attestation_marks_missing_sidecar_unjoined(tmp_path: Path) -> None:
 
 
 def _env_without_ambient_identity(**extra: str) -> dict:
-    """The subprocess env with every ambient session marker scrubbed, so
-    resolve_self_model deterministically floors to "unknown" on any machine -
+    """The subprocess env with every ambient session marker scrubbed, so the
+    transcript read deterministically answers not-observable on any machine -
     CI has no markers anyway, but a developer shell runs under a live harness
     session whose transcript WOULD resolve, and the assertion below must not
     depend on where pytest ran."""
@@ -160,6 +160,8 @@ def _env_without_ambient_identity(**extra: str) -> dict:
         "GEMINI_SESSION_ID",
         "OPENCODE_SESSION_ID",
         "CLAUDE_SESSION_ID",
+        "FNO_HARNESS_NAME",
+        "FNO_HARNESS_SESSION_ID",
     )
     env = {
         k: v for k, v in os.environ.items()

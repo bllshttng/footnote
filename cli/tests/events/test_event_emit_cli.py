@@ -664,10 +664,16 @@ def test_review_attestation_model_is_stamped_from_transcript(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No caller-supplied model -> the emit chokepoint stamps what the session's
-    own transcript says answered, via resolve_self_model."""
-    import fno.agents.self_stamp as self_stamp
+    own transcript says answered, via the provenance leaf."""
+    import fno.provenance.observed as observed
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {
+            "kind": "observed", "model": "claude-opus-5", "samples": 3,
+        },
+    )
     events = _events_path(tmp_path)
 
     result = runner.invoke(
@@ -689,9 +695,13 @@ def test_review_attestation_unknown_model_drops_the_callers_claim(
     """An unresolvable transcript means NOT OBSERVABLE: the caller's env claim
     is dropped, never laundered into the record. Empty is the schema's contract
     for that, so the event carries NO model key."""
-    import fno.agents.self_stamp as self_stamp
+    import fno.provenance.observed as observed
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "unknown")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {"kind": "no-transcript"},
+    )
     events = _events_path(tmp_path)
     payload = {**_attestation_data(), "model": "glm-5.2[1m]"}
 
@@ -715,9 +725,15 @@ def test_review_attestation_refuses_a_supplied_model_that_disagrees(
     never silently dropped - the positive marker that the caller gets no vote.
     Assert the non-zero exit AND that no event line was appended, not merely
     that stderr matched."""
-    import fno.agents.self_stamp as self_stamp
+    import fno.provenance.observed as observed
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {
+            "kind": "observed", "model": "claude-opus-5", "samples": 3,
+        },
+    )
     events = _events_path(tmp_path)
     payload = {**_attestation_data(), "model": "glm-5.2[1m]"}
 
@@ -743,24 +759,34 @@ def test_review_attestation_refuses_a_supplied_model_that_disagrees(
 def test_model_stamp_helper_stamps_observed_over_no_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import fno.agents.self_stamp as self_stamp
+    import fno.provenance.observed as observed
     from fno.events.cli import stamp_review_attestation_model
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {
+            "kind": "observed", "model": "claude-opus-5", "samples": 3,
+        },
+    )
     data: dict = {"verdict": "pass"}
-    stamp_review_attestation_model(data)
+    stamp_review_attestation_model(data, "claude", "sess-A")
     assert data["model"] == "claude-opus-5"
 
 
 def test_model_stamp_helper_drops_claim_when_unobservable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import fno.agents.self_stamp as self_stamp
+    import fno.provenance.observed as observed
     from fno.events.cli import stamp_review_attestation_model
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "unknown")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {"kind": "no-transcript"},
+    )
     data: dict = {"verdict": "pass", "model": "glm-5.2[1m]"}
-    stamp_review_attestation_model(data)
+    stamp_review_attestation_model(data, "claude", "sess-A")
     assert "model" not in data
 
 
@@ -769,13 +795,19 @@ def test_model_stamp_helper_refuses_a_disagreeing_claim(
 ) -> None:
     import typer
 
-    import fno.agents.self_stamp as self_stamp
+    import fno.provenance.observed as observed
     from fno.events.cli import stamp_review_attestation_model
 
-    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    monkeypatch.setattr(
+        observed,
+        "observed_model_for_session",
+        lambda harness, session_id, cwd: {
+            "kind": "observed", "model": "claude-opus-5", "samples": 3,
+        },
+    )
     data: dict = {"verdict": "pass", "model": "glm-5.2[1m]"}
     with pytest.raises(typer.Exit) as excinfo:
-        stamp_review_attestation_model(data)
+        stamp_review_attestation_model(data, "claude", "sess-A")
     assert excinfo.value.exit_code == 1
 
 

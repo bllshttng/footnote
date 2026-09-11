@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -329,38 +330,42 @@ def mirror_to_global_log(event: dict, resolved_events: Path, repo_root: Optional
         )
 
 
-def stamp_review_attestation_model(data_dict: dict[str, Any]) -> None:
+def stamp_review_attestation_model(
+    data_dict: dict[str, Any], harness: str, session_id: str
+) -> None:
     """Stamp data.model on a review_attestation from the emitting process.
 
     THE MODEL IS STAMPED HERE, SAME RULE AS THE ATTESTER. The routed-model env
     names the model the session ASKED for; a non-Anthropic name over an unset
     base URL silently falls back to the primary model, so a claim read from env
-    can name a model that never answered. resolve_self_model reads the
-    session's own transcript - what actually answered - and floors to "unknown"
-    when unobservable. An unresolvable transcript means NOT OBSERVABLE, so the
-    caller's env claim is dropped, never laundered into the record; empty is
-    the schema's contract for that. A supplied value that disagrees with the
-    transcript is refused naming both, the same rule attester_session_id
-    follows.
+    can name a model that never answered. The session's own transcript reports
+    what actually answered, read through the platform provenance leaf
+    (fno.provenance.observed - L0, like this module, which is why the stamp
+    does not reach the L5 agent-runtime resolver). An unresolvable transcript
+    means NOT OBSERVABLE, so the caller's env claim is dropped, never laundered
+    into the record; empty is the schema's contract for that. A supplied value
+    that disagrees with the transcript is refused naming both, the same rule
+    attester_session_id follows.
 
     Both review_attestation writers call this - the `fno doctor event emit`
     chokepoint below and `fno do review classify --attest` - so two rows can
     never disagree about the rule.
     """
-    from fno.agents.self_stamp import resolve_self_model
+    from fno.provenance.observed import observed_model_for_session
 
-    observed = resolve_self_model()
+    observed = observed_model_for_session(harness, session_id, os.getcwd())
+    name = observed.get("model") if observed.get("kind") == "observed" else None
     supplied_model = str(data_dict.get("model") or "").strip()
-    if observed and observed != "unknown":
-        if supplied_model and supplied_model != observed:
+    if name:
+        if supplied_model and supplied_model != name:
             typer.echo(
                 f"error: model supplied as '{supplied_model}' but this session's "
-                f"transcript reads '{observed}'. Drop the field; the emitter stamps it. "
+                f"transcript reads '{name}'. Drop the field; the emitter stamps it. "
                 "No event emitted.",
                 err=True,
             )
             raise typer.Exit(code=1)
-        data_dict["model"] = observed
+        data_dict["model"] = name
     else:
         data_dict.pop("model", None)
 
@@ -504,7 +509,11 @@ def emit(
             raise typer.Exit(code=1)
         data_dict["attester_session_id"] = resolved_id
         data_dict["attester_witness"] = witness
-        stamp_review_attestation_model(data_dict)
+        from fno.harness_identity import harness_from_env
+
+        stamp_review_attestation_model(
+            data_dict, harness_from_env(os.environ, warn=False) or "", resolved_id
+        )
 
     # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user

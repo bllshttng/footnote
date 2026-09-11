@@ -448,7 +448,7 @@ Two consequences are recorded rather than gated.
 
 It is recorded rather than gated because the native final-head review is the DEFAULT path, and refusing its attestation wedges every single-session PR.
 
-The `model` field records the model that ANSWERED, stamped by the emit chokepoint from the attesting session's own transcript via `resolve_self_model`.
+The `model` field records the model that ANSWERED, stamped by the emit chokepoint from the attesting session's own transcript via `observed_model_for_session` (the platform provenance leaf).
 
 The emitter passes no model of its own.
 
@@ -458,7 +458,7 @@ A non-Anthropic name over an unset base URL silently falls back to the primary m
 
 An env read recorded asks as answers.
 
-x-3f1d measured that on four sessions in one day.
+Four sessions in one day produced that wrong record.
 
 The caller gets no vote: a `--data` model that disagrees with the transcript refuses the emit, the same rule `attester_session_id` follows.
 
