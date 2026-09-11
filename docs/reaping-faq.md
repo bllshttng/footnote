@@ -105,7 +105,7 @@ The row is a planner. Every node it was assigned reached a planning-complete sta
 
 ### live descendant
 
-The line reads `kept {id} (live descendant: {child})`. A live registry row names this row as its parent (`gc_sweep.rs:64-67`). The parent stays until the child is gone. Retire the child and the parent becomes eligible.
+The line reads `kept {id} (live descendant: {child})`. A live registry row names this row as its parent (`gc_sweep.rs:1681-1694`). The parent stays until the child is gone, unless the parent's own harness reports `done`, `stopped` or `failed` (`gc_sweep.rs:1684`). A terminal parent has no running surface for its children to keep alive, so the lineage guard yields to it. Retire the child and the parent becomes eligible.
 
 ## The row is waiting on evidence
 
@@ -146,7 +146,7 @@ The asymmetry matters (`gc.rs:152-155`). A recorded status that is not `merged` 
 
 ### active
 
-The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs:349`, `gc.rs:333-335`). The session is live in the only sense the law allows. Wait past the window. If the session is truly done, stop it yourself.
+The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs:349`, `gc.rs:334-349`). The session is live in the only sense the law allows. Wait past the window. Two facts override it early: a terminal harness state (`done`, `stopped`, `failed`) and a provably dead pid (ESRCH). If `claude agents` reads the session `done` while the reaper prints this line, that combination is a defect, not a wait.
 
 ### graph unreadable
 
@@ -202,8 +202,8 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (open work: {node} {status}; read via {reader})` | Wait for the node to ship. Never close the node by hand. | Run `fno backlog get <node>` and read `status`. |
 | `kept {id} (open do row on done node: {node})` | Wait. A real run settles it. Never close the node. | Run `fno backlog get <node>` and read `status`. |
 | `kept {id} (planning assignment never closed by this session: {node})` | Wait for the session to close its own assignment. | The line names the node. |
-| `kept {id} (live descendant: {child})` | Wait for the child row to go. | The same report carries the child line. |
-| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. | Run the dry run again. Read the new age. |
+| `kept {id} (live descendant: {child})` | Wait for the child row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. | The same report carries the child line. |
+| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early. | Run the dry run again. Read the new age. |
 | `kept {id} (transcript unresolved: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |
 | `kept {id} (no provenance: ...)` | Restore one resolvable source for the row. | Run `fno-agents node-route --names <name> --json`. |
 | `kept {id} (sources disagree: {a} vs {b})` | Fix source `{a}`, which named `{b}`. | Run `fno-agents node-route --names <name> --json`. |
