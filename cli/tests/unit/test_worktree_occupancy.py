@@ -1,8 +1,16 @@
 """Rules R0-R5 over a fabricated process table; no live processes (x-0396)."""
 
+import sys
+from pathlib import Path
+
 import pytest
 
-from fno.worktree_occupancy import INERT, RETIRE, TERMINATE, classify
+# The classifier is sweep-side tooling in scripts/lib (see its header), not a
+# package module; it imports the fno modules it composes from the cli venv.
+SCRIPT = Path(__file__).parents[3] / "scripts" / "lib" / "worktree_occupancy.py"
+sys.path.insert(0, str(SCRIPT.parent))
+
+from worktree_occupancy import INERT, RETIRE, TERMINATE, classify  # noqa: E402
 
 
 HOME = "/Users/tester"
@@ -182,7 +190,7 @@ class TestUnclassified:
 
 def test_holds_and_inert_vocabularies():
     """The sweep bridge matches on these exact words; pin them."""
-    from fno import worktree_occupancy as m
+    import worktree_occupancy as m
 
     assert {m.HOLDS, m.INERT} == {"holds", "inert"}
     assert {m.KEEP, m.TERMINATE, m.RETIRE} == {"keep", "terminate", "retire"}
@@ -190,11 +198,8 @@ def test_holds_and_inert_vocabularies():
 
 def test_no_registry_or_cwd_read_in_module():
     """Verify step 6: the only cwd/registry mentions are the trap comment."""
-    import pathlib
-
-    src = pathlib.Path(__file__).parents[2] / "src" / "fno" / "worktree_occupancy.py"
     bad = []
-    for i, line in enumerate(src.read_text().splitlines(), 1):
+    for i, line in enumerate(SCRIPT.read_text().splitlines(), 1):
         if '"cwd"' in line or ".cwd" in line or "registry" in line.lower():
             stripped = line.strip()
             if stripped.startswith("#"):

@@ -37,9 +37,11 @@ wt_classify_pids() {
         if [[ -z "${FNO_PYTHON:-}" || ! -d "${root}/cli/src" ]]; then
             rc=1
         else
+            # The classifier is a script beside this bridge (see its header):
+            # the cli/src tree it composes from rides PYTHONPATH.
             # shellcheck disable=SC2086  # one pid per argv word, by contract
             out="$(PYTHONPATH="${root}/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-                "$FNO_PYTHON" -m fno.worktree_occupancy "$wt" $pids 2>/dev/null)" || rc=$?
+                "$FNO_PYTHON" "${root}/scripts/lib/worktree_occupancy.py" "$wt" $pids 2>/dev/null)" || rc=$?
         fi
     fi
     n_pids="$(printf '%s\n' "$pids" | grep -c .)"

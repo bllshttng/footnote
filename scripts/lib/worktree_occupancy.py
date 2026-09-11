@@ -5,6 +5,12 @@ coarsely: any pid keeps the tree, forever, because nothing retires a leaked
 test-fixture keeper, an orphaned Bash-tool shell, or a bg session whose job
 already finished. This module names each hit and classifies it.
 
+This is sweep-side tooling, so it lives beside worktree-status.py in
+scripts/lib, not in cli/src/fno: that tree is shrink-only net
+(check-file-budget.sh), and the growth here is the feature. The bridge
+(worktree-occupancy.sh) runs this file as a script with cli/src on
+PYTHONPATH, which is where the fno modules it composes live.
+
 Fail closed: a hit the classifier cannot positively place is a holder.
 Absence of a recognised holder is never proof a tree is free.
 """
@@ -240,7 +246,7 @@ def _job_state_reader(home: str, now: float) -> Callable[[str], Optional[Tuple[s
 
 
 def main(argv: List[str]) -> int:
-    """``python -m fno.worktree_occupancy <worktree> <pid>...``
+    """``python scripts/lib/worktree_occupancy.py <worktree> <pid>...``
 
     One tab-separated row per pid: ``pid verdict action job reason cmd``.
     Any failure exits 2 with nothing on stdout, so the bridge fails closed."""
