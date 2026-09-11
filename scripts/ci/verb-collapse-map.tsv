@@ -4,6 +4,7 @@ agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic di
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
 agents bash-census	T1	agents bash-census	0
+agents census	T1	agents census	0
 agents claim acquire	T1	agents claim acquire	27
 agents claim list	T1	agents claim list	9
 agents claim reap	T1	agents claim reap	1

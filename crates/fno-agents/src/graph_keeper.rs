@@ -729,6 +729,12 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // A peer resetting between connect and accept surfaces here
+            // (Linux ECONNABORTED); one dropped probe must not retire a
+            // keeper that owns the seat. Interrupted accept retries too.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionAborted
+                    || e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }

@@ -308,8 +308,11 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
     let graph = home.join("graph.json");
     std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
     let sock = home.join("graph.json.store.sock");
+    // Each racer's stderr lands in its own file: an unexpected exit names its
+    // path (seat refusal, self-retire, bind failure) instead of a bare code.
+    let stderr_of = |i: usize| home.join(format!("racer-{i}.stderr"));
     let mut keepers: Vec<Child> = (0..4)
-        .map(|_| {
+        .map(|i| {
             Command::new(WORKER_BIN)
                 .args([
                     "--store-keeper",
@@ -321,22 +324,25 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
                     "seat-race",
                 ])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(std::fs::File::create(stderr_of(i)).unwrap()))
                 .spawn()
                 .expect("spawn racing keeper")
         })
         .collect();
+    let explain =
+        |i: usize| -> String { std::fs::read_to_string(stderr_of(i)).unwrap_or_default() };
     wait_for_socket(&sock);
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut exited_three = 0;
     while Instant::now() < deadline {
         exited_three = 0;
-        for k in keepers.iter_mut() {
+        for (i, k) in keepers.iter_mut().enumerate() {
             if let Some(status) = k.try_wait().unwrap() {
                 assert_eq!(
                     status.code(),
                     Some(3),
-                    "a loser exits EXIT_SEAT_OWNED=3, got {status}"
+                    "racer {i} exits EXIT_SEAT_OWNED=3, got {status}: {}",
+                    explain(i)
                 );
                 exited_three += 1;
             }
@@ -355,7 +361,15 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
         let _ = k.kill();
         let _ = k.wait();
     }
-    assert_eq!(exited_three, 3, "three losers must exit 3");
+    assert_eq!(
+        exited_three,
+        3,
+        "three losers must exit 3; racer stderr: 0={:?} 1={:?} 2={:?} 3={:?}",
+        explain(0),
+        explain(1),
+        explain(2),
+        explain(3)
+    );
 }
 
 #[test]
