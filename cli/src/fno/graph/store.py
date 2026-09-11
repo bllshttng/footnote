@@ -581,19 +581,6 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
 
 
-def identify_spawned_keepers() -> list[dict]:
-    """Identify keepers spawned here plus the canonical seat."""
-    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
-    socks.add(store_socket_for(Path(GRAPH_JSON)))
-    rows: list[dict] = []
-    for sock in sorted(socks):
-        try:
-            rows.append(_Keeper(sock).identify())
-        except StoreUnavailable:
-            continue
-    return rows
-
-
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)

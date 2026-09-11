@@ -130,7 +130,7 @@ def _reparent_live_children(
     moved: list[tuple[str, Optional[str]]] = []
     for e in entries:
         nid = e.get("id") if isinstance(e, dict) else None
-        if nid in kids:
+        if isinstance(nid, str) and nid in kids:
             e["parent"] = target
             moved.append((nid, target))
     return moved
