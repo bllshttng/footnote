@@ -42,30 +42,7 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadSource {
-    Json,
-    Sqlite,
-}
-
-impl ReadSource {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "json" => Ok(Self::Json),
-            "sqlite" => Ok(Self::Sqlite),
-            _ => Err(format!(
-                "--read-source must be json or sqlite, got {value:?}"
-            )),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Sqlite => "sqlite",
-        }
-    }
-}
+use crate::backlog::Backend;
 
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
@@ -81,7 +58,8 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
-/// [--canonical] [--lock-timeout-secs N] [--read-source json|sqlite]`.
+/// [--canonical] [--lock-timeout-secs N]`. The backend is not argv state:
+/// the store names it in graph_meta and every request re-reads it.
 pub struct KeeperConfig {
     pub sock: PathBuf,
     pub graph: PathBuf,
@@ -92,7 +70,6 @@ pub struct KeeperConfig {
     pub lock_timeout: Duration,
     /// Project journal receiving bounded write-gate aggregates.
     pub events: Option<PathBuf>,
-    pub read_source: ReadSource,
     /// Idle self-exit bound. A keeper is long-lived by design in production,
     /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
     /// a killed pytest worker above all - and one orphan per fixture graph
@@ -115,7 +92,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
     let mut canonical = false;
     let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
     let mut events = None;
-    let mut read_source = ReadSource::Json;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -133,9 +109,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                 lock_timeout = Duration::from_secs(v);
             }
             "--events" => events = Some(PathBuf::from(it.next().ok_or("--events needs a value")?)),
-            "--read-source" => {
-                read_source = ReadSource::parse(it.next().ok_or("--read-source needs a value")?)?
-            }
             other => return Err(format!("unknown arg: {other}")),
         }
     }
@@ -159,7 +132,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         canonical,
         lock_timeout,
         events,
-        read_source,
         idle_limit,
     })
 }
@@ -292,7 +264,6 @@ struct StoreState {
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
     gate_metrics: Mutex<GateMetrics>,
     events: Option<PathBuf>,
-    read_source: ReadSource,
     /// The (dev, ino) of the socket path at bind time: the seat's proof.
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
     /// stands down (AC2-ERR).
@@ -301,6 +272,16 @@ struct StoreState {
     /// at every Identify, and the WouldBlock arm self-retires when the
     /// binary under the keeper is rewritten while it idles.
     startup_fp: Option<crate::drift::ExeFingerprint>,
+}
+
+impl StoreState {
+    /// The backend the store names RIGHT NOW, re-read from graph_meta on
+    /// every request: another process flipping `graph_meta.backend` lands on
+    /// the next request, no restart (AC5-EDGE). Unset or absent db reads as
+    /// json.
+    fn backend(&self) -> Backend {
+        crate::backlog::backend(&self.graph)
+    }
 }
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
@@ -396,6 +377,43 @@ fn flush_gate_metrics(state: &StoreState) {
             "retry_count": completed.retries,
         }),
     );
+}
+
+/// The soak sampler: each 5-minute window, when the backend is json
+/// (JSON authoritative) and the db version moved since the last
+/// sample, run one parity compare and journal it. A failed compare
+/// does not advance the sampler, so the window retries (AC13-HP).
+fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
+    if state.backend() != crate::backlog::Backend::Json {
+        return;
+    }
+    let Ok(version) = crate::backlog::version(&state.graph) else {
+        return;
+    };
+    if last_sampled.as_deref() == Some(version.as_str()) {
+        return;
+    }
+    // Same gate discipline as the parity op: the compare holds the shared
+    // read guard so a publish cannot interleave with the sample.
+    let gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+    let report = crate::backlog::parity(&state.graph);
+    drop(gate);
+    let Ok(report) = report else {
+        return;
+    };
+    *last_sampled = Some(version);
+    if let Some(events) = &state.events {
+        let emitter = crate::events::EventEmitter::new(events, "daemon");
+        let _ = emitter.emit(
+            "graph_parity_sample",
+            &json!({
+                "rows": report.rows,
+                "divergent": report.divergent,
+                "divergent_ids": report.divergent_ids,
+                "backend": "json",
+            }),
+        );
+    }
 }
 
 /// Exit code for a keeper that found its seat owned: the Python spawner
@@ -559,7 +577,6 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         snapshots: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
         events: cfg.events.clone(),
-        read_source: cfg.read_source,
         sock_ino,
         startup_fp,
     });
@@ -573,7 +590,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         "graph": cfg.graph.display().to_string(),
         "session": cfg.session,
         "started_at": started_at,
-        "store_backend": cfg.read_source.name(),
+        // The live backend is stamped onto every Identify reply in
+        // serve_client, not frozen here.
     })
     .to_string()
     .into_bytes();
@@ -584,15 +602,21 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         let metrics_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
             .name("fno-store-metrics".into())
-            .spawn(move || loop {
-                std::thread::sleep(GATE_WINDOW);
-                if metrics_shutdown.load(Ordering::SeqCst) == 1 {
-                    break;
+            .spawn(move || {
+                // The parity sampler state: the last db version a
+                // sample covered, so an unmoved window samples nothing.
+                let mut last_sampled: Option<String> = None;
+                loop {
+                    std::thread::sleep(GATE_WINDOW);
+                    if metrics_shutdown.load(Ordering::SeqCst) == 1 {
+                        break;
+                    }
+                    flush_gate_metrics(&metrics_state);
+                    sample_parity(&metrics_state, &mut last_sampled);
                 }
-                flush_gate_metrics(&metrics_state);
             });
     }
-    if state.read_source == ReadSource::Sqlite {
+    if state.backend() == Backend::Sqlite {
         let export_state = Arc::clone(&state);
         let export_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
@@ -606,10 +630,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                     .gate
                     .write()
                     .unwrap_or_else(|error| error.into_inner());
-                let result = crate::graph_sqlite::export_if_due(
-                    &export_state.graph,
-                    Duration::from_secs(60),
-                );
+                let result =
+                    crate::backlog::export_if_due(&export_state.graph, Duration::from_secs(60));
                 drop(gate);
                 if let (Err(error), Some(path)) = (result, &export_state.events) {
                     let emitter = crate::events::EventEmitter::new(path, "daemon");
@@ -900,6 +922,12 @@ fn serve_client(
                 // next census, not one restart behind. New JSON keys are
                 // not a frame-shape change (PROTOCOL_VERSION stays 1).
                 let mut id: Value = serde_json::from_slice(&identify).unwrap_or(json!({}));
+                if let Some(obj) = id.as_object_mut() {
+                    // The backend the store names at answer time: a keeper
+                    // reports a flip another process made, even one made
+                    // after this keeper started (AC4-HP, AC5-EDGE).
+                    obj.insert("store_backend".to_string(), json!(state.backend().name()));
+                }
                 if let (Some(obj), Some(fp)) = (id.as_object_mut(), &state.startup_fp) {
                     obj.insert(
                         "build".to_string(),
@@ -1019,6 +1047,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
         "export_status" => handle_export_status(state),
+        "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
@@ -1150,12 +1179,12 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
     let sqlite;
     let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
         Some(a) => a,
-        None => match state.read_source {
-            ReadSource::Json => {
+        None => match state.backend() {
+            Backend::Json => {
                 cached = cached_entries(state, false, false)?;
                 &cached
             }
-            ReadSource::Sqlite => {
+            Backend::Sqlite => {
                 sqlite = read_state(state, false, true)?;
                 &sqlite
             }
@@ -1191,12 +1220,12 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    match state.read_source {
-        ReadSource::Json => {
+    match state.backend() {
+        Backend::Json => {
             let entries = cached_entries(state, keep_malformed, strict)?;
             Ok(json!({ "entries": entries }))
         }
-        ReadSource::Sqlite => {
+        Backend::Sqlite => {
             let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
             let entries = read_state(state, keep_malformed, !strict)?;
             Ok(json!({ "entries": entries }))
@@ -1223,9 +1252,9 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let mut overlaid = match state.read_source {
-        ReadSource::Json => (*cached_entries(state, false, false)?).clone(),
-        ReadSource::Sqlite => read_state(state, false, true)?,
+    let mut overlaid = match state.backend() {
+        Backend::Json => (*cached_entries(state, false, false)?).clone(),
+        Backend::Sqlite => read_state(state, false, true)?,
     };
     graph_store::apply_readiness_overlay(&mut overlaid);
     let mut out = Vec::with_capacity(tokens.len());
@@ -1244,9 +1273,9 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
 /// derives the rung map from this light read instead of a full begin, which
 /// ships the whole graph for one derived value.
 fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
-    let entries = match state.read_source {
-        ReadSource::Json => cached_entries(state, false, false)?,
-        ReadSource::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
+    let entries = match state.backend() {
+        Backend::Json => cached_entries(state, false, false)?,
+        Backend::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
     };
     let refs: Vec<Value> = entries
         .iter()
@@ -1267,13 +1296,13 @@ fn read_state(
     keep_malformed: bool,
     backup_on_corrupt: bool,
 ) -> Result<Vec<Value>, StoreError> {
-    match state.read_source {
-        ReadSource::Json => {
+    match state.backend() {
+        Backend::Json => {
             graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
         }
-        ReadSource::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
+        Backend::Sqlite => crate::backlog::read_entries(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1283,11 +1312,11 @@ fn read_state(
 }
 
 fn state_version(state: &StoreState) -> Result<String, StoreError> {
-    match state.read_source {
-        ReadSource::Json => Ok(graph_store::file_content_version(&state.graph)),
-        ReadSource::Sqlite => crate::graph_sqlite::version(&state.graph).map_err(|error| {
+    match state.backend() {
+        Backend::Json => Ok(graph_store::file_content_version(&state.graph)),
+        Backend::Sqlite => crate::backlog::version(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1334,11 +1363,11 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
 /// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-    let bytes = match state.read_source {
-        ReadSource::Json => std::fs::read(&state.graph).map_err(|error| {
+    let bytes = match state.backend() {
+        Backend::Json => std::fs::read(&state.graph).map_err(|error| {
             StoreError::Unreadable(state.graph.display().to_string(), error.to_string())
         })?,
-        ReadSource::Sqlite => {
+        Backend::Sqlite => {
             graph_store::serialize_graph_file(&read_state(state, true, false)?).into_bytes()
         }
     };
@@ -1352,9 +1381,9 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     // One gate-held window for entries and digest both (cached_snapshot): a
     // commit publishing mid-begin waits, so a retrying writer's version never
     // names a file its entries did not come from.
-    let (version, entries) = match state.read_source {
-        ReadSource::Json => cached_snapshot(state)?,
-        ReadSource::Sqlite => {
+    let (version, entries) = match state.backend() {
+        Backend::Json => cached_snapshot(state)?,
+        Backend::Sqlite => {
             let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
             (
                 state_version(state)?,
@@ -1395,16 +1424,16 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
-    if state.read_source != ReadSource::Sqlite {
+    if state.backend() != Backend::Sqlite {
         return Err(StoreError::Invalid(
-            "graph export requires graph.read_source=sqlite".into(),
+            "graph export requires graph_meta.backend=sqlite".into(),
         ));
     }
     let _gate = state
         .gate
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    let version = crate::graph_sqlite::export_now(&state.graph).map_err(StoreError::Sqlite)?;
+    let version = crate::backlog::export_now(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "version": version,
         "path": state.graph.display().to_string(),
@@ -1412,16 +1441,31 @@ fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
-    if state.read_source != ReadSource::Sqlite {
+    if state.backend() != Backend::Sqlite {
         return Ok(json!({"backend": "json", "stale": false}));
     }
     let (current, exported) =
-        crate::graph_sqlite::export_status(&state.graph).map_err(StoreError::Sqlite)?;
+        crate::backlog::export_status(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "backend": "sqlite",
         "stale": exported.as_deref() != Some(current.as_str()),
         "version": current,
         "exported_version": exported,
+    }))
+}
+
+/// The parity op: the thin wire face over the only compare
+/// implementation (backlog::parity); no second compare here.
+fn handle_parity(state: &StoreState) -> Result<Value, StoreError> {
+    // The compare reads graph.json AND the db: under the shared gate so a
+    // concurrent publish can never present it a torn pair.
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    let report = crate::backlog::parity(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "rows": report.rows,
+        "divergent": report.divergent,
+        "divergent_ids": report.divergent_ids,
+        "backend": state.backend().name(),
     }))
 }
 
@@ -1445,12 +1489,11 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
             plan_rungs: plan_rung_map(params),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         if let Ok(value) = &outcome {
             seed_cache(state, value.entries.clone(), &value.version);
         }
@@ -1638,12 +1681,11 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(current_version),
             plan_rungs: plan_rung_map(params),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         if let Ok(value) = &outcome {
             seed_cache(state, value.entries.clone(), &value.version);
         }
@@ -2637,11 +2679,10 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             // in_progress like any full write); a caller that sends none
             // keeps stored statuses.
             plan_rungs: plan_rung_map(&p),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     )?;
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         seed_cache(state, outcome.entries.clone(), &outcome.version);
     }
     Ok(json!({
@@ -2720,7 +2761,6 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
-            read_source: ReadSource::Json,
             sock_ino: None,
             startup_fp: None,
         }
@@ -2793,7 +2833,6 @@ mod tests {
             events: None,
             sock_ino: None,
             startup_fp: None,
-            read_source: ReadSource::Json,
         }
     }
 
@@ -3146,6 +3185,63 @@ mod tests {
         );
     }
 
+    /// Reads the Identify reply's `store_backend` over the wire.
+    fn identify_backend(stream: &mut UnixStream) -> String {
+        stream
+            .write_all(&encode(TAG_IDENTIFY, b""))
+            .expect("identify write");
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).expect("identify header");
+        assert_eq!(header[0], TAG_IDENTIFY_REPLY, "unexpected reply tag");
+        let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).expect("identify body");
+        let id: Value = serde_json::from_slice(&body).unwrap();
+        id["store_backend"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn keeper_identify_reports_the_named_backend_live() {
+        // AC4-HP + AC5-EDGE over the wire: the reply carries the backend
+        // graph_meta names at answer time, and a flip by another process
+        // lands on the next Identify without a restart.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("backend.store.sock");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        let cfg = KeeperConfig {
+            sock: sock.clone(),
+            graph: graph.clone(),
+            session: "test-backend".into(),
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            events: None,
+            // The Shutdown frame ends the keeper process from inside, which
+            // under test kills the whole binary; the idle bound is the way a
+            // test keeper exits.
+            idle_limit: Some(Duration::from_millis(700)),
+        };
+        let handle = std::thread::spawn(move || run(cfg));
+        let mut stream = loop {
+            match UnixStream::connect(&sock) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
+        crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
+        assert_eq!(
+            identify_backend(&mut stream),
+            "sqlite",
+            "a flip lands on the next Identify"
+        );
+        // Drop the client and let the idle bound retire the keeper.
+        drop(stream);
+        let result = handle.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!sock.exists(), "idle exit must unlink the socket");
+    }
+
     #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
         let dir = tempfile::tempdir().unwrap();
@@ -3157,7 +3253,6 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             events: None,
-            read_source: ReadSource::Json,
             idle_limit: Some(Duration::from_millis(700)),
         };
         let handle = std::thread::spawn(move || run(cfg));
@@ -3200,7 +3295,6 @@ mod tests {
             events: None,
             sock_ino: None,
             startup_fp: None,
-            read_source: ReadSource::Json,
         };
         let stale = json!({
             "name": "update_fields",

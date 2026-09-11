@@ -91,6 +91,21 @@ event_types:
         error: { type: string }
     consumers: [operator]
 
+  - name: graph_parity_sample
+    retention: durable
+    description: "One 5-minute parity sample: the relational export compared against authoritative JSON while JSON is still the backend. The first sample starts the 7-day soak clock."
+    sources: [daemon]
+    data:
+      required: [rows, divergent, backend]
+      properties:
+        rows: { type: integer }
+        divergent: { type: integer }
+        divergent_ids:
+          type: array
+          description: "The first ten divergent node ids."
+        backend: { type: string }
+    consumers: [operator]
+
   - name: event_migration_landed
     retention: durable
     description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."

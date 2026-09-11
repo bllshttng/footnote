@@ -21,7 +21,7 @@ One file per install. These belong at the root.
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `graph.json`, `.lock`, `.sha256` | `graph/store.py` via `paths.graph_json()` | permanent |
-| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/graph_sqlite.rs` | durable row store; WAL sidecars are SQLite-managed |
+| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
 | `graph.html` | `graph/render_html.py` | regenerated |
 | `graph-archive.json` | `graph/archive.py` via `paths.graph_archive_json()` | permanent |

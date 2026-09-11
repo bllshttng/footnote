@@ -737,7 +737,6 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             canonical_path: None,
             base_version: Some(base),
             plan_rungs: None,
-            sqlite_authoritative: false,
         },
         graph_store::DEFAULT_LOCK_TIMEOUT,
     );
@@ -815,7 +814,6 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
                 canonical_path: None,
                 base_version: Some(base),
                 plan_rungs: None,
-                sqlite_authoritative: false,
             },
             graph_store::DEFAULT_LOCK_TIMEOUT,
         );
