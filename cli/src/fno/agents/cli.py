@@ -998,7 +998,7 @@ def cmd_spawn(
         help=(
             "The CLI binary to launch; default: the invoking harness, then "
             "claude. Any other binary on PATH also spawns, into a pane with "
-            "fno as the viewport. One-shot: --substrate headless."
+            "fno as the viewport; pass its init flags after '--'."
         ),
     ),
     vendor: str | None = typer.Option(
