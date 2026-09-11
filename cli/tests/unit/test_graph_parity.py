@@ -91,6 +91,16 @@ def test_compare_race_guard_exits_unmeasured(tmp_path):
     assert parity.compare(graph=graph, db=db, retries=2) == 2
 
 
+def test_compare_malformed_entries_shape_is_unmeasured_not_a_crash(tmp_path):
+    """`entries` as a non-list (e.g. a dict) must read UNMEASURED, not raise
+    an uncaught TypeError out of compare()."""
+    graph = tmp_path / "graph.json"
+    graph.write_bytes(b'{"entries": {"oops": 1}}')
+    db = tmp_path / "graph.db"
+    _make_db(db, [], None)
+    assert parity.compare(graph=graph, db=db) == 2
+
+
 def test_negative_control_passes_on_live_shaped_copies(tmp_path):
     entries = [{"id": "x-1", "title": "one"}, {"id": "x-2", "title": "two"}]
     graph = tmp_path / "graph.json"

@@ -49,7 +49,7 @@ def compare(*, graph: "Path | None" = None, db: "Path | None" = None, retries: i
         with sqlite3.connect(db) as c:
             stored = c.execute("SELECT id, row FROM entries ORDER BY ordinal, id").fetchall()
         sqlite_rows = _rows([(k, json.loads(b)) for k, b in stored], "SQLite entries")
-    except (OSError, sqlite3.Error, KeyError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(f"graph-parity: UNMEASURED: {exc}")
         return 2
     failures = [f"missing from SQLite: {k}" for k in sorted(json_rows.keys() - sqlite_rows.keys())]
