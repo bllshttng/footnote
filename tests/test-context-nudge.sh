@@ -665,6 +665,76 @@ assert_eq "latch: missing latches/ still exits 0" "$RC" "0"
 # passing absent-assertion proves the haystack was read rather than empty.
 assert_contains "hook: sweep positive control" "$HOOK_SRC" 'fno agents spawn -k'
 
+# === AC2: one boot per hook fire, and the fold preserves the values (x-3c74) ===
+# A counting fno shim: every invocation appends its argv to a counter file, so
+# the assertion is the INVOCATION COUNT, not just the trigger values reaching
+# the hook - a test that only checks values passes just as well on two boots as
+# on one. Reused for both trigger discrimination and the boot count.
+COUNT_BINDIR="$(mktemp -d)"
+COUNTER="$SBX/fno-invocations.txt"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" -m fno.cli "$@"\n' \
+  "$COUNTER" "$FNO_PYTHON" > "$COUNT_BINDIR/fno"
+cp "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
+chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
+
+# Configure BOTH triggers away from their defaults (50/40) so a stale-value bug
+# (e.g. a fold that reads the block but keeps hardcoded defaults) cannot pass.
+printf '[target.handoff]\nking_used_pct_trigger = 41\nused_pct_trigger = 55\n' > "$SBX/.fno/config.toml"
+
+# uncrowned, 54% (below the configured 55): the OLD default (50) would have
+# blocked here, so a no-block proves the new value reached the hook, not just
+# that some value did.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry no no
+write_transcript "$SBX/ac2-below.jsonl" 540000
+: > "$COUNTER"
+OUT=$(printf '%s' "$(payload "$SBX/ac2-below.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_absent "AC1-HP: 54% stays below the configured 55% trigger" "$OUT" '"decision":"block"'
+
+# uncrowned, 55%: blocks, and the reason names the configured value.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/ac2-gen.jsonl" 550000
+: > "$COUNTER"
+OUT=$(printf '%s' "$(payload "$SBX/ac2-gen.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_eq     "AC1-HP: uncrowned at 55% exits 0" "$RC" "0"
+assert_contains "AC1-HP: reason names the configured general trigger (55%)" "$OUT" 'session compact trigger (55%)'
+cfg_calls=$(grep -c 'config get' "$COUNTER"); cfg_calls="${cfg_calls:-0}"
+assert_eq     "AC2-HP: exactly one config get invocation (uncrowned fire)" "$cfg_calls" "1"
+assert_contains "AC2-HP: the one call names the block" "$(cat "$COUNTER")" 'config get target.handoff'
+assert_absent "AC2-EDGE: no separate used_pct_trigger scalar read" "$(cat "$COUNTER")" 'target.handoff.used_pct_trigger'
+assert_absent "AC2-EDGE: no separate king_used_pct_trigger scalar read" "$(cat "$COUNTER")" 'target.handoff.king_used_pct_trigger'
+
+# crowned, 40% (below the configured king trigger of 41): the OLD default (40)
+# would have blocked here too, so no-block proves the new king value landed.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry yes no
+write_transcript "$SBX/ac2-king-below.jsonl" 400000
+: > "$COUNTER"
+OUT=$(printf '%s' "$(payload "$SBX/ac2-king-below.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_absent "AC1-HP: crowned 40% stays below the configured 41% king trigger" "$OUT" '"decision":"block"'
+
+# crowned, 41%: blocks, one boot.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/ac2-king.jsonl" 410000
+: > "$COUNTER"
+OUT=$(printf '%s' "$(payload "$SBX/ac2-king.jsonl")" | PATH="$COUNT_BINDIR:$PATH" bash "$HOOK" 2>/dev/null); RC=$?
+assert_contains "AC1-HP: crowned at 41% blocks" "$OUT" '"decision":"block"'
+cfg_calls=$(grep -c 'config get' "$COUNTER"); cfg_calls="${cfg_calls:-0}"
+assert_eq     "AC2-HP: exactly one config get invocation (crowned fire)" "$cfg_calls" "1"
+
+# AC2-EDGE (the regression the count exists to catch): a re-added second scalar
+# read must fail the count assertion and the failure message names both lines.
+FAKE_COUNTER="$SBX/fake-two-boots.txt"
+printf 'config get target.handoff.used_pct_trigger\nconfig get target.handoff.king_used_pct_trigger\n' > "$FAKE_COUNTER"
+fake_calls=$(grep -c 'config get' "$FAKE_COUNTER")
+if [ "$fake_calls" != "1" ]; then
+  ok "AC2-EDGE: a reintroduced second scalar read fails the count (got $fake_calls: $(cat "$FAKE_COUNTER" | tr '\n' ';'))"
+else
+  bad "AC2-EDGE: two-boot fixture should not count as one"
+fi
+rm -f "$FAKE_COUNTER"
+rm -rf "$COUNT_BINDIR"
+
 echo ""
 echo "================================"
 echo "Results: $pass passed, $fail failed"
