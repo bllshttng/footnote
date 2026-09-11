@@ -2685,9 +2685,8 @@ def cmd_name(
     typer.echo(name)
 
 
-# `rename` moved to the Rust client (`agent.rename` over the daemon RPC); the rust_runtime
-# router entry makes `fno agents rename` resolve there. Python's rename_agent stays: it is
-# the transaction library, not a command twin.
+# `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
+# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
 
 
 @agents_app.command("retask", hidden=True)
