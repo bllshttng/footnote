@@ -4364,10 +4364,13 @@ fn x2774_open_work_keeps_name_their_reader() {
 }
 
 /// Change 5: one staged world judged twice. Dry and acting agree row for
-/// row, except the two permitted divergences, each asserted by name:
-/// needs_live_stop (dry only: a claude row with no death evidence) and the
+/// row, except the permitted divergences, each asserted by name:
+/// needs_live_stop (dry only: a claude row with no death evidence), the
 /// freshness re-check (acting only, covered by
-/// activity_arriving_in_the_apply_window_keeps_the_row in gc.rs).
+/// activity_arriving_in_the_apply_window_keeps_the_row in gc.rs), and a
+/// pane row the precheck calls NeedsKill (dry only;
+/// x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row asserts the pane
+/// buckets agree row for row).
 #[test]
 fn x2774_dry_and_acting_agree_row_for_row() {
     let (dir, home) = staged_graph_home();
@@ -4441,6 +4444,69 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     );
     assert_eq!(acting.needs_live_stop.len(), 0);
     assert_eq!(acting.stop_refused.len(), 0, "{:?}", acting.stop_refused);
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-58a5: a pane row whose pid is a reaped child (ESRCH) and whose codex
+/// session has no rollout in the store. The precheck answers Unprovable,
+/// so the dry run files it under stop_refused instead of promising the
+/// retirement, and the acting run's real pane stop refuses with the SAME
+/// detail. Neither retired list names it. This is the positive version of
+/// the measured defect: the dry run listed bp-a238 under retired while the
+/// real sweep refused it.
+#[test]
+fn x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "pane.jsonl", 2 * 3600);
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "NP",
+            "status": "done",
+            "sessions": [
+                {"phase": "do", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            ]
+        }]),
+    );
+    // A child that has already been reaped: its pid reads ESRCH to every
+    // later probe, the gone-pid fact the row carries.
+    let mut child = std::process::Command::new("true")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    state::update_registry(&home.registry_json(), |r| {
+        let mut pane = x2774_spawn("row-pane", "t-pane", "s-pane-x58a5");
+        pane.harness = Some("codex".into());
+        pane.substrate = Some("pane".into());
+        pane.pid = Some(pid);
+        pane.pid_start_time = None;
+        r.entries.push(pane);
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-pane-x58a5") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    let dry = x2774_sweep(&home, &emitter, 900, true, &picks, no_agents());
+    let acting = x2774_sweep(&home, &emitter, 900, false, &picks, no_agents());
+    assert_eq!(
+        dry.stop_refused, acting.stop_refused,
+        "both runs refuse with an identical detail: {:?} vs {:?}",
+        dry.stop_refused, acting.stop_refused
+    );
+    assert_eq!(dry.stop_refused.len(), 1, "{:?}", dry.stop_refused);
+    assert!(
+        dry.stop_refused[0].1.contains("is gone (ESRCH)")
+            && dry.stop_refused[0].1.contains("codex"),
+        "the refusal names the pid fact and the holder read: {:?}",
+        dry.stop_refused
+    );
+    assert!(!dry.retired.iter().any(|(id, _)| id == "t-pane"));
+    assert!(!acting.retired.iter().any(|(id, _)| id == "t-pane"));
     std::fs::remove_dir_all(home.root()).ok();
 }
 

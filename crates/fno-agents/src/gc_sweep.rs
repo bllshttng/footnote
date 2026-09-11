@@ -1754,6 +1754,61 @@ pub(crate) fn run_with_release(
             });
             continue;
         }
+        // x-58a5: the same honesty for pane rows. The precheck answers what
+        // the real run's stop will answer - already-stopped retires, a live
+        // pid is a kill no dry run may promise, an unprovable pid is a
+        // refusal both runs share. No release lift here: a release
+        // satisfies only the stop_on_death seam, and the pane stop never
+        // consults that seam, so the real pane stop refuses under one and
+        // the dry run must predict that.
+        if dry_run && e.substrate.as_deref() == Some("pane") {
+            match crate::pane_stop::precheck_pane_stop(e) {
+                crate::pane_stop::PanePrecheck::AlreadyStopped(_) => {}
+                crate::pane_stop::PanePrecheck::NeedsKill => {
+                    let detail = "pane pid is running; a dry run does not promise a kill \
+                                  it cannot prove"
+                        .to_string();
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to needs live stop ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.needs_live_stop.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "needs live stop",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+                crate::pane_stop::PanePrecheck::Unprovable(detail) => {
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to stop refused ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.stop_refused.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "stop refused",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+            }
+        }
         // The stop-family release still ISSUES the stop (x-e3cc): the seam
         // runs, the receipt records the outcome, and the release satisfies
         // the gate whether or not absence confirms. `None` when death
