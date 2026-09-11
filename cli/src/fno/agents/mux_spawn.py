@@ -200,7 +200,8 @@ def _shell_integration() -> str:
 
 
 # Moved to fno.agents.mux_server (x-f209, file budget); re-exported here.
-from fno.agents.mux_server import mux_server_env, resolve_mux_session  # noqa: E402
+from fno.agents.mux_server import mux_server_env as mux_server_env  # noqa: E402
+from fno.agents.mux_server import resolve_mux_session  # noqa: E402
 
 
 
