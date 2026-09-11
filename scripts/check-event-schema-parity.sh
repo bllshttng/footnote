@@ -364,6 +364,11 @@ dual_owner_kinds = {
     # table carries them for acceptance without emitting.
     "evals_scheduled_run",
     "evals_stale",
+    # Scratch-shape sweep: the mirror image of the evals pair - the Rust
+    # `scratch sweep` stage is the only emitter; the Python side carries
+    # them in schema.yaml for the validator and `doctor event find`.
+    "scratch_shape_observed",
+    "scratch_shape_filed",
 }
 collisions -= dual_owner_kinds
 if collisions:
