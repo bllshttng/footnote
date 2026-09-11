@@ -59,7 +59,7 @@ bash scripts/setup/archive-worktree.sh <name|path>   # the shared implementation
 
 The CLI and compatibility lifecycle entry delegate to the script above. They expose `--force`, `--yes` (skip kill prompt), and `--delete-branch` without copying the checks.
 
-Without `--force`, archival refuses on dirty state, unpushed commits, live sessions, unreadable process snapshots, failed salvage, app ownership, canonical checkout, and removal-time changes.
+Without `--force`, archival refuses on dirty state, unpushed commits, live sessions, unreadable process snapshots, failed salvage, app ownership, canonical checkout, and removal-time changes. A retired `--kill-orphans` flag is on this list too: parsing it prints one refusal line and sets nothing, because release by parentage killed real pane keepers (x-0396).
 
 With `--force`, the script measures and prints every dirty path. It prints each unpushed commit's abbreviated SHA and subject. It prints positive live-session evidence before removal. It still refuses unverifiable evidence. Its final receipt distinguishes discarded worktree state from preserved or deleted branch data.
 
@@ -72,6 +72,24 @@ Every removal emits one `worktree_removed` event row (path, caller, claim read, 
 ### The DIRTY bucket under a done node (law d-cfcf5a8e)
 
 The merge reaper removes a done-and-merged node's tree whatever its git status, keeps the branch, and holds only unpushed work: a HEAD that is not an ancestor of origin/main is not dirt, and an unreadable origin holds too. The recoverability argument is the ruling: the branch is pushed, the transcript persists, the node records the PR, so removal is cheap and reversible and hoarding is not. An OPEN node's tree keeps the old boundary, report only; setup's own symlinks into canonical are the one discounted case (`reason=setup-links`). While a request's tree is held (unpushed, or a removal that failed) the request stays pending and echoes the hold at most once an hour, so a later pass takes the tree once the hold clears instead of tombstoning it forever.
+
+### Who occupies a worktree
+
+The process table plus the lsof cwd snapshot (`_wt_pids`) is the only truthful occupancy source. Every classification reads that enumeration; none invents a second one.
+
+Never ask a recorded cwd which tree a worker occupies. The agents-registry `cwd` field is the spawn directory, and the claude job `state.json` `cwd` field is the spawn directory too. Measured 2026-09-11: 29 of 30 alive registry rows and 17 of 17 live bg jobs read the canonical checkout while their sessions wrote inside worktrees. A hold detector built on either field named its own live worktree free. The classifier is `cli/src/fno/worktree_occupancy.py`; it never reads those fields, and the bridge is `scripts/lib/worktree-occupancy.sh`.
+
+`claude bg-spare` argv is identical for a live session and an idle spare, so argv alone can never mark a spare reapable. The identity is the daemon's rendezvous socket farm (`session_procs.bg_socket_pid_map`), which joins a pid to its job id; a join miss holds.
+
+Four classes release a tree: a keeper the keeper lane names REAP, an orphaned claude Bash-tool shell (ppid 1, `zsh|bash|sh -c source <home>/.claude/shell-snapshots/...`), a claude job in a terminal state whose transcript is silent past `STALLED_AFTER_S` (7200 s), and any descendant of these. Every other process keeps the tree. A hit the classifier cannot place keeps the tree with reason `unclassified: <name>`, and a pid with no ps row keeps it with reason `no ps row`: absence of a recognised holder is never proof a tree is free.
+
+A kept tree prints the evidence per pid:
+
+    kept (processes: 1 held, 1 inert)
+        26287 holds claude job abc123 working, transcript 79s | claude bg-spare --bg-spare ...
+        26288 inert socket absent, no registry row claims it | fno-agents-worker --pane ...
+
+An all-inert tree falls through to `would-archive` (dry run) or removal, where `archive-worktree.sh` classifies its own fresh re-enumeration a second time and signals only `terminate` rows. `retire` rows carry a claude job id, and the sweep releases those job records through `claude rm`.
 
 ## Commit-time salvage refs
 
