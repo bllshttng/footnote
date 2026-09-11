@@ -1043,10 +1043,7 @@ def cmd_spawn(
         False,
         "--headless",
         "-p",
-        help=(
-            "Shortcut for --substrate headless: a one-shot worker. Wins over "
-            "--substrate."
-        ),
+        help="Shortcut for --substrate headless: a one-shot worker. Wins over --substrate.",
     ),
     sandbox_write_policy: str | None = typer.Option(
         None,
