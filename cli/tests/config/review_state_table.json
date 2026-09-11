@@ -66,6 +66,46 @@
           "verdict": "refused"
         }
       ]
+    },
+    {
+      "name": "spent_budget_stale_local_reads_reviewed",
+      "expected_state": "reviewed",
+      "rounds_exhausted": true,
+      "verdicts": [
+        {
+          "producer": "local_attestation",
+          "name": "code-review",
+          "verdict": "stale",
+          "freshness": "stale",
+          "reviewed_sha": "444500be"
+        },
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "under_budget_stale_local_reads_unreviewed",
+      "expected_state": "unreviewed",
+      "rounds_exhausted": false,
+      "verdicts": [
+        {
+          "producer": "local_attestation",
+          "name": "code-review",
+          "verdict": "stale",
+          "freshness": "stale",
+          "reviewed_sha": "444500be"
+        },
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused",
+          "required": false
+        }
+      ]
     }
   ]
 }

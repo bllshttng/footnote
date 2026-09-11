@@ -2300,6 +2300,60 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
         assert needle not in note, f"past-cap receipt names {needle}: {note}"
 
 
+def test_a_spent_row_discharges_when_the_rederived_count_is_under(
+    monkeypatch, tmp_path
+):
+    """The producer's budget bit is authority on its own (d-0fa92eb9): the
+    row says rounds_exhausted true, the gate's own re-derivation lands under
+    the cap, and the discharge still fires - a refusal past a spent budget
+    is unsatisfiable by construction. The row's stale verdict is the PR 1717
+    shape: covered at emit, head moved since. The remedy checks are the
+    q-8a3bf752 regression: no gate text at the cap names approval or any
+    override valve."""
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    rows = [
+        json.dumps(_soft_round("2026-08-25T21:00:00Z", "9" * 40)),
+        json.dumps(
+            {
+                "ts": "2026-08-25T22:01:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 42,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": FIXTURE_HEAD,
+                    "rounds_used": 2,
+                    "rounds_max": 2,
+                    "rounds_exhausted": True,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "stale",
+                            "attestation_origin": "self_attested",
+                            "reviewed_sha": "444500be",
+                            "freshness": "stale",
+                        }
+                    ],
+                },
+            }
+        ),
+    ]
+    _journal(tmp_path).write_text("\n".join(rows) + "\n")
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: (None, ""))
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, f"row-spent must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert "review budget discharged (2/2 rounds)" in note, note
+    for needle in ("approval", "coverage-override", "coverage-waive"):
+        assert needle not in note, f"cap receipt names {needle}: {note}"
+        assert needle not in refusal, f"cap refusal names {needle}: {refusal}"
+
+
 def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
     monkeypatch, tmp_path
 ):

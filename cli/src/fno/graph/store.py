@@ -225,7 +225,9 @@ def _worker_binary() -> Path | None:
                         return candidate
             break
     found = shutil.which("fno-agents-worker")
-    if found:
+    # which() answers are normally real files; a stale or faked PATH entry
+    # reaches Popen as FileNotFoundError here, so verify before trusting it.
+    if found and Path(found).is_file():
         return Path(found)
     try:
         from fno.rust_binary import resolve_binary

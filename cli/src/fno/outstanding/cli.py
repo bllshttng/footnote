@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import List
@@ -154,6 +155,32 @@ def report(
         typer.echo(block, nl=False)
 
 
+def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict[str, list[str]]:
+    """Live law-lane decisions whose subject this question is about.
+
+    Matched two ways: a subject NAMED via --subject (or a --node that spells
+    one) always hits; otherwise the question text must carry every token of
+    a hyphenated subject (review-coverage needs both words), and only when no
+    subject was named - an explicit subject is a deliberate act, not a guess
+    to second-guess. Losing the lookup is worse than one unneeded ask, so
+    the caller catches everything (d-0fa92eb9, q-8a3bf752: no agent asks a
+    question the operator already settled).
+    """
+    from fno.decide import list_decisions
+
+    _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
+    words = set(re.findall(r"[a-z0-9]+", question.lower()))
+    named = {s.casefold() for s in (subject, node) if s}
+    hits: dict[str, list[str]] = {}
+    for row in rows:
+        key = str(row.get("subject") or "").strip()
+        tokens = set(key.lower().split("-"))
+        by_text = not subject and len(tokens) >= 2 and tokens <= words
+        if key and (key.casefold() in named or by_text):
+            hits.setdefault(key, []).append(str(row.get("decision_id")))
+    return hits
+
+
 @outstanding_app.command("ask")
 def ask(
     question: str = typer.Argument(..., help="What you need the operator to decide or answer."),
@@ -166,6 +193,11 @@ def ask(
     ),
     node: str = typer.Option(
         None, "--node", help="Backlog node the question is about, when there is one."
+    ),
+    subject: str = typer.Option(
+        None,
+        "--subject",
+        help="The decision subject this question is about; live law on it refuses the ask.",
     ),
 ) -> None:
     """Record a question for the operator so it survives the next turn.
@@ -186,6 +218,25 @@ def ask(
             f"characters, the event stores {QUESTION_CAP}.",
             err=True,
         )
+    try:
+        hits = _live_law_hits(question, subject, node)
+    except Exception as exc:  # noqa: BLE001 - fail open: record the question
+        typer.echo(
+            f"outstanding: live-law lookup failed ({exc}); recording anyway",
+            err=True,
+        )
+        hits = {}
+    if hits:
+        for key, ids in hits.items():
+            line = (
+                f"outstanding: refused: live law already rules on '{key}' "
+                f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
+                "--lane law --state live. Act on the law; do not ask the operator."
+            )
+            if not subject:
+                line += " If the question is about another subject, name it with --subject."
+            typer.echo(line, err=True)
+        raise typer.Exit(2)
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
     # OWNED (x-20f1): the asker handle lands on a durable question event and is
@@ -203,6 +254,7 @@ def ask(
             ask=ask,
             options=option or None,
             blocks=blocks or None,
+            subject=subject,
         )
         append_question_event(event, _storage_root())
     except QuestionIndexWriteError as exc:

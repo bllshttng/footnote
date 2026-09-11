@@ -730,6 +730,7 @@ def _derive_review_state(
     verdicts: object,
     chain: set[str] | None = None,
     github_approval_satisfies: bool = False,
+    rounds_exhausted: bool = False,
 ) -> str | None:
     """Derive one known outcome from validated per-reviewer verdicts.
 
@@ -743,6 +744,9 @@ def _derive_review_state(
     key mirrors the Rust producer's bit. Only an explicit false reads
     not-owed - a missing key (every row emitted before the field existed)
     and any non-bool value read required, the fail-closed direction.
+    ``rounds_exhausted`` is the producer's budget bit (d-0fa92eb9): at a
+    spent budget a covered row IS reviewed, whatever the verdict freshness.
+    A malformed verdict list still returns None first, so it fails closed.
     """
     chain = chain or set()
     if coverage == "unknown":
@@ -756,6 +760,8 @@ def _derive_review_state(
         for verdict in verdicts
     ):
         return None
+    if rounds_exhausted and coverage == "covered":
+        return "reviewed"
     if any(
         verdict.get("verdict") == "reviewed"
         and _human_approval_counts(verdict, github_approval_satisfies)
@@ -801,22 +807,30 @@ def _verdicts_as_stored(data: dict) -> list[dict]:
 def _shape_review_coverage(
     data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> dict:
-    """Shape one event and invalidate any unproven covered verdict."""
+    """Shape one event and invalidate any unproven covered verdict.
+
+    A spent budget (``rounds_exhausted`` true, d-0fa92eb9) keeps a covered
+    row covered and reviewed; ``reviewed_count`` is the producer's count and
+    is never overwritten here (d-e1f84036: never report 0 reviews when
+    reviews happened).
+    """
     shaped = dict(data)
     verdicts = _verdicts_as_stored(data)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
+    spent = data.get("rounds_exhausted") is True
     review_state = _derive_review_state(
         data.get("coverage"),
         verdicts,
         _tiling_chain(data),
         _resolved_github_approval_flag(cwd),
+        rounds_exhausted=spent,
     )
     if review_state in _KNOWN_REVIEW_STATES:
         shaped["review_state"] = review_state
     else:
         shaped.pop("review_state", None)
-    if data.get("coverage") != "covered":
+    if data.get("coverage") != "covered" or spent:
         return shaped
 
     raw_verdicts = data.get("verdicts")
@@ -841,7 +855,6 @@ def _shape_review_coverage(
     ]
     if malformed or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
-        shaped["reviewed_count"] = len(valid)
     return shaped
 
 

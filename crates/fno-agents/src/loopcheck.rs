@@ -3059,7 +3059,7 @@ fn read_pr_info(
         // Locked Decision 1, same conjunct as the solo lane arm: the pass
         // condition is disposition-complete, withheld below the cap only.
         let blockers = disposition_blockers(&events_text, &head_branch, head_sha);
-        let reviewed = (info.all_required_passed() || local_recovery)
+        let reviewed = (info.all_required_passed() || local_recovery || tiling.rounds_exhausted)
             && unaddressed.is_empty()
             && reviewers_ok
             && !blockers_withhold(&blockers, tiling.rounds_exhausted);
@@ -3253,10 +3253,10 @@ fn local_recovery_from_refusal(
 }
 
 /// True when explicit reviewer refusal is the only remaining review obstacle.
-/// Missing and stale reviewers still deserve a wait or re-read, while findings
-/// and unattested required local reviewers remain work for the agent.
 fn awaiting_review_only(pr: &PrInfo) -> bool {
-    pr.coverage.review_state() == Some(ReviewState::ReviewerRefused)
+    pr.coverage
+        .review_state_at(pr.range_tiling.rounds_exhausted)
+        == Some(ReviewState::ReviewerRefused)
         && pr.missing_bots.is_empty()
         && pr.stale_bots.is_empty()
         && pr.unaddressed_findings.is_empty()
@@ -7133,7 +7133,7 @@ fn coverage_event_data_full(
         "verdicts": &rep.verdicts,
         "head_sha": head_sha,
     });
-    if let Some(review_state) = rep.review_state() {
+    if let Some(review_state) = rep.review_state_at(tiling.is_some_and(|t| t.rounds_exhausted)) {
         data["review_state"] = serde_json::json!(review_state);
     }
     if let Coverage::Covered(n) = &rep.coverage {

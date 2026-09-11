@@ -435,7 +435,8 @@ def _coverage_refused_reason(
                 f"{', '.join(stale)} reviewed an older commit and must re-read"
             )
         return (
-            prefix + "0 reviewed (no head-pinned pass attestation; "
+            prefix + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
+            "(no head-pinned pass attestation; "
             f"{'; '.join(waits)} - if a reviewer there is uninstalled or no "
             "longer configured, check config.review)"
         )
@@ -448,7 +449,8 @@ def _coverage_refused_reason(
     # the bare path exits 1 for anyone who copies it verbatim.
     return (
         prefix
-        + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD"
+        + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
+        + "(no head-pinned pass attestation - run the review verb at HEAD"
         + (f" - `{self_review_hint}`" if self_review_hint else "")
         + " - close every finding, commit and push first, then attest at the "
         + "final head with `bash skills/review/scripts/emit-attestation.sh <reviewer>`)"
