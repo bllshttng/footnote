@@ -255,6 +255,50 @@ def test_single_owner_plan_is_not_reported():
     assert m.detect_shared_plan_cost_violations(entries) == []
 
 
+def test_cost_guard_skips_normalize_for_uncosted_nodes(monkeypatch):
+    """AC1: the cheap guard runs first. normalize_plan_path is a keeper round
+    trip, so normalizing before the cost check paid it for every node and
+    discarded the answer for all but the costed few."""
+    calls: list = []
+
+    def counting_normalize(p):
+        calls.append(p)
+        return os.path.normpath(p) if p else None
+
+    monkeypatch.setattr("fno.graph.store.normalize_plan_path", counting_normalize)
+    entries = [_n(f"ab-{i:04x}", plan_path="/plans/p.md", cost_usd=None) for i in range(10)]
+    entries += [
+        _n("ab-cost1", plan_path="/plans/p.md", cost_usd=1.0),
+        _n("ab-cost2", plan_path="/plans/p.md", cost_usd=2.0),
+    ]
+    violations = m.detect_shared_plan_cost_violations(entries)
+    assert calls == ["/plans/p.md", "/plans/p.md"]
+    assert len(violations) == 1 and violations[0].nodes == ["ab-cost1", "ab-cost2"]
+
+
+def test_normalize_plan_path_caches_the_keeper_round_trip(monkeypatch):
+    """AC2: the keeper fold is pure, so one request serves every repeat of the
+    same input for the life of the process."""
+    from fno.graph import store
+
+    requests: list = []
+
+    class _FakeClient:
+        def request(self, method, params):
+            requests.append(params["path"])
+            return {"path": os.path.normpath(params["path"])}
+
+    monkeypatch.setattr(store, "_client_for", lambda _graph: _FakeClient())
+    store.normalize_plan_path.cache_clear()
+    try:
+        first = store.normalize_plan_path("/plans/./p.md")
+        second = store.normalize_plan_path("/plans/./p.md")
+        assert first == second == "/plans/p.md"
+        assert requests == ["/plans/./p.md"]
+    finally:
+        store.normalize_plan_path.cache_clear()
+
+
 # --- leg 4: drain stale ----------------------------------------------------
 
 
@@ -1119,7 +1163,6 @@ def test_cli_retro_seam_selects_comment_and_reads_region(monkeypatch, tmp_path):
     bounded merged region - all hermetic (no live gh/git)."""
     import subprocess
 
-    from fno.graph import cli
 
     comment = json.loads(_PR525_FIXTURE.read_text())
     node = {"id": "ab-retro", "details": f"finding\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
@@ -1133,7 +1176,7 @@ def test_cli_retro_seam_selects_comment_and_reads_region(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(args, 1, "", "boom")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    items = cli._validity_retro_source(node)
+    items = m._validity_retro_source(node)
     # Picked the fixture comment (its path), not the decoy.
     assert "tests/test-agents-heal-token.sh" in items["pr:review-comment"]
     assert any(k.startswith("git:merged-region:") for k in items)
@@ -1146,20 +1189,19 @@ def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
     invalid cwd each return {} so collect_evidence records `retro` unavailable."""
     import subprocess
 
-    from fno.graph import cli
 
     monkeypatch.setattr(
         subprocess, "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "gh down"),
     )
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": f"x\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
     ) == {}
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": "y <!-- retro-triage source_pr=None finding_hash=abc -->",
          "cwd": str(tmp_path)}
     ) == {}
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": f"z\n{_RETRO_TRAILER}", "cwd": "/no/such/dir"}
     ) == {}
 
@@ -1167,7 +1209,6 @@ def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
 def test_read_merged_region_rejects_traversal(monkeypatch, tmp_path):
     """CWE-22: a parent-escaping / absolute / non-str path is rejected before any
     read (gemini review). git show never runs for such a path."""
-    from fno.graph import cli
 
     called = {"git": False}
 
@@ -1178,8 +1219,8 @@ def test_read_merged_region_rejects_traversal(monkeypatch, tmp_path):
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     for bad in ("../../etc/passwd", "/etc/passwd", "..", "a/../../b"):
-        assert cli._read_merged_region(str(tmp_path), bad, 1) == ""
-    assert cli._read_merged_region(str(tmp_path), 123, 1) == ""  # non-str path
+        assert m._read_merged_region(str(tmp_path), bad, 1) == ""
+    assert m._read_merged_region(str(tmp_path), 123, 1) == ""  # non-str path
     assert called["git"] is False  # never reached the subprocess
 
 
@@ -1369,6 +1410,47 @@ def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
         m._run_validity_analysis([_packet("ab-x")])
 
 
+def test_run_validity_analysis_timeout_defaults_then_takes_the_budget(monkeypatch):
+    """AC6: the analyzer's subprocess timeout follows the pass budget, not the
+    120s default, when the pass is nearly out of time."""
+    import types
+
+    captured = {}
+
+    def fake_llm_call(prompt, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return types.SimpleNamespace(stdout=json.dumps({"results": []}))
+
+    monkeypatch.setattr(m, "llm_call", fake_llm_call)
+    m._run_validity_analysis([])
+    assert captured["timeout"] == m.VALIDITY_RUN_TIMEOUT_S
+    m._run_validity_analysis([], timeout=20.0)
+    assert captured["timeout"] == 20.0
+
+
+def test_run_validity_sweep_hands_remaining_budget_to_analyzer(tmp_path, monkeypatch):
+    """AC6 wiring: run_timeout flows through the sweep into the default analyzer."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [_idea("ab-bounded", 90, now, title="t", plan_path=None)]
+    seen = {}
+
+    def fake_analysis(packets, model=None, timeout=None):
+        seen["timeout"] = timeout
+        return {
+            p.node_id: {"classification": "keep", "confidence": 0.8,
+                        "rationale": "still good", "evidence_ids": []}
+            for p in packets
+        }
+
+    monkeypatch.setattr(m, "_run_validity_analysis", fake_analysis)
+    res = m.run_validity_sweep(
+        entries, validity_days=60, batch_size=25, out_dir=tmp_path,
+        now=now, run_timeout=20.0,
+    )
+    assert seen["timeout"] == 20.0
+    assert res.eligible == 1
+
+
 def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
     stub = tmp_path / "stub.sh"
     stub.write_text(
@@ -1405,6 +1487,22 @@ def test_backlog_staleness_days_rejects_non_positive():
 
     with pytest.raises(ValidationError):
         BacklogBlock(staleness_days=0)
+
+
+def test_maintain_budget_seconds_defaults_to_300():
+    from fno.config import MaintainBlock
+
+    assert MaintainBlock().budget_seconds == 300
+
+
+def test_maintain_budget_seconds_rejects_non_positive():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import MaintainBlock
+
+    with pytest.raises(ValidationError):
+        MaintainBlock(budget_seconds=0)
 
 
 def test_node_has_movement_field_signals():

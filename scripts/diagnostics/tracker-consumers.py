@@ -168,7 +168,12 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
     total = 0
     owner_files = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".py")}
     rust_allow = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".rs")}
-    machinery = {str(REPO_ROOT / "cli/src/fno/backlog/advance.py")}
+    machinery = {
+        str(REPO_ROOT / "cli/src/fno/backlog/advance.py"),
+        # run_pass is the maintain verb's engine (moved out of the cli shell);
+        # its reads are the verb's own orchestration, not a new consumer.
+        str(REPO_ROOT / "cli/src/fno/graph/maintain.py"),
+    }
     machinery_marker = "tracker-owned machinery"
 
     # Live registry: function names of tracker-owned verb callbacks.

@@ -114,6 +114,7 @@ FIELD_META: dict[str, Meta] = {
     "backlog.maintain.validity_days": Meta("advanced", "Age (days) before a stale idea enters the validity sweep."),
     "backlog.maintain.validity_batch_size": Meta("advanced", "Oldest-first validity-sweep batch size (clamped to 100)."),
     "backlog.maintain.abandoned_do_row_hours": Meta("advanced", "Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone."),
+    "backlog.maintain.budget_seconds": Meta("advanced", "Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in."),
     "backlog.staleness_days": Meta(
         "advanced",
         "Age (days) before an unmoved ready node is quarantined from selection.",

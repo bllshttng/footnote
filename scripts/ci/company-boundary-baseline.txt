@@ -47,5 +47,5 @@ cli/src/fno/claims/roster.py:67: L1 core -> L5 runtime / from fno.agents.watchdo
 # the same shape as the roster.py entries above. The detector takes the
 # prover as an injected parameter, so tests drive it hermetically; the
 # edge lives only where the sweep composes its instrument.
-cli/src/fno/graph/maintain.py:2064: L1 core -> L5 runtime / from fno.agents.watchdog import finished_with_the_tree, tail_facts
+cli/src/fno/graph/maintain.py:2100: L1 core -> L5 runtime / from fno.agents.watchdog import finished_with_the_tree, tail_facts
 layer cycle: L0 platform -> L5 runtime -> L0 platform

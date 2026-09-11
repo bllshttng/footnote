@@ -261,15 +261,15 @@ class MaintainBlock(BaseModel):
 
     staleness_days: int = 30
     max_failed_attempts: int = 3
-    # Transcript-quiet hours before the abandoned-do-row leg reaps.
-    abandoned_do_row_hours: int = 24
-    # Validity sweep. No raising validators: a nonpositive/oversized
-    # value degrades to a bounded default IN THE LEG (per Failure Modes) so a bad
-    # config never breaks the whole `maintain` command.
-    validity_days: int = 60
+    abandoned_do_row_hours: int = 24  # transcript-quiet hours before the do-row leg reaps
+    # Wall-clock budget for one pass (checked between legs); a short pass exits 4.
+    budget_seconds: int = 300
+    validity_days: int = 60  # validity sweep degrades to bounded defaults in-leg
     validity_batch_size: int = 25
 
-    @field_validator("staleness_days", "max_failed_attempts", "abandoned_do_row_hours")
+    @field_validator(
+        "staleness_days", "max_failed_attempts", "abandoned_do_row_hours", "budget_seconds"
+    )
     @classmethod
     def _positive_counts(cls, v: int, info: ValidationInfo) -> int:
         """A threshold below 1 cannot bound anything."""

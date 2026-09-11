@@ -43,6 +43,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+from functools import lru_cache
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -719,13 +720,16 @@ def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list
 # Pure helpers (ported; served by the keeper's pure methods)
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=4096)
 def normalize_plan_path(path: str | None) -> str | None:
     """Normalize a ``plan_path`` for comparison across graph / ledger and
     across absolute-vs-relative + trailing-slash conventions.
 
     The one normalizer behind every plan-path guard (the ported Rust
     implementation answers through the keeper; one comparison vocabulary is
-    why every comparison site routes through one function).
+    why every comparison site routes through one function). The keeper side is
+    a lexical fold with no filesystem access and no state, so the answer for a
+    given input never changes and the round trip is cached per process.
     """
     result = _client_for(GRAPH_JSON).request("normalize_plan_path", {"path": path})
     return result["path"] if isinstance(result, dict) else None
