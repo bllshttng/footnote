@@ -1144,15 +1144,13 @@ rm -rf "$S"
 # 7c. AC14 sweep combo: the removal-time re-read overrules the sweep's older
 # read - a process that turned holds between step 4 and archive keeps the tree.
 # The sweep resolves archive-worktree.sh from ITS OWN repo root, so the fixture
-# carries a copy of the script and its lib deps.
+# carries a thin wrapper that execs the REAL archive: a copy would resolve the
+# reapable probe against the sandbox (no venv, no installed fno on CI) and die
+# rc=2 before the occupancy recheck this test exists to exercise.
 S=$(new_merged_tree)
-mkdir -p "$S/scripts/setup" "$S/scripts/lib"
-cp "$REPO_ROOT/scripts/setup/archive-worktree.sh" "$S/scripts/setup/"
-cp "$REPO_ROOT/scripts/lib/worktree-reapable.sh" \
-   "$REPO_ROOT/scripts/lib/worktree-unpushed.sh" \
-   "$REPO_ROOT/scripts/lib/worktree-removal-event.sh" \
-   "$REPO_ROOT/scripts/lib/worktree-occupancy.sh" \
-   "$S/scripts/lib/"
+mkdir -p "$S/scripts/setup"
+printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$REPO_ROOT/scripts/setup/archive-worktree.sh" > "$S/scripts/setup/archive-worktree.sh"
+chmod +x "$S/scripts/setup/archive-worktree.sh"
 OCCLOG="$STUB/flip.log"; : > "$OCCLOG"
 ( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
 disown "$HOLD" 2>/dev/null || true
