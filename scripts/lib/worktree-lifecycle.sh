@@ -3,7 +3,7 @@
 # Usage:
 #   worktree-lifecycle.sh status                    # List all worktrees
 #   worktree-lifecycle.sh cleanup [--older-than Nd] [--prefix <prefix>] [--apply] [--dry-run]
-#   worktree-lifecycle.sh cleanup --merged [--apply] [--kill-orphans]
+#   worktree-lifecycle.sh cleanup --merged [--apply]
 #   Both cleanup removal modes are dry-run by default; --apply executes.
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
 #   worktree-lifecycle.sh cargo-offload [--apply]   # Move crates/*/target caches
@@ -50,6 +50,24 @@ if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh" ]]; then
 else
     wt_unpushed_count() { printf '1\n'; }
     wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
+fi
+
+# The per-hit occupancy classifier over _wt_pids output (x-0396). A partial
+# deploy that dropped the lib degrades to all-holds: every tree with a
+# process is kept, never killed.
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-occupancy.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-occupancy.sh"
+else
+    wt_classify_pids() { _wt_occupancy_failclosed "$2"; }
+    _wt_occupancy_failclosed() {
+        local pid
+        while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" holds keep - "classifier unavailable" -
+        done <<< "$1"
+    }
+    wt_occupancy_print_rows() { printf '%s\n' "$1" | awk -F '\t' 'NF >= 6 { printf "    %s %s %s | %s\n", $1, $2, $5, $6 }'; }
 fi
 
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
@@ -345,11 +363,18 @@ PY
 
 # Best-effort retire the dead job records for a selector. Never fails the sweep
 # (claude rm is now unblocked by the fixed WorktreeRemove hook); logs one line
-# per reap. A missing `claude` binary is a silent no-op.
+# per reap. A missing `claude` binary is a silent no-op. Optional extra args
+# are job ids named by the occupancy classifier's retire rows (x-0396): the
+# sweep retires the job whose session process it released, not just ones the
+# cwd-keyed candidate query can see (that field is the spawn directory).
 _reap_jobs() {
     local selector="$1" canonical="$2" job
+    shift 2
     command -v claude >/dev/null 2>&1 || return 0
-    while IFS= read -r job; do
+    {
+        _reap_job_candidates "$selector" "$canonical"
+        if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; fi
+    } | sort -u | while IFS= read -r job; do
         [[ -z "$job" ]] && continue
         if claude rm "$job" >/dev/null 2>&1; then
             echo "  reaped bg-job record $job (worktree archived)" >&2
@@ -357,19 +382,7 @@ _reap_jobs() {
             # retired-ok: reports which shellout failed on which job.
             echo "  reap: claude rm $job failed (non-fatal)" >&2
         fi
-    done < <(_reap_job_candidates "$selector" "$canonical")
-}
-
-# All given PIDs reparented to pid 1 (orphans)? Unreadable ppid -> not-orphan
-# (keep, never kill), preserving the under-reap bias.
-_wt_all_orphans() {
-    local pid ppid
-    while IFS= read -r pid; do
-        [[ -z "$pid" ]] && continue
-        ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-        [[ -z "$ppid" || "$ppid" != "1" ]] && return 1
-    done <<< "$1"
-    return 0
+    done
 }
 
 _cargo_target_mtime() {
@@ -992,7 +1005,6 @@ case "${1:-status}" in
         PREFIX=""
         MERGED=""
         APPLY=""
-        KILL_ORPHANS=""
         CARGO_TARGETS=""
         CARGO_CAP_BYTES=68719476736
         CARGO_MAX_AGE_DAYS=7
@@ -1004,7 +1016,13 @@ case "${1:-status}" in
                 --prefix) PREFIX="$2"; shift 2 ;;
                 --merged) MERGED="true"; shift ;;
                 --apply) APPLY="true"; shift ;;
-                --kill-orphans) KILL_ORPHANS="true"; shift ;;
+                --kill-orphans)
+                    # Retired (x-0396): the ppid-1 leg released trees by
+                    # parentage, which a real pane keeper reads as safe to
+                    # kill. Classified processes release a tree now; every
+                    # unclassified one always keeps it.
+                    echo "worktree cleanup: --kill-orphans is retired: classified processes release a tree by default, unclassified ones always keep it" >&2
+                    shift ;;
                 --cargo-targets) CARGO_TARGETS="true"; shift ;;
                 --cap-bytes) CARGO_CAP_BYTES="$2"; shift 2 ;;
                 --free-share-pct) CARGO_FREE_SHARE_PCT="$2"; shift 2 ;;
@@ -1019,7 +1037,7 @@ case "${1:-status}" in
 
         if [[ -n "$CARGO_TARGETS" ]]; then
             CARGO_APPLY="$APPLY"
-            if [[ -n "$MERGED" || -n "$OLDER_SET" || -n "$PREFIX" || -n "$KILL_ORPHANS" ]]; then
+            if [[ -n "$MERGED" || -n "$OLDER_SET" || -n "$PREFIX" ]]; then
                 echo "worktree cleanup: --cargo-targets cannot be combined with worktree-removal selectors" >&2
                 exit 1
             fi
@@ -1143,28 +1161,39 @@ case "${1:-status}" in
                 if _wt_live "$wt"; then
                     printf '%-18s %-34s %s\n' "kept (live-session)" "$branch" "$wt"; N_LIVE=$((N_LIVE + 1)); continue
                 fi
-                # 4. rooted processes
+                # 4. rooted processes, each named and classified (x-0396). A
+                #    hit the classifier cannot positively place is a holder;
+                #    absence of a recognised holder is never proof the tree
+                #    is free.
                 YES=""
+                ROWS=""
+                RETIRE_JOBS=""
                 pids="$(_wt_pids "$wt")"
                 pids_rc=$?
                 if [[ "$pids_rc" -ne 0 ]]; then
                     printf '%-18s %-34s %s\n' "kept (process-snapshot-unreadable)" "$branch" "$wt"; N_PROC=$((N_PROC + 1)); continue
                 fi
                 if [[ -n "$pids" ]]; then
-                    if [[ -z "$KILL_ORPHANS" ]]; then
-                        printf '%-18s %-34s %s\n' "kept (processes: $(printf '%s\n' "$pids" | grep -c .))" "$branch" "$wt"; N_PROC=$((N_PROC + 1)); continue
+                    ROWS="$(wt_classify_pids "$wt" "$pids")"
+                    N_HELD="$(printf '%s\n' "$ROWS" | awk -F '\t' '$2 == "holds" { c++ } END { print c + 0 }')"
+                    N_INERT="$(printf '%s\n' "$ROWS" | awk -F '\t' '$2 == "inert" { c++ } END { print c + 0 }')"
+                    if [[ "$N_HELD" -gt 0 ]]; then
+                        printf '%-18s %-34s %s\n' "kept (processes: $N_HELD held, $N_INERT inert)" "$branch" "$wt"
+                        wt_occupancy_print_rows "$ROWS"
+                        N_PROC=$((N_PROC + 1)); continue
                     fi
-                    if _wt_all_orphans "$pids"; then
-                        YES="--yes"   # archive-worktree.sh SIGTERMs the ppid-1 orphans
-                    else
-                        printf '%-18s %-34s %s\n' "kept (live-session)" "$branch" "$wt"; N_LIVE=$((N_LIVE + 1)); continue
-                    fi
+                    # All inert: the tree may go. Retire rows carry the claude
+                    # job ids to release alongside the archive (best effort).
+                    RETIRE_JOBS="$(printf '%s\n' "$ROWS" | awk -F '\t' '$4 != "-" { print $4 }' | sort -u | tr '\n' ' ')"
+                    RETIRE_JOBS="${RETIRE_JOBS% }"
                 fi
                 # Candidate. Dry-run is the default for --merged, and an
                 # explicit --dry-run wins even if --apply was also passed
                 # (a safety wrapper appending --dry-run must never be ignored).
                 if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
-                    printf '%-18s %-34s %s\n' "would-archive" "$branch" "$wt"; N_REAP=$((N_REAP + 1)); continue
+                    printf '%-18s %-34s %s\n' "would-archive" "$branch" "$wt"
+                    [[ -n "$ROWS" ]] && wt_occupancy_print_rows "$ROWS"
+                    N_REAP=$((N_REAP + 1)); continue
                 fi
                 if [[ ! -f "$ARCHIVE" ]]; then
                     printf '%-18s %-34s %s\n' "failed (no-script)" "$branch" "$wt"; N_FAIL=$((N_FAIL + 1)); continue
@@ -1172,12 +1201,15 @@ case "${1:-status}" in
                 # Salvage + strict re-check + removal all live in archive-worktree.sh
                 # (its liveness re-check at removal time is authoritative, not our
                 # cached one). Exit 5 = salvage kept the worktree. The caller env
-                # names this path in the worktree_removed event row it emits.
+                # names this path in the worktree_removed event row it emits. No
+                # --yes is passed: the removal-time classification re-reads the
+                # tree and only inert rows are signalled (x-0396).
                 FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
                     0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
-                       _reap_jobs "$wt" "$CANONICAL_MAIN" ;;
+                       # shellcheck disable=SC2086
+                       _reap_jobs "$wt" "$CANONICAL_MAIN" $RETIRE_JOBS ;;
                     3) printf '%-18s %-34s %s\n' "kept (needs-confirmation)" "$branch" "$wt"; N_NEEDCONF=$((N_NEEDCONF + 1)) ;;
                     5) printf '%-18s %-34s %s\n' "kept (salvage-failed)" "$branch" "$wt"; N_SALVAGE=$((N_SALVAGE + 1)) ;;
                     6) printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)) ;;

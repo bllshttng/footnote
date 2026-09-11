@@ -300,6 +300,7 @@ scripts/lib/corrections-lock.sh
 scripts/lib/mission-emit.sh
 scripts/lib/worktree-lifecycle.sh
 scripts/lib/worktree-manager.sh
+scripts/lib/worktree_occupancy.py
 scripts/lint/no-invalid-events.sh
 scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py

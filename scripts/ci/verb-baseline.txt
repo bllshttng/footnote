@@ -156,7 +156,7 @@ workspace reap
 workspace register-worker
 workspace worktree archive
 workspace worktree cargo-offload
-workspace worktree cleanup
+workspace worktree cleanup !--kill-orphans
 workspace worktree ensure
 workspace worktree overlap-record
 workspace worktree overlaps
