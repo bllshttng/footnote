@@ -4,9 +4,9 @@ A worker pane (codex, agy, a pane-hosted claude) survives a mux restart as an id
 
 ## Is this page for you?
 
-You are asking why a worker pane came back as an idle row instead of a live process, or whether anything can respawn without being asked. This page owns the idle-row and held-pane mechanics, the one-field membership record, and the resume gesture. Misreading it makes you wait on a process that does not exist yet: an idle row is a record, not a running session.
+You ask why a worker pane came back as an idle row instead of a live process, or whether anything can respawn without being asked. This page owns the idle-row and held-pane mechanics, the one-field membership record, and the resume gesture. Misreading it makes you wait on a process that does not exist yet: an idle row is a record, not a running session.
 
-Not for: choosing the startup policy or bulk-resuming a whole workspace, and anything about the tab count; those live in [workspace-restore](workspace-restore.md).
+Not for: choosing the startup policy or bulk-resuming a whole workspace, and anything about the tab count. Those live in [workspace-restore](workspace-restore.md).
 
 The destructive edge: restore prunes a worker member whose registry row is gone, and a reaped name can never resume. Retire the registry row and the member's only door closes with it.
 

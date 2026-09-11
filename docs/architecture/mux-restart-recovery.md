@@ -6,7 +6,7 @@ A client reconnect and a mux server restart have different guarantees. Client re
 
 You are asking what survives a mux server restart or a reboot, and what you must bring back by hand. This page owns the two guarantee sets (reconnect versus restart) and the held-shell rebuild at startup. Misreading it after a mere client disconnect sends you restoring a workspace that never died.
 
-Not for: the startup policy values, bulk resume, and the tab count; those live in [workspace-restore](workspace-restore.md). The held-pane and idle-row mechanics it builds on are in [pane-worker-relaunch](pane-worker-relaunch.md).
+Not for: the startup policy values, bulk resume, and the tab count. Those live in [workspace-restore](workspace-restore.md). The held-pane and idle-row mechanics it builds on are in [pane-worker-relaunch](pane-worker-relaunch.md).
 
 At startup, the existing agents daemon preserves recovery records by default and reports interrupted atomic-write temp files. The mux server rebuilds each persisted pane-substrate worker as a named held shell in its stored tab and tree position. The shell prints its state, so workspace pruning cannot mistake it for a pristine disposable shell. No harness process starts during restoration.
 

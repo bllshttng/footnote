@@ -4,11 +4,11 @@ After a reboot or a killed mux server, every worker pane is gone. A pane's pty w
 
 ## Is this page for you?
 
-You are bringing worker panes back after a reboot or a killed mux server, or choosing `[mux.restore] policy` in your config. This page owns what `hold`, `idle`, and `resume` do to worker members, and what the on-demand verb relaunches. Misreading it picks the wrong knob for your symptom: on 2026-09-04 an operator set `idle` to cut a 28-tab restore, and `idle` does not govern tabs at all.
+You are bringing worker panes back after a reboot or a killed mux server, or choosing `[mux.restore] policy` in your config. This page owns what `hold`, `idle`, and `resume` do to worker members, and what the on-demand verb relaunches. Misreading it picks the wrong knob for your symptom. On 2026-09-04 an operator set `idle` to cut a 28-tab restore. `idle` does not govern tabs at all.
 
-Not for: the tab count. Tabs rebuild from each squad's stored tab trees under every policy value, so no value restores zero tabs; only `hold` skips tabs whose every slot binds a done worker. For held-pane and idle-row mechanics see [pane-worker-relaunch](pane-worker-relaunch.md); for what a client reconnect preserves versus a server restart see [mux-restart-recovery](mux-restart-recovery.md).
+Not for: the tab count. Tabs rebuild from each squad's stored tab trees under every policy value. No value restores zero tabs. Only `hold` skips tabs whose every slot binds a done worker. Held-pane and idle-row mechanics: [pane-worker-relaunch](pane-worker-relaunch.md). What a client reconnect preserves versus a server restart: [mux-restart-recovery](mux-restart-recovery.md).
 
-The destructive edge: `resume`, as the startup policy or the on-demand verb, relaunches every worker member that is not tombstoned, gone, or reap-retired. Finished-and-merged work relaunches too. Run `fno mux workspace restore --dry-run --json` first; it classifies and spawns nothing.
+The destructive edge: `resume`, as the startup policy or the on-demand verb, relaunches every worker member that is not tombstoned, gone, or reap-retired. Finished-and-merged work relaunches too. Run `fno mux workspace restore --dry-run --json` first. It classifies and spawns nothing.
 
 ## The verb
 
@@ -53,11 +53,11 @@ The proof ran on the state just before the reader unification. The unification k
 
 Will `mux.restore.policy = idle` reduce my tab count?
 
-No, and it can raise it. Tabs rebuild from the stored tab trees under every policy (`crates/fno/src/server.rs:8210`); only `hold` skips a tab whose every slot binds a done worker, because the doneness gate sits inside the hold branch (`crates/fno/src/server.rs:7976`). Under `idle` a finished worker keeps its tab where `hold` would skip it.
+No, and it can raise it. Tabs rebuild from the stored tab trees under every policy (`crates/fno/src/server.rs:8210`). Only `hold` skips a tab whose every slot binds a done worker. The doneness gate sits inside the hold branch (`crates/fno/src/server.rs:7976`). Under `idle` a finished worker keeps its tab. Under `hold` the same tab is skipped.
 
 *Graduates to:* the doneness gate running before the policy branch, so every policy skips finished workers' tabs.
 
-What happens to my tab trees when the mux server is killed?
+The mux server was killed. What happens to your tab trees?
 
 The store keeps the layout that the last topology write left. A SIGKILL writes nothing at death. A tab close writes its tree removal first (`closing_a_shell_tab_writes_its_tree_removal`, `crates/fno/src/server.rs:19380`), and `kill-server` captures the layout on the way down (`CoreMsg::Kill` -> `bye_all` -> `Flow::Shutdown`, `crates/fno/src/server.rs:13021`). Tabs open at each death persist, so trees accrete across server deaths. At the next start, `hold` skips tabs whose every slot binds a done worker.
 
@@ -67,7 +67,7 @@ Every worker member that is not tombstoned, not gone, and not retired by a reap 
 
 Restore printed `never bound`. Is that session gone?
 
-Not necessarily. The label means fno holds no session id for the member and the spawn journal positively records the registry row was removed with an empty session field (`crates/fno/src/restore_liveness.rs:73`, `crates/fno/src/spawn_journal.rs:334`). It describes fno's reach, not the harness transcript's existence. fno cannot resume a session it holds no id for; the harness itself can, given the session id.
+Not necessarily. The label means fno holds no session id for the member. The spawn journal positively records the registry row's removal with an empty session field (`crates/fno/src/restore_liveness.rs:73`, `crates/fno/src/spawn_journal.rs:334`). It describes fno's reach, not the harness transcript's existence. fno cannot resume a session it holds no id for. The harness itself can, given the session id.
 
 ## Files
 
