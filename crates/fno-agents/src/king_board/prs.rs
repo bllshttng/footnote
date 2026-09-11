@@ -1,5 +1,6 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
 use super::budget::run_json;
+use super::queues::NODE_ID_BODY;
 use super::{s_i64, s_str, SourceRead, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -132,7 +133,7 @@ pub(crate) fn read_prs(
         "--limit".to_string(),
         max_pr_reads.to_string(),
         "--json".to_string(),
-        "number,title,mergeable,statusCheckRollup,headRefName,url".to_string(),
+        "number,title,mergeable,statusCheckRollup,headRefName,url,body".to_string(),
     ];
     let listing = run_json(cmd, cwd, slice);
     if !listing.is_ok() {
@@ -223,12 +224,40 @@ fn normalized_pr_url(url: &str) -> String {
         .to_lowercase()
 }
 
+/// Well-formed node ids named on the LAST exact `Backlog-Closure:` line of a
+/// body, order-preserved, deduplicated (mirrors closure.parse_closure_trailer).
+/// Case-insensitive key, token split on whitespace and commas, malformed
+/// tokens dropped.
+fn trailer_node_ids(body: &str) -> Vec<String> {
+    let id_re = regex::Regex::new(&format!("^{NODE_ID_BODY}$")).expect("static regex");
+    let mut last: Option<&str> = None;
+    for line in body.lines() {
+        let is_trailer = line
+            .get(..16)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Backlog-Closure:"));
+        if is_trailer {
+            last = Some(&line[16..]);
+        }
+    }
+    let Some(rest) = last else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for token in rest.split(|c: char| c == ',' || c.is_whitespace()) {
+        if !token.is_empty() && id_re.is_match(token) && !ids.iter().any(|i| i == token) {
+            ids.push(token.to_string());
+        }
+    }
+    ids
+}
+
 /// Binding classification over already-fetched open-PR rows and graph
 /// entries: the pure half of `read_prs`, returns (bound node rows, warnings).
-/// Two keys, in order: delimiter-bounded branch matching, then - only when
+/// Three keys, in order: delimiter-bounded branch matching; then - only when
 /// the branch names nothing - the graph's own `(pr_number, pr_url)`
 /// back-pointer, scoped by normalized URL because a pr_number is only unique
-/// within one repository (mirrors _reconcile.classify_open_pr_bindings).
+/// within one repository; then the body's exact `Backlog-Closure:` trailer
+/// (mirrors _reconcile.classify_open_pr_bindings).
 fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
     let real_ids: HashSet<&str> = entries.iter().filter_map(|e| s_str(e, "id")).collect();
     let node_by_id: HashMap<&str, &Value> = entries
@@ -254,9 +283,11 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
         }
     }
     let mut warnings: Vec<String> = Vec::new();
-    // First pass: which nodes have exactly one open PR.
+    // First pass: which nodes have exactly one open PR. A trailer-resolved
+    // row competes for its node like a branch-resolved one, so one node named
+    // by a branch PR and a trailer PR reads ambiguous on both.
     let mut open_prs_by_node: HashMap<String, Vec<i64>> = HashMap::new();
-    let mut parsed: Vec<(i64, Option<String>, String, Vec<String>)> = Vec::new();
+    let mut parsed: Vec<(i64, Option<String>, String, Vec<String>, Vec<String>)> = Vec::new();
     for row in rows {
         let Some(number) = s_i64(row, "number") else {
             continue;
@@ -269,21 +300,49 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
             .into_iter()
             .filter(|nid| real_ids.contains(nid.as_str()))
             .collect();
+        let trailer: Vec<String> = match row.get("body").and_then(Value::as_str) {
+            Some(body) => trailer_node_ids(body)
+                .into_iter()
+                .filter(|nid| real_ids.contains(nid.as_str()))
+                .collect(),
+            None => Vec::new(),
+        };
         if matched.len() == 1 {
             open_prs_by_node
                 .entry(matched[0].clone())
                 .or_default()
                 .push(number);
+        } else if matched.is_empty() {
+            // Sibling guard: branch and back-pointer both miss and the
+            // trailer names exactly one real node, so the row competes for
+            // that node like a branch-resolved one.
+            let key = row
+                .get("url")
+                .and_then(Value::as_str)
+                .map(normalized_pr_url)
+                .unwrap_or_default();
+            let hits: Vec<&str> = if key.is_empty() {
+                Vec::new()
+            } else {
+                by_pr_ref.get(&(number, key)).cloned().unwrap_or_default()
+            };
+            if hits.is_empty() && trailer.len() == 1 {
+                open_prs_by_node
+                    .entry(trailer[0].clone())
+                    .or_default()
+                    .push(number);
+            }
         }
         parsed.push((
             number,
             row.get("url").and_then(Value::as_str).map(str::to_string),
             head.to_string(),
             matched,
+            trailer,
         ));
     }
     let mut bound: Vec<Value> = Vec::new();
-    for (number, url, _head, mut matched) in parsed {
+    for (number, url, head, mut matched, trailer) in parsed {
         if matched.is_empty() {
             let key = url.as_deref().map(normalized_pr_url).unwrap_or_default();
             let mut hits: Vec<&str> = if key.is_empty() {
@@ -293,7 +352,23 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
             };
             hits.sort_unstable();
             match hits.as_slice() {
-                [] => continue, // untracked: carries no candidate
+                [] => {
+                    if trailer.is_empty() {
+                        warnings.push(format!(
+                            "pr_node_binding_untracked: #{number} {head} (branch names no node; \
+                             no node carries this PR; body carries no Backlog-Closure trailer)"
+                        ));
+                        continue;
+                    }
+                    if trailer.len() > 1 {
+                        warnings.push(format!(
+                            "pr_node_binding_ambiguous: #{number} -> {}",
+                            trailer.join(" ")
+                        ));
+                        continue;
+                    }
+                    matched = trailer;
+                }
                 [only] => matched = vec![(*only).to_string()],
                 many => {
                     warnings.push(format!(
@@ -473,6 +548,139 @@ mod tests {
         json!({"number": number, "headRefName": head, "url": url})
     }
 
+    fn pr_row_with_body(number: i64, head: &str, url: &str, body: &str) -> Value {
+        let mut row = pr_row(number, head, url);
+        row["body"] = json!(body);
+        row
+    }
+
+    #[test]
+    fn binding_warns_untracked_when_no_key_names_the_node() {
+        // AC5: an unbindable PR is named in the warnings instead of dropped
+        // from every queue.
+        let entries = vec![json!({"id": "x-1a2b"})];
+        let rows = vec![pr_row(
+            5,
+            "chore/tidy-docs",
+            "https://github.com/o/r/pull/5",
+        )];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        let warning = warnings
+            .iter()
+            .find(|w| w.contains("pr_node_binding_untracked"))
+            .expect("untracked warning");
+        assert!(warning.contains("#5") && warning.contains("chore/tidy-docs"));
+    }
+
+    #[test]
+    fn binding_reads_the_body_trailer_and_warns_missing_until_the_ref_lands() {
+        // AC1: a trailer-only row resolves through the body; without a
+        // back-pointer it takes the existing missing warning, with one it
+        // binds.
+        let entries = vec![json!({"id": "x-0001"})];
+        let rows = vec![pr_row_with_body(
+            5,
+            "fix/descriptive-name",
+            "https://github.com/o/r/pull/5",
+            "Summary.\n\nBacklog-Closure: x-0001\n",
+        )];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-0001")));
+
+        let entries = vec![json!({
+            "id": "x-0001", "pr_number": 5,
+            "pr_url": "https://github.com/o/r/pull/5",
+        })];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert_eq!(bound.len(), 1);
+        assert_eq!(s_str(&bound[0], "id"), Some("x-0001"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn binding_ignores_prose_and_reads_only_the_last_trailer_line() {
+        // Only a line starting with the trailer key counts (prose never
+        // becomes a claim), and only the LAST such line wins.
+        let entries = vec![json!({"id": "x-0001"}), json!({"id": "x-prose"})];
+        let rows = vec![pr_row_with_body(
+            5,
+            "chore/tidy-docs",
+            "https://github.com/o/r/pull/5",
+            "this also fixes x-prose; the Backlog-Closure trailer is documented elsewhere.\n",
+        )];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("pr_node_binding_untracked")));
+
+        let rows = vec![pr_row_with_body(
+            5,
+            "chore/tidy-docs",
+            "https://github.com/o/r/pull/5",
+            "backlog-closure: x-prose\nBacklog-Closure: x-0001",
+        )];
+        let entries = vec![json!({"id": "x-0001"})];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-0001")));
+        assert!(!warnings.iter().any(|w| w.contains("x-prose")));
+
+        let entries = vec![json!({
+            "id": "x-0001", "pr_number": 5,
+            "pr_url": "https://github.com/o/r/pull/5",
+        })];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert_eq!(bound.len(), 1);
+        assert_eq!(s_str(&bound[0], "id"), Some("x-0001"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn binding_refuses_when_the_trailer_names_several_real_nodes() {
+        // Several trailer claims are ambiguous, never a list-order pick.
+        let url = "https://github.com/o/r/pull/5";
+        let entries = vec![json!({"id": "x-1a2b"}), json!({"id": "x-cdef"})];
+        let rows = vec![pr_row_with_body(
+            5,
+            "chore/no-node-here",
+            url,
+            "Backlog-Closure: x-1a2b, x-cdef",
+        )];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("pr_node_binding_ambiguous")
+                && w.contains("x-1a2b")
+                && w.contains("x-cdef")));
+    }
+
+    #[test]
+    fn binding_sibling_guard_makes_branch_and_trailer_prs_ambiguous() {
+        // One node named by a branch PR and a trailer PR has two open PRs,
+        // so neither row binds alone.
+        let entries = vec![json!({"id": "x-1a2b"})];
+        let rows = vec![
+            pr_row(5, "feature/x-1a2b", "https://github.com/o/r/pull/5"),
+            pr_row_with_body(
+                6,
+                "target/other-work",
+                "https://github.com/o/r/pull/6",
+                "Backlog-Closure: x-1a2b",
+            ),
+        ];
+        let (bound, warnings) = classify_pr_bindings(&rows, &entries);
+        assert!(bound.is_empty());
+        assert!(warnings.is_empty());
+    }
+
     #[test]
     fn binding_binds_through_the_graphs_reverse_key_when_the_branch_names_no_node() {
         // AC1/AC6: the graph's own back-pointer binds a node-less branch.
@@ -526,6 +734,10 @@ mod tests {
         )];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
-        assert!(warnings.is_empty());
+        // The verdict is unchanged (never binds cross-repo); since x-9588 the
+        // row is also named in the warnings instead of dropped silently.
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("pr_node_binding_untracked") && w.contains("#1476")));
     }
 }

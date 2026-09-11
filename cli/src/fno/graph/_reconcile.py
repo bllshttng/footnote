@@ -1640,21 +1640,24 @@ def classify_open_pr_bindings(
 ) -> list[OpenPrBinding]:
     """Classify every open-PR row against graph entries: ``bound`` (the node
     points back at this PR), ``missing`` (a unique real node resolves but does
-    not point back), ``untracked`` (neither key names a real node), or
+    not point back), ``untracked`` (no key names a real node), or
     ``ambiguous`` (several real nodes, or one node named by several open PRs).
 
-    Two resolution keys, in order: delimiter-bounded branch matching is
+    Three resolution keys, in order: delimiter-bounded branch matching is
     ``branch_node_ids`` - the same producer/gate authority the merged reverse
-    map's ``_branch_matches_node`` agrees with - and when it yields nothing,
-    the graph's own ``(pr_number, pr_url)`` back-pointer read through
-    ``node_pr_refs``. The branch key wins whenever it hits, so existing
-    verdicts are unchanged. The reverse key is scoped by URL because a
-    ``pr_number`` is only unique within one repository.
+    map's ``_branch_matches_node`` agrees with; when it yields nothing, the
+    graph's own ``(pr_number, pr_url)`` back-pointer read through
+    ``node_pr_refs``, scoped by URL because a ``pr_number`` is only unique
+    within one repository; when both miss, the row body's exact
+    ``Backlog-Closure:`` trailer (x-9588). The branch key wins whenever it
+    hits, so existing verdicts are unchanged. A row produced without a
+    ``body`` field never reads the trailer; the ``untracked`` detail names
+    that absence instead of reading it as an empty body.
 
     Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
     board all read the same verdicts.
     """
-    from fno.pr.closure import branch_node_ids
+    from fno.pr.closure import branch_node_ids, parse_closure_trailer
 
     real_ids = {
         e.get("id")
@@ -1675,7 +1678,7 @@ def classify_open_pr_bindings(
             key_url = _normalized_pr_url(url)
             if key_url is not None:
                 by_pr_ref.setdefault((num, key_url), []).append(nid)
-    parsed: list[tuple[int, Optional[str], str, list[str]]] = []
+    parsed: list[tuple[int, Optional[str], str, list[str], list[str], bool]] = []
     open_prs_by_node: dict[str, list[int]] = {}
     for row in open_rows:
         if not isinstance(row, dict):
@@ -1685,12 +1688,27 @@ def classify_open_pr_bindings(
         if not isinstance(number, int) or not head:
             continue
         matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
-        parsed.append((number, row.get("url"), head, matched))
+        body_supplied = "body" in row
+        trailer: list[str] = (
+            [nid for nid in parse_closure_trailer(row["body"]) if nid in real_ids]
+            if body_supplied
+            else []
+        )
+        parsed.append((number, row.get("url"), head, matched, trailer, body_supplied))
         if len(matched) == 1:
             open_prs_by_node.setdefault(matched[0], []).append(number)
+        elif not matched:
+            # Sibling guard: a trailer-resolved row competes for its node like
+            # a branch-resolved one, so one node named by a branch PR and a
+            # trailer PR reads ambiguous on both rows.
+            key_url = _normalized_pr_url(row.get("url"))
+            hits = by_pr_ref.get((number, key_url), []) if key_url else []
+            if not hits and len(trailer) == 1:
+                open_prs_by_node.setdefault(trailer[0], []).append(number)
 
     verdicts: list[OpenPrBinding] = []
-    for number, url, head, matched in parsed:
+    for number, url, head, matched, trailer, body_supplied in parsed:
+        via = "branch"
         if not matched:
             # Fallback: the node's own back-pointer. A reverse candidate
             # already points at this PR, so this can only ever produce
@@ -1698,18 +1716,49 @@ def classify_open_pr_bindings(
             key_url = _normalized_pr_url(url)
             hits = by_pr_ref.get((number, key_url), []) if key_url else []
             if not hits:
-                verdicts.append(OpenPrBinding(number, url, head, "untracked"))
-                continue
-            if len(hits) > 1:
-                verdicts.append(
-                    OpenPrBinding(
-                        number, url, head, "ambiguous",
-                        detail=f"{len(hits)} nodes carry this PR: "
-                        f"{' '.join(sorted(hits))}",
+                if not trailer:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "untracked",
+                            detail=(
+                                f"branch '{head}' names no real node; "
+                                + (
+                                    f"no node carries #{number} at {url}"
+                                    if url
+                                    else "no url, back-pointer not read"
+                                )
+                                + (
+                                    "; body carries no Backlog-Closure trailer"
+                                    if body_supplied
+                                    else "; body not supplied, trailer not read"
+                                )
+                            ),
+                        )
                     )
-                )
-                continue
-            matched = hits
+                    continue
+                if len(trailer) > 1:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "ambiguous",
+                            detail=f"trailer names {len(trailer)} real nodes: "
+                            f"{' '.join(trailer)}",
+                        )
+                    )
+                    continue
+                matched = trailer
+                via = "trailer"
+            else:
+                if len(hits) > 1:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "ambiguous",
+                            detail=f"{len(hits)} nodes carry this PR: "
+                            f"{' '.join(sorted(hits))}",
+                        )
+                    )
+                    continue
+                matched = hits
+                via = "branch"
         if len(matched) > 1:
             verdicts.append(
                 OpenPrBinding(
@@ -1736,6 +1785,11 @@ def classify_open_pr_bindings(
         verdicts.append(
             OpenPrBinding(
                 number, url, head, "bound" if refs_this_pr else "missing", node_id=nid,
+                detail=(
+                    None
+                    if refs_this_pr
+                    else f"{nid} resolved via {via} but does not point back at #{number}"
+                ),
             )
         )
     return verdicts
@@ -1759,7 +1813,7 @@ def list_open_pr_branches(
         return []
     cmd = [
         "gh", "pr", "list", "--state", "open", "--limit", str(limit + 1),
-        "--json", "number,url,headRefName",
+        "--json", "number,url,headRefName,body",
     ]
     try:
         result = runner(
