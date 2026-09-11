@@ -238,8 +238,14 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    # The door answers the row NAME, not the session uuid; fno_id guards the join.
-    door = invoke(["mux", "thread", "--server", session, entry.name], 30)
+    # The door answers the row NAME, not the session uuid; fno_id guards the
+    # join. A machine reach asks for a portal of its own in a new tab: with
+    # no --portal the server serves portal 0, and the reach would repoint the
+    # operator's own seat and leave the view under their keys.
+    door = invoke(
+        ["mux", "thread", "--server", session, entry.name, "--portal", "new", "--tab", "new"],
+        30,
+    )
     if door.returncode:
         lines = (door.stderr or door.stdout or "").strip().splitlines()
         raise RetaskTransportError(
@@ -793,6 +799,18 @@ def run_retask(
             result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
         except subprocess.TimeoutExpired as exc:
             raise RetaskTransportError("pane_send_timeout") from exc
+        if result.returncode == 23:  # EXIT_TARGET_IDENTITY_MISMATCH (mux_cli.rs)
+            lines = [line for line in (result.stderr or "").splitlines() if line.strip()]
+            detail = lines[-1] if lines else None
+            # The server's portal-refusal text names the left session; other
+            # identity refusals (unreconciled pane, addressed mismatch) keep
+            # the family name with the truthful detail.
+            reason = (
+                "view_left_worker"
+                if detail and "the viewer left that session" in detail
+                else "identity_refused"
+            )
+            raise RetaskTransportError(reason, detail=detail)
         if text == "/clear" and submit and result.returncode == 0:
             clear_sent[0] = True
         return result.returncode == 0
@@ -899,9 +917,10 @@ def run_retask(
     def ready_frame(frame: str) -> Mapping[str, object]:
         from fno.agents.mux_spawn import _evaluate_manifest_screen, _pane_osc_title
 
+        # The title is passed when readable but no longer required: a portal
+        # view of a live claude reads None, and the manifest's grid rules
+        # (live_prompt_box / composer_working) carry the verdict alone.
         osc_title = _pane_osc_title(session, int(pane), subprocess.run)
-        if entry.harness == "claude" and osc_title is None:
-            return {"matched": False, "error": "pane title unreadable"}
         return _evaluate_manifest_screen(
             entry.harness, frame, subprocess.run, osc_title=osc_title
         )

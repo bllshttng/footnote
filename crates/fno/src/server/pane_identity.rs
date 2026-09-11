@@ -36,13 +36,61 @@ impl Core {
             }
         }
         if ids.is_empty() {
-            ids.extend(crate::thread_viewer::identity_for_pane(
-                &self.portals,
-                pid,
-                agents,
-            ));
+            // (x-3ea6) A claude portal seat whose child no longer runs
+            // `attach <id>` has left its worker; the seat answers no identity,
+            // so the `pane ls` / `pane read` joins read null and the callers
+            // that join on fno_id refuse with no code of their own.
+            if self.portal_seat_refusal_live(pid, agents).is_none() {
+                ids.extend(crate::thread_viewer::identity_for_pane(
+                    &self.portals,
+                    pid,
+                    agents,
+                ));
+            }
         }
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
+    }
+
+    /// (x-3ea6) A claude portal seat whose child no longer runs `attach <id>`
+    /// has left its worker: someone detached the viewer (to agent view) or
+    /// re-picked another row. Every programmatic keystroke refuses at this
+    /// one choke point and the seat drops out of the fno_id join. `argv` is
+    /// injected so tests need no live claude; [`Self::portal_seat_refusal_live`]
+    /// reads the pane's real child.
+    pub(super) fn portal_seat_refusal(
+        &self,
+        pane: u64,
+        agents: &[RegistryAgent],
+        argv: Option<Vec<String>>,
+    ) -> Option<String> {
+        let row = crate::thread_viewer::row_for_pane(&self.portals, pane, agents)?;
+        let id = row.attach_id.as_deref()?;
+        if row.harness.as_deref() != Some("claude") {
+            return None;
+        }
+        if argv
+            .as_deref()
+            .is_some_and(|a| crate::pane_argv::attaches(a, id))
+        {
+            return None;
+        }
+        Some(format!(
+            "pane {pane} is the portal for {} (attach {id}) but its child runs {}; the viewer left that session",
+            row.name,
+            argv.as_ref()
+                .map(|a| a.join(" "))
+                .unwrap_or_else(|| "an unreadable process".to_string())
+        ))
+    }
+
+    /// The live-argv half: the pane's current child, read at gate time.
+    fn portal_seat_refusal_live(&self, pane: u64, agents: &[RegistryAgent]) -> Option<String> {
+        let argv = self
+            .panes
+            .get(&pane)
+            .and_then(|e| e.pty.child_pid())
+            .and_then(crate::pane_argv::process_argv);
+        self.portal_seat_refusal(pane, agents, argv)
     }
 
     /// Fold the cached registry rows and the spawn journal into the same
@@ -102,6 +150,18 @@ impl Core {
                     "pane {pane} carries label {host}; its birth pane id could not be reused, so it was adopted at a fresh id and its identity never reconciled; re-address by session id through `fno mux where`"
                 ),
             });
+        }
+        // (x-3ea6) A claude portal seat whose child lost `attach <id>` refuses
+        // every send - raw or guarded, addressed or not - before any expected
+        // identity is consulted: `/clear` typed into the wrong session cannot
+        // be undone.
+        if let Ok(rows) = agents {
+            if let Some(msg) = self.portal_seat_refusal_live(pane, rows) {
+                return Some(ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg,
+                });
+            }
         }
         if expected_identity.is_none() {
             if let (Some(host), Ok(rows)) = (label, agents) {
