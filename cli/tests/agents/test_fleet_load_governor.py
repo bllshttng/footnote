@@ -346,7 +346,7 @@ def test_a_settings_object_missing_new_fields_keeps_its_cap(monkeypatch):
 
 
 class TestCauseMainProbeEntry:
-    """x-0c69 AC1-HP: the console script IS the verb, byte for byte.
+    """AC1-HP: the console script IS the verb, byte for byte.
 
     The Rust gate reads the probe's stdout and exit code; if the narrow entry
     point ever answered differently from `fno-py doctor footprint --json

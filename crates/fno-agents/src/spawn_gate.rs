@@ -808,9 +808,9 @@ enum FleetReading {
     /// Footprint answered and disclaimed its own answer. Carries its words.
     Incomplete(String),
     /// No usable answer at all. Carries why, in the probe's own words where
-    /// there are any: "attribution unavailable" with no cause sent its
+    /// there are any: "attribution unavailable" with no cause once sent its
     /// readers hunting load averages for an hour while the instrument was
-    /// fine and the transport was not (x-0c69).
+    /// fine and the transport was not.
     Unreadable(String),
 }
 
@@ -876,7 +876,7 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
 /// purpose: the probe binary (`fno-footprint-cause`) imports only
 /// `fno.doctor_footprint` (measured 0.11s wall at load 117), where the old
 /// `fno` shim route paid a full typer-app import plus provisioning waits and
-/// timed out under exactly the load this gate exists to measure (x-0c69).
+/// timed out under exactly the load this gate exists to measure.
 const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
 
 /// The probe argv: the narrow console script when it resolves, else the
@@ -984,9 +984,9 @@ fn footprint_cause_raw() -> Result<String, String> {
 ///
 /// `Err` carries WHY the probe has no answer, as text a refusal can print.
 /// A deadline miss is a fact about the probe's clock, never about the
-/// machine: printing it as if it were a CPU reading is how x-0c69 turned a
-/// healthy instrument into "attribution unavailable" at load 511 while the
-/// same instrument, read in process, answered 3.69/12.00 in 1.6s.
+/// machine: printing a clock miss as if it were a CPU reading is how a
+/// healthy instrument once read as "attribution unavailable" at load 511
+/// while the same instrument, read in process, answered 3.69/12.00 in 1.6s.
 fn footprint_cause_raw_with(argv: &[String], budget: Duration) -> Result<String, String> {
     let bin = argv[0].clone();
     let mut child = Command::new(&argv[0])
@@ -1683,7 +1683,7 @@ MemAvailable:    8000000 kB\n";
     /// The `_emit_failure` shape (`{"error": ..., "exit_code": 4}`) is an
     /// ANSWER, not a silence: its words must reach the refusal, because
     /// "attribution unavailable" with no cause is exactly what sent an hour
-    /// of hunting after load averages while the instrument was fine (x-0c69).
+    /// of hunting after load averages while the instrument was fine.
     #[test]
     fn an_error_payload_classifies_unreadable_carrying_footprints_words() {
         let raw =
@@ -1706,8 +1706,8 @@ MemAvailable:    8000000 kB\n";
     }
 
     /// A probe that misses its budget must say so: the miss is a fact about
-    /// the probe's clock, and a bare "unavailable" let a healthy instrument
-    /// read as attribution failure at load 511 (x-0c69). The budget is
+    /// the probe's clock, and a bare "unavailable" once let a healthy
+    /// instrument read as attribution failure at load 511. The budget is
     /// passed explicitly so the test does not depend on machine speed.
     #[cfg(unix)]
     #[test]
