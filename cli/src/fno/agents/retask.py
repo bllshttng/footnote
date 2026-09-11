@@ -940,34 +940,3 @@ def run_retask(
         if renamed_name[0] != entry.name:
             receipt["registry_name"] = renamed_name[0]
         return receipt
-
-
-def plan_retask(
-    worker: str,
-    *,
-    node: str,
-    settings: object = None,
-    model: Optional[str] = None,
-    effort: Optional[str] = None,
-    env: Optional[Mapping[str, str]] = None,
-    registry_path: Optional[Path] = None,
-) -> dict:
-    node = _resolve_retask_node(node)
-    entry = resolve_agent(worker, path=registry_path).entry
-    try:
-        target = resolve_target_coordinate(
-            node,
-            settings=settings,
-            model=model,
-            effort=effort,
-            env=env,
-        )
-    except DispatchResolveError as exc:
-        return {
-            "outcome": "refused",
-            "reason": "dispatch_verb_unresolved",
-            "detail": str(exc),
-        }
-    return detect_retask(
-        entry, target, node=node, live_permission_mode=_live_permission_mode(entry)
-    )

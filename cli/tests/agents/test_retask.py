@@ -1177,12 +1177,17 @@ def test_planless_blueprint_node_retasks_an_opus_claude_worker(tmp_path, monkeyp
         json.dumps({"type": "permission-mode", "permissionMode": "bypassPermissions"})
         + "\n"
     )
-    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
     monkeypatch.setattr(
         "fno.agents.dispatch._mux_recipient_transcript", lambda _entry: transcript
     )
 
-    receipt = retask.plan_retask("bp-x", node="x-bdb9", settings=settings, env={})
+    target = retask.resolve_target_coordinate(
+        "x-bdb9", settings=settings, env={}
+    )
+    receipt = retask.detect_retask(
+        row, target, node="x-bdb9",
+        live_permission_mode=retask._live_permission_mode(row),
+    )
 
     assert receipt["outcome"] == "retask_ready"
     assert receipt["payload"]["target"]["verb"] == "blueprint"
@@ -1219,23 +1224,38 @@ def test_ready_target_node_keeps_the_zai_lane_and_refuses_an_opus_row(
         mux=None,
         fno_id="F",
     )
-    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
     monkeypatch.setattr("fno.agents.dispatch._mux_recipient_transcript", lambda _entry: None)
 
-    receipt = retask.plan_retask("bp-x", node="x-bdb9", settings=settings, env={})
+    target = retask.resolve_target_coordinate("x-bdb9", settings=settings, env={})
+    receipt = retask.detect_retask(
+        row, target, node="x-bdb9",
+        live_permission_mode=retask._live_permission_mode(row),
+    )
 
     assert receipt == {"outcome": "spawn_required", "reason": "provider"}
 
 
 def test_unresolvable_dispatch_verb_refuses_instead_of_guessing(monkeypatch):
+    import pytest
+
+    import fno.agents.retask as retask
+    from fno.agents.harness_map import DispatchResolveError
+
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+
+    with pytest.raises(DispatchResolveError):
+        retask.resolve_target_coordinate("x-bdb9", env={})
+
+
+def test_run_retask_refuses_when_the_dispatch_verb_cannot_resolve(monkeypatch):
     import fno.agents.retask as retask
 
     monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
     row = _row()
     monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
 
-    receipt = retask.plan_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
 
-    assert receipt["outcome"] == "refused"
+    assert receipt["status"] == "refused"
     assert receipt["reason"] == "dispatch_verb_unresolved"
     assert receipt["detail"]
