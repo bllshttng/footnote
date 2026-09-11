@@ -1585,6 +1585,18 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     def unreadable_registry():
         raise OSError("registry is a directory")
 
+    # The CLI app resolves config roots through git when the process cache is
+    # cold, and the admission pair and CPU override read config per verdict.
+    # Warm the cache and pin the seams before the recorder goes in, so the
+    # recorded window holds only what a footprint run itself executes.
+    import contextlib
+
+    from fno.config import load_settings
+
+    with contextlib.suppress(Exception):
+        load_settings()
+    _pin_admission(monkeypatch)
+    monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
     monkeypatch.setattr(doctor_footprint.subprocess, "run", ps_only)
     monkeypatch.setattr("fno.agents.registry.load_registry", unreadable_registry)
     _pin_load(monkeypatch, status="within")
