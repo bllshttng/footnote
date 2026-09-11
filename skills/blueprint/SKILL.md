@@ -22,7 +22,7 @@ Create implementation plans scaled to the task. The output shape is always one p
 
 Read the argument left to right: an optional leading `subagent` token (stripped before Plan Claims Ingestion reads the node id), then the input (node id, design-doc path, or feature description). No token: run it here, inline.
 
-`subagent` runs the whole skill in a subagent of this session - a plan takes 5 to 11 minutes instead of a 40 to 60 minute lane, and it still takes the claim, writes the row and runs every gate:
+`subagent` runs the whole skill in a subagent of this session, and it still takes the claim, writes the row and runs every gate. The reasons are measured, not speed. A subagent cannot orphan: its completion IS the tool result (four of four returned in one measurement; every codex thread blueprint in that same measurement orphaned, one after 623 minutes, one with a negative span). A subagent spends no spawn share: the gate counts spawned workers, so one king was refused twice at 7 of 7 while two blueprint subagents ran. No timing is claimed. Both wall-clock comparisons on record are confounded, one by unmatched model tiers, one by heavy external machine load, so no trustworthy timing exists in either direction:
 
 1. Run `fno backlog session open <node> --json`. A nonzero exit is the answer. Relay the refusal line and launch nothing.
 2. For several nodes at once, run `fno config assert-subagent-budget --width <n>` first. A refusal means one at a time.
