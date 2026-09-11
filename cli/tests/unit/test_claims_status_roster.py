@@ -36,7 +36,7 @@ def test_roster_reader_module_is_authority():
     assert claims_cli.RosterReading is roster_module.RosterReading
     assert claims_cli.read_roster is roster_module.read_roster
     assert claims_cli._finished_row_states is roster_module._finished_row_states
-    assert claims_cli._worker_reachability is roster_module._worker_reachability
+    assert claims_cli.classify_workers is roster_module.classify_workers
 
 
 @pytest.fixture
