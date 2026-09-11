@@ -52,6 +52,13 @@ make_repo() {
   fi
   # Isolated home dir: no ~/.fno/config.toml budget leakage
   mkdir -p "${_dir}/home" || fail "mkdir home failed in $_dir"
+  # State-path stub: init resolves its manifest through `fno-agents state path`
+  # when a binary answers, so the stub pins that answer to the scenario's space
+  # dir and the reads below follow it.
+  mkdir -p "${_dir}/bin" "${_dir}/space" || fail "mkdir bin/space failed in $_dir"
+  cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${_dir}/bin/fno-agents" \
+    || fail "stub install failed in $_dir"
+  chmod 755 "${_dir}/bin/fno-agents"
 }
 
 # HOME is the effective isolation: init-target-state.sh sets
@@ -88,13 +95,15 @@ printf '# isolated\n' > "$_BLANK_HP"
 
 (cd "$TMP_HP" && \
   HOME="${TMP_HP}/home" \
+  PATH="${TMP_HP}/bin:${PATH}" \
+  FNO_TEST_SPACE="${TMP_HP}/space" \
   GLOBAL_SETTINGS="${_BLANK_HP}" \
   TARGET_START=1 \
   TARGET_INPUT="test-budget-hp" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "AC1-HP: init exited non-zero"
 
-STATE_HP="$TMP_HP/.fno/target-state.md"
+STATE_HP="$TMP_HP/space/target-state.md"
 [[ -f "$STATE_HP" ]] || fail "AC1-HP: state file not created"
 
 # budget_wall_clock_cap_minutes line must be complete (own line, correct value)
@@ -144,13 +153,15 @@ printf '# isolated\n' > "$_BLANK_ERR"
 
 (cd "$TMP_ERR" && \
   HOME="${TMP_ERR}/home" \
+  PATH="${TMP_ERR}/bin:${PATH}" \
+  FNO_TEST_SPACE="${TMP_ERR}/space" \
   GLOBAL_SETTINGS="${_BLANK_ERR}" \
   TARGET_START=1 \
   TARGET_INPUT="test-budget-no-caps" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "AC1-ERR: init exited non-zero"
 
-STATE_ERR="$TMP_ERR/.fno/target-state.md"
+STATE_ERR="$TMP_ERR/space/target-state.md"
 [[ -f "$STATE_ERR" ]] || fail "AC1-ERR: state file not created"
 
 # No budget_* keys should appear
@@ -198,13 +209,15 @@ printf '# isolated\n' > "$_BLANK_WALL"
 
 (cd "$TMP_WALL" && \
   HOME="${TMP_WALL}/home" \
+  PATH="${TMP_WALL}/bin:${PATH}" \
+  FNO_TEST_SPACE="${TMP_WALL}/space" \
   GLOBAL_SETTINGS="${_BLANK_WALL}" \
   TARGET_START=1 \
   TARGET_INPUT="test-wall-only" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "AC1-EDGE-A: init exited non-zero"
 
-STATE_WALL="$TMP_WALL/.fno/target-state.md"
+STATE_WALL="$TMP_WALL/space/target-state.md"
 [[ -f "$STATE_WALL" ]] || fail "AC1-EDGE-A: state file not created"
 
 grep -qE '^budget_wall_clock_cap_minutes:[[:space:]]*90$' "$STATE_WALL" \
@@ -238,13 +251,15 @@ printf '# isolated\n' > "$_BLANK_COST"
 
 (cd "$TMP_COST" && \
   HOME="${TMP_COST}/home" \
+  PATH="${TMP_COST}/bin:${PATH}" \
+  FNO_TEST_SPACE="${TMP_COST}/space" \
   GLOBAL_SETTINGS="${_BLANK_COST}" \
   TARGET_START=1 \
   TARGET_INPUT="test-cost-only" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "AC1-EDGE-B: init exited non-zero"
 
-STATE_COST="$TMP_COST/.fno/target-state.md"
+STATE_COST="$TMP_COST/space/target-state.md"
 [[ -f "$STATE_COST" ]] || fail "AC1-EDGE-B: state file not created"
 
 grep -qE '^budget_cost_cap_usd:[[:space:]]*42$' "$STATE_COST" \
