@@ -5,6 +5,37 @@ use super::*;
 /// The pid no OS reports as alive (rm_refusal.rs uses the same token).
 const GONE_PID: i64 = i32::MAX as i64;
 
+/// The directory state a zero-scan verdict must carry: for every dir the
+/// receipt named, whether it exists and what it holds at assert time. A zero
+/// scan is only honest when the message shows what the scan would have seen.
+fn dir_listing(claims: &Value) -> String {
+    let mut out = String::new();
+    for field in ["dirs", "read_dirs"] {
+        let Some(dirs) = claims.get(field).and_then(Value::as_array) else {
+            continue;
+        };
+        for dir in dirs {
+            let Some(dir) = dir.as_str() else { continue };
+            let path = std::path::Path::new(dir);
+            let entries = std::fs::read_dir(path)
+                .map(|rd| {
+                    let names: Vec<String> = rd
+                        .filter_map(Result::ok)
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    format!("{} entries [{}]", names.len(), names.join(", "))
+                })
+                .unwrap_or_else(|e| format!("unreadable: {e}"));
+            out.push_str(&format!(
+                " {field}={} exists={} {entries};",
+                path.display(),
+                path.exists()
+            ));
+        }
+    }
+    out
+}
+
 fn write_stop_claim(
     dir: &std::path::Path,
     key: &str,
@@ -101,7 +132,12 @@ async fn a_confirmed_stop_releases_the_stopped_holders_dead_claims() {
         .cloned()
         .expect("a confirmed stop rides the claims receipt");
     let released = claims.get("released").and_then(Value::as_array).unwrap();
-    assert_eq!(released.len(), 1, "{claims}");
+    assert_eq!(
+        released.len(),
+        1,
+        "{claims}; at assert time: {}",
+        dir_listing(&claims)
+    );
     assert_eq!(released[0]["key"], "node:x-stop");
     assert!(!claim_path.exists(), "the dead claim file is gone");
     std::env::remove_var("FNO_CLAIMS_ROOT");
