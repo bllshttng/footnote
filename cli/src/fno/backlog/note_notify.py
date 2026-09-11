@@ -99,13 +99,13 @@ def note_recipients(
             return
         # A role holder is a marker, not an address; resolve it where the
         # address is born. None means nobody is behind it: skip, not fail.
-        address, raw = holder_agent_name(address), address
-        if not address or address in seen:
+        resolved = holder_agent_name(address)
+        if not resolved or resolved in seen:
             return
-        if self_session and (address.endswith(self_session) or raw.endswith(self_session)):
+        if self_session and (resolved.endswith(self_session) or address.endswith(self_session)):
             return
-        seen.add(address)
-        out.append((address, why))
+        seen.add(resolved)
+        out.append((resolved, why))
 
     add(holder_of(node_id), f"holder of {node_id}")
 
