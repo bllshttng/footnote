@@ -1314,6 +1314,179 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
     assert "no ambient identity" in r.output
 
 
+def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
+    """AC1-HP: a free node comes back claimed under blueprint-session:<id>,
+    and the open writes no session row and no status change."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open1")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open001", "--json"])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["status"] == "opened"
+    assert out["claim_key"] == "node:x-open001"
+    assert out["holder"] == "blueprint-session:sess-open1"
+    assert out["session_id"] == "sess-open1"
+    assert "acquired_at" in out
+    status = claim_status("node:x-open001")
+    assert status["state"] == "live"
+    assert status["holder"] == "blueprint-session:sess-open1"
+    node = read_graph(g)[0]
+    assert node["status"] != "in_progress"
+    assert node.get("sessions") in (None, [])
+
+
+def test_cli_session_open_refuses_live_foreign_holder(tmp_path, monkeypatch):
+    """AC2-ERR: a live spawn-handover claim is named and left intact."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open2")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    acquire_claim("node:x-open002", "spawn-handover:worker-a", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open002"])
+
+    assert r.exit_code == 1
+    assert "held by spawn-handover:worker-a" in r.output
+    assert "no planner started" in r.output
+    status = claim_status("node:x-open002")
+    assert status["state"] == "live"
+    assert status["holder"] == "spawn-handover:worker-a"
+
+
+def test_cli_session_open_refuses_second_open_same_session(tmp_path, monkeypatch):
+    """AC3-ERR: a second open by the same session exits 1 without touching
+    the claim's acquire time."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open3")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    first = CliRunner().invoke(C.cli, ["session", "open", "x-open003", "--json"])
+    assert first.exit_code == 0, first.output
+    before = claim_status("node:x-open003")["acquired_at"]
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open003"])
+
+    assert r.exit_code == 1
+    assert "already open for this session" in r.output
+    assert claim_status("node:x-open003")["acquired_at"] == before
+
+
+def test_cli_session_open_refuses_without_identity(tmp_path, monkeypatch):
+    """AC4-ERR: no ambient identity, no claim taken."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open004"])
+
+    assert r.exit_code == 2
+    assert "no ambient identity" in r.output
+    assert claim_status("node:x-open004")["state"] == "free"
+
+
+def test_cli_session_close_releases_blueprint_session_claim(tmp_path, monkeypatch):
+    """AC5-HP: open then close in one session releases the blueprint holder
+    and bounds the row with the claim's acquire time."""
+    from datetime import datetime, timezone
+
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open010", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open10")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    opened = CliRunner().invoke(C.cli, ["session", "open", "x-open010", "--json"])
+    assert opened.exit_code == 0, opened.output
+    acquired_at = json.loads(opened.output)["acquired_at"]
+    expected_start = datetime.fromtimestamp(
+        acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    closed = CliRunner().invoke(C.cli, [
+        "session", "close", "x-open010",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-open010",
+        "--json",
+    ])
+
+    assert closed.exit_code == 0, closed.output
+    out = json.loads(closed.output)
+    assert out["claim_released"] is True
+    assert out["claim_holder"] == "blueprint-session:sess-open10"
+    assert claim_status("node:x-open010")["state"] == "free"
+    row = read_graph(g)[0]["sessions"][0]
+    assert row["phase"] == "blueprint"
+    assert row["started_at"] == expected_start
+    assert "ended_at" in row
+
+
+def test_cli_session_close_leaves_foreign_blueprint_claim_intact(tmp_path, monkeypatch):
+    """AC6-ERR: another session's blueprint claim is left held; the close
+    still writes its row and answers claim_released false."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open011", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open11")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    acquire_claim("node:x-open011", "blueprint-session:other-sess", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-open011",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-open011",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output.strip().splitlines()[-1])
+    assert out["claim_released"] is False
+    assert "claim_holder" not in out
+    status = claim_status("node:x-open011")
+    assert status["state"] == "live"
+    assert status["holder"] == "blueprint-session:other-sess"
+    assert read_graph(g)[0]["sessions"][0]["session_id"] == "sess-open11"
+
+
 def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
     """The blueprint terminal releases the exact handover claim it was
     launched under; the receipt names the holder and the claim answers free."""

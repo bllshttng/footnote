@@ -13537,6 +13537,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "cost",
         "session add",
         "session close",
+        "session open",
         "session reap-open",
         "decide",
         "decisions",
