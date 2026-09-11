@@ -45,8 +45,7 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 
 
 def _fleet_incident_gate() -> None:
-    """The pane gate's first admission boundary: the native verdict, BEFORE
-    the FNO_SPAWN_GATE=0 bypass. This side owns no state interpretation."""
+    """The pane gate's first admission boundary: the native verdict, BEFORE the bypass."""
     import subprocess
 
     from fno.rust_binary import find_dev_binary, resolve_binary

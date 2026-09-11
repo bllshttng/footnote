@@ -258,11 +258,9 @@ RUST_CLIENT_VERBS = frozenset(
         "authorized-merge",
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
-        # Durable fleet incident breaker (x-77db): stop/clear/status/check in
-        # one machine-wide file. Dispatched directly in client.rs (no daemon
-        # RPC); the public surface is the `fno agents incident` adapter and
-        # the admission gates call the crate directly, so this entry keeps
-        # the client.rs<->router parity test in sync and provides the help.
+        # Durable fleet incident breaker (x-77db): dispatched directly in
+        # client.rs (no daemon RPC); the public surface is `fno agents incident`,
+        # the admission gates call the crate. Keeps the parity test in sync.
         "fleet-incident",
     }
 )
