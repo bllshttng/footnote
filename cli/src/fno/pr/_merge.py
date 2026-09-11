@@ -38,7 +38,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import run
 
@@ -263,18 +263,22 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return str(info.get("head_sha") or "").strip() or None
 
 
-def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str, str]]:
+def _pr_head_ref_and_oid(
+    pr_number: int, repo: str, runner: Callable = run
+) -> Optional[Tuple[str, str, str]]:
     """``(branch, head_sha, state)`` for a PR, or None when the read failed.
 
     One REST request answers all three, the same one ``_pr_head_oid`` already
     makes. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
     view``, which bills the per-user GraphQL quota every watcher on the machine
     shares. The state rides along because it is already in the payload, and the
-    in-flight guard needs it to exempt a terminal PR.
+    in-flight guard needs it to exempt a terminal PR. ``runner`` is injectable
+    so the acquire verb, which runs inside a PreToolUse hook, can bound the
+    network call it sits inside.
     """
     from fno.pr._rest import fetch_pr_info_rest
 
-    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=runner)
     if info is None:
         return None
     branch = str(info.get("head_ref") or "").strip()

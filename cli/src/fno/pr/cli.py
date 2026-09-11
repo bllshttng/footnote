@@ -15,11 +15,15 @@ dependency. Each module preserves the bash exit-code / output contract.
 from __future__ import annotations
 
 import enum
+import functools
 import json
 import os
+import subprocess
 from typing import List, Optional
 
 import typer
+
+from fno.pr._proc import run
 
 
 pr_app = typer.Typer(
@@ -611,7 +615,7 @@ def review_hold(
         typer.echo(f"PR {pr_number}: no review in flight on {branch}")
         raise typer.Exit(code=0)
 
-    if not branch:
+    if not branch and not (action == "acquire" and pr_number is not None):
         typer.echo(f"review-hold {action} needs --branch", err=True)
         raise typer.Exit(code=1)
     if action == "release":
@@ -635,6 +639,38 @@ def review_hold(
         typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
     if action == "acquire":
+        if pr_number is not None:
+            # x-b5f6: a review that names its PR keys the hold on that PR's head
+            # ref, resolved from GitHub - never on whatever branch this checkout
+            # stands on. No hold rather than a guessed one: a hold on a
+            # bystander branch reports protection of a PR it is not protecting.
+            # The verb runs inside a PreToolUse hook, so the read is bounded.
+            from fno.pr._merge import _pr_head_ref_and_oid
+
+            try:
+                refs = _pr_head_ref_and_oid(
+                    pr_number, cwd, runner=functools.partial(run, timeout=10)
+                )
+            except subprocess.TimeoutExpired:
+                refs = None
+            if refs is None:
+                typer.echo(
+                    f"review-hold: not registered on PR {pr_number}: the PR read failed; "
+                    "no hold rather than a guessed branch",
+                    err=True,
+                )
+                raise typer.Exit(code=0)
+            resolved_branch, resolved_head, resolved_state = refs
+            if resolved_state != "OPEN":
+                typer.echo(
+                    f"review-hold: not registered on PR {pr_number}: {resolved_state}; "
+                    "no hold rather than a guessed branch",
+                    err=True,
+                )
+                raise typer.Exit(code=0)
+            # The PR's own head ref and head replace whatever the caller passed.
+            branch = resolved_branch
+            head = resolved_head
         flags = _parse_flags(flags_json)
         # The cap gate: the prefixed line lets the hook surface the denial;
         # policy, not infra, so the one acquire failure that blocks.
