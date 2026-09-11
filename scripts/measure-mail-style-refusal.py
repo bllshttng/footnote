@@ -73,7 +73,7 @@ def load_bodies(sender: str | None) -> tuple[list[str], str, str, int]:
             if first.startswith("control:") or style.has_exception(body):
                 continue
             bodies.append(body)
-    return bodies, min(timestamps), max(timestamps), total
+    return bodies, min(timestamps, default=""), max(timestamps, default=""), total
 
 
 def main() -> int:

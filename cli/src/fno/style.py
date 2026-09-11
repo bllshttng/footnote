@@ -516,7 +516,7 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
                 Violation(
                     8, index, sentence,
                     f'sentence {shown} uses the filler "{_quote_safe(word)}". '
-                    "Delete it; the imperative alone reads stronger.",
+                    "Delete it. The imperative alone reads stronger.",
                 )
             )
     lowered_sentence = sentence.lower()

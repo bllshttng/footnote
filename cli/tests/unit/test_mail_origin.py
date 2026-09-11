@@ -645,7 +645,7 @@ def test_peer_trailer_names_the_action_boundary_and_the_door(monkeypatch):
     assert "merge a PR, send email" in trailer
     assert "needs operator authority or standing law" in trailer
     assert "is allowed" not in trailer
-    # The x-37dd rewrite: short sentences, never the semicolon density shape.
+    # The plain-sentence rewrite: short sentences, never semicolon density.
     assert ";" not in trailer
 
 
