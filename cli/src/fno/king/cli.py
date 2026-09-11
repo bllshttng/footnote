@@ -509,26 +509,22 @@ def history_cmd(
 ) -> None:
     """Read this crown's recorded reign: its check-ins, newest first, verbatim.
 
-    Never a generated summary. ``fno agents court -n`` answers who rules
-    NOW; this answers what happened across the reign. Contract:
-    docs/architecture/reign.md.
+    ``fno agents court -n`` answers who rules NOW; this answers what
+    happened across the reign. Contract: docs/architecture/reign.md.
     """
-    from fno.king.history import HistoryUnreadable, read_history, render, resolve_scope
+    from fno.king.history import HistoryUnreadable, resolve_scope, run_native
     from fno.paths import project_events_json
 
     try:
         crown = resolve_scope(scope)
     except HistoryUnreadable as exc:
         _refuse(f"king: {exc}")
-    try:
-        result = read_history(project_events_json(), crown)
-    except HistoryUnreadable as exc:
-        typer.echo(f"king: {exc}", err=True)
-        raise typer.Exit(1) from exc
-    if as_json:
-        typer.echo(json.dumps(result, indent=2, sort_keys=True))
-    else:
-        typer.echo(render(result))
+    code, out, err = run_native(project_events_json(), crown, as_json)
+    if out:
+        typer.echo(out.rstrip("\n"))
+    if err:
+        typer.echo(err.rstrip("\n"), err=True)
+    raise typer.Exit(code)
 
 
 @king_app.command("board")
@@ -751,8 +747,7 @@ agents_king_app.command("shape")(shape_cmd)
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
-# Registered here only, like the faq typer: the retired bare `fno king` menu
-# stays capped, and the collapse map allocates the agents-king row.
+# Here only, like the faq typer: the retired bare `fno king` menu stays capped.
 agents_king_app.command("history")(history_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 

@@ -47,6 +47,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "help",
     "host",
     "kill-check",
+    "king-history",
     "route-slot",
     "list",
     "logs",
@@ -417,10 +418,19 @@ async fn run(args: Vec<String>) -> i32 {
     // `court-fold` (x-52d2): the crown scope fold for `fno agents court
     // --nodes` and the local board's court section, daemon-free like
     // court-orphans; the workers column rides the same native claim verdicts
-    // `claim sweep` uses, so a fold and the claims surface cannot disagree
-    // about who holds a node.
+    // `claim sweep` established, so a fold and the claims surface cannot
+    // disagree about who holds a node.
     if verb == "court-fold" {
         return fno_agents::court_fold::run_court_fold(&args[1..]);
+    }
+
+    // `king-history` (x-a238): the crown-scope reign_checkin readback for
+    // `fno agents king history`. Daemon-free read, `==` dispatch like
+    // court-fold: Python resolves the caller's crown scope and pins the
+    // journal path (identity and paths are Python-owned), the native side
+    // owns the scan so the file-budget Python-tree ratchet holds.
+    if verb == "king-history" {
+        return fno_agents::king_history::run_king_history(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
