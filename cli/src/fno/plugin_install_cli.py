@@ -73,6 +73,6 @@ def install(
         if force:
             argv.append("--force")
         argv.append(harness)
-    result = subprocess.run([str(binary), *argv], check=False)
-    if result.returncode != 0:
-        raise typer.Exit(code=result.returncode)
+    proc = subprocess.run([str(binary), *argv], check=False)
+    if proc.returncode != 0:
+        raise typer.Exit(code=proc.returncode)
