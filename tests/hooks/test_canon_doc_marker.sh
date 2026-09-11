@@ -3,8 +3,9 @@
 #
 # Direct tests of scripts/lib/canon-doc-marker.sh: the one reader for the
 # canon doc's fenced marker blocks. Verifies: a closed block extracts exactly;
-# a missing closing marker is content (captured to the next heading or EOF,
-# never a parse error); an absent marker or unreadable file exits 1 with no
+# a missing closing marker is content (captured to the next machine boundary
+# or EOF, never a parse error, and never bounded by the operator's own
+# headings); an absent marker or unreadable file exits 1 with no
 # output; a found-but-empty block exits 0 with no output; and the placeholder
 # helpers classify the seed line and real user text apart.
 
@@ -43,18 +44,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Missing closing marker, next heading bounds the capture: CONTENT, not an
-#    error. Exit 0 with the text intact is the contract the write-through's
+# 2. Missing closing marker: CONTENT, not an error. The operator's own
+#    headings inside the block never bound the capture - bounding on any
+#    `## ` line dropped everything they wrote below their own formatting.
+#    Exit 0 with the text intact is the contract the write-through's
 #    self-heal depends on.
 # ---------------------------------------------------------------------------
 BROKEN="$TMP/broken.md"
-printf '<!-- fno:user -->\nPARTIAL EDIT TEXT\n## Next section\nunrelated\n' > "$BROKEN"
+printf '<!-- fno:user -->\nPARTIAL EDIT TEXT\n## My own notes\nmore operator words\n' > "$BROKEN"
 OUT="$(canon_doc_extract_marker "$BROKEN" user)"
 RC=$?
-if [[ "$RC" == "0" && "$OUT" == "PARTIAL EDIT TEXT" ]]; then
-  pass "missing closing marker: captured to the next heading, exit 0"
+if [[ "$RC" == "0" && "$OUT" == "PARTIAL EDIT TEXT
+## My own notes
+more operator words" ]]; then
+  pass "missing closing marker: capture runs through the operator's own headings"
 else
-  fail "missing closing (heading) rc=$RC out=[$OUT]"
+  fail "missing closing (operator heading) rc=$RC out=[$OUT]"
+fi
+
+# ---------------------------------------------------------------------------
+# 2b. Missing closing marker, machine boundary bounds the capture: the
+#     writer's own section headings and any other marker fence stop it, so a
+#     following machine section is never swallowed into user content.
+# ---------------------------------------------------------------------------
+BOUNDED="$TMP/bounded.md"
+printf '<!-- fno:user -->\noperator text\n## Merge order and why (session)\n<!-- fno:session -->\nmachine-side\n<!-- /fno:session -->\n' > "$BOUNDED"
+OUT="$(canon_doc_extract_marker "$BOUNDED" user)"
+RC=$?
+if [[ "$RC" == "0" && "$OUT" == "operator text" ]]; then
+  pass "missing closing marker: machine section heading bounds the capture"
+else
+  fail "missing closing (machine heading) rc=$RC out=[$OUT]"
+fi
+FENCED="$TMP/fenced.md"
+printf '<!-- fno:user -->\noperator text\n<!-- fno:session -->\nmachine-side\n<!-- /fno:session -->\n' > "$FENCED"
+OUT="$(canon_doc_extract_marker "$FENCED" user)"
+RC=$?
+if [[ "$RC" == "0" && "$OUT" == "operator text" ]]; then
+  pass "missing closing marker: another marker fence bounds the capture"
+else
+  fail "missing closing (marker fence) rc=$RC out=[$OUT]"
 fi
 
 # ---------------------------------------------------------------------------

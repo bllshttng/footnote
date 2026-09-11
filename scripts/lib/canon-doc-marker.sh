@@ -10,16 +10,21 @@
 # Prints the raw text between `<!-- fno:<marker-name> -->` and its closing
 # `<!-- /fno:<marker-name> -->`, marker lines excluded, nothing trimmed.
 # A missing closing marker (a partial hand edit) is CONTENT, never a parse
-# error: the capture runs to the next `## ` heading or end of file instead.
-# Exit 0 when the open marker exists (content may be empty), 1 when it does
-# not or the file is unreadable; callers seed their placeholder on 1.
+# error: the capture runs to the next machine boundary instead - another
+# marker fence, one of the writer's own section headings, or end of file.
+# The operator's own `## ` headings never bound the capture: bounding on
+# any heading dropped everything the operator wrote below their own
+# formatting. Exit 0 when the open marker exists (content may be empty),
+# 1 when it does not or the file is unreadable; callers seed their
+# placeholder on 1.
 canon_doc_extract_marker() {
   local file="$1" marker="$2"
   [[ -n "$file" && -f "$file" && -n "$marker" ]] || return 1
   awk -v m="$marker" '
     !grab && index($0, "<!-- fno:" m " -->") { grab = 1; found = 1; next }
     grab && index($0, "<!-- /fno:" m " -->") { exit }
-    grab && /^## / { exit }
+    grab && /^<!-- fno:[A-Za-z0-9._-]+ -->[[:space:]]*$/ { exit }
+    grab && /^## (Merge order and why|Open decisions awaiting the operator|Gaps and open thinking|Workarounds in force|User notes) \(/ { exit }
     grab { print }
     END { exit found ? 0 : 1 }
   ' "$file" 2>/dev/null
