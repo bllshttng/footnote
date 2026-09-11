@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from urllib.parse import quote as _url_quote
 
@@ -167,6 +167,7 @@ __all__ = [
     "ClaimValidationError",
     "ClaimVerdictError",
     "ClaimVerdictUnavailable",
+    "ForceReleaseOutcome",
     "HolderMismatch",
     "RebindRefused",
     "acquire_claim",
@@ -1610,19 +1611,34 @@ def list_claims_with_counts(
     return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
 
 
+class ForceReleaseOutcome(NamedTuple):
+    """What a force-release found at the resolved path (x-9c91 change 4).
+
+    ``archived=False`` means no claim file existed where this call looked -
+    which is how a key resolved to the WRONG root reports "success" today
+    while the real lock file sits untouched in the other root.
+    """
+
+    path: Path
+    archived: bool
+    previous_holder: Optional[str]
+
+
 def force_release_claim(
     key: str,
     reason: str,
     *,
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
-) -> None:
+) -> ForceReleaseOutcome:
     """Administratively drop a claim, regardless of holder.
 
     ``reason`` is required (non-empty); the audit event records who ran the
-    override and why. Idempotent: missing claim file is success. Existing
-    claims are archived to ``.expired/`` rather than unlinked, so a forensic
-    trail survives.
+    override and why. Existing claims are archived to ``.expired/`` rather
+    than unlinked, so a forensic trail survives, and the outcome names the
+    path that was read and whether an archive happened. A missing claim file
+    is no longer reported as a release: the outcome carries
+    ``archived=False`` so a caller can tell "dropped" from "nothing there".
 
     ``holding_recovery_lock`` is for the one caller that already holds this
     key's recovery mutex and is calling from inside it. The mutex is a mkdir
@@ -1671,7 +1687,7 @@ def force_release_claim(
             emit_claim_force_overridden(
                 key=key, reason=reason, previous_holder=None, previous_pid=None,
             )
-            return
+            return ForceReleaseOutcome(path=path, archived=False, previous_holder=None)
 
         previous: Optional[Claim] = None
         try:
@@ -1685,6 +1701,11 @@ def force_release_claim(
             reason=reason,
             previous_holder=previous.holder if previous is not None else None,
             previous_pid=previous.pid if previous is not None else None,
+        )
+        return ForceReleaseOutcome(
+            path=path,
+            archived=True,
+            previous_holder=previous.holder if previous is not None else None,
         )
     finally:
         if acquired_lock:
@@ -1832,12 +1853,16 @@ def reap_dead_claims(
 
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
     ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
-    ``kept_suspect_unprobed``, ``kept_offhost``, ``corrupted``, ``vanished``,
-    ``contended``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
-    ``roots``. The two new suspect buckets split what used to be one number:
-    "kept: 2 suspect" is the line that taught the operator the reaper was
-    useless, because it could not say whether those two were protected or
-    merely unmeasured. A ``claim_reap_swept`` event fires on every
+    ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
+    ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
+    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
+    reason)``), ``apply``, ``roots``. The two new suspect buckets split what
+    used to be one number: "kept: 2 suspect" is the line that taught the
+    operator the reaper was useless, because it could not say whether those
+    two were protected or merely unmeasured. ``kept_unclassified`` is a
+    third split: a claim with no native verdict in the walked directory was
+    never probed at all, so it counts there with the directory it was seen
+    in, never under the probe buckets. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1852,7 +1877,11 @@ def reap_dead_claims(
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
-        native_verdicts.update(claim_verdicts(root=cdir.parent.parent))
+        # Verbatim --claims-dir: cdir is already the resolved claims directory,
+        # and the old root=cdir.parent.parent round-trip re-resolved it one
+        # level down, so every space-root claim got no verdict and fell to
+        # unknown-keeps (x-9c91).
+        native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
 
     ts = now_ms()
     scanned = 0
@@ -1862,19 +1891,36 @@ def reap_dead_claims(
         "offhost": 0, "suspect": 0, "live": 0,
         "suspect_alive": 0, "suspect_unprobed": 0,
     }
+    # A claim the native door never classified (no verdict row for its key in
+    # the walked directory) is not "unprobed" - the roster probe was never the
+    # instrument that failed. It is unclassified, and the per-dir count names
+    # the directory to fix.
+    kept_unclassified = 0
+    unclassified_dirs: dict[str, int] = {}
+    # Why the abandonment probe answered None, folded one token per unprobed
+    # keep from the probe's own reasons dict.
+    unprobed_by: dict[str, int] = {}
 
     def _sweep_verdict(
-        claim: Claim, native_verdict: Optional[dict[str, Any]] = None
+        claim: Claim, cdir: Path, native_verdict: Optional[dict[str, Any]] = None
     ) -> tuple[bool, str]:
+        nonlocal kept_unclassified
         native = native_verdict or native_verdicts.get(claim.key)
         if native is None:
-            return False, "suspect_unprobed"
-        return sweep_verdict(
+            kept_unclassified += 1
+            unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
+            return False, "_unclassified"
+        dead, bucket = sweep_verdict(
             claim,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
             native_verdict=native,
         )
+        if not dead and bucket == "suspect_unprobed":
+            token = getattr(abandonment_probe, "reasons", {}).get(claim.key)
+            if token:
+                unprobed_by[token] = unprobed_by.get(token, 0) + 1
+        return dead, bucket
 
     corrupted = 0
     vanished = 0
@@ -1939,7 +1985,7 @@ def reap_dead_claims(
             # file and asks the native door again for that fresh claim, because
             # the claim may have been archived-and-recreated between this scan
             # and the lock.
-            provably_dead, bucket = _sweep_verdict(claim)
+            provably_dead, bucket = _sweep_verdict(claim, cdir)
 
             if provably_dead:
                 if not apply:
@@ -1976,9 +2022,10 @@ def reap_dead_claims(
                     # The native key read deliberately has unknown PID
                     # exclusivity: this is a TOCTOU re-read, not a reused batch
                     # scan. The first batch read carried the full sibling set.
-                    fresh_native = claim_verdicts(prefix="", root=cdir.parent.parent).get(fresh.key)
+                    fresh_native = claim_verdicts(prefix="", claims_dir_path=cdir).get(fresh.key)
                     if fresh_native is None:
-                        kept["suspect_unprobed"] += 1
+                        kept_unclassified += 1
+                        unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
                         continue
                     identity = fresh.machine_id or fresh.host
                     pid_key = (identity, fresh.pid) if fresh.pid is not None else None
@@ -1997,6 +2044,7 @@ def reap_dead_claims(
                         }
                     fresh_dead, fresh_bucket = _sweep_verdict(
                         fresh,
+                        cdir,
                         native_verdict=fresh_native,
                     )
                     if not fresh_dead:
@@ -2066,6 +2114,9 @@ def reap_dead_claims(
                     release_dir_mutex(recovery_lock, recovery_token)
                 continue
 
+            if bucket == "_unclassified":
+                continue
+
             # Not provably dead. Bucket the reason for the report.
             kept[bucket] += 1
 
@@ -2090,6 +2141,9 @@ def reap_dead_claims(
         "kept_suspect": kept["suspect"],
         "kept_suspect_alive": kept["suspect_alive"],
         "kept_suspect_unprobed": kept["suspect_unprobed"],
+        "kept_unclassified": kept_unclassified,
+        "unclassified_dirs": unclassified_dirs,
+        "kept_suspect_unprobed_by": unprobed_by,
         "kept_offhost": kept["offhost"],
         "corrupted": corrupted,
         "vanished": vanished,

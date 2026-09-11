@@ -45,8 +45,17 @@ def claim_verdicts(
     *,
     prefix: str | None = None,
     root: Path | None = None,
+    claims_dir_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return native verdict rows for many keys in one subprocess."""
+    """Return native verdict rows for many keys in one subprocess.
+
+    ``claims_dir_path``, when given, is passed verbatim as ``--claims-dir``:
+    the door scans exactly that directory. Without it, ``root`` is resolved
+    through :func:`claims_dir` (which appends ``.fno/claims`` to an explicit
+    root), so a caller that already HOLDS a resolved claims directory must
+    use ``claims_dir_path`` - passing that directory as ``root`` would send
+    the door to a directory one level down that does not exist.
+    """
     binary = resolve_binary()
     if binary is None:
         raise ClaimVerdictUnavailable(
@@ -67,7 +76,7 @@ def claim_verdicts(
     # else the claims_dir(None) contract (env override, else the repo's space).
     # Verbatim --claims-dir, because --root spells a repo checkout (it appends
     # .fno/claims) and no root reaches the space layout.
-    command.extend(("--claims-dir", str(claims_dir(root))))
+    command.extend(("--claims-dir", str(claims_dir_path or claims_dir(root))))
 
     try:
         result = run_subprocess(command, capture_output=True, text=True, check=False)

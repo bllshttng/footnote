@@ -1603,6 +1603,19 @@ event_types:
         kept_suspect_unprobed:
           type: integer
           description: "SUSPECT node claims the roster probe could not answer for: no row resolved to the holder, or the roster itself did not read. Absence, never proof, so the claim is kept."
+        kept_unclassified:
+          type: integer
+          description: "Claims the native door returned no verdict for in the walked directory - the probe was never reached, so this is not an unprobed keep. The per-directory split below names where they were seen."
+        unclassified_dirs:
+          type: object
+          description: "kept_unclassified keyed by the claims directory the sweep walked, so a door reading the wrong directory is visible as that directory's count."
+          additionalProperties:
+            type: integer
+        kept_suspect_unprobed_by:
+          type: object
+          description: "Unprobed keeps keyed by the probe's own reason token (native-verdict-missing, roster-read-degraded, handover-live, ...). The cause is named only where an instrument ran and degraded."
+          additionalProperties:
+            type: integer
         kept_offhost:
           type: integer
         corrupted:
