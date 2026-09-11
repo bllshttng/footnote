@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import signal
-from typing import Callable
 
 _REAP_WAIT_TERM_S = 3
 _REAP_WAIT_KILL_S = 3

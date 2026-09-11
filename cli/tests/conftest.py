@@ -331,7 +331,10 @@ def _reap_session_processes(tmp_path_factory):
     from fno.graph.store import reap_spawned_keepers
 
     survivors = reap_spawned_keepers(timeout=15.0)
-    rooted = reap_rooted([str(basetemp)])
+    # This session's own pid, not the default: a leak still parented by THIS
+    # worker has a readable cwd only when the worker is the named reaper, and
+    # a worker-parented child is exactly the leak that never reaches ppid 1.
+    rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
     assert not survivors and not rooted, (
         f"{len(survivors)} store keeper(s) outlived the test session "
         f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "

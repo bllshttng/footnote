@@ -31,6 +31,25 @@ def _spawn_rooted(cwd, command: str) -> subprocess.Popen:
     return proc
 
 
+def _wait_children(proc: subprocess.Popen, count: int, timeout_s: float = 5.0) -> bool:
+    """Poll until ``proc`` has at least ``count`` live children.
+
+    A fixed sleep here is a load flake: a CI runner can delay the fork past
+    any constant, so the tree test polls for the shape it asserts on.
+    """
+    import psutil
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            if len(psutil.Process(proc.pid).children()) >= count:
+                return True
+        except psutil.NoSuchProcess:
+            return False
+        time.sleep(0.05)
+    return False
+
+
 def test_reap_rooted_takes_the_whole_tree(tmp_path):
     """An orphan shell rooted under the root owns a descendant rooted
     elsewhere ('/'); the descendant comes back too, and everything is
@@ -47,6 +66,7 @@ def test_reap_rooted_takes_the_whole_tree(tmp_path):
     )
     try:
         assert shell.poll() is None
+        assert _wait_children(shell, 2), "shell never forked its two children"
 
         started = time.monotonic()
         rows = reap_rooted([str(tmp_path)], reaper=os.getpid())
