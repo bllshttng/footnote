@@ -8,6 +8,7 @@ compare.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -18,7 +19,7 @@ from fno.graph import parity
 def _write_json(path: Path, entries: list[dict]) -> str:
     data = json.dumps({"entries": entries}).encode("utf-8")
     path.write_bytes(data)
-    return parity._json_sha256(data)
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
 def _make_db(path: Path, entries: list[dict], exported_version: "str | None") -> None:
@@ -99,8 +100,14 @@ def test_negative_control_passes_on_live_shaped_copies(tmp_path):
     assert parity.negative_control(graph=graph, db=db) == 0
 
 
-def test_self_test_passes():
-    assert parity.self_test() == 0
+def test_compare_duplicate_id_in_json_is_unmeasured(tmp_path):
+    """A duplicate id is refused loudly (UNMEASURED), never silently
+    collapsed to whichever row happened to load last."""
+    graph = tmp_path / "graph.json"
+    sha = _write_json(graph, [{"id": "x-1", "title": "a"}, {"id": "x-1", "title": "b"}])
+    db = tmp_path / "graph.db"
+    _make_db(db, [{"id": "x-1", "title": "a"}], sha)
+    assert parity.compare(graph=graph, db=db) == 2
 
 
 def test_negative_control_prints_pass_with_id(tmp_path, capsys):
