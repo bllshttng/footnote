@@ -4130,7 +4130,6 @@ def _starvation_receipts(
     """
     from fno.backlog.advance import first_dead_ancestor, selection_guards
     from fno.graph._intake import filter_by_project
-    from fno.graph.strand import _is_live
 
     container_ids = _container_ids(entries)
     # One pass, guarding against a non-dict row (codebase convention: a malformed
