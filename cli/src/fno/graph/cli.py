@@ -3288,8 +3288,7 @@ def cmd_update(
     refuse_retired_model_tier(_model_tier_tombstone)
 
     details = read_text_arg(details, details_file, what="the details")
-    # The 'null' clear-sentinel is a COMMAND-LINE convention; a file's
-    # content is data and stores verbatim.
+    # A file's content is data; the 'null' clear-sentinel is CLI-only.
     details_from_file = details_file is not None
 
     _require_node_id(task_id)

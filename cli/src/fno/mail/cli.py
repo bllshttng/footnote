@@ -3592,9 +3592,8 @@ def cmd_send(
     to_king: str | None = typer.Option(
         None, "--to-king",
         help=(
-            "Anycast over the crown: deliver to whoever holds this scope RIGHT "
-            "NOW, resolved at send time; no live holder queues nothing. Use "
-            "instead of <name> for the role."
+            "Anycast over the crown: deliver to whoever holds this scope "
+            "RIGHT NOW, resolved at send time; no live holder queues nothing."
         ),
     ),
     any_live: bool = typer.Option(
@@ -3652,9 +3651,8 @@ def cmd_send(
         False, "--check",
         help=(
             "With --raw: report whether an injection path EXISTS and inject "
-            "nothing: 'injectable: <lane>' (exit 0), 'not-injectable' (exit 1), "
-            "'unmeasurable' (exit 3), malformed payload exit 2. It reports a "
-            "PATH, never a landing."
+            "nothing: 'injectable: <lane>' (exit 0), 'not-injectable' (1), "
+            "'unmeasurable' (3), malformed payload (2). Reports a PATH only."
         ),
     ),
     to_self: bool = typer.Option(

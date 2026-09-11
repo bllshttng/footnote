@@ -1295,11 +1295,10 @@ def cmd_spawn(
         None,
         "--wait",
         help=(
-            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h). "
-            "Waitable: load_backstop, ram_floor, cpu_instrument_unreadable, "
+            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h): "
+            "load_backstop, ram_floor, cpu_instrument_unreadable, "
             "cpu_share_undecidable, fleet_cpu_share, provider_cap, max_live. "
-            "Anything else exits at once with its receipt. Conflicts with "
-            "--no-wait."
+            "Anything else exits at once. Conflicts with --no-wait."
         ),
     ),
     prompt_file: str | None = typer.Option(
