@@ -4691,8 +4691,8 @@ def test_a_claude_no_sid_row_in_a_linked_worktree_is_attributed(monkeypatch):
     assert "harness=claude node=x-ae54 name=t-ae54-worker" in advisory[0]
 
 
-def test_aa31_default_report_carries_provider_outages(monkeypatch, capsys):
-    """x-aa31: the default -J surface carries the outage instrument - open
+def test_stale_reset_default_report_carries_provider_outages(monkeypatch, capsys):
+    """The default -J surface carries the outage instrument - open
     breakers and every refusal reason with a count - without reaching for
     --only. A failed measurement lands as a named unknown, never a missing
     key, and the human lines carry the same numbers."""

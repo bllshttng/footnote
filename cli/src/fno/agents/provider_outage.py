@@ -302,7 +302,7 @@ def _outage_records_from_parsed(
 ) -> "tuple[list[OutageEvidence], list[dict[str, Any]]]":
     """Filter one row's parsed transcript records down to outage evidence.
 
-    Past-window evidence is refused BY NAME (x-aa31) unless its reset epoch
+    Past-window evidence is refused BY NAME unless its reset epoch
     is still in the future: the freshness expired, not the fact, and a
     capped fleet that went quiet must not read as healthy."""
     from fno.adapters.providers.error_taxonomy import reset_epoch_from
@@ -715,7 +715,7 @@ def _validate(record: OutageEvidence, now_s: float, policy: OutagePolicy) -> str
     age = now_s - record.observed_at
     if age < 0 or age > policy.evidence_freshness_s:
         # Same rule as the collector: a live reset epoch admits the record
-        # however old the line is; otherwise the refusal is named (x-aa31).
+        # however old the line is; otherwise the refusal is named.
         if not (
             age > 0 and isinstance(record.reset_at, (int, float))
             and now_s < float(record.reset_at)
@@ -836,7 +836,7 @@ def _breakers(
             continue
         # Votes sharing a still-future reset ARE one event: rows noticing
         # the same live cap hours apart still describe one outage, so the
-        # spread window (the proxy for votes that cannot) yields (x-aa31).
+        # spread window (the proxy for votes that cannot) yields.
         one_live_cap = kind == "fair_usage_policy" and all(
             isinstance(vote.get("reset_at"), (int, float))
             and now_s < float(vote["reset_at"])

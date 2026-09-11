@@ -658,8 +658,8 @@ def _fup_transcript(tmp_path, name, content, *, age_s):
     return path
 
 
-def test_aa31_stale_evidence_is_a_named_refusal_not_a_silent_zero(tmp_path):
-    """x-aa31: a record past the freshness window must reach the caller as a
+def test_stale_reset_stale_evidence_is_a_named_refusal_not_a_silent_zero(tmp_path):
+    """A record past the freshness window must reach the caller as a
     counted ``evidence_stale`` refusal. The positive control proves the
     classifier live first: the same record inside the window is accepted."""
     fresh = _fup_transcript(tmp_path, "fresh.jsonl", FUP, age_s=60)
@@ -685,8 +685,8 @@ def test_aa31_stale_evidence_is_a_named_refusal_not_a_silent_zero(tmp_path):
     assert refusals[0]["count"] == 1
 
 
-def test_aa31_stale_evidence_with_live_reset_is_still_current(tmp_path):
-    """x-aa31: the freshness expired, not the fact. A record whose body names
+def test_stale_reset_stale_evidence_with_live_reset_is_still_current(tmp_path):
+    """The freshness expired, not the fact. A record whose body names
     a reset epoch still in the future is accepted however old the line is;
     the same shape with an expired reset is refused by name."""
     live = _fup_transcript(tmp_path, "live.jsonl", FUP_LIVE_RESET, age_s=1200)
@@ -710,7 +710,7 @@ def test_aa31_stale_evidence_with_live_reset_is_still_current(tmp_path):
     assert refusals[0]["reset_at"] == NOW - 8 * 3600
 
 
-def test_aa31_naive_reset_stamp_resolves_through_account_timezone(tmp_path):
+def test_stale_reset_naive_reset_stamp_resolves_through_account_timezone(tmp_path):
     """A naive stamp resolves only against the account's reset_timezone; with
     it the stale record is current evidence, without it the refusal names why."""
     naive = _fup_transcript(
@@ -743,7 +743,7 @@ def test_aa31_naive_reset_stamp_resolves_through_account_timezone(tmp_path):
     assert refusals[0]["reset_at"] is None
 
 
-def test_aa31_breaker_opens_on_stale_live_evidence_past_the_cross_row_window():
+def test_stale_reset_breaker_opens_on_stale_live_evidence_past_the_cross_row_window():
     """The measured event, replayed: rows noticed the cap 466s apart, both
     lines older than the 600s freshness window, both bodies naming a reset
     still ~2h out. Quorum 2 must open the breaker even though the vote span
@@ -771,7 +771,7 @@ def test_aa31_breaker_opens_on_stale_live_evidence_past_the_cross_row_window():
     assert {item["reason"] for item in report["refusals"]} == {"evidence_stale"}
 
 
-def test_aa31_stale_admitted_evidence_expires_at_its_reset_epoch():
+def test_stale_reset_stale_admitted_evidence_expires_at_its_reset_epoch():
     reset_at = NOW + 2 * 3600
     records = [
         _record("row-1", NOW - 900, FUP_LIVE_RESET, status=429, reset_at=reset_at),
@@ -785,7 +785,7 @@ def test_aa31_stale_admitted_evidence_expires_at_its_reset_epoch():
     assert {item["reason"] for item in after_reset["refusals"]} == {"evidence_stale"}
 
 
-def test_aa31_fresh_vote_carries_the_resolved_reset_epoch():
+def test_stale_reset_fresh_vote_carries_the_resolved_reset_epoch():
     """A fresh FUP terminal votes with the epoch resolved at collect time, so
     the breaker carries a real reset_at where the fold's tz-less parse of a
     naive stamp read None."""

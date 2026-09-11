@@ -4117,7 +4117,7 @@ def _run_unfinished_report(
         payload["keepers"] = lane_result.to_json()
     except Exception as exc:  # noqa: BLE001 - the report outlives one lane's crash
         lane_lines = [f"keeper lane: crashed: {exc!r}"]
-    # The outage instrument rides the default report (x-aa31): open breakers
+    # The outage instrument rides the default report: open breakers
     # and every refusal reason with its count are part of the operator's
     # answer, and a -J reader must not need --only to learn a lane is down.
     payload["provider_outages"] = wd.measure_provider_outages_safe(now)

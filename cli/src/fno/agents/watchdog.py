@@ -1762,7 +1762,7 @@ def measure_provider_outages(
 
 def measure_provider_outages_safe(now_s: float) -> dict[str, Any]:
     """The default report's outage measure: a crash lands as a named unknown
-    report, never a missing key (x-aa31)."""
+    report, never a missing key."""
     try:
         rows, _warnings = fleet_rows()
         return measure_provider_outages(rows, now_s=now_s)
@@ -1775,7 +1775,7 @@ def measure_provider_outages_safe(now_s: float) -> dict[str, Any]:
 def provider_outage_lines(report: Optional[dict[str, Any]]) -> list[str]:
     """Human lines for one report: every open breaker, every refusal reason
     with its count. A clean zero means measured and clear, never dropped
-    evidence (x-aa31)."""
+    evidence."""
     lines = []
     for breaker in (report or {}).get("breakers") or []:
         lines.append(
