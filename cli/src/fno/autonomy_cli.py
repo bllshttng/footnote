@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import lru_cache
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
@@ -55,7 +56,11 @@ def dispatch_provenance() -> list[tuple[str, str, str]]:
     return list(provenance_rows())
 
 
-_PROVENANCE_BY_SPAWNER = {row[0]: row for row in dispatch_provenance()}
+@lru_cache(maxsize=1)
+def _provenance_by_spawner() -> dict:
+    # Lazy + cached: an import-time binary exec would pay one RPC per import
+    # and break collection wherever the binary lags the source.
+    return {row[0]: row for row in dispatch_provenance()}
 
 
 def _settings_for(project_root: Optional[Path]):
@@ -327,7 +332,7 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
     # x-84b2: stamp each row with its dispatch provenance codes.
     stamped = []
     for r in rows:
-        codes = _PROVENANCE_BY_SPAWNER.get(r.name)
+        codes = _provenance_by_spawner().get(r.name)
         stamped.append(replace(r, source=codes[1] if codes else None, verb=codes[2] if codes else None))
     return stamped
 

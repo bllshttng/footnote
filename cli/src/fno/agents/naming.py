@@ -5,26 +5,58 @@ validator at the spawn boundary and must never become the generator."""
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 from typing import Optional
 
 #: The daemon's public agent-name contract: 1-64 chars of ``[A-Za-z0-9_-]``.
 MAX_LEN = 64
-_VALID_NAME = re.compile(r"[A-Za-z0-9_-]{1,%d}\Z" % MAX_LEN)
-
 #: Per-component cap for human-readable text, matching the shell dispatchers'
 #: ``cut -c1-30``.
 SLUG_CAP = 30
 
-_NODE_SHAPE_RE = re.compile(r"([a-z][a-z0-9]*-[0-9a-f]+)(?:-(.*))?\Z")
+def _binary() -> str:
+    from fno import rust_binary
 
-#: First tokens that open a typed non-node identity rather than a graph node
-#: prefix. ``session-`` wins over the node-shape regex because a session
-#: handle can itself be node-shaped.
-_TYPED_IDENTITY_TOKENS = frozenset({"backlog", "evals", "session"})
+    # The full resolver (env override -> bundled -> sibling -> PATH -> cargo
+    # dev), not the installed-only one: the vocabulary owner lives in the
+    # binary, so a dev checkout resolves its own fresh build.
+    binary = rust_binary.resolve_binary()
+    if binary is None:
+        raise AgentNameError(
+            "no fno-agents binary found: the name vocabulary lives in the Rust "
+            "runtime; run `fno doctor update`"
+        )
+    return str(binary)
+
+
+def _mint(*args: str) -> str:
+    import os
+
+    proc = subprocess.run(
+        [_binary(), "name-mint", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
+    )
+    if proc.returncode == 0:
+        lines = proc.stdout.strip().splitlines()
+        return lines[-1] if lines else ""
+    message = proc.stderr.strip()
+    if message.startswith("error: "):
+        message = message[len("error: "):]
+    if proc.returncode == 3:
+        raise AgentNameError(message)
+    raise BridgeUsageError(message)
+
+
+def _opt(value: Optional[str]) -> list[str]:
+    value = (value or "").strip()
+    return [] if not value else [value]
 
 
 class AgentNameError(ValueError):
@@ -54,13 +86,18 @@ def bridge_name(
             raise BridgeUsageError(
                 "pass the legacy prefix form or --source/--verb, not both"
             )
-        if not verb:
+        code = verb if verb in dispatch_verbs() else (verb_code_for(verb) if verb else "")
+        args: list[str] = []
+        if _opt(source):
+            args += ["--source", source or ""]
+        if _opt(code):
+            args += ["--verb", code]
+        if not _opt(code):
             raise BridgeUsageError("--source requires --verb")
-        code = verb if verb in dispatch_verbs() else verb_code_for(verb)
-        return dispatch_agent_name(
-            source or None, code, node_id,
-            slug=slug, qualifier=qualifier, discriminator=discriminator,
-        )
+        return _mint(*args, node_id,
+                     *( ["--slug", slug] if _opt(slug) else []),
+                     *( ["--qualifier", qualifier] if _opt(qualifier) else []),
+                     *( ["--discriminator", discriminator] if _opt(discriminator) else []))
     if not prefix:
         raise BridgeUsageError("a prefix or --verb is required")
     return agent_name(
@@ -70,10 +107,19 @@ def bridge_name(
 
 @lru_cache(maxsize=1)
 def _codes() -> dict:
-    """The vocabulary tables from ``naming-codes.yaml`` (see that file)."""
-    import yaml
+    """The vocabulary tables, served by the binary that owns them."""
+    import os
 
-    raw = yaml.safe_load((Path(__file__).parent / "naming-codes.yaml").read_text())
+    proc = subprocess.run(
+        [_binary(), "name-codes", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
+    )
+    if proc.returncode != 0:
+        raise AgentNameError("name-codes read failed: the fno-agents binary is stale")
+    raw = json.loads(proc.stdout)
     return {
         "sources": frozenset(raw["sources"]),
         "verbs": frozenset(raw["verbs"]),
@@ -115,45 +161,31 @@ def agent_name(
 ) -> str:
     """Build ``<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]``.
 
-    The name is the dedup token for ``fno agents spawn``: source, verb,
-    identity, qualifier, and discriminator are required (never shaved); only
-    the human slug gives way. :raises AgentNameError: over-budget required
-    identity or a component outside the daemon contract.
+    The name is the dedup token for ``fno agents spawn``: required identity
+    never shaves; only the human slug gives way. :raises AgentNameError:
+    over-budget required identity.
     """
-    prefix = (prefix or "").strip()
-    node_id = (node_id or "").strip()
-    qualifier = (qualifier or "").strip()
-    disc = slug_component(discriminator)
-
-    required_parts = [p for p in (prefix, node_id, qualifier, disc) if p]
-    if not required_parts:
+    flags: list[str] = []
+    for flag, value in (
+        ("--slug", slug),
+        ("--qualifier", qualifier),
+        ("--discriminator", discriminator),
+    ):
+        if _opt(value):
+            flags += [flag, value or ""]
+    if not (prefix or "").strip() and not (node_id or "").strip():
+        # The bridge reads empty-everything as a usage error; the Python owner
+        # always refused it as a naming error - keep that contract for the
+        # in-process producers.
         raise AgentNameError("agent name needs at least a prefix or a node id")
-    required = "-".join(required_parts)
-    if len(required) > MAX_LEN:
-        raise AgentNameError(
-            f"required agent-name identity is {len(required)} chars, over the "
-            f"{MAX_LEN}-char runtime limit: prefix={prefix!r} node={node_id!r}"
-            + (f" qualifier={qualifier!r}" if qualifier else "")
-            + (f" discriminator={disc!r}" if disc else "")
-        )
-
-    human = slug_component(slug)
-    if human:
-        avail = MAX_LEN - len(required) - 1  # -1 for the joining hyphen
-        human = human[:avail].rstrip("-") if avail > 0 else ""
-
-    name = "-".join(p for p in (prefix, node_id, qualifier, human, disc) if p)
-    if not _VALID_NAME.fullmatch(name):
-        raise AgentNameError(
-            f"generated agent name {name!r} violates the runtime contract "
-            f"[A-Za-z0-9_-]{{1,{MAX_LEN}}} (node={node_id!r})"
-        )
-    return name
+    return _mint(prefix, node_id, *flags)
 
 
 def verb_code_for(word: Optional[str]) -> str:
     """The verb code for a work-verb word (``/target``, ``/fno:blueprint``,
-    ``builtin``, ...). Unknown words raise: nothing defaults to ``t``."""
+    ``builtin``, ...). Unknown words raise: nothing defaults to ``t``. The
+    word-normalization is trivial text handling; the TABLE it reads is the
+    binary's (``name-codes``), so no second copy of the vocabulary exists."""
     v = (word or "").strip()
     if v.startswith("/fno:"):
         v = v[len("/fno:"):]
@@ -180,17 +212,22 @@ def dispatch_agent_name(
     fabricating provenance."""
     v = (verb or "").strip()
     if v not in dispatch_verbs():
+        # The bridge maps work-verb words; the dispatch seam takes codes only.
         raise AgentNameError(f"unknown dispatch verb {verb!r}")
-    if source is None:
-        prefix = v
-    else:
-        s = source.strip()
-        if s not in dispatch_sources():
-            raise AgentNameError(f"unknown dispatch source {source!r}")
-        prefix = f"{s}-{v}"
-    return agent_name(
-        prefix, identity, slug=slug, qualifier=qualifier, discriminator=discriminator
-    )
+    flags: list[str] = []
+    for flag, value in (
+        ("--slug", slug),
+        ("--qualifier", qualifier),
+        ("--discriminator", discriminator),
+    ):
+        if _opt(value):
+            flags += [flag, value or ""]
+    args: list[str] = []
+    if _opt(source):
+        args += ["--source", source or ""]
+    if _opt(verb):
+        args += ["--verb", verb or ""]
+    return _mint(*args, identity, *flags)
 
 
 @dataclass(frozen=True)
@@ -206,6 +243,39 @@ class DispatchName:
     tail: str
 
 
+def parse_many(names: list[str]) -> list[Optional[DispatchName]]:
+    """Batch parse: one binary exec for a whole list of candidate names. The
+    hot readers (cleanup candidate scan, truth-status row reads) call this;
+    single-name callers use :func:`parse_dispatch_agent_name`."""
+    if not names:
+        return []
+    import os
+
+    proc = subprocess.run(
+        [_binary(), "name-parse"],
+        input="\n".join(names),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
+    )
+    if proc.returncode != 0:
+        raise AgentNameError("name-parse failed: the fno-agents binary is stale")
+    out: list[Optional[DispatchName]] = []
+    for line in proc.stdout.splitlines():
+        row = json.loads(line)
+        if row.get("verb") is None:
+            out.append(None)
+            continue
+        out.append(
+            DispatchName(
+                row["name"], row.get("source"), row["verb"], row.get("node"),
+                row.get("tail") or "",
+            )
+        )
+    return out
+
+
 def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
     """Parse ``[<source>-]<verb>-<identity>``, else None. Positional
     grammar: the first token is a source only when the second is a verb, so a
@@ -213,24 +283,7 @@ def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
     not canonical (AC3-EDGE)."""
     if not name:
         return None
-    tokens = name.split("-")
-    verbs = dispatch_verbs()
-    source: Optional[str] = None
-    if len(tokens) >= 2 and tokens[0] in dispatch_sources() and tokens[1] in verbs:
-        source, rest = tokens[0], tokens[2:]
-    elif tokens[0] in verbs:
-        rest = tokens[1:]
-    else:
-        return None
-    verb = tokens[0] if source is None else tokens[1]
-    if not rest:
-        return None
-    if rest[0] in _TYPED_IDENTITY_TOKENS:
-        return DispatchName(name, source, verb, None, "-".join(rest))
-    m = _NODE_SHAPE_RE.match("-".join(rest))
-    if m:
-        return DispatchName(name, source, verb, m.group(1), m.group(2) or "")
-    return DispatchName(name, source, verb, None, "-".join(rest))
+    return parse_many([name])[0]
 
 
 def legacy_verb_code(name: Optional[str]) -> Optional[str]:
