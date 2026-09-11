@@ -19,103 +19,15 @@ Usage:
 
 import re
 import sys
+from pathlib import Path
 
-# Prices per million tokens
-PRICING = {
-    "opus-5.0": {
-        # Opus 5 held the 4.5 -> 4.8 sticker price. Fast mode ($10/$50) is a
-        # separate tier that this table does not yet carry; see model_tier.
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_create": 6.25,
-        "web_search": 0.01,
-    },
-    "opus-4.8": {
-        # Anthropic held the 4.5 / 4.6 / 4.7 sticker price through 4.8.
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_create": 6.25,
-        "web_search": 0.01,
-    },
-    "opus-4.7": {
-        # Per-token rates identical to 4.6 / 4.5 — Anthropic held the sticker
-        # price across 4.5 → 4.6 → 4.7. The tokenizer changed (up to ~35%
-        # denser), so effective per-request cost can rise even though these
-        # per-million rates did not.
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_create": 6.25,
-        "web_search": 0.01,
-    },
-    "opus-4.6": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_create": 6.25,
-        "web_search": 0.01,
-    },
-    "opus-4.6-fast": {
-        "input": 30.00,
-        "output": 150.00,
-        "cache_read": 3.00,
-        "cache_create": 37.50,
-        "web_search": 0.01,
-    },
-    "opus-4.5": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_create": 6.25,
-        "web_search": 0.01,
-    },
-    "opus-4.1": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_create": 18.75,
-        "web_search": 0.01,
-    },
-    "opus-4.0": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_create": 18.75,
-        "web_search": 0.01,
-    },
-    "fable-5": {
-        # Fable 5 / Mythos 5 sit above the opus tier. Without this row they
-        # fall through to DEFAULT_TIER and undercount 3.3x.
-        "input": 10.00,
-        "output": 50.00,
-        "cache_read": 1.00,
-        "cache_create": 12.50,
-        "web_search": 0.01,
-    },
-    "sonnet": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_read": 0.30,
-        "cache_create": 3.75,
-        "web_search": 0.01,
-    },
-    "haiku-4.5": {
-        "input": 1.00,
-        "output": 5.00,
-        "cache_read": 0.10,
-        "cache_create": 1.25,
-        "web_search": 0.01,
-    },
-    "haiku-3.5": {
-        "input": 0.80,
-        "output": 4.00,
-        "cache_read": 0.08,
-        "cache_create": 1.00,
-        "web_search": 0.01,
-    },
-}
+# Prices per million tokens; the table itself lives in pricing.yaml beside
+# this module.
+import yaml as _yaml
+
+PRICING: dict = _yaml.safe_load(
+    (Path(__file__).resolve().parent / "pricing.yaml").read_text(encoding="utf-8")
+)
 
 # Default for unknown models
 DEFAULT_TIER = "sonnet"

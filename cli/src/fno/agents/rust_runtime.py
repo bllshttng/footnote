@@ -38,6 +38,8 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+
+import yaml
 from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Sequence
 
 # The binary lookup itself is stdlib-only and has callers below this layer, so
@@ -85,60 +87,13 @@ def refuse_without_binary(verb: str) -> NoReturn:
     )
     raise SystemExit(BIN_NOT_FOUND_EXIT)
 
-FOLDED_AGENT_SUBCOMMANDS = {
-    "autonomy": (
-        "fno.autonomy_cli:autonomy_app",
-        "Inspect every path that can start a session without an operator asking.",
-        {"hidden": True},
-    ),
-    "claim": (
-        "fno.claims.cli:cli",
-        "Work-claim coordination primitive",
-        {"hidden": True},
-    ),
-    "dispatch": (
-        "fno.dispatch:dispatch_app",
-        "Dispatch ready work into mux panes.",
-        {"hidden": True},
-    ),
-    "king": (
-        "fno.king.cli:agents_king_app",
-        "The king session manifest and escalation controls.",
-        {"hidden": True},
-    ),
-    "mail": (
-        "fno.mail.cli:mail_app",
-        "Durable polled mailbox: send/unread/ack/reply/drain/status (canonical spelling; root `fno mail` is the shim).",
-        {"hidden": True},
-    ),
-    "mcp": (
-        "fno.mcp.cli:mcp_app",
-        "MCP sidecar client verbs.",
-        {"hidden": True},
-    ),
-    "restart": (
-        "fno.restart:restart_command",
-        "Restart running fno processes onto fresh binaries.",
-        {"hidden": True},
-    ),
-    "roles": (
-        "fno.roles.cli:roles_app",
-        "Inspect bounded business-role definitions and resolutions.",
-        {"hidden": True},
-    ),
-    # x-6233 (d-cf2d6fe1): worktree lifecycle folds under agents, which also
-    # resolves the Python/Rust `workspace` collision - root `workspace` then
-    # unambiguously means the mux one. Old spellings stay one-release shims.
-    "workspace": (
-        "fno.workspace.cli:cli",
-        "Worktree lifecycle and worker registration.",
-        {"hidden": True},
-    ),
-    "worker": (
-        "fno.worker.cli:cli",
-        "Manage delivery worker phases.",
-        {"hidden": True},
-    ),
+FOLDED_AGENT_SUBCOMMANDS: dict = {
+    name: (entry[0], entry[1], entry[2])
+    for name, entry in yaml.safe_load(
+        (Path(__file__).resolve().parent / "folded_subcommands.yaml").read_text(
+            encoding="utf-8"
+        )
+    ).items()
 }
 
 #: Verbs the bundled ``fno-agents`` client implements end-to-end: the daemon
