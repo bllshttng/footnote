@@ -1085,6 +1085,13 @@ def style(
         help="For --surface markdown: check ADDED lines only since this ref (e.g. origin/main). "
         "A whole-file gate is unlandable because existing prose already breaks the rules.",
     ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Rewrite the mechanical set (semicolons, wrapped paragraphs) and "
+        "report the rest. With --stdin prints to stdout; with --files rewrites "
+        "in place. Residue exits 1.",
+    ),
 ) -> None:
     """Check text against the seven style rules in docs/style-rules.md.
 
@@ -1094,6 +1101,9 @@ def style(
     sentence. A paragraph is one physical line, so a newline starts the next
     block. Code, paths, flags, and quoted output do not count.
     Mail prose is capped at 80 masked words. Other surfaces do not use this cap.
+
+    With --fix the mechanical rules are rewritten through the same path the
+    check reads; unfixable residue exits 1.
 
     Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
     this gate. That second 2 fires when git and this verb disagree about how
@@ -1111,6 +1121,12 @@ def style(
         raise typer.Exit(2)
     if diff_base is not None and surface != "markdown":
         typer.echo("style: --diff-base applies to --surface markdown only.", err=True)
+        raise typer.Exit(2)
+    if fix and diff_base is not None:
+        typer.echo(
+            "style: --fix rewrites whole inputs; it does not combine with --diff-base.",
+            err=True,
+        )
         raise typer.Exit(2)
 
     if diff_base is not None:
@@ -1152,8 +1168,16 @@ def style(
         text = sys.stdin.read()
         if style_mod.has_exception(text):
             _style_skip_receipt(["<stdin>"])
+            if fix:
+                sys.stdout.write(text)
             raise typer.Exit(0)
-        violations = style_mod.check(text, surface=surface)
+        if fix:
+            # The write-back mirrors the read path: stdout for stdin, in place
+            # for files. Residue flows to the common tail, which exits 1.
+            text, violations = style_mod.fix(text, surface=surface)
+            sys.stdout.write(text)
+        else:
+            violations = style_mod.check(text, surface=surface)
     elif files:
         violations = []
         skipped: list[str] = []
@@ -1162,7 +1186,13 @@ def style(
             if style_mod.has_exception(text):
                 skipped.append(str(path))
                 continue
-            violations.extend(style_mod.check(text, surface=surface))
+            if fix:
+                fixed, residue = style_mod.fix(text, surface=surface)
+                if fixed != text:
+                    path.write_text(fixed, encoding="utf-8")
+                violations.extend(residue)
+            else:
+                violations.extend(style_mod.check(text, surface=surface))
         _style_skip_receipt(skipped)
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
@@ -1547,30 +1577,33 @@ def _git_added_line_nums(
     return nums
 
 
-def preamble_budget() -> None:
-    """Report the SessionStart preamble byte budget; refuse when over it.
-
-    Thin wrapper over the source-of-truth bash gate
-    scripts/ci/check-preamble-budget.sh, whose exit code passes through: 0 at
-    or under the ceiling, 1 over it or on a discovery failure. This verb is the
-    local signal, not a second CI registration - the gate already runs in
-    guards.yml on every push and pull_request, and the smoke-registry copy it
-    replaced made one AGENTS.md breach red three check runs at once.
-    """
+def _run_ci_gate(rel_path: str) -> None:
+    """Run a scripts/ci bash gate from the repo root; its exit code passes
+    through. Exit 2 here is the wrapper's alone - the script is missing or
+    unrunnable - since every gate failure path exits 1 itself."""
     from fno._subprocess_util import propagate_returncode
     from fno.paths import resolve_repo_root
 
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "ci" / "check-preamble-budget.sh"
+    root = Path(resolve_repo_root())
+    script = root / rel_path
     if not script.exists():
         typer.echo(f"gate script not found at {script}", err=True)
         raise typer.Exit(code=2)
     try:
-        result = subprocess.run(["bash", str(script)], cwd=repo_root)
+        result = subprocess.run(["bash", str(script)], cwd=root)
     except FileNotFoundError as exc:
         typer.echo(f"failed to run gate script: {exc}", err=True)
         raise typer.Exit(code=2)
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def preamble_budget() -> None:
+    """Report the SessionStart preamble byte budget; refuse when over it.
+
+    This verb is the local signal, not a second CI registration: the gate
+    already runs in guards.yml on every push and pull_request.
+    """
+    _run_ci_gate("scripts/ci/check-preamble-budget.sh")
 
 
 def stale_skill_refs() -> None:
@@ -1581,20 +1614,7 @@ def stale_skill_refs() -> None:
     source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
     matches it (0 clean, 1 stale references, 2 script error).
     """
-    from fno._subprocess_util import propagate_returncode
-    from fno.paths import resolve_repo_root
-
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
-    if not script.exists():
-        typer.echo(f"audit script not found at {script}", err=True)
-        raise typer.Exit(code=2)
-    try:
-        result = subprocess.run(["bash", str(script)], cwd=repo_root)
-    except FileNotFoundError as exc:
-        typer.echo(f"failed to run audit script: {exc}", err=True)
-        raise typer.Exit(code=2)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _run_ci_gate("scripts/ci/check-no-stale-skill-refs.sh")
 
 
 def retired_commands() -> None:
@@ -1606,20 +1626,7 @@ def retired_commands() -> None:
     failure path in the gate goes through its own ``fail()`` and exits 1, so
     the 2 below is this wrapper's alone - the script is missing or unrunnable.
     """
-    from fno._subprocess_util import propagate_returncode
-    from fno.paths import resolve_repo_root
-
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "ci" / "check-retired-command-strings.sh"
-    if not script.exists():
-        typer.echo(f"gate script not found at {script}", err=True)
-        raise typer.Exit(code=2)
-    try:
-        result = subprocess.run(["bash", str(script)], cwd=repo_root)
-    except FileNotFoundError as exc:
-        typer.echo(f"failed to run gate script: {exc}", err=True)
-        raise typer.Exit(code=2)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _run_ci_gate("scripts/ci/check-retired-command-strings.sh")
 
 
 def _field_names(block: Any) -> set[str]:
@@ -1972,6 +1979,10 @@ def lint(
         None, "--diff-base",
         help="style: check ADDED lines only since this ref (e.g. origin/main).",
     ),
+    fix: bool = typer.Option(
+        False, "--fix",
+        help="style: rewrite the mechanical set; report the rest. Residue exits 1.",
+    ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="registry/field-coverage: machine-readable output."
     ),
@@ -2014,6 +2025,7 @@ def lint(
         "stdin": stdin,
         "files": files,
         "diff_base": diff_base,
+        "fix": fix,
         "as_json": as_json,
         "live": live,
         "base": base,
