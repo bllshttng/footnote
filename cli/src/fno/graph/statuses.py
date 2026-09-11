@@ -287,6 +287,8 @@ def live_worked_node_ids(
     unmeasurable row the roster CANNOT attribute to a node still refuses the
     whole overlay: unknowable liveness fails closed. Attributable ones skip
     themselves, so one worker never blanks the measure for every node.
+    The roster read is the price of attribution; only a graph with no
+    non-terminal node skips it.
     """
     try:
         from fno.claims.roster import _really_finished, read_roster
@@ -295,6 +297,9 @@ def live_worked_node_ids(
 
         if entries is None:
             entries = read_graph_strict(graph_json())
+        if not any(isinstance(entry, dict) and entry.get("status") not in TERMINAL_RUNGS
+                   for entry in entries):
+            return {}
         reading = read_roster()
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")

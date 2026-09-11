@@ -140,3 +140,17 @@ def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
 
     assert reading.consulted is True
     assert reading.unmeasurable_by_node == {"x-a238": ["bp-a238-king-brief"]}
+
+
+def test_all_terminal_graph_skips_the_roster_probe(monkeypatch):
+    """No non-terminal node can be worked, so the fleet probe is wasted there
+    and display paths keep their instant answer."""
+    entries = [{"id": "done-1", "status": "done", "sessions": []}]
+
+    def _boom(**_kw):
+        raise AssertionError("roster probed on an all-terminal graph")
+
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", _boom)
+
+    assert live_worked_node_ids(strict=True) == {}
