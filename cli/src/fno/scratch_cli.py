@@ -38,7 +38,7 @@ def sweep(
         None, "--threshold", help="Jobs at which a shape files one p1 node (default config.evals.scratch_threshold, 3)."
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print would-file lines; emit nothing, call nothing."
+        False, "--dry-run", "-N", help="Print would-file lines; emit nothing, call nothing."
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print the state lines as one JSON array."),
 ) -> None:

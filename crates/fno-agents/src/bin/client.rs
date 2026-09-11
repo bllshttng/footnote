@@ -84,6 +84,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "resume-argv",
     "review-start",
     "rm",
+    "scratch",
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
