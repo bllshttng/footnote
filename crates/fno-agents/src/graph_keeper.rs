@@ -748,7 +748,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             Err(e)
                 if e.kind() == std::io::ErrorKind::ConnectionAborted
                     || e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            // Anything past WouldBlock/Aborted/Interrupted is a listener
+            // that can no longer accept: a broken keeper must not report
+            // success (worker.rs prints the Err and exits 2).
+            Err(e) => return Err(format!("accept failed on {}: {e}", cfg.sock.display())),
         }
     }
     // Unlink only what we still own: after a seat loss the path names the
