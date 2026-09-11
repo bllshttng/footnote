@@ -158,7 +158,36 @@ def resolve_canonical_worktree(
       never returned. ``core.worktree`` recovery was rejected (empirically empty
       for ``--separate-git-dir``). git's porcelain paths are already
       symlink-resolved, so the ``.git`` probe is reliable.
+
+    Subprocess-free short-circuit: a ``.git`` DIRECTORY above cwd marks a main
+    working tree - the first record ``git worktree list`` emits - so the
+    filesystem answers exactly. A ``.git`` FILE marks a linked worktree whose
+    pointer names the main tree's git dir (``<main>/.git/worktrees/<name>``),
+    which parses without a subprocess; a submodule worktree's pointer
+    (``.../.git/modules/<mod>/.git/worktrees/<name>``) fails the
+    ``<prefix>/.git``-is-a-dir guard and falls through to the subprocess. The
+    settings load sits on the hot lane: one ``doctor footprint`` run must
+    shell exactly one subprocess (``ps``), so a cold config read may not pay
+    for a ``worktree list``.
     """
+    anchor = Path(cwd) if cwd is not None else Path.cwd()
+    for ancestor in [anchor, *anchor.parents]:
+        dot_git = ancestor / ".git"
+        if dot_git.is_dir():
+            return ancestor.resolve()
+        if dot_git.is_file():
+            text = dot_git.read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                if not line.startswith("gitdir:"):
+                    continue
+                gitdir = Path(line[len("gitdir:") :].strip())
+                if not gitdir.is_absolute():
+                    gitdir = (ancestor / gitdir).resolve()
+                marker = "/.git/worktrees/"
+                parts = str(gitdir).split(marker)
+                if len(parts) == 2 and (Path(parts[0]) / ".git").is_dir():
+                    return Path(parts[0]).resolve()
+            break
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],

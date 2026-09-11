@@ -3,6 +3,8 @@
 //! anywhere) and attaches raw `UnixStream` fake clients speaking the wire
 //! protocol via the sync codec.
 
+mod common;
+
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -297,7 +299,7 @@ fn server_spine_echo_roundtrips_via_fake_client() {
     send(&mut stream, &ClientMsg::Input(b"echo he\"ll\"o\r".to_vec()));
     // The typed line contains the quotes; only the OUTPUT is bare "hello".
     wait_for_frame(&mut stream, 10, |text| {
-        text.lines().any(|l| l.trim() == "hello")
+        common::screen_has_line(text, "hello")
     });
 }
 
@@ -310,7 +312,7 @@ fn server_spine_unspawnable_shell_falls_back_to_sh() {
     wait_for_frame(&mut stream, 10, |_| true);
     send(&mut stream, &ClientMsg::Input(b"echo fell-back\r".to_vec()));
     wait_for_frame(&mut stream, 10, |text| {
-        text.lines().any(|l| l.trim() == "fell-back")
+        common::screen_has_line(text, "fell-back")
     });
 }
 
@@ -434,7 +436,11 @@ fn server_spine_output_flood_stays_responsive() {
     // test deterministic on a machine fast enough that our reader only ever
     // sees the final frame (frames are droppable; we cannot force one).
     wait_for_frame(&mut stream, 15, |text| {
-        text.lines().filter(|l| l.trim() == "y").count() >= 5 || text.contains("FLOOD-DONE")
+        text.lines()
+            .filter(|l| common::strip_prompts(l) == "y")
+            .count()
+            >= 5
+            || text.contains("FLOOD-DONE")
     });
     // The typed line carries quotes so only the OUTPUT is bare, and the
     // match is contains-based: input landing during the pipeline teardown
@@ -467,7 +473,7 @@ fn server_spine_bad_client_dropped_peers_keep_streaming() {
     // The pane keeps working for B.
     send(&mut b, &ClientMsg::Input(b"echo b-survives\r".to_vec()));
     wait_for_frame(&mut b, 10, |text| {
-        text.lines().any(|l| l.trim() == "b-survives")
+        common::screen_has_line(text, "b-survives")
     });
 }
 

@@ -132,6 +132,33 @@ pub fn sidecar_pid_field(text: &str) -> Option<i32> {
     text.trim().split(':').next()?.parse().ok()
 }
 
+/// A line of pane text with any leading shell prompts removed. A CR nudge
+/// queued while the shell was still starting prints its prompt after the
+/// next command's echo, so real output can render as `$ set-ok`.
+///
+/// ANY leading whitespace-delimited token ending in `$` strips, because a
+/// prompt's shape is the shell's choice (`$`, `$ $ $`, `sh-3.2$`). The
+/// caller's contract: the literal passed to [`screen_has_line`] must not
+/// end in `$`, or its own output row strips as a prompt and the wait can
+/// never see it.
+pub fn strip_prompts(line: &str) -> &str {
+    let mut rest = line.trim();
+    loop {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if end == 0 || !rest[..end].ends_with('$') {
+            return rest;
+        }
+        rest = rest[end..].trim_start();
+    }
+}
+
+/// True when any screen row is exactly `want` once leading prompts are
+/// stripped. The one matcher for "did this command's output line render?" -
+/// an exact trim-equality compare misses output wearing a late prompt.
+pub fn screen_has_line(screen: &str, want: &str) -> bool {
+    screen.lines().any(|l| strip_prompts(l) == want)
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         // ClientHarness autospawns a setsid server the harness has no Child
@@ -289,7 +316,7 @@ impl ClientHarness {
                 if self
                     .screen()
                     .lines()
-                    .any(|line| line.trim() == "fno-input-ready")
+                    .any(|line| strip_prompts(line) == "fno-input-ready")
                 {
                     return;
                 }
