@@ -2578,10 +2578,11 @@ event_types:
           type: string
 
   - name: reign_checkin
-    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any)."
+    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any). Carries canonical scope and change; crown_scope, crown, and result are refused aliases."
     sources: [loop, daemon]
     data:
-      required: []
+      required: [scope, change]
+      forbidden: [crown_scope, crown, result]
       properties:
         scope:
           type: string

@@ -233,6 +233,11 @@ RUST_CLIENT_VERBS = frozenset(
         # graph.json and claims in, per-scope fold out; Python passes the
         # crowns gather_court already adjudicated.
         "court-fold",
+        # Crown-scope reign_checkin readback for `fno agents king history`:
+        # daemon-free read; Python resolves the caller's crown scope and pins
+        # the journal path, then invokes the binary directly (not via `fno
+        # agents` routing).
+        "king-history",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",
@@ -465,6 +470,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
+    "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--json]; invoked directly by `fno agents king history`, not `fno agents` routing.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",

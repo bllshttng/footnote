@@ -38,6 +38,12 @@ Exit is blocked while actionable rows exist. The stop hook reads board truth. A 
 
 A reign does not dispatch. The single exception is a provably dead dispatching arm: a red row in `fno agents status`. That spawn is journaled `reign_dispatch_exception`, naming the arm and the node, BEFORE it fires. A spawn without that row is a defect.
 
+## The check-in journal: write canonical, read it back
+
+Every `reign_checkin` row carries the canonical keys `scope` and `change`, plus the beat's measured evidence under distinct extra keys. The validator refuses any other shape. The aliases `crown_scope`, `crown`, and `result` are refused even beside the canonical keys. Before this contract, 153 check-ins from five kings named the scope three different ways. No schema-keyed reader can walk a journal like that.
+
+`fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. A zero-match answer still names the journal path and the scanned count, so an empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
+
 ## The codex limit
 
 Codex exposes none of `/goal`, `/loop`, or Monitor. A codex reign has no self-injected beat. The wake arm's backstop is its only pulse. The skill names this in its first line.
