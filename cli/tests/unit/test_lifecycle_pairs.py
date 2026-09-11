@@ -119,7 +119,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
-        "view", "worked",
+        "version", "view", "worked",
     }),
     "carveout": frozenset({"add", "list", "resolve", "update"}),
 }
