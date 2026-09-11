@@ -121,75 +121,8 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     monkeypatch.setattr(_claude_session_registry, "seed_unverified_reason", lambda *a, **k: None)
 
 
-@pytest.fixture(autouse=True)
-def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
-    """Guard the claude/codex subprocess seams so a test that reaches the
-    Python dispatch path cannot exec a *real* provider binary and spawn a live
-    session (e.g. an immortal ``claude --bg``).
-
-    ``_force_python_runtime`` only keeps dispatch in-process; it does nothing
-    about the provider subprocess underneath. The agents suite has repeatedly
-    leaked live ``claude --bg`` sessions when a test drove a dispatch path
-    without isolating PATH - the ambient real ``claude`` got exec'd and left a
-    resident bg session that piles up and can be resumed later (ab-c1bf3552,
-    generalizing PR #415, which fixed two such tests one at a time).
-
-    The discriminator is *which* binary runs, not whether a subprocess runs at
-    all: the safe pattern installs a fake claude/codex on a tmp-isolated
-    PATH (``install_fake_*`` + ``monkeypatch.setenv("PATH", bin_dir)``) and lets
-    the real seam exec the fake. This wrapper resolves the command's executable
-    and raises only when it points at a binary OUTSIDE the pytest tmp tree (i.e.
-    a real install). Tests that stub the seam with a Python callable replace this
-    wrapper outright (monkeypatch order: test wins), so they are unaffected;
-    out-of-process e2e/parity tests spawn a fresh interpreter and never reach
-    this in-process patch.
-    """
-    # Real-provider smoke tests (@pytest.mark.smoke, e.g.
-    # test_codex_integration_smoke, run nightly
-    # by provider-smoke.yml) intentionally exec the real binary; never guard
-    # those (codex P2 review). Per-PR CI excludes `-m smoke`, so this only
-    # matters for the nightly real-provider run.
-    if request.node.get_closest_marker("smoke"):
-        return
-
-    import shutil
-    from pathlib import Path
-
-    from fno.agents.harnesses import claude as _claude
-    from fno.agents.harnesses import codex as _codex
-
-    # Use pytest's session basetemp (which honors a custom --basetemp) rather
-    # than tempfile.gettempdir(), so the "is this a tmp-isolated fake?" check
-    # stays correct under a non-default temp root.
-    tmp_root = str(tmp_path_factory.getbasetemp().resolve())
-    provider_bins = {"claude", "codex"}
-
-    def _is_real_provider_exec(cmd) -> bool:
-        argv0 = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
-        argv0 = str(argv0)
-        if Path(argv0).name not in provider_bins:
-            return False
-        resolved = argv0 if Path(argv0).is_absolute() else (shutil.which(argv0) or "")
-        if not resolved:
-            # bare provider name with no fake on PATH: would resolve to the
-            # ambient real binary (or fail), never an isolated fake -> block.
-            return True
-        return not str(Path(resolved).resolve()).startswith(tmp_root)
-
-    def _guard(orig):
-        def wrapper(cmd, *args, **kwargs):
-            if _is_real_provider_exec(cmd):
-                name = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
-                raise AssertionError(
-                    f"live provider exec blocked under pytest: a test reached a real "
-                    f"provider binary ({name!r}). Install a fake on a tmp-isolated PATH "
-                    "(install_fake_claude/codex + monkeypatch.setenv PATH), stub "
-                    "the seam (_subprocess_run/_subprocess_popen), or assert routing "
-                    "without executing dispatch."
-                )
-            return orig(cmd, *args, **kwargs)
-
-        return wrapper
-
-    monkeypatch.setattr(_claude, "_subprocess_run", _guard(_claude._subprocess_run))
-    monkeypatch.setattr(_codex, "_subprocess_popen", _guard(_codex._subprocess_popen))
+# The provider-exec guard lives in the ROOT cli/tests/conftest.py
+# (_block_live_provider_exec) so every cli test is covered, not just this
+# directory. x-ec81: the agents-only copy left 36 test files outside
+# cli/tests/agents/ reaching a spawn seam unguarded, and test_spawn_guard.py
+# leaked three live claude daemons. Do not re-add a copy here.

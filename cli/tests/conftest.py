@@ -305,6 +305,100 @@ def _drain_exited_keepers():
     drain_exited_keepers()
 
 @pytest.fixture(autouse=True)
+def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
+    """Guard every provider subprocess seam so no cli test execs a *real*
+    provider binary (e.g. an immortal ``claude --bg``).
+
+    The agents suite repeatedly leaked live sessions when a test drove a
+    dispatch path without isolating PATH: the ambient real ``claude`` got
+    exec'd and left a resident bg session (ab-c1bf3552, generalizing PR #415,
+    which fixed two such tests one at a time). The old guard lived in
+    ``cli/tests/agents/conftest.py``, and a conftest guards only its own
+    directory - x-ec81 measured three live ``claude daemon run`` processes
+    leaked by ``cli/tests/test_spawn_guard.py`` at the ``cli/tests/`` root,
+    where nothing guarded at all. This root copy covers every cli test; the
+    agents copy is gone, never kept beside it.
+
+    Two layers, because seams differ. One guarded ``Popen`` subclass is set
+    on the ``subprocess`` module: ``subprocess.run`` and ``check_output``
+    read ``Popen`` from that module global at call time, so one patch covers
+    them plus every direct ``Popen(...)`` call (the bare calls in ``agy``,
+    ``pi`` and ``_acp`` included). The three harness aliases that captured
+    the original class at import time (``claude``, ``codex``,
+    ``cursor_agent``) are repointed to the guarded class. A subclass keeps
+    ``isinstance`` checks and ``Popen[bytes]`` working.
+
+    The discriminator is *which* binary runs, not whether a subprocess runs
+    at all: the safe pattern installs a fake provider on a tmp-isolated PATH
+    (``install_fake_claude`` + ``monkeypatch.setenv("PATH", bin_dir)``) and
+    the fake runs. The check resolves the executable and raises only when it
+    points OUTSIDE the pytest tmp tree (i.e. a real install). Tests that
+    stub a seam with a Python callable replace this outright (monkeypatch
+    order: test wins); out-of-process e2e/parity tests spawn a fresh
+    interpreter and never reach this in-process patch.
+    """
+    # Real-provider smoke tests (@pytest.mark.smoke, run nightly by
+    # provider-smoke.yml) intentionally exec the real binary; never guard
+    # those (codex P2 review). Per-PR CI excludes `-m smoke`.
+    if request.node.get_closest_marker("smoke"):
+        return
+
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from fno.agents.harnesses import agy as _agy
+    from fno.agents.harnesses import claude as _claude
+    from fno.agents.harnesses import codex as _codex
+    from fno.agents.harnesses import cursor_agent as _cursor
+
+    # Use pytest's session basetemp (which honors a custom --basetemp) rather
+    # than tempfile.gettempdir(), so the "is this a tmp-isolated fake?" check
+    # stays correct under a non-default temp root.
+    tmp_root = str(tmp_path_factory.getbasetemp().resolve())
+    # claude + codex are the historical leakers; the rest are the launched
+    # name of every other harness module: agy.AGY_BINARY, and argv[0] of
+    # cursor_agent (module constant) / pi.rpc_argv / grok.acp_argv / kimi
+    # (inline argv, no constant to import).
+    provider_bins = {
+        "claude", "codex", "pi", "grok", "kimi",
+        _agy.AGY_BINARY, _cursor.CURSOR_AGENT_BINARY,
+    }
+
+    def _is_real_provider_exec(cmd) -> bool:
+        argv0 = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
+        argv0 = str(argv0)
+        if Path(argv0).name not in provider_bins:
+            return False
+        resolved = argv0 if Path(argv0).is_absolute() else (shutil.which(argv0) or "")
+        if not resolved:
+            # bare provider name with no fake on PATH: would resolve to the
+            # ambient real binary (or fail), never an isolated fake -> block.
+            return True
+        return not str(Path(resolved).resolve()).startswith(tmp_root)
+
+    class _GuardedPopen(subprocess.Popen):
+        def __init__(self, args, *popenargs, **kwargs):
+            if _is_real_provider_exec(args):
+                name = args[0] if isinstance(args, (list, tuple)) and args else args
+                raise AssertionError(
+                    f"live provider exec blocked under pytest in "
+                    f"{request.node.nodeid}: a test reached a real provider "
+                    f"binary ({name!r}). Install a fake on a tmp-isolated PATH "
+                    "(install_fake_claude/codex + monkeypatch.setenv PATH), "
+                    "stub the seam (_subprocess_run/_subprocess_popen), or "
+                    "assert routing without executing dispatch."
+                )
+            super().__init__(args, *popenargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    # Module aliases hold the ORIGINAL class from import time; repoint them.
+    monkeypatch.setattr(_claude, "_subprocess_popen", _GuardedPopen)
+    monkeypatch.setattr(_codex, "_subprocess_popen", _GuardedPopen)
+    monkeypatch.setattr(_cursor, "_subprocess_popen", _GuardedPopen)
+
+
+@pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):
     """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).
 
