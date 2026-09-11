@@ -135,6 +135,12 @@ pub fn sidecar_pid_field(text: &str) -> Option<i32> {
 /// A line of pane text with any leading shell prompts removed. A CR nudge
 /// queued while the shell was still starting prints its prompt after the
 /// next command's echo, so real output can render as `$ set-ok`.
+///
+/// ANY leading whitespace-delimited token ending in `$` strips, because a
+/// prompt's shape is the shell's choice (`$`, `$ $ $`, `sh-3.2$`). The
+/// caller's contract: the literal passed to [`screen_has_line`] must not
+/// end in `$`, or its own output row strips as a prompt and the wait can
+/// never see it.
 pub fn strip_prompts(line: &str) -> &str {
     let mut rest = line.trim();
     loop {
