@@ -89,7 +89,7 @@ The report has two wired consumers from day one, so the harness is not a write-o
 
 ## Scratch-shape sweep
 
-Agents author throwaway scripts under `~/.claude/jobs/<job>/tmp/`. The scratch-shape sweep (`fno doctor scratch sweep`) notices a recurring question and files one p1 node for it. The census behind the rule table lives in the findings brief, `internal/fno/briefs/20260908-scratch-script-shapes-findings.md`. That brief's section 6 is the shipped classifier.
+Agents author throwaway scripts under `~/.claude/jobs/<job>/tmp/`. The scratch-shape sweep (`fno doctor scratch sweep`) notices a recurring question and files one p1 node for it. The census behind the rule table, and the remedy rank per shape, live in the crate's scratch module documentation. That rule table is the shipped classifier.
 
 - **What it reads.** `<jobs>/*/tmp/**/*.py|sh` files with mtime inside the window. The window defaults to 28 days (`config.evals.scratch_window_days`). A file whose git blob hash is in repo history is a copy of source. Flat copies report as the `copy_for_diff` shape. A copy under a directory holding `__init__.py`, `.git` or `pyproject.toml` is checkout residue and is skipped. Only what survives is authored scratch.
 - **The recurrence unit is (job, shape).** Files per job measure one agent's habit. Distinct jobs measure the fleet's need. One king writing 158 mail wrappers in a night is one recurrence. Each new pair emits one `scratch_shape_observed` row to the global journal. A pair already recorded inside the window never re-emits, so a re-run the same day is a no-op.
