@@ -70,16 +70,26 @@ make_git_repo() {
   mkdir -p "$dir/.fno"
 }
 
+# State-path stub: init resolves its manifest through `fno-agents state path`
+# when a binary answers, so install it per scenario and read the space path.
+install_stub() {
+  local dir="$1"
+  mkdir -p "$dir/bin" "$dir/space"
+  cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "$dir/bin/fno-agents"
+  chmod 755 "$dir/bin/fno-agents"
+}
+
 # ── T1/T2/T3: smoke init ─────────────────────────────────────────────────────
 _TMP=$(mktemp -d)
 trap 'rm -rf "$_TMP"' EXIT
 
 make_git_repo "$_TMP"
 
-# The manifest lives in the repo's space; pin the spaces root into the
-    # sandbox and resolve the path the way the hook does.
+# The manifest lives in the repo's space; the state-path stub pins the
+    # answer into the sandbox so CI proves the space leg too.
 export FNO_SPACES_DIR="$_TMP/spaces"
-MANIFEST="$(cd "$_TMP" && fno do state path target-state 2>/dev/null || echo "$_TMP/.fno/target-state.md")"
+install_stub "$_TMP"
+MANIFEST="$_TMP/space/target-state.md"
 
 # Run init with minimal env (TARGET_START=1, TARGET_INPUT, TARGET_SIZE=M)
 INIT_OUTPUT=$(
@@ -87,6 +97,8 @@ INIT_OUTPUT=$(
   TARGET_START=1 \
   TARGET_INPUT="smoke" \
   TARGET_SIZE=M \
+  PATH="$_TMP/bin:$PATH" \
+  FNO_TEST_SPACE="$_TMP/space" \
   bash "$INIT_HOOK" 2>&1
 )
 INIT_RC=$?
@@ -180,8 +192,8 @@ fi
 # T3b: unattended mode sets attended: false
 _TMP2=$(mktemp -d)
 make_git_repo "$_TMP2"
-MANIFEST2="$_TMP2/.fno/target-state.md"
-(cd "$_TMP2" && TARGET_START=1 TARGET_INPUT="smoke-unattended" TARGET_UNATTENDED=1 bash "$INIT_HOOK") 2>/dev/null || true
+MANIFEST2="$_TMP2/space/target-state.md"
+(cd "$_TMP2" && install_stub "$_TMP2" && TARGET_START=1 TARGET_INPUT="smoke-unattended" TARGET_UNATTENDED=1 PATH="$_TMP2/bin:$PATH" FNO_TEST_SPACE="$_TMP2/space" bash "$INIT_HOOK") 2>/dev/null || true
 if [[ -f "$MANIFEST2" ]]; then
   ATTENDED2=$(grep -E "^attended:" "$MANIFEST2" | head -1 | sed 's/^attended:[[:space:]]*//')
   if [[ "$ATTENDED2" == "false" ]]; then
@@ -197,8 +209,8 @@ rm -rf "$_TMP2"
 # T3c: TARGET_ADVISORY=1 sets advisory: true
 _TMP3=$(mktemp -d)
 make_git_repo "$_TMP3"
-MANIFEST3="$_TMP3/.fno/target-state.md"
-(cd "$_TMP3" && TARGET_START=1 TARGET_INPUT="smoke-advisory" TARGET_ADVISORY=1 bash "$INIT_HOOK") 2>/dev/null || true
+MANIFEST3="$_TMP3/space/target-state.md"
+(cd "$_TMP3" && install_stub "$_TMP3" && TARGET_START=1 TARGET_INPUT="smoke-advisory" TARGET_ADVISORY=1 PATH="$_TMP3/bin:$PATH" FNO_TEST_SPACE="$_TMP3/space" bash "$INIT_HOOK") 2>/dev/null || true
 if [[ -f "$MANIFEST3" ]]; then
   ADVISORY3=$(grep -E "^advisory:" "$MANIFEST3" | head -1 | sed 's/^advisory:[[:space:]]*//')
   if [[ "$ADVISORY3" == "true" ]]; then
@@ -223,7 +235,7 @@ else
     cd "$_TMP4" && \
     TARGET_START=1 TARGET_INPUT="write-once-test" bash "$INIT_HOOK" 2>/dev/null
   ) || true
-  MANIFEST4="$_TMP4/.fno/target-state.md"
+  MANIFEST4="$_TMP4/space/target-state.md"
   if [[ -f "$MANIFEST4" ]]; then
     SET_RC=0
     SET_OUT=$(PYTHONPATH="${REPO_ROOT}/cli/src" "$PYTHON_CLI" -m fno.cli \
@@ -255,7 +267,7 @@ else
     cd "$_TMP5" && \
     TARGET_START=1 TARGET_INPUT="plan-path-fill-test" bash "$INIT_HOOK" 2>/dev/null
   ) || true
-  MANIFEST5="$_TMP5/.fno/target-state.md"
+  MANIFEST5="$_TMP5/space/target-state.md"
   if [[ -f "$MANIFEST5" ]]; then
     # plan_path after init with no TARGET_PLAN_PATH should be empty / ""
     CURRENT_PLAN=$(grep -E "^plan_path:" "$MANIFEST5" | head -1 | sed 's/^plan_path:[[:space:]]*//' | tr -d '"')
