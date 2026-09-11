@@ -1115,6 +1115,7 @@ def operator_question(
     ask: str | None = None,
     options: "list[str] | None" = None,
     blocks: "list[str] | None" = None,
+    subject: str | None = None,
     source: str = "target",
 ) -> dict[str, Any]:
     """Build an ``operator_question`` event (an agent needs a human answer).
@@ -1134,6 +1135,7 @@ def operator_question(
         ("ask", ask),
         ("options", options),
         ("blocks", blocks),
+        ("subject", subject),
     ):
         if value is not None:
             data[key] = value

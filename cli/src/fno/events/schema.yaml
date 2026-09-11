@@ -3306,6 +3306,9 @@ event_types:
           type: array
           items: { type: string }
           description: "Optional backlog node ids that stop while the question remains open."
+        subject:
+          type: string
+          description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
     consumers: [operator, fno-agents needs]
 
   - name: operator_question_closed

@@ -288,6 +288,103 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     }
 
 
+# --- the ask gate: live law on the subject refuses the question ---------------
+
+
+def _fake_law_rows(*a, **k):
+    return (
+        "(all)",
+        [
+            {
+                "decision_id": "d-0fa92eb9",
+                "subject": "review-coverage",
+                "lane": "law",
+                "lifecycle": "live",
+            }
+        ],
+        0,
+    )
+
+
+_PR1717_QUESTION = (
+    "PR 1717 is stuck at the review cap: coverage reads uncovered and the "
+    "attestation is stale. Approve, or set the override label?"
+)
+
+
+def _question_rows(root: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in project_log("events.jsonl", project_root=root)
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+        and json.loads(line)["type"] == "operator_question"
+    ]
+
+
+class TestAskRefusedWhenLiveLawRules:
+    def test_the_pr1717_question_exits_2_and_records_nothing(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        # Positive control: a plain ask on a different subject records a row,
+        # so the absence below is the gate's doing and not a broken journal.
+        plain = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        assert plain.exit_code == 0, plain.output
+        assert len(_question_rows(root)) == 1
+
+        refused = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        assert refused.exit_code == 2, refused.output
+        assert "d-0fa92eb9" in refused.output
+        assert "review-coverage" in refused.output
+        assert len(_question_rows(root)) == 1, "the refused ask recorded nothing new"
+
+    def test_a_named_subject_hits_even_on_unrelated_text(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        refused = runner.invoke(
+            outstanding_app,
+            ["ask", "what colour should the button be?", "--subject", "review-coverage"],
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "d-0fa92eb9" in refused.output
+
+    def test_a_named_other_subject_asks_and_records_the_subject(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        allowed = runner.invoke(
+            outstanding_app,
+            ["ask", _PR1717_QUESTION, "--subject", "pr-heal"],
+        )
+        assert allowed.exit_code == 0, allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1
+        assert rows[0]["data"]["subject"] == "pr-heal"
+
+    def test_a_question_with_no_matching_words_asks(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
+        assert allowed.exit_code == 0, allowed.output
+
+    def test_a_failing_law_lookup_fails_open_and_records(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def broken(*a, **k):
+            raise RuntimeError("index unreadable")
+
+        monkeypatch.setattr("fno.decide.list_decisions", broken)
+        allowed = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        assert allowed.exit_code == 0, allowed.output
+        assert "live-law lookup failed" in allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1, "a broken index must not eat the question"
+
+
 def test_live_is_computed_for_json_and_missing_asker_is_stale(
     root: Path,
 ):
