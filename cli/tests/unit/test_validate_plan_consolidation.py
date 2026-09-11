@@ -430,3 +430,52 @@ def test_pydantic_model_rejects_malformed_block():
     bad = dict(base, consolidation={"outcome": "absorb", "absorbed": []})
     with pytest.raises(ValidationError):
         PlanFrontmatter.model_validate(bad)
+
+
+# -- the `rejected` key (x-6f98): a plan ruling against a foreign node --
+
+
+def test_rejected_entries_pass_the_gate_beside_any_outcome(tmp_path):
+    plan = tmp_path / "rejected.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: x-bbbb\n"
+        "      reason: opposite direction, nothing reads its fields\n"
+    ))
+    result = _run(plan)
+    assert result.returncode == 0, result.stdout
+    assert "consolidation outcome is proceed_alone" in result.stdout
+
+
+def test_rejected_entry_with_empty_reason_errors_naming_the_section(tmp_path):
+    plan = tmp_path / "rejected-empty.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: x-bbbb\n"
+        "      reason: \"\"\n"
+    ))
+    result = _run(plan)
+    assert result.returncode == 1, result.stdout
+    assert "(rejected)" in result.stdout
+
+
+def test_rejected_entry_with_a_non_node_id_errors_naming_the_section(tmp_path):
+    plan = tmp_path / "rejected-bad-id.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: bbbb\n"
+        "      reason: missing the prefix\n"
+    ))
+    result = _run(plan)
+    assert result.returncode == 1, result.stdout
+    assert "is not a node id" in result.stdout
+    assert "(rejected)" in result.stdout
