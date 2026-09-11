@@ -59,7 +59,7 @@ bash scripts/setup/archive-worktree.sh <name|path>   # the shared implementation
 
 The CLI and compatibility lifecycle entry delegate to the script above. They expose `--force`, `--yes` (skip kill prompt), and `--delete-branch` without copying the checks.
 
-Without `--force`, archival refuses on dirty state, unpushed commits, live sessions, unreadable process snapshots, failed salvage, app ownership, canonical checkout, and removal-time changes. A retired `--kill-orphans` flag is on this list too. Parsing it prints one refusal line and sets nothing, because release by parentage killed real pane keepers (x-0396).
+Without `--force`, archival refuses on dirty state, unpushed commits, live sessions, unreadable process snapshots, failed salvage, app ownership, canonical checkout, and removal-time changes. A retired `--kill-orphans` flag is on this list too. Parsing it prints one refusal line and sets nothing, because release by parentage killed real pane keepers.
 
 With `--force`, the script measures and prints every dirty path. It prints each unpushed commit's abbreviated SHA and subject. It prints positive live-session evidence before removal. It still refuses unverifiable evidence. Its final receipt distinguishes discarded worktree state from preserved or deleted branch data.
 
