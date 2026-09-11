@@ -1472,6 +1472,24 @@ def test_no_fix_never_heals(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "pr-watch enabled but not running" in result.stdout
 
 
+def test_wedged_pr_watch_reports_in_human_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain `doctor` names the wedged verdict and the refresh fix; silence
+    here would read as a clean bill while the watcher delivers nothing."""
+    _stub_signals(monkeypatch, src=Path("/src"), source_rev="abc", marker="abc",
+                  capture_present="present")
+    _wedged_pr_watch(monkeypatch)
+    import fno.pr_watch._install as pw
+    monkeypatch.setattr(
+        pw, "refresh_watcher",
+        lambda **kw: pytest.fail("plain doctor must not refresh; only --fix does"),
+    )
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "pr-watch wedged" in result.stdout
+    assert "fno do pr watch refresh" in result.stdout
+
+
 def test_ac3_hp_fix_delegates_to_update(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3-HP: --fix on a stale Python install delegates to `fno doctor update`."""
     _stub_signals(

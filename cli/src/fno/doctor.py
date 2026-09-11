@@ -2355,6 +2355,12 @@ def _emit_human(
             f"fno doctor: pr-watch enabled but not running ({pw.get('detail')}); "
             f"run `{fix}`, then verify with `fno do pr watch status`."
         )
+    elif pw_verdict == "wedged":
+        fix = pw.get("fix") or "fno do pr watch refresh"
+        out(
+            f"fno doctor: pr-watch wedged ({pw.get('detail')}); "
+            f"run `{fix}`, then verify with `fno do pr watch status`."
+        )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
