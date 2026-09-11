@@ -93,7 +93,12 @@ def main() -> int:
                 "pid": pid,
             }
             if pid is None:
-                row["verdict"] = "UNPROBEABLE-no-pid"
+                # A detail without a pid is the claude roster arm's shape: it
+                # names the session it stopped, and no pid was ever touched.
+                # Only a detail-less effect is truly unprobeable.
+                row["verdict"] = (
+                    "PIDLESS-detail" if detail else "UNPROBEABLE-no-pid"
+                )
             elif pid_alive(pid):
                 row["verdict"] = "PID-ALIVE"
                 row["detail"] = detail
@@ -107,6 +112,7 @@ def main() -> int:
     probed = [r for r in rows if r["pid"] is not None]
     alive = [r for r in rows if r["verdict"] == "PID-ALIVE"]
     unprobeable = [r for r in rows if r["verdict"] == "UNPROBEABLE-no-pid"]
+    pidless = [r for r in rows if r["verdict"] == "PIDLESS-detail"]
 
     if args.json:
         print(
@@ -117,6 +123,7 @@ def main() -> int:
                     "rows": rows,
                     "probed": len(probed),
                     "unprobeable_no_pid": len(unprobeable),
+                    "pidless_detail": len(pidless),
                     "pid_alive": len(alive),
                 },
                 indent=1,
@@ -130,7 +137,7 @@ def main() -> int:
             )
         print(
             f"summary: {len(probed)} probed, {len(unprobeable)} UNPROBEABLE-no-pid, "
-            f"{len(alive)} PID-ALIVE"
+            f"{len(pidless)} PIDLESS-detail, {len(alive)} PID-ALIVE"
         )
 
     if alive:
@@ -146,8 +153,10 @@ def main() -> int:
         return 1
     if unprobeable:
         print(
-            f"note: {len(unprobeable)} confirmed-removed effect(s) name no pid "
-            "(pre-x9485 receipts); after the next deploy these must vanish",
+            f"note: {len(unprobeable)} confirmed-removed effect(s) carry no detail "
+            "(pre-x9485 receipts); after the next deploy these must vanish. "
+            f"{len(pidless)} more name a session but no pid: the claude roster "
+            "arm's shape, permanent by design.",
             file=sys.stderr,
         )
     return 0

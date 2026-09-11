@@ -2118,10 +2118,13 @@ pub(crate) fn stage_session_retirement(
     // injected bool seam, so the detail names the arm and the row's
     // registered pid - the process the outcome is about - and the checked-in
     // probe verifies that pid reads gone.
-    let stop_detail = pane_stop
-        .as_ref()
-        .map(|s| s.detail.clone())
-        .or_else(|| stop_row_detail(e));
+    let stop_detail = pane_stop.as_ref().map(|s| s.detail.clone()).or_else(|| {
+        if stopped {
+            stop_row_detail(e)
+        } else {
+            None
+        }
+    });
     receipt
         .effects
         .push(crate::gc_native::stop_outcome_effect(stopped, stop_detail));
