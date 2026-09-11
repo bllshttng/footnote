@@ -677,6 +677,24 @@ def _run_tick(
     # Load once up-front; resets to {} on corruption (baseline discipline)
     state = store.load()
 
+    # x-d211: order the rich scan least-recently-polled first, so a budget
+    # break resumes where the last tick stopped instead of starving the tail.
+    # Missing cursor first (never-polled), then oldest stamp; discovery order
+    # breaks ties. Corrupt or non-string stamps sort as missing.
+    def _poll_order(indexed):
+        idx, cand = indexed
+        try:
+            key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
+        except ValueError:
+            return (2, "", idx)
+        entry = state.get(key)
+        stamp = entry.get("last_polled_at") if isinstance(entry, dict) else None
+        if isinstance(stamp, str) and stamp:
+            return (1, stamp, idx)
+        return (0, "", idx)
+
+    candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
+
     candidate_keys: set[str] = set()
     for cand in candidates:
         try:
@@ -804,14 +822,6 @@ def _run_tick(
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
-        if (
-            dispatch_deadline is not None
-            and dispatch_deadline - time.monotonic()
-            < _dispatch_reserve_seconds(dispatch_budget_seconds)
-        ):
-            emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
-            skipped += 1
-            break
         try:
             key = make_watermark_key(repo_slug=slug, pr_number=pr)
         except ValueError:
@@ -831,6 +841,19 @@ def _run_tick(
         batched_entry = state.get(key)
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
+
+        # x-d211: the budget break sits AFTER the cheap disposals, so a
+        # parked or terminal prefix cannot spend the tick while actionable
+        # PRs wait. Only a candidate that still owes the rich read is a
+        # legal break point.
+        if (
+            dispatch_deadline is not None
+            and dispatch_deadline - time.monotonic()
+            < _dispatch_reserve_seconds(dispatch_budget_seconds)
+        ):
+            emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
+            skipped += 1
+            break
 
         # Per-PR concurrency guard
         pr_lock_key = f"pr-watch:{slug or 'unknown'}:{pr}"
@@ -865,6 +888,12 @@ def _run_tick(
                 )
                 entry = None
 
+            # x-d211: stamp the cursor on every successful rich observation so
+            # the next tick orders this PR behind never-polled candidates. The
+            # final store.persist() carries it.
+            if isinstance(entry, dict):
+                entry["last_polled_at"] = now_iso
+
             skip_reason = None
             if cand.repo_dir is None:
                 skip_reason = "no-checkout"
@@ -888,6 +917,7 @@ def _run_tick(
                     "merge_dispatched": obs.state == "MERGED",
                     "retries": 0,
                     "parked": None,
+                    "last_polled_at": now_iso,
                 }
                 store.set(key, baseline)
                 log.debug("pr-watch: first-seen PR #%d baselined as %s", pr, obs.state)
@@ -904,6 +934,7 @@ def _run_tick(
                     "merge_dispatched": False,
                     "retries": pending.get("retries", 0),
                     "parked": pending.get("parked"),
+                    "last_polled_at": now_iso,
                 }
             if entry is None:
                 continue

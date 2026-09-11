@@ -11,6 +11,9 @@ Entry schema per key::
         "merge_dispatched": bool,        # True once /fno:pr merged was fired
         "retries": int,                  # consecutive dispatch failures
         "parked": str | None,            # non-None = reason we stopped polling
+        "last_polled_at": str,           # ISO-8601 ts of last rich read; orders
+                                         # the next tick's scan least-recently-polled
+                                         # first (missing sorts before any stamp)
     }
 
 Key format: ``"{repo_slug}#{pr_number}"`` (globally unique across repos).
