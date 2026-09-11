@@ -126,6 +126,40 @@ PASSTHROUGH_PANE_ONLY = (
     "(the default) or drop them."
 )
 
+#: A claude thread spawned with no message starts with no prompt: claude's job
+#: state reads `needs: send a prompt to start` and the row holds a worker slot
+#: for nothing. Printed by the seam (explicit substrate, both runtimes) and by
+#: cmd_spawn (resolved substrate).
+SEEDLESS_THREAD_REFUSAL = (
+    "refusing a claude thread spawn with no message. Claude starts that session "
+    "with no prompt, it waits for one forever, and its row holds a worker slot. "
+    "Put the work in the message: fno agents spawn '/fno:target {node}' "
+    "--name {name} --node {node} --substrate thread. A resume needs no message: "
+    "pass --resume <uuid>. No worker launched."
+)
+
+
+def seedless_thread_refusal(
+    harness: Optional[str],
+    substrate: Optional[str],
+    message: Optional[str],
+    *,
+    resume: Optional[str] = None,
+    crown: bool = False,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+) -> Optional[str]:
+    """The refusal text for a fresh claude thread spawn with no message, else None.
+
+    A resume continues a transcript and a crown spawn gets the reign verb typed
+    later in dispatch, so neither needs a message here.
+    """
+    if harness != "claude" or substrate not in ("thread", "bg"):
+        return None
+    if (message or "").strip() or resume or crown:
+        return None
+    return SEEDLESS_THREAD_REFUSAL.format(name=name or "<name>", node=node or "<node>")
+
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -1120,15 +1154,13 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # Plan-presence, not plan quality: an unplanned target bills planning.
+            # x-ebd2: the resolved leading verb is the phase authority.
+            # blueprint/think bill planning; target never acquires frontier
+            # eligibility merely because its low-difficulty node has no plan -
+            # that model-only plan-presence inference is gone (the derived
+            # verb already routed the node to the blueprint profile).
             grid_role: Optional[str] = None
-            if grid_node_entry and verb == "target":
-                grid_role = (
-                    "execution"
-                    if (grid_node_entry.get("plan_path") or "").strip()
-                    else "planning"
-                )
-            elif verb in ("blueprint", "think"):
+            if verb in ("blueprint", "think"):
                 grid_role = "planning"
             protected_name: Optional[str] = None
             try:
@@ -1765,3 +1797,83 @@ def routing_enforcement_state(settings: object = None) -> str:
         return "enforced" if _routing_enforced(settings) else "unenforced"
     except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
         return "unenforced"
+
+# --------------------------------------------------------------------------- #
+# The CLI's substrate posture gates, moved here from cmd_spawn (file budget):
+# the value gate + bg alias, and the monitor gate.
+
+
+def resolve_spawn_gates(substrate, monitor, *, once, harness):
+    """Validate the substrate/monitor posture; canonicalize ``thread``->``bg``.
+
+    Exit 2 on a value outside the closed set or a monitor combination without
+    support (exactly claude+zai on a pane). The deprecated ``bg`` spelling
+    warns and still works. Portal gates live on the Rust lane only: the
+    Python parser must not advertise a flag whose placement it cannot run.
+    """
+    if substrate not in ("pane", "thread", "bg", "headless"):
+        print(
+            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if substrate == "bg":
+        print(
+            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
+            "the alias will be removed after one release",
+            file=sys.stderr,
+        )
+    if substrate == "thread":
+        substrate = "bg"
+    if monitor is not None and monitor != "happy":
+        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
+        raise SystemExit(2)
+    if monitor == "happy" and (substrate != "pane" or once):
+        print(
+            "--monitor happy is pane-only; bg and headless workers do not pass "
+            "the happy launcher seam",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if monitor == "happy" and harness != "claude":
+        print(
+            f"--monitor happy requires the claude harness; got harness {harness!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return substrate
+
+
+def place_default_view(worker: str) -> bool:
+    """Open the built-in default view (portal 0) on a freshly seated thread.
+
+    The bare spawn's view rides the SAME two-call seam a user names by hand
+    (``fno mux thread <name> --portal 0``); the spawn parser itself never
+    declares a portal flag. Best effort by contract: a failure prints a named
+    note with the manual reach and returns False - the worker receipt keeps
+    its own verdict.
+    """
+    import subprocess
+
+    argv = ["fno", "mux", "thread", worker, "--portal", "0"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"fno agents spawn: default view unavailable ({exc}); open it by "
+            f"hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit {proc.returncode}"
+        print(
+            f"fno agents spawn: default view not placed ({reason}); open it "
+            f"by hand: fno mux thread {worker} --portal 0",
+            file=sys.stderr,
+        )
+        return False
+    return True

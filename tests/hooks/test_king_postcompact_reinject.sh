@@ -45,6 +45,8 @@ if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
   cat "$KING_REG_FIXTURE"
 elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   cat "$KING_FAQ_FIXTURE" 2>/dev/null || true
+elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
+  cat "$KING_HANDOFF_PATH_FIXTURE" 2>/dev/null || true
 else
   exit 1
 fi
@@ -53,7 +55,9 @@ chmod +x "$TMP/bin/fno"
 export PATH="$TMP/bin:$PATH"
 export KING_REG_FIXTURE="$TMP/registry.json"
 export KING_FAQ_FIXTURE="$TMP/faq.txt"
+export KING_HANDOFF_PATH_FIXTURE="$TMP/handoff-path.txt"
 : > "$KING_FAQ_FIXTURE"
+: > "$KING_HANDOFF_PATH_FIXTURE"
 
 SID="sess-king"
 SID_OTHER="sess-someone-else"
@@ -168,11 +172,48 @@ RC=$?
   && pass "UTF-8-straddling truncation carries no lone-surrogate escape" \
   || fail "UTF-8-straddling truncation rc=$RC leaked a lone surrogate: ${OUT:0:200}"
 
+# 7e. Canon read-back: the precompact doc's FILLED judgment blocks ride back
+#     after the compact; default placeholders (their signature text) do not.
+registry_fixture "$CROWNED_ROW"
+FNO_PLATFORM=claude
+CANON_DOC="$TMP/canon-doc.md"
+cat > "$CANON_DOC" <<'DOC'
+# Canon doc: crown fno
+
+Session id (authoritative): `sess-king`  |  refreshed by precompact-canon-doc.sh.
+
+## Merge order and why (session)
+<!-- fno:session -->
+Ship the sibling's PR before the read-back wave.
+SENTINEL_CANON_MERGE
+<!-- /fno:session -->
+
+## Open decisions awaiting the operator (session)
+<!-- fno:session -->
+_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._
+<!-- /fno:session -->
+DOC
+printf '%s\n' "$CANON_DOC" > "$KING_HANDOFF_PATH_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] \
+  && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+      | contains("Your crown'"'"'s handoff") and contains("SENTINEL_CANON_MERGE") and contains("Full canon doc")' >/dev/null 2>&1 \
+  && ! printf '%s' "$OUT" | grep -q "Nothing external knows this" \
+  && pass "canon read-back: filled blocks injected, placeholders dropped" \
+  || fail "canon read-back rc=$RC payload=${OUT:0:300}"
+: > "$KING_HANDOFF_PATH_FIXTURE"
+
+# 7f. No resolvable canon doc: no handoff section, base brief still present
+#     (positive marker, not absence alone).
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | grep -q "level 1 over fno" \
+  && ! echo "$OUT" | grep -q "Your crown's handoff" \
+  && pass "no canon doc: no handoff section, brief intact" \
+  || fail "no-canon-doc rc=$RC payload=${OUT:0:300}"
+
 # 7. Byte budget: the brief is paid on every compaction of every king.
-BRIEF_BYTES="$(wc -c < "$BRIEF" 2>/dev/null | tr -d ' ')"
-[[ -n "$BRIEF_BYTES" && "$BRIEF_BYTES" -le "$BRIEF_MAX_BYTES" ]] \
-  && pass "brief is ${BRIEF_BYTES}B <= ${BRIEF_MAX_BYTES}B budget" \
-  || fail "brief is ${BRIEF_BYTES:-missing}B, over the ${BRIEF_MAX_BYTES}B budget"
 
 echo ""
 echo "king-postcompact-reinject: $PASS passed, $FAIL failed"

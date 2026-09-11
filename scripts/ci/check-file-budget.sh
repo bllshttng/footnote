@@ -84,6 +84,9 @@ case "$PY_ALLOWANCE" in '' | *[!0-9]*)
 esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
+# The source types this gate measures. The diffs and the uncommitted-work check
+# read this one list, so a new type cannot reach one and miss the other.
+GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
 
 # Base resolution follows check-proto-version-bump.sh: an EXPLICIT refspec, so
 # a narrowed fetch config cannot leave a stale ref reading as current, and a
@@ -150,10 +153,10 @@ _CACHED_COUNT=""
 live_count() {
     if [[ -z "$_CACHED_COUNT" ]]; then
         # -z / xargs -0: a quoted or spaced path must count, never split. The
-        # diff below reads with core.quotepath=off for the same reason - a
-        # changed file that arrives quoted would fail cat-file and silently
+        # diffs below read with -z for the same reason - a changed file that
+        # arrives quoted or brace-compacted would fail cat-file and silently
         # escape the gate.
-        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
+        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z "${GATED[@]}" \
             | xargs -0 wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
             | wc -l | tr -d ' ')"
     fi
@@ -171,35 +174,37 @@ is_test_path() {
 }
 
 fails=0
-py_added=0
-py_deleted=0
 findings="$(mktemp)"
 trap 'rm -f "$findings"' EXIT
 
-while IFS=$'\t' read -r added deleted path; do
-    [[ "$added" == "-" ]] && continue            # binary row
-    case "$path" in *"=>"*) path="${path#*=> }" ;; esac
-    [[ -z "$path" ]] && continue
-    git cat-file -e "HEAD:$path" 2>/dev/null || continue   # deleted at HEAD
-
-    if [[ "$path" == cli/src/fno/*.py ]] && ! is_test_path "$path"; then
-        py_added=$((py_added + added))
-        py_deleted=$((py_deleted + deleted))
+# A -z numstat row is "added<TAB>deleted<TAB>path". A rename row leaves path
+# empty and sends the old and new paths as the next two fields.
+while IFS= read -r -d '' row; do
+    added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
+    deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
+    base_path="$path"
+    if [[ -z "$path" ]]; then
+        IFS= read -r -d '' base_path
+        IFS= read -r -d '' path
     fi
+    [[ "$added" == "-" ]] && continue            # binary row
+    git cat-file -e "HEAD:$path" 2>/dev/null || continue   # deleted at HEAD
 
     head_lines="$(git cat-file -p "HEAD:$path" | wc -l | tr -d ' ')"
     [[ "$head_lines" -gt "$BUDGET" ]] || continue   # under budget grows freely
 
-    if git cat-file -e "$BASE:$path" 2>/dev/null; then
+    if git cat-file -e "$BASE:$base_path" 2>/dev/null; then
         if [[ "$added" -gt "$deleted" ]]; then
             if [[ "$PUSH_ALARM" -eq 1 ]]; then
                 # A red push run is an alarm, not a refusal: the merge already
                 # happened. The shrink number is the measured net growth, so
                 # the next author gets the exact size of the owed payback.
                 net=$((added - deleted))
-                echo "check-file-budget: main advanced $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) and grew $path by +$added/-$deleted" >> "$findings"
-                echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head." >> "$findings"
-                echo "  The next change touching this file must shrink it by at least $net lines." >> "$findings"
+                {
+                    echo "check-file-budget: main advanced $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) and grew $path by +$added/-$deleted"
+                    echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head."
+                    echo "  The next change touching this file must shrink it by at least $net lines."
+                } >> "$findings"
             else
                 echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
             fi
@@ -223,12 +228,34 @@ while IFS=$'\t' read -r added deleted path; do
 # are identical there; on the explicit-sha path a sha that is not an ancestor
 # (a force-push overwrite) must still be honored as pinned, which three-dot
 # would silently widen to the merge base.
-done < <(git -c core.quotepath=off diff --numstat -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
+
+# The tree tally is its own pass because it needs no HEAD blob: a deleted
+# module banks its lines here. --no-renames counts a module moved into or out
+# of the tree as the growth or shrink it is.
+py_added=0
+py_deleted=0
+while IFS= read -r -d '' row; do
+    added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
+    deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
+    [[ "$added" == "-" ]] && continue
+    is_test_path "$path" && continue
+    py_added=$((py_added + added))
+    py_deleted=$((py_deleted + deleted))
+done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
 py_net=$((py_added - py_deleted))
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
     echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat." >> "$findings"
     fails=1
+fi
+
+# A worker runs this locally mid-change to learn its number before CI does.
+# Every diff above reads commits, so uncommitted work would print as no growth.
+# It never changes the exit code.
+if ! git diff --quiet HEAD -- "${GATED[@]}" \
+        || [[ -n "$(git ls-files --others --exclude-standard -- "${GATED[@]}")" ]]; then
+    echo "check-file-budget: WARN uncommitted changes to gated files are not counted. The numbers here measure commits only. Commit, then re-run." >&2
 fi
 
 if [[ -s "$findings" ]]; then
@@ -238,6 +265,6 @@ if [[ "$fails" -eq 1 ]]; then
     exit 1
 fi
 if [[ "$QUIET" -eq 0 ]]; then
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net +$py_net, allowance $PY_ALLOWANCE)"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE)"
 fi
 exit 0

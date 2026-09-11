@@ -258,6 +258,13 @@ RUST_CLIENT_VERBS = frozenset(
         # also satisfy it. Dispatched directly in client.rs before
         # build_request (no daemon RPC, no Python impl).
         "review-coverage",
+        # Pre-manifest <help> tag read: the stop hooks' visitor-allowed
+        # exit calls this directly when no manifest names the session, so a
+        # worker that dies before `target init` still gets its distress heard.
+        # Dispatched directly in client.rs before build_request (no daemon RPC,
+        # no Python impl); this entry keeps the client.rs<->router parity test
+        # in sync and provides the help line.
+        "distress-scan",
         # Manual session restoration (x-d285): hidden-but-invocable operator
         # escape hatch that restores a recorded session under its account and
         # route, refusing until ``--session`` selects between a fork's two
@@ -344,6 +351,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # it must never auto-route to the daemon.
     "newest-assistant-text",
     "distress-verdicts",  # x-3ecf: blocked_child's verdict lookup; no Rust port.
+    # The stop hook's read-only spawn-gate capacity probe. Pure Python (the
+    # gate lives in fno.agents.spawn_gate); no Rust port, so it must never
+    # auto-route to the daemon.
+    "gate-status",
     # ab-098967b4 P1: internal helper the Rust `list` render path shells out to
     # for the discovered-live-sessions lane. Pure Python (reads
     # ~/.claude/sessions via fno.agents.discover); no Rust port, so it
@@ -498,6 +509,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
+    "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
     "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
@@ -646,6 +658,106 @@ def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
+def _refuse_codex_spawn_with_unreachable_tools(args: Sequence[str]) -> None:
+    """Refuse a bounded Codex code spawn whose sandbox blocks a tool it needs, before any row."""
+    if not _is_bounded_codex_code_spawn(args):
+        return
+    from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE, probe_codex_sandbox
+
+    probe = probe_codex_sandbox(Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()))
+    if probe.verdict == "unknown":
+        print(f"sandbox-probe: could not judge the codex sandbox ({probe.note}); launching unprobed",
+              file=sys.stderr)
+    for tool, evidence in probe.blocked:
+        print(f"sandbox-probe: {tool} is unreachable inside the codex workspace-write sandbox "
+              f"({evidence}); no worker launched, node stays dispatchable", file=sys.stderr)
+    if probe.blocked:
+        print("remedy: allow it in ~/.codex/config.toml (gh needs [sandbox_workspace_write] "
+              "network_access = true; git needs the git common dir writable), or dispatch "
+              "unsandboxed with --yolo", file=sys.stderr)
+        raise SystemExit(EXIT_SANDBOX_UNREACHABLE)
+
+
+def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
+    """Refuse a fresh claude thread spawn with no message before any worker launches.
+
+    Judges an explicit substrate only: an absent one routes to the Python
+    ``cmd_spawn`` (see :func:`_is_pane_substrate_spawn`), which judges the
+    resolved substrate with the same helper.
+    """
+    from fno.agents.spawn_defaults import (
+        _has_explicit_substrate,
+        _seed_of,
+        seedless_thread_refusal,
+    )
+
+    toks = list(args[1:])
+    substrate = _has_explicit_substrate(toks)
+    if substrate is None:
+        return
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
+
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
+    refusal = seedless_thread_refusal(
+        harness,
+        substrate,
+        _seed_of(toks),
+        resume=_spawn_flag_value(toks, "--resume"),
+        crown=_has_flag(toks, "-k", ("--crown",)),
+        name=_spawn_flag_value(toks, "--name"),
+        node=_spawn_flag_value(toks, "--node"),
+    )
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
+    """Refuse a seed whose ``$fno:`` verb the calling shell ate, before any route.
+
+    Sits at the make_context seam beside the other pre-route refusals: a check
+    inside ``cmd_spawn`` never sees a spawn the Rust client execs (auto mode
+    with an installed binary), and the fleet's default ``--substrate thread``
+    spawn is exactly that shape.
+    """
+    from fno.agents.harness_map import lost_verb_refusal
+    from fno.agents.spawn_defaults import _seed_of
+
+    seed = _seed_of(list(args[1:]))
+    refusal = lost_verb_refusal(seed) if seed else None
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _refuse_unfireable_seed(args: "Sequence[str]") -> None:
+    """Refuse a verb-shaped seed the codex session cannot expand, pre-route.
+
+    Beside ``_refuse_lost_verb_payload``: the Rust client execs the fleet's
+    default thread spawn, so a check inside ``cmd_spawn`` never sees it.
+    """
+    from fno.agents.harness_map import cannot_fire_refusal
+    from fno.agents.spawn_defaults import _seed_of
+
+    toks = list(args[1:])
+    seed = _seed_of(toks)
+    if not seed or not seed.strip().startswith(("/", "$fno:")):
+        return
+    from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
+
+    try:
+        harness, _ = resolve_dispatch_harness(_spawn_flag_value(toks, "--harness", "-H"))
+    except DispatchFlagError:
+        return
+    refusal = cannot_fire_refusal(seed, harness)
+    if refusal:
+        print(f"fno agents spawn: {refusal}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
 
@@ -677,8 +789,10 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     ``fno mux pane run`` spawn (front-half reuse + registry mux ref), so a
     pane spawn must never route to the Rust client's daemon RPC (the daemon
     PTY host retires at G4; a silent fallback there is exactly what AC1-ERR
-    forbids). ``pane`` is the default, so an absent ``--substrate`` counts.
-    The scan stops at ``--argv`` like the other raw-args scans so a payload
+    forbids). An ABSENT ``--substrate`` still routes here: the pane back half
+    is Python-owned and its body resolves the built-in default (thread where
+    the harness seats one, else pane). The scan stops at ``--argv`` like the
+    other raw-args scans so a payload
     token can never masquerade as our flag, and at a bare ``--`` fence for the
     same reason (x-1caa: fenced tokens are provider passthrough - a fenced
     ``-p`` must not flip a pane-default spawn onto the binary route, past
@@ -713,10 +827,10 @@ def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
     cursor-agent, grok, agy) live only in the Python dispatch. Without this
     carve-out an installed binary answers a working lane with "fno has not
     built this harness's keeper lane spawn arm yet". The substrate scan
-    mirrors :func:`_is_pane_substrate_spawn` (absent = pane; the headless
-    spellings opt out; the scans stop at ``--argv`` and a bare ``--``), and
-    a headless spawn of these harnesses is NOT carved out: its honest
-    refusal is the stance check the Python seam runs.
+    mirrors :func:`_is_pane_substrate_spawn` (absent routes to Python, whose
+    body resolves the built-in default; the headless spellings opt out; the
+    scans stop at ``--argv`` and a bare ``--``), and a headless spawn of these
+    harnesses is NOT carved out: its honest refusal is the stance check.
     """
     if verb != "spawn":
         return False
@@ -1475,7 +1589,12 @@ def make_agents_group_cls() -> type:
 
                         args = inject_spawn_defaults(args)
                         _refuse_codex_code_spawn_without_git_grant(args)
+                        _refuse_seedless_thread_spawn(args)
+                        _refuse_lost_verb_payload(args)
+                        _refuse_unfireable_seed(args)
                     _export_worker_dirs_at_seam(args)
+                    if verb == "spawn":  # after the export: the probe needs its roots
+                        _refuse_codex_spawn_with_unreachable_tools(args)
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)

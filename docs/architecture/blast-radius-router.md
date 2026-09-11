@@ -35,7 +35,7 @@ The decision is always surfaced (a one-line `blast: ...` announce on stderr), ne
 
 ## Scope
 
-Plan **and** node inputs (a File Ownership Map exists). `fno do target init` resolves a node-id `--input` to its `plan_path` via an exact, format-agnostic graph id match (no fuzzy title guessing; a modifier-laden free-text input never mis-resolves and simply skips), so `/megawalk` and `/megatron` node walks inherit the modulation. Free-text `/target "feature"` keeps its operator/default ceremony until a surface is known. Folder plans read `00-INDEX.md`.
+Plan **and** node inputs (a File Ownership Map exists). `fno do target init` resolves a node-id `--input` to its `plan_path` with an exact, format-agnostic graph id match. No fuzzy title guessing: a modifier-laden free-text input never mis-resolves and simply skips. Node-id dispatches inherit the modulation. Free-text `/target "feature"` keeps its operator/default ceremony until a surface is known. Folder plans read `00-INDEX.md`.
 
 ## Config (`config.target.blast.*`, default OFF)
 

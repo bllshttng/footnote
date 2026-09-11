@@ -825,21 +825,23 @@ pub fn keeper_dir() -> PathBuf {
     crate::proto::mux_dir().join("panes")
 }
 
-/// True when a socket stem belongs to `session`: the trailing `-<pane key>`
-/// splits off first and must be numeric, and the session part matches
-/// exactly. Free function so the prefix-collision rule is unit-testable
-/// without a mux dir - a prefix match would let session `work` adopt
-/// session `work-2`'s live keeper panes at startup.
-fn socket_belongs_to(stem: &str, session: &str) -> bool {
-    let Some((sock_session, pane_key)) = stem.rsplit_once('-') else {
-        return false;
-    };
-    sock_session == session && !pane_key.is_empty() && pane_key.chars().all(|c| c.is_ascii_digit())
+/// The pane key a keeper socket stem carries, when the stem belongs to
+/// `session`. The birth pane id: the one identity that outlives the server.
+/// Free function so the prefix-collision rule is unit-testable without a mux
+/// dir - a prefix match would let session `work` adopt session `work-2`'s
+/// live keeper panes at startup.
+fn pane_key_of(stem: &str, session: &str) -> Option<u64> {
+    let (sock_session, pane_key) = stem.rsplit_once('-')?;
+    (sock_session == session)
+        .then(|| pane_key.parse().ok())
+        .flatten()
 }
 
-/// Every keeper socket for `session`, newest-last. The sweep and the
-/// `pane keeper list` verb both read this.
-pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
+/// Every keeper socket for `session` with the pane key its stem carries,
+/// sorted by key, newest-last. The sweep and the `pane keeper list` verb both
+/// read this. A stem whose key does not parse is skipped here, so the sweep
+/// never sees a socket it could not adopt at its own key.
+pub fn keeper_sockets(session: &str) -> Vec<(u64, PathBuf)> {
     let dir = keeper_dir();
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -853,8 +855,8 @@ pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
         let Some(stem) = name.strip_suffix(".sock") else {
             continue;
         };
-        if socket_belongs_to(stem, session) {
-            out.push(entry.path());
+        if let Some(key) = pane_key_of(stem, session) {
+            out.push((key, entry.path()));
         }
     }
     out.sort();
@@ -2102,15 +2104,15 @@ mod tests {
     }
 
     #[test]
-    fn keeper_socket_match_is_exact_per_session_not_by_prefix() {
+    fn keeper_socket_key_is_exact_per_session_not_by_prefix() {
         // A prefix match would let session `work` adopt session `work-2`'s
         // live keeper panes at startup.
-        assert!(socket_belongs_to("work-771", "work"));
-        assert!(socket_belongs_to("work-2-771", "work-2"));
-        assert!(!socket_belongs_to("work-2-771", "work"));
-        assert!(!socket_belongs_to("work", "work"), "no pane key, not ours");
-        assert!(!socket_belongs_to("work-", "work"), "empty pane key");
-        assert!(!socket_belongs_to("work-abc", "work"), "non-numeric key");
+        assert_eq!(pane_key_of("work-771", "work"), Some(771));
+        assert_eq!(pane_key_of("work-2-771", "work-2"), Some(771));
+        assert_eq!(pane_key_of("work-2-771", "work"), None);
+        assert_eq!(pane_key_of("work", "work"), None, "no pane key, not ours");
+        assert_eq!(pane_key_of("work-", "work"), None, "empty pane key");
+        assert_eq!(pane_key_of("work-abc", "work"), None, "non-numeric key");
     }
 
     #[test]

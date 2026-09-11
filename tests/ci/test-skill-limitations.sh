@@ -18,7 +18,10 @@ bash -n "$GATE" || fail "gate failed bash -n"
 bash "$GATE" --selftest "$FIXTURES" || fail "gate selftest failed"
 
 output="$(bash "$GATE")" || fail "shipped skills tree did not pass"
-grep -Fq '24 skill file(s) passed' <<<"$output" \
-    || fail "positive control did not report all 24 skill files"
+# Count the same way the gate does: one entry per skills/*/SKILL.md. A
+# hardcoded count here broke every skill addition until someone noticed CI.
+skill_count="$(find "${REPO_ROOT}/skills" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
+grep -Fq "${skill_count} skill file(s) passed" <<<"$output" \
+    || fail "positive control did not report all ${skill_count} skill files"
 
 printf 'test-skill-limitations: PASS\n'

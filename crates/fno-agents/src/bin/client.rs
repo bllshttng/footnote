@@ -12,7 +12,7 @@ use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, restart_daemon, ClientError,
     RestartError, RestartOutcome,
 };
-use fno_agents::drift::drift_warning;
+use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
@@ -37,6 +37,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "court-fold",
     "detect",
     "digest",
+    "distress-scan",
     "drive",
     "drive-authority",
     "evidence-gate",
@@ -55,6 +56,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "node-origin",
     "node-route",
     "notify-watch",
     "orphan-reap",
@@ -241,6 +243,16 @@ async fn run(args: Vec<String>) -> i32 {
     // rung of the badge lattice currently badges the agent. Same `matches!`
     // treatment as `claim` so it stays out of CLIENT_VERB_USAGE /
     // RUST_CLIENT_VERBS and the parity guard.
+    // `node-origin` is the HIDDEN transport verb over the request-origin
+    // decision (fno_agents::node_origin): Python birth assembly posts birth
+    // records and stamps the receipt. Same `matches!` treatment as `claim`
+    // so the routable-verb parity guard does not see it; the verb IS
+    // registered in ALL_CLIENT_ACTIONS because the verb-surface ratchet's
+    // binary probe reads the unknown-verb refusal.
+    if matches!(verb, "node-origin") {
+        return fno_agents::node_origin::run_node_origin(&args[1..]);
+    }
+
     if matches!(verb, "detect") {
         return fno_agents::scrape::run_detect(&args[1..]);
     }
@@ -504,6 +516,12 @@ async fn run(args: Vec<String>) -> i32 {
     // ledger.json for a session. Never touches the daemon; exits 0 on empty.
     if verb == "digest" {
         return fno_agents::digest::run_digest(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `distress-scan`: pre-manifest <help> tag read (see distress.rs doc).
+    // Direct dispatch, no daemon RPC; always exits 0.
+    if verb == "distress-scan" {
+        return fno_agents::distress::run_distress_scan(&args[1..]);
     }
 
     // `needs` (x-feec): read-only needs-me-queue fold over events.jsonl +
@@ -778,20 +796,34 @@ async fn run(args: Vec<String>) -> i32 {
         // PTY host (retiring at G4; a silent daemon fallback is exactly what
         // AC1-ERR forbids). FNO_AGENTS_RUNTIME=python stops the front door
         // routing straight back here.
-        let substrate = params
+        let mut substrate = params
             .get("substrate")
             .and_then(|v| v.as_str())
-            .unwrap_or("pane");
+            .unwrap_or_else(|| default_substrate(&params))
+            .to_string();
         // `thread` is the public substrate name. The lower-level dispatch arms
         // retain their historical `bg` selector until their wire contract moves.
-        let substrate = if substrate == "thread" {
-            "bg"
-        } else {
-            substrate
-        };
+        if substrate == "thread" {
+            substrate = "bg".to_string();
+        }
+        let substrate = substrate.as_str();
         if let Err(message) = validate_spawn_placement(&params, substrate) {
             eprintln!("{message}");
             return 2;
+        }
+        // The default view (mirrors the Python seam): a bare spawn that took
+        // the built-in thread default from INSIDE a mux opens portal 0 on its
+        // worker. An explicit --portal wins; outside a mux nothing auto-opens.
+        if substrate == "bg"
+            && params.get("substrate").is_none()
+            && params.get("portal").is_none()
+            && std::env::var("FNO_PANE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("portal".into(), Value::from(0u8));
+            }
         }
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
@@ -1335,7 +1367,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
             }
         }
     }
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(fno_agents::scrape::fno_bin())
         .args(&args)
         .output()
         .map_err(|e| {
@@ -1388,7 +1420,7 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
 /// to it. Returns the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("fno")
+    let err = std::process::Command::new(fno_agents::scrape::fno_bin())
         .arg("agents")
         .args(args)
         .env("FNO_AGENTS_RUNTIME", "python")
@@ -1434,11 +1466,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let substrate = params
         .get("substrate")
         .and_then(|v| v.as_str())
-        .unwrap_or("pane");
+        .unwrap_or_else(|| default_substrate(&params))
+        .to_string();
     let substrate = if substrate == "thread" {
         "bg"
     } else {
-        substrate
+        substrate.as_str()
     };
 
     // unwrap_or_default is acceptable HERE (unlike the ask pre-check, which
@@ -2028,7 +2061,7 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 /// but the arms rows print either way.
 async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
-    let arms = arms_readout(&home);
+    let mut arms = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -2037,6 +2070,18 @@ async fn run_status(json_out: bool) -> i32 {
                 exit_code_for(err.code)
             }
             ResponsePayload::Ok(mut result) => {
+                // One drift read feeds both the stderr warning below and the
+                // facts the arms rows are explained against.
+                let drift = drift_from_status(&result);
+                let uptime_s = result
+                    .pointer("/daemon/uptime_secs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let drifted = matches!(drift, DriftState::Drifted { .. });
+                fno_agents::tick_ledger::explain(
+                    &mut arms,
+                    &fno_agents::tick_ledger::DaemonFacts::Up { uptime_s, drifted },
+                );
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert(
                         "arms".into(),
@@ -2059,7 +2104,7 @@ async fn run_status(json_out: bool) -> i32 {
                     .and_then(|d| d.get("pid"))
                     .and_then(Value::as_u64)
                     .map(|p| p as u32);
-                if let Some(w) = drift_warning(&drift_from_status(&result), pid) {
+                if let Some(w) = drift_warning(&drift, pid) {
                     eprintln!("{w}");
                 }
                 0
@@ -2068,6 +2113,10 @@ async fn run_status(json_out: bool) -> i32 {
         Err(ClientError::DaemonNotRunning) => {
             // The arms table is exactly what a dead control plane needs to
             // show; print it beside the down-daemon signal rather than nothing.
+            fno_agents::tick_ledger::explain(
+                &mut arms,
+                &fno_agents::tick_ledger::DaemonFacts::Down,
+            );
             let payload = json!({
                 "schema_version": 1,
                 "daemon": null,
@@ -2087,6 +2136,12 @@ async fn run_status(json_out: bool) -> i32 {
         Err(e) => {
             // Unreachable daemon (socket error, timeout, ...): same degraded
             // shape as DaemonNotRunning - the arms readout stands on its own.
+            // Daemon rules do not fire on Unknown, so stale rows read
+            // `unexplained` rather than blaming a daemon of unknown health.
+            fno_agents::tick_ledger::explain(
+                &mut arms,
+                &fno_agents::tick_ledger::DaemonFacts::Unknown,
+            );
             let payload = json!({
                 "schema_version": 1,
                 "daemon": null,
@@ -2125,36 +2180,13 @@ fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
     fno_agents::tick_ledger::read_arms(&journals, now_unix)
 }
 
-/// The human render: one line per arm (red rows first-class), then the daemon
-/// block the JSON payload carries.
+/// The human render: one owned line per arm (red rows first-class), then the
+/// daemon block the JSON payload carries. `explain` filled every row's
+/// `line`, so the render prints them without re-formatting.
 fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus]) {
     println!("control-plane arms:");
     for arm in arms {
-        let verdict = if arm.stale { "STALE" } else { "ok" };
-        let age = match arm.age_s {
-            Some(s) => format!("{s}s ago"),
-            None => "never".to_string(),
-        };
-        let skip = arm
-            .skip_reason
-            .as_deref()
-            .map(|r| format!(" skip={r}"))
-            .unwrap_or_default();
-        let acted = arm.acted.map(|n| format!(" acted={n}")).unwrap_or_default();
-        let scheduler = arm
-            .scheduler
-            .as_deref()
-            .map(|s| format!(" via={s}"))
-            .unwrap_or_default();
-        let detail = arm
-            .detail
-            .as_deref()
-            .map(|d| format!(" {d}"))
-            .unwrap_or_default();
-        println!(
-            "  {:<16} {:<5} {:>10}{}{}{}{}",
-            arm.arm, verdict, age, acted, skip, scheduler, detail
-        );
+        println!("  {}", arm.line);
     }
     let Some(daemon) = result.get("daemon").and_then(Value::as_object) else {
         return;
@@ -2400,10 +2432,12 @@ fn run_reap(rest: &[String]) -> i32 {
     // (x-91eb) The mux sideline sweep: the registry pass above reaps rows,
     // but ghost panes are the surface an operator SEES. The sweep body stays
     // the one prune verb (reused, not reimplemented); `--no-mux` skips it.
+    // The manual verb keeps `--include-used-shells`: closing a human's spent
+    // shells is an attended choice, never the daemon's default.
     let mux = if no_mux {
         fno_agents::reap_render::MuxSweep::Skipped
     } else {
-        run_mux_sweep(dry_run)
+        fno_agents::gc::mux_tab_sweep(dry_run, true)
     };
     print!(
         "{}",
@@ -2416,45 +2450,6 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     );
     0
-}
-
-/// (x-91eb) Shell out to the existing prune verb - one sweep body, reused,
-/// not reimplemented. Fail-closed: a spawn failure, a non-zero exit, or an
-/// unparsable receipt is `Unread`, never a measured zero (AC3-EDGE).
-fn run_mux_sweep(dry_run: bool) -> fno_agents::reap_render::MuxSweep {
-    let mut cmd = std::process::Command::new("fno");
-    cmd.args([
-        "mux",
-        "workspace",
-        "prune",
-        "--tabs-only",
-        "--include-used-shells",
-        "--json",
-    ]);
-    if dry_run {
-        cmd.arg("--dry-run");
-    }
-    match cmd.output() {
-        Ok(out) => {
-            let code = out.status.code();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match (code, fno_agents::reap_render::parse_prune_receipt(&stdout)) {
-                (Some(0), Some(receipt)) => fno_agents::reap_render::MuxSweep::Ran { receipt },
-                (code, _) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
-                    fno_agents::reap_render::MuxSweep::Unread {
-                        exit_code: code,
-                        stderr_first,
-                    }
-                }
-            }
-        }
-        Err(e) => fno_agents::reap_render::MuxSweep::Unread {
-            exit_code: None,
-            stderr_first: e.to_string(),
-        },
-    }
 }
 
 /// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
@@ -2602,13 +2597,13 @@ fn run_node_route(rest: &[String]) -> i32 {
             );
             entry.harness = Some(harness.to_string());
             let answer = match store.matches(&entry) {
-                Some(hits) if !hits.is_empty() => {
-                    match fno_agents::gc::transcript_age_s(Some(&hits), now) {
-                        Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
-                        Some(_) => serde_json::json!({"state": "quiet"}),
-                        None => serde_json::json!({"state": "unresolved"}),
-                    }
-                }
+                // x-54cf: the age is the newest timestamped entry through the
+                // shared probe, not a file stat.
+                Some(hits) if !hits.is_empty() => match fno_agents::gc::probe_row_age(&entry) {
+                    Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
+                    Some(_) => serde_json::json!({"state": "quiet"}),
+                    None => serde_json::json!({"state": "unresolved"}),
+                },
                 _ => serde_json::json!({"state": "unresolved"}),
             };
             answers.insert(pair.clone(), answer);
@@ -2745,6 +2740,28 @@ fn apply_interactive_defaults(params: &mut Map<String, Value>) {
         if is_pty_lane && !params.contains_key("session_id") && !params.contains_key("resume_id") {
             params.insert("session_id".into(), Value::String(mint_session_uuid()));
         }
+    }
+}
+
+/// The substrate a spawn with NO explicit `--substrate` gets: thread where the
+/// harness seats one, else the closable pane. The Python seam (the public
+/// `fno agents spawn` front door) resolves the SAME default in its own body
+/// and opens the thread's default view through the mux thread verb, so this
+/// helper only answers for a DIRECT binary call.
+/// It seats only the three lanes this client itself routes (claude/codex
+/// bg, opencode serve); a keeper-lane harness (pi, cursor-agent, grok, agy)
+/// keeps the pane default here and seats its thread through the Python seam's
+/// keeper carve-out instead. The harness default matches the daemon's
+/// `handle_spawn` provider default (codex) so a bare direct call and the
+/// daemon route cannot disagree.
+fn default_substrate(params: &Value) -> &'static str {
+    let harness = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
+    match harness {
+        "claude" | "codex" | "opencode" => "thread",
+        _ => "pane",
     }
 }
 
@@ -3786,7 +3803,7 @@ fn fetch_discovered_sessions(
         // No outer deadline to subtract from: this path has no caller-supplied
         // budget, so the wait it may have spent changes nothing about the run.
         |_spent| {
-            let mut cmd = Command::new("fno");
+            let mut cmd = Command::new(fno_agents::scrape::fno_bin());
             cmd.args(&argv);
             cmd.env("FNO_AGENTS_RUNTIME", "python");
             // Fail-open by contract, and the same rule the latch needs: only a

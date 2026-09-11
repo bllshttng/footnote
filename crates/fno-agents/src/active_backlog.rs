@@ -730,6 +730,14 @@ struct AdvanceEpicReceipt {
     /// with no children, distinct from a truly exhausted mission.
     #[serde(default)]
     error: Option<String>,
+    /// A held receipt: another advance for this scope was still in flight and
+    /// the CLI stood this one down instead of stacking a second copy (the
+    /// x-ef2c one-in-flight gate). Held is a skip, never a retirement.
+    #[serde(default)]
+    held: bool,
+    /// Held requests the gate has counted for this scope.
+    #[serde(default)]
+    requests: u64,
 }
 
 /// Facts about one `dispatch_mission` pass beyond the fire-and-forget dispatch
@@ -743,6 +751,11 @@ struct DispatchFacts {
     ready: usize,
     reason: Option<String>,
     error: Option<String>,
+    /// The CLI reported the scope held: no children were considered because a
+    /// previous advance for the same scope is still running (x-ef2c).
+    held: bool,
+    /// Held requests the gate has counted for this scope; readout only.
+    requests: u64,
     /// Children resolved synchronously this pass (dispatched headless rows):
     /// real work the tick did even though nothing entered `pending`.
     sync_resolved: usize,
@@ -788,6 +801,8 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
         ready,
         reason,
         error: receipt.error.clone(),
+        held: receipt.held,
+        requests: receipt.requests,
         // Set later, by the dispatch loop that actually resolves the rows.
         sync_resolved: 0,
     }
@@ -952,6 +967,10 @@ pub fn mission_drain_tick(
     let skip_reason: Option<String> = match outcome {
         MissionDispatch::Retire => Some("mission_retired".to_string()),
         MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
+        // The gate held this tick's converge: name HELD, never no_work - an
+        // empty child set from a held receipt is the amplifier reporting
+        // itself, not an exhausted mission (x-ef2c).
+        MissionDispatch::Continue if facts.held => Some("held".to_string()),
         // Something dispatched by an earlier tick is still running: a full
         // spawn lane on THIS pass does not make that stale.
         MissionDispatch::Continue if !pending.is_empty() => Some("in_flight".to_string()),
@@ -974,8 +993,13 @@ pub fn mission_drain_tick(
         .rotation
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
+    let held_requests = if facts.held {
+        format!(" requests={}", facts.requests)
+    } else {
+        String::new()
+    };
     let detail = format!(
-        "mission={}{} ready={} closed={} dispatched={} sync={} pending={}{}",
+        "mission={}{} ready={} closed={} dispatched={} sync={} pending={}{}{}",
         cfg.mission,
         rotation,
         facts.ready,
@@ -983,6 +1007,7 @@ pub fn mission_drain_tick(
         newly_dispatched,
         sync_closed,
         pending.len(),
+        held_requests,
         match skip_reason.as_deref() {
             Some("no_work") => match undispatched_count(cfg) {
                 Ok(count) => format!(" stranded={count}"),
@@ -1628,6 +1653,24 @@ mod tests {
         let r: AdvanceEpicReceipt = serde_json::from_slice(br#"{"epic_id":"x-e"}"#).unwrap();
         assert!(r.children.is_empty());
         assert!(!r.deactivated && !r.all_done);
+    }
+
+    #[test]
+    fn a_held_receipt_parses_and_reads_as_held_not_no_work() {
+        // x-ef2c: the CLI's one-in-flight gate answers `held` with an empty
+        // child set. Without the field that receipt read as no_work - a lie
+        // that hides exactly the stacking this gate exists to delete. Held is
+        // never a retirement, so the mission flags must stay false.
+        let r: AdvanceEpicReceipt =
+            serde_json::from_slice(br#"{"epic_id":"x-e","held":true,"requests":4}"#).unwrap();
+        assert!(r.held);
+        assert_eq!(r.requests, 4);
+        assert!(!r.deactivated && !r.all_done);
+        let facts = facts_from_receipt(&r);
+        assert!(facts.held);
+        assert_eq!(facts.ready, 0);
+        assert_eq!(facts.error, None);
+        assert_eq!(facts.requests, 4);
     }
 
     #[test]

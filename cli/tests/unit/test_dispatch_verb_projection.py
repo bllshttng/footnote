@@ -88,8 +88,18 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iso:
     return Iso(tmp_path, monkeypatch)
 
 
-def _write_graph(graph: Path, *, verb: str | None, brief: str | None, cwd: str) -> None:
-    """One epic with one ready leaf child; the child declares what it declares."""
+def _write_graph(
+    graph: Path,
+    *,
+    verb: str | None,
+    brief: str | None,
+    cwd: str,
+    difficulty: str = "low",
+) -> None:
+    """One epic with one ready leaf child; the child declares what it declares.
+
+    ``difficulty`` defaults low so the planless child is the law's
+    straight-to-/target intake; the blueprint cases pass medium."""
     child: dict = {
         "id": "x-BP01",
         "slug": "bp-declared",
@@ -99,6 +109,7 @@ def _write_graph(graph: Path, *, verb: str | None, brief: str | None, cwd: str) 
         "status": "ready",
         "domain": "code",
         "priority": "p1",
+        "difficulty": difficulty,
         "cwd": cwd,
         "created_at": "2026-09-07T00:00:00+00:00",
         "touched_at": "2026-09-07T00:00:00+00:00",
@@ -194,7 +205,10 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """AC4/AC5: a node declaring /fno:blueprint, dispatched through epic
     advance, hands the spawn the rendered verb and the brief on TARGET_BRIEF."""
     repo = iso.repo()
-    _write_graph(iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo))
+    _write_graph(
+        iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo),
+        difficulty="medium",
+    )
     monkeypatch.setattr(
         "fno.graph._intake.project_root_from_settings",
         lambda project: str(repo) if project == "web" else None,
@@ -223,11 +237,13 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     assert calls[0]["dispatch_state"] == "free", calls[0]["dispatch_holder"]
 
 
-def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
-    """AC6-EDGE: a node declaring nothing gets the builtin and no brief -
-    the same code path, distinguished only by the declaration."""
+def test_epic_advance_undeclared_node_derives_the_target_intake(iso, monkeypatch):
+    """AC6-EDGE, x-ebd2 posture: a planless low node declaring nothing derives
+    the straight-to-/target intake and gets no brief - the same code path,
+    distinguished only by the declaration. The receipt names the RESOLVED
+    verb, so a legitimate default reads as one, not as 'builtin'."""
     repo = iso.repo()
-    _write_graph(iso.graph, verb=None, brief=None, cwd=str(repo))
+    _write_graph(iso.graph, verb=None, brief=None, cwd=str(repo), difficulty="low")
     monkeypatch.setattr(
         "fno.graph._intake.project_root_from_settings",
         lambda project: str(repo) if project == "web" else None,
@@ -241,17 +257,17 @@ def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
     assert res.dispatched == ("x-BP01",)
     assert calls[0]["argv"][-1] == "/target --no-merge x-BP01", calls[0]["argv"]
     assert "TARGET_BRIEF" not in calls[0]["env"]
-    # AC8-HP: a legitimate default is named as one, not left to guesswork.
+    # AC8-HP: the derived intake is named, never guessed.
     disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
-    assert disp and disp[0]["data"]["verb"] == "builtin"
+    assert disp and disp[0]["data"]["verb"] == "/target"
     assert disp[0]["data"]["verb_source"] == "none-declared"
 
 
-def test_field_absent_node_dict_warns_and_names_the_source(iso, monkeypatch, capsys):
-    """AC9-EDGE: a node dict built without a dispatch_verb key at all (the
-    pre-fix projection) dispatches with verb_source=field-absent and a
-    warning on stderr - the tripwire that makes the next lossy projection
-    self-report instead of silently substituting the builtin."""
+def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
+    """AC9-EDGE, x-ebd2 posture: a node dict built without a dispatch_verb key
+    at all (the pre-fix projection) REFUSES before any worker, claim, or model
+    slot is spent - a missing key is a broken projection, never permission to
+    guess the builtin."""
     repo = iso.repo()
     calls = _record_spawns(monkeypatch)
     # The pre-fix projection's shape, constructed directly: eleven keys, no
@@ -267,20 +283,21 @@ def test_field_absent_node_dict_warns_and_names_the_source(iso, monkeypatch, cap
 
     res = adv._converge_one(node_meta, str(repo), iso.events, verbose=False)
 
-    assert calls, "positive control: the spawn instrument ran and recorded"
-    assert res.decision == "dispatched"
-    disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
-    assert disp and disp[0]["data"]["verb"] == "builtin"
-    assert disp[0]["data"]["verb_source"] == "field-absent"
-    err = capsys.readouterr().err
-    assert "x-BP01" in err and "dispatch_verb" in err, err
+    assert not calls, "no worker may be spent on a lossy projection"
+    assert res.decision == "failed"
+    failed = [e for e in _events(iso.events) if e["type"] == "advance_failed"]
+    assert failed and "x-0961" in failed[0]["data"]["error"]
+    assert "dispatch_verb" in failed[0]["data"]["error"]
 
 
 def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """The lane-fill door (`_ready_nodes` -> `dispatch_lanes`) shells the same
     `fno backlog ready` surface, so it eats declared verbs identically."""
     repo = iso.repo(git=True)
-    _write_graph(iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo))
+    _write_graph(
+        iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo),
+        difficulty="medium",
+    )
     calls = _record_spawns(monkeypatch)
 
     receipts = adv.dispatch_lanes(

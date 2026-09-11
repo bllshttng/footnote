@@ -126,7 +126,32 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       // ponytail: if OpenCode ever runs parallel sub-sessions under one footnote
       // run, bind the first idle's sid in a sidecar and match against it; for the
       // Sequential opencode harness one active session makes presence sufficient.
-      if (!fnoSessionId(dir)) return
+      if (!fnoSessionId(dir)) {
+        // A worker that dies before `target init` writes a manifest still
+        // carries a <help> tag nobody would otherwise read (loop-check below
+        // never runs on this path). Side effect only, best-effort, never
+        // throws: this is the shell stop hooks' pre-manifest distress-scan,
+        // ported to OpenCode's idle event.
+        const preSynth = join(dir, ".fno", `.opencode-premanifest-${sid}.jsonl`)
+        try {
+          const res = await client.session.messages({ path: { id: sid } })
+          const items = Array.isArray(res?.data) ? res.data : []
+          writeFileSync(preSynth, synthesizeTranscript(items))
+          const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+          await $`cd ${dir} && ${bin} distress-scan --transcript ${preSynth} --run ${sid} --harness opencode --cwd ${dir}`
+            .quiet()
+            .text()
+        } catch (e) {
+          console.error(`[footnote] pre-manifest distress-scan skipped (non-fatal): ${e}`)
+        } finally {
+          try {
+            unlinkSync(preSynth)
+          } catch {
+            // nothing to clean up / already gone
+          }
+        }
+        return
+      }
       if (busy) return
       busy = true
 

@@ -67,6 +67,10 @@
       "enum": ["SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED"],
       "description": "Return-contract outcome. Present only on task_done and run_summary."
     },
+    "harness": {
+      "type": "string",
+      "description": "The producing session's harness (e.g. claude, codex, agy), when known. Metadata only, never part of the routing address (from/parent carry that); a producer with no resolved harness omits the field entirely rather than writing null."
+    },
     "data": {
       "type": "object",
       "description": "Per-type payload; see the protocol spec for per-type fields."

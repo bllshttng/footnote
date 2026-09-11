@@ -255,6 +255,9 @@ case "$*" in
   *"do pr list"*)
     echo '[]'
     ;;
+  *"config paths handoff"*)
+    echo "${CANON_PATH_OUT:?}"
+    ;;
   *)
     exit 1
     ;;
@@ -345,6 +348,25 @@ if grep -q "Unsure whether the blocked_child queue drains fairly" "$HANDWRITTEN_
   pass "hand-written crown-only headings bind by label, not ordinal position"
 else
   fail "hand-written crown headings lost or misplaced by the refire"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. A crowned session with NO custom_instructions keys its doc on the crown
+# scope, not the session id: a crown outlives its sessions, so a successor
+# resolves the same rolling doc. The fake fno answers the --scope form with a
+# fixture path; the doc must land THERE, titled for the crown, still carrying
+# the authoritative session id line.
+# ---------------------------------------------------------------------------
+CANON_PATH_OUT="$TMP/handoffs/crown-rolling.md"
+export CANON_PATH_OUT
+printf '{"trigger":"manual"}' \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if [[ -f "$CANON_PATH_OUT" ]] \
+  && grep -q "# Canon doc: crown x-9e1e-fixture" "$CANON_PATH_OUT" \
+  && grep -q "Session id (authoritative): \`$SID\`" "$CANON_PATH_OUT"; then
+  pass "crowned default doc keys on the crown scope at the --scope answer"
+else
+  fail "crowned default doc missing or not scope-keyed"
 fi
 
 echo

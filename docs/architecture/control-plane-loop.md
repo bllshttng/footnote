@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document covers the stop-hook decision verb (`fno-agents loop-check`) that runs INSIDE a session. For the driver loop that dispatches sessions from outside - target, megawalk, megatron - see [unified-loop.md](unified-loop.md) (step 5).
+This document covers the stop-hook decision verb (`fno-agents loop-check`) that runs INSIDE a session. For the driver loop that dispatches sessions from outside, see [unified-loop.md](unified-loop.md) (step 5). The target driver is live today. The megawalk and megatron arms were removed.
 
 ## Principle
 
@@ -21,7 +21,16 @@ The arms:
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
-The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. `fno doctor` names every stale arm with its last skip reason. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
+The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm. A row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
+
+Every red row names its cause as the first rule that holds. If no rule fires, the row reads `unexplained`, so a reader can see the rules ran:
+
+- `daemon_young`: A daemon-scheduled arm reads `pending`, not red, while the daemon is up less than twice the interval. The first window has not elapsed.
+- `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
+- `daemon_down`: The daemon is not running.
+- `tick_timeout`: The pr-watch tick broke (timeout or error) before this arm ran. See `pr_watch_merge`.
+- `scheduler_silent`: No pr-watch tick inside 2x interval. Run `fno do pr watch status`.
+- `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
 ## What was deleted
 
@@ -142,7 +151,7 @@ The matching writer lives in `/pr check`: it replies in-thread (`in_reply_to`) p
 | `NoWork` | No state file or no recognizable work in progress |
 | `Budget` | Budget cap reached (see Budget Resolution below) |
 | `NoProgress` | Backstop: fingerprint unchanged across N independent observations |
-| `Interrupted` | Target `.fno/.target-cancelled` or king `.fno/kings/<scope>.cancelled` detected |
+| `Interrupted` | Target `.fno/.target-cancelled` or king `.fno/kings/<scope>.cancelled` detected. The sentinel may carry `author:` / `reason:` lines; the termination line echoes them and the plain sentinel is then deleted, so one cancel terminates one run |
 | `Aborted` | `<aborted reason="...">` tag seen in transcript |
 
 ### Backstop fingerprint

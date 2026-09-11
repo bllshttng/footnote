@@ -74,8 +74,8 @@ Two ways to ship a feature end in a green PR. Merging requires the existing auto
 **Autopilot.** Point the `target` skill at a feature description or a backlog node, then walk away:
 
 ```
-/target "add OAuth login"     # think -> plan -> code -> review -> ship
-/target fno-a3f9              # by backlog node id
+/fno:target "add OAuth login"     # think -> plan -> code -> review -> ship
+/fno:target <node-id>             # by backlog node id (fno backlog next names one)
 ```
 
 It runs the whole loop with or without you watching, and prints the PR URL when it ships. You don't have to pass a size; it runs a sensible default.
@@ -83,13 +83,14 @@ It runs the whole loop with or without you watching, and prints the PR URL when 
 **Hands-on.** Drive the design yourself, then hand off the build:
 
 ```
-/think "OAuth login"          # explore the design space
-/blueprint "OAuth login"      # plan it, then hands off to a fresh /target thread
+/fno:think "OAuth login"          # explore the design space
+/fno:blueprint "OAuth login"      # write the executable plan
+/fno:target path/to/plan.md       # build it when you're ready
 ```
 
-`/blueprint` spawns the build in its own Claude Code thread so your planning context stays clean.
+`/fno:blueprint` writes the plan and stops. Nothing builds until you point `/fno:target` at the plan (or at a backlog node id), so a finished plan is a fine place to pause.
 
-**Keep going.** `/megawalk` chews through the whole backlog until it's done or out of budget, walking the dependency graph to pick what ships next.
+**Keep going.** The backlog is the queue. `fno backlog idea "..."` captures work, `fno backlog next` names the ready node, and `/fno:target <node-id>` ships it end to end. To work a whole board, `/fno:target bg --all-ready` dispatches every ready node as background workers, and `fno backlog advance` (opt-in) dispatches a node's dependents once its PR merges.
 
 **Loop harnesses together.** Spawn an agent on another provider and work alongside it:
 
@@ -102,7 +103,7 @@ Each agent runs its own loop and they coordinate over a message bus. Claude, Cod
 
 **Also in the box:**
 
-- A six-agent review panel reads the diff before it ships, analyzing integration and UX-flow, not just unit tests, via `/review`.
+- A review lane reads the diff before it ships: `/fno:review` runs the configured inline reviewer and emits a head-pinned attestation. `config.review.max_rounds` (default 2) caps the rounds. `config.review.github_apps` names any external bot that must sign off before the merge gate opens.
 - Provider rotation with failover and per-model lockout, so a flaky or rate-limited model doesn't stall the loop.
 - A read-only browser view of any running pane, via `fno mux serve --web`. Open the URL on your phone and watch an agent work. Nothing to install on the viewing device. The bridge releases its socket write half at attach, so no keystroke reaches your terminal. [docs/guides/web-view.md](docs/guides/web-view.md)
 

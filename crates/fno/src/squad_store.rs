@@ -156,6 +156,12 @@ pub struct StoredMember {
     /// Full harness session identity captured alongside `harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+    /// The birth pane id, captured at each persist while a pane resolves and
+    /// never cleared: after a restart it is the first join tried in
+    /// `member_pane`, so the member lands back on the same pane number.
+    /// `#[serde(default)]`, same no-quarantine rule as `tab_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<u64>,
 }
 
 ///  The one declared member-to-row join, stated here because the
@@ -2435,64 +2441,11 @@ fn epoch_to_iso(secs: u64) -> String {
 }
 
 #[cfg(test)]
+mod member_join_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn member_joins_row_prefers_the_full_session_id_then_the_short_id() {
-        //  The declared join, both keys: a member carrying a full
-        // harness session id joins on it and ignores the short ids; a member
-        // without one joins by attach id against the row's short id; an
-        // id-less member joins nothing.
-        let m_session = StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: Some("claude".into()),
-            harness_session_id: Some("sess-full".into()),
-        };
-        assert!(member_joins_row(
-            &m_session,
-            Some("other-short"),
-            Some("sess-full")
-        ));
-        assert!(!member_joins_row(
-            &m_session,
-            Some("sess-full"),
-            Some("other-session")
-        ));
-        let m_short = StoredMember {
-            attach_id: "abc12345".into(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: None,
-            harness_session_id: None,
-        };
-        assert!(member_joins_row(&m_short, Some("abc12345"), None));
-        assert!(!member_joins_row(&m_short, None, Some("abc12345")));
-        assert!(!member_joins_row(&m_short, Some("zzzzzzzz"), None));
-        let m_bare = StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: None,
-            harness_session_id: None,
-        };
-        assert!(!member_joins_row(&m_bare, Some("abc12345"), Some("sess")));
-    }
 
     /// A scratch store dir installed via the per-thread path override, so the
     /// store never touches a real file AND never mutates the process
@@ -2529,6 +2482,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 
@@ -2889,6 +2843,7 @@ mod tests {
             worker: Some("probe-x5f7f".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -2943,6 +2898,7 @@ mod tests {
             worker: Some("t-abcd-worker".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("01a03a85-1111-7222-8333-444455556666".into()),
+            pane_id: None,
         };
         let sibling = StoredMember {
             attach_id: String::new(),
@@ -2954,6 +2910,7 @@ mod tests {
             worker: Some("t-abcd-sibling".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("22222222-1111-7222-8333-444455556666".into()),
+            pane_id: None,
         };
         let already_gone = StoredMember {
             tombstone: true,
@@ -3012,6 +2969,7 @@ mod tests {
             worker: Some("a;rm -rf".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -3383,6 +3341,7 @@ mod tests {
             worker: Some("residue".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         assert_eq!(
@@ -3437,6 +3396,7 @@ mod tests {
             worker: Some("w1".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.fold_registry_rows(
@@ -3479,6 +3439,7 @@ mod tests {
             worker: Some("w1".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.fold_registry_rows(
@@ -3543,6 +3504,7 @@ mod tests {
             worker: Some("target-x-aaaa-worker".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.add_retire_eligible_name("target-x-aaaa-worker");
@@ -3578,6 +3540,7 @@ mod tests {
             worker: Some("w9".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let stale = crate::agents_view::RegistryAgent {
             name: "w9".into(),
@@ -3635,6 +3598,7 @@ mod tests {
             worker: Some("w9".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let stale = crate::agents_view::RegistryAgent {
             name: "w9".into(),
@@ -3686,6 +3650,7 @@ mod tests {
             worker: Some("w4".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         assert_eq!(
             evidence.verdict(&member),
@@ -3739,6 +3704,7 @@ mod tests {
             worker: Some(worker.into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         assert_eq!(
             evidence.verdict(&member("w2")),
@@ -4456,6 +4422,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -4654,6 +4621,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }];
         assert_eq!(
             prune_decision_at(
@@ -4813,6 +4781,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 
@@ -4827,6 +4796,7 @@ mod tests {
             worker: Some(name.into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 

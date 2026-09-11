@@ -235,6 +235,29 @@ def decode_key(filename: str) -> str:
     return unquote(filename)
 
 
+def list_claim_keys(prefix: str | None = None, root: Path | None = None) -> list[str]:
+    """Keys present in the claims dir, by directory walk only.
+
+    Presence, never liveness: a key is listed because its ``.lock`` file
+    exists. No verdict subprocess, no file parse. For callers that only need
+    "is this key claimed" (the undispatched observer), the verdict leg of
+    :func:`fno.claims.core.list_claims` cost 33s under load and its state
+    column was discarded. Skips subdirs (the ``.expired`` archive) and any
+    non-``.lock`` name; a corrupted file still counts as claimed.
+    """
+    cdir = claims_dir(root)
+    if not cdir.is_dir():
+        return []
+    keys = [
+        decode_key(entry.name)
+        for entry in cdir.iterdir()
+        if not entry.is_dir() and entry.name.endswith(".lock")
+    ]
+    if prefix is not None:
+        keys = [key for key in keys if key.startswith(prefix)]
+    return sorted(keys)
+
+
 def claim_path(key: str, root: Path | None = None) -> Path:
     """Return the canonical file path for a claim key."""
     return claims_dir(root) / f"{encode_key(key)}.lock"

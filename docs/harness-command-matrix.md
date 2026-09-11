@@ -188,7 +188,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 
 | Verb | Caller | What it does |
 |------|---|---|
-| `loop` | operator / dispatcher | Unified cross-session driver loop (`--driver target\|megawalk`). |
+| `loop` | operator / dispatcher | Unified cross-session driver loop (`--driver target`; the megawalk arm was removed). |
 | `loop-check` | stop hook | The in-session stop/allow decision from external truth (PR, CI, review bots, budget). |
 | `finalize` | loop-check terminal-allow | Idempotent ledger record + ship-time plan stamp. |
 | `kill-check` | loop | Evaluate a plan's `kill_criteria`. |
@@ -286,6 +286,10 @@ This table shows how autonomous dispatch renders a footnote `/verb` for each har
 | opencode | `/fno:verb ...` | Plugin-namespaced palette + `opencode run --command`. |
 | codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
 | gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
+
+Single-quote a `$fno:verb` payload on a command line. Inside double quotes the shell expands `$fno` to nothing before fno runs. bash leaves `:target`. zsh also drops the first letter and leaves `arget`. The worker reads either one as prose. `fno agents spawn` refuses both shapes and names the fix.
+
+Without the footnote plugin enabled in its codex home, a codex session cannot expand an intact `$fno:verb`. A verb-shaped codex seed on a machine where the plugin is `missing` or `wrong-channel` is refused at spawn instead of delivered as prose. A receipt for a verb-shaped seed carries `"verb_fired": "pending"`. For `/fno:target <node>` it also carries a `"verb_marker"` command whose passing verdict is the claim naming the spawned session as holder. Prose seeds carry no field.
 
 Retask is a read-and-verified transaction over a live mux pane. It clears before switching. It waits for a changed harness session id. It renames the fno registry label. It verifies model and effort before submitting the no-merge target. Claude uses the declarative `direct` strategy. Codex uses `menu_walk` with live cursor reads. Gemini, agy, and opencode expose an unsupported strategy and retask refuses with `unsupported_switch_strategy` (spawn a fresh worker instead); only an axis mismatch returns `spawn_required`.
 

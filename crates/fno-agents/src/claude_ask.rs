@@ -1131,6 +1131,31 @@ pub fn read_state_json(jobs_dir: &Path) -> Result<StateSnapshot, StateReadError>
     }
 }
 
+/// How long a spawn waits for claude to record its prompt in job state.
+pub const SEED_WAIT: Duration = Duration::from_secs(5);
+
+/// `None` once `<jobs_dir>/state.json` carries a non-empty `intent`, which
+/// `claude --bg` writes before it returns; otherwise the reason, naming the
+/// path read. A session started with no prompt reads `intent: ""` forever.
+pub fn seed_unverified_reason(jobs_dir: &Path, timeout: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(snap) = read_state_json(jobs_dir) {
+            if snap.intent.is_some_and(|intent| !intent.trim().is_empty()) {
+                return None;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Some(format!(
+                "{} records no prompt after {}s",
+                jobs_dir.join("state.json").display(),
+                timeout.as_secs_f64()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn parse_state(state_path: &Path) -> Result<StateSnapshot, StateReadError> {
     let raw_text = match std::fs::read_to_string(state_path) {
         Ok(t) => t,
@@ -2128,6 +2153,8 @@ pub fn dispatch_claude_ask(
 /// Receipt (byte-parity with Python `cmd_spawn` on the complete path):
 /// `{"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n`.
 /// A bounded identity miss reports `status: "spawning"` and carries a warning.
+/// A prompt claude never recorded in job state also reports `spawning`, plus
+/// `seed: "unverified"` and a `seed_unverified` reason.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_claude_spawn(
     home: &AgentsHome,
@@ -2284,6 +2311,23 @@ pub fn dispatch_claude_spawn(
             );
         }
     };
+    // A thread nobody seeded waits forever for input, so `live` also needs
+    // claude's own record of the prompt. Python cmd_spawn appends the same keys.
+    let seed_field = Some(message)
+        .filter(|m| !m.trim().is_empty())
+        .and_then(|_| seed_unverified_reason(&claude_home.jobs_dir_for(&short_id), SEED_WAIT))
+        .map(|reason| {
+            format!(
+                r#", "seed": "unverified", "seed_unverified": {}"#,
+                json_string_ascii(&reason)
+            )
+        })
+        .unwrap_or_default();
+    let receipt_status = if seed_field.is_empty() {
+        receipt_status
+    } else {
+        "spawning"
+    };
     // Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED mode
     // (flag or yolo-derived) so an audit of "why did this worker have edit
     // rights" has a durable answer - and only as a request, because fno
@@ -2333,7 +2377,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude"{model_field}, "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude"{model_field}, "status": "{receipt_status}"{perm_field}{cwd_field}{seed_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,
@@ -3775,6 +3819,32 @@ mod tests {
         fs::write(jobs.join("state.json"), r#"{"state":"done","output":null}"#).unwrap();
         let snap = read_state_json(&jobs).unwrap();
         assert_eq!(snap.output_result, None);
+    }
+
+    #[test]
+    fn seed_unverified_reason_is_none_once_intent_is_recorded() {
+        let jobs = tmpdir();
+        fs::write(
+            jobs.join("state.json"),
+            r#"{"state":"running","intent":"reply PONG"}"#,
+        )
+        .unwrap();
+        assert_eq!(seed_unverified_reason(&jobs, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn seed_unverified_reason_names_the_path_for_a_missing_or_empty_intent() {
+        let jobs = tmpdir();
+        let state = jobs.join("state.json").display().to_string();
+        let missing = seed_unverified_reason(&jobs, Duration::ZERO).unwrap();
+        assert!(missing.contains(&state), "{missing}");
+        fs::write(
+            jobs.join("state.json"),
+            r#"{"state":"blocked","intent":""}"#,
+        )
+        .unwrap();
+        let empty = seed_unverified_reason(&jobs, Duration::ZERO).unwrap();
+        assert!(empty.contains(&state), "{empty}");
     }
 
     // --- read_timeline_tail ---

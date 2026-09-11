@@ -77,10 +77,49 @@ fi
 SHORT="${SID: -8}"
 
 # ---------------------------------------------------------------------------
+# Crowned-ness + crown scope, read before the doc-path resolution because a
+# crowned session keys its doc on the SCOPE (a crown outlives its sessions; a
+# successor resolves the same rolling doc). Computed once from the registry
+# read and handed into the heredoc below via env: the heredoc's stdout carries
+# ONLY the auto block text, matching every other fact in this script. An
+# earlier version smuggled this boolean out as a synthetic first stdout line
+# for bash to split off by position - fragile, since any reordering of the
+# heredoc's own output silently corrupts the auto block with no error (the
+# whole heredoc is wrapped in `|| true`).
+# ---------------------------------------------------------------------------
+REG_ROWS=""
+if command -v fno >/dev/null 2>&1; then
+  REG_ROWS="$(fno agents registry-json 2>/dev/null || true)"
+fi
+
+CROWN_INFO="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
+import json, os
+sid = os.environ.get("SID", "")
+try:
+    data = json.loads(os.environ.get("REG_ROWS") or "[]")
+except Exception:
+    data = []
+if isinstance(data, dict):
+    data = data.get("agents") or data.get("rows") or []
+rows = data if isinstance(data, list) else []
+mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
+r = mine[0] if mine else {}
+lvl = r.get("crown_level")
+scp = r.get("crown_scope")
+print("1" if (mine and (lvl is not None or scp is not None)) else "0")
+print(scp if isinstance(scp, str) else "")
+' 2>/dev/null || true)"
+IS_CROWNED="$(printf '%s' "$CROWN_INFO" | sed -n 1p)"
+CROWN_SCOPE="$(printf '%s' "$CROWN_INFO" | sed -n 2p)"
+[[ "$IS_CROWNED" == "1" ]] || IS_CROWNED=0
+
+# ---------------------------------------------------------------------------
 # Resolve the canon doc path. A manual /compact <path> carries a path the
 # session deliberately chose - enrich THAT file rather than minting a sibling.
-# Otherwise fall back to fno config paths handoff. Only treat custom_instructions as a
-# path when it plainly is one (ends in .md); prose instructions fall through.
+# Otherwise fall back to fno config paths handoff: --scope for a crowned
+# session (the newest doc for that crown, else today's scope-keyed name), the
+# session-keyed form otherwise. Only treat custom_instructions as a path when
+# it plainly is one (ends in .md); prose instructions fall through.
 # ---------------------------------------------------------------------------
 DOC_PATH=""
 _ci="$(_json_field custom_instructions)"
@@ -94,6 +133,9 @@ case "$_ci" in
   /*.md|./*.md|../*.md) DOC_PATH="$_ci" ;;
   *.md) [[ -f "$_ci" ]] && DOC_PATH="$_ci" ;;
 esac
+if [[ -z "$DOC_PATH" && -n "$CROWN_SCOPE" ]]; then
+  DOC_PATH="$(fno config paths handoff --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+fi
 if [[ -z "$DOC_PATH" ]]; then
   DOC_PATH="$(fno config paths handoff --session-id "$SID" 2>/dev/null || true)"
 fi
@@ -114,42 +156,12 @@ if [[ -f "$FNO_DIR/target-state.md" ]]; then
   PLAN="$(grep -m1 -E "^plan_path:" "$FNO_DIR/target-state.md" 2>/dev/null | sed -E 's/^plan_path:[[:space:]]*//; s/^"(.*)"$/\1/' || true)"
 fi
 
-REG_ROWS=""
-if command -v fno >/dev/null 2>&1; then
-  REG_ROWS="$(fno agents registry-json 2>/dev/null || true)"
-fi
-
 PR_RAW=""
 if command -v fno >/dev/null 2>&1; then
   # Omit the section entirely if fno is missing, there is no remote, or REST fails
   # - never a failed hook (the vertical-generalization epic takes fno past code).
   PR_RAW="$(fno do pr list --state open 2>/dev/null || true)"
 fi
-
-# Crowned-ness, computed once from the already-fetched REG_ROWS and handed
-# into the heredoc below via env: the heredoc's stdout carries ONLY the auto
-# block text, matching every other fact in this script. An earlier version
-# smuggled this boolean out as a synthetic first stdout line for bash to
-# split off by position - fragile, since any reordering of the heredoc's own
-# output silently corrupts the auto block with no error (the whole heredoc is
-# wrapped in `|| true`).
-IS_CROWNED="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
-import json, os
-sid = os.environ.get("SID", "")
-try:
-    data = json.loads(os.environ.get("REG_ROWS") or "[]")
-except Exception:
-    data = []
-if isinstance(data, dict):
-    data = data.get("agents") or data.get("rows") or []
-rows = data if isinstance(data, list) else []
-mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
-r = mine[0] if mine else {}
-lvl = r.get("crown_level")
-scp = r.get("crown_scope")
-print("1" if (mine and (lvl is not None or scp is not None)) else "0")
-' 2>/dev/null || true)"
-[[ "$IS_CROWNED" == "1" ]] || IS_CROWNED=0
 
 # ---------------------------------------------------------------------------
 # Build the auto block. One python heredoc (quoted delimiter => no shell
@@ -352,7 +364,7 @@ fi
 # is preserved once, not appended again.
 PRIOR=""
 if [[ -f "$DOC_PATH" ]]; then
-  PRIOR="$(awk '/^# Canon doc: session /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
+  PRIOR="$(awk '/^# Canon doc: /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -366,7 +378,13 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
   if [[ -n "$(printf '%s' "$PRIOR" | tr -d '[:space:]')" ]]; then
     printf '%s\n\n' "$PRIOR"
   fi
-  echo "# Canon doc: session ${SHORT}"
+  # A crowned session's doc is the crown's rolling doc (scope-keyed name), so
+  # the title names the crown; a successor reading it is not session ${SHORT}.
+  if [[ "$IS_CROWNED" == "1" && -n "$CROWN_SCOPE" ]]; then
+    echo "# Canon doc: crown ${CROWN_SCOPE}"
+  else
+    echo "# Canon doc: session ${SHORT}"
+  fi
   echo ""
   echo "Session id (authoritative): \`${SID}\`  |  refreshed ${ISO} by precompact-canon-doc.sh."
   # Blank line, deliberately: a paragraph is one physical line, so two echoes

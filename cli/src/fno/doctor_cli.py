@@ -16,6 +16,7 @@ from fno.doctor_bash_census import bash_census_command
 from fno.paths import resolve_plugin_script
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
+from fno.doctor_graph import graph_app
 from fno.doctor_lanes import lanes_command
 from fno.evals.cli import evals_app
 from fno.events.cli import cli as event_app
@@ -61,6 +62,7 @@ doctor_app.add_typer(bundle_app, name="bundle")
 doctor_app.add_typer(codemap_app, name="codemap")
 doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
+doctor_app.add_typer(graph_app, name="graph")
 doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 # Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.

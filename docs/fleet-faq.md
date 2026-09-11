@@ -1,6 +1,6 @@
 # Fleet FAQ
 
-Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md).
+Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
 This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
 
@@ -40,7 +40,7 @@ Probably not, and four readers will disagree with each other. Know what each one
 |---|---|---|
 | roster `status` in `fno agents list` | what the last reconcile saw | flaps between `unknown`, `quiet`, `orphaned` on a live session |
 | `pgrep -f <session-id>` | a process exists right now | a thread-substrate worker is idle between turns and holds no process |
-| transcript mtime | the session wrote recently | **you read the wrong path** (see below) |
+| transcript mtime | the session wrote recently | **you read the wrong path** (see below), or the right path read by its stat: untimestamped trailing records keep the file young while the conversation is silent (measured median +20 min, max +240 hours) - age the newest timestamped entry, not the file |
 | `fno agents resume <name> --print-command` | nothing about liveness: it renders the route and returns | it prints a command for a session the provider cannot reach, and for one whose cwd is gone |
 
 **Read the right transcript.** Claude Code keys its project directory by the session's **cwd**. A worker running in a worktree writes to a directory named for that worktree, not for the canonical checkout:
@@ -185,7 +185,7 @@ The discriminator is not the motive. Both a good and a bad edit will say "to fit
 - **Not fine:** the metric is satisfied by the explanation ceasing to exist.
 - **Fine:** the contract moves to a doc the file already cites elsewhere, and a one-line pointer stays.
 
-Also worth knowing, because it changes what you tell a worker: the same gate **excludes test paths** (`check-file-budget.sh`). Test coverage is free. Say so, or a worker will delete tests it must keep.
+Also worth knowing, because it changes what you tell a worker: the same gate **excludes test paths** (`check-file-budget.sh`). Test coverage is free. Say so, or a worker will delete tests it must keep. A deleted module banks all its lines, so deleting dead code is a real remedy. A module moved into `cli/src/fno` counts as growth, so a move is not a free port.
 
 *Graduates to:* the budget gate discounting comment and docstring lines, so the cheapest legal move for a worker is a real port.
 

@@ -160,3 +160,19 @@ def test_render_names_an_unreadable_queue_and_prints_warnings(capsys):
     captured = capsys.readouterr()
     assert any("UNREADABLE" in line and "graph unreadable" in line for line in captured.out.splitlines())
     assert captured.err.strip() == "warning: stalled_holder: capped"
+
+
+def test_render_names_an_over_budget_queue_not_a_count(capsys):
+    from fno.king.cli import _render
+
+    q = _queue(
+        status="over_budget",
+        error="fno backlog undispatched --json: killed at its 4.6s slice of the board budget; the source did not fail",
+        rows=[],
+    )
+    board = {"actionable": 0, "warnings": [], "queues": [q]}
+    _render(board, 25)
+    out = capsys.readouterr().out
+    assert "NOT READ" in out
+    assert "killed at its 4.6s slice" in out
+    assert "None" not in out

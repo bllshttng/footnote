@@ -379,6 +379,22 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
     assert receipt["effective_message"] == "/fno:pr check 7"
 
 
+def test_spawn_refuses_a_payload_whose_verb_the_shell_ate(workdir) -> None:
+    """zsh turns a double-quoted `$fno:target x-1` into `arget x-1`. The spawn
+    refuses it before launching anything, instead of seeding a worker with prose."""
+    from fno.agents.cli import agents_app
+
+    result = _make_runner().invoke(
+        agents_app,
+        ["spawn", "--name", "eaten-c", "-H", "codex", "arget x-1", "--substrate", "thread"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "Single-quote the payload: '$fno:target ...'" in result.output
+    assert not any(e.name == "eaten-c" for e in load_registry())
+
+
 def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) -> None:
     """x-85fe: when the default moves the worker off the caller (canonical !=
     caller), the bg receipt appends the effective cwd LAST, and the stderr

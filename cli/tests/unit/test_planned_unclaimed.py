@@ -83,6 +83,56 @@ def test_ac3_observer_miss_is_prepended_to_normal_selection():
     assert [row["id"] for row in merged] == ["x-p0-missed", "x-p2-normal"]
 
 
+def test_ac1_hp_claim_snapshot_walks_keys_without_subprocess(tmp_path, monkeypatch):
+    from fno.backlog.undispatched import read_claim_snapshot
+    from fno.claims import verdict as claims_verdict
+
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    (claims / "node%3Ax-held.lock").write_text("holder: a\n")
+    (claims / "node%3Ax-other.lock").write_text("holder: b\n")
+    (claims / "other%3Akey.lock").write_text("holder: c\n")
+    (claims / ".expired").mkdir()
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("read_claim_snapshot spawned the verdict sweep")
+
+    monkeypatch.setattr(claims_verdict, "run_subprocess", _boom)
+
+    rows = read_claim_snapshot()
+
+    assert sorted(row["key"] for row in rows) == ["node:x-held", "node:x-other"]
+    assert all(row["state"] is None for row in rows)
+
+
+def test_ac1_hp_keys_only_rows_classify_identically_to_verdict_rows(
+    tmp_path, monkeypatch
+):
+    from fno.backlog.undispatched import classify_planned_unclaimed, read_claim_snapshot
+
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    (claims / "node%3Ax-held.lock").write_text("holder: a\n")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    entries = [_node("x-open"), _node("x-held")]
+
+    from_keys = classify_planned_unclaimed(entries, read_claim_snapshot())
+    from_verdict = classify_planned_unclaimed(
+        entries, [{"key": "node:x-held", "state": "live"}]
+    )
+
+    assert from_keys == from_verdict
+
+
+def test_ac1_edge_missing_claims_dir_is_empty_not_error(tmp_path, monkeypatch):
+    from fno.backlog.undispatched import read_claim_snapshot
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+
+    assert read_claim_snapshot() == []
+
+
 def test_scope_filters_project_mission_roadmap_and_parent():
     entries = [
         _node("x-in", project="fno", mission_id="m1", roadmap_id="r1", parent="x-root"),
@@ -100,3 +150,35 @@ def test_scope_filters_project_mission_roadmap_and_parent():
     )
 
     assert [row["id"] for row in receipt["rows"]] == ["x-in"]
+
+
+def test_worked_node_with_no_claim_stays_out(monkeypatch):
+    """A worker past its claim TTL still owns the node: the observer must not
+    offer it just because the claims list answered nobody home."""
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda *a, **kw: {"x-worked": ["do-worker"]},
+    )
+
+    from fno.backlog.undispatched import read_planned_unclaimed_from_entries
+
+    receipt = read_planned_unclaimed_from_entries([_node("x-in"), _node("x-worked")])
+
+    assert [row["id"] for row in receipt["rows"]] == ["x-in"]
+
+
+def test_worked_authority_failure_refuses_the_observer(monkeypatch):
+    """Unknown liveness must not read as an offerable node; the receipt
+    refuses with the reason and the board queue renders unreadable."""
+    def _raise(*a, **kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    from fno.backlog.undispatched import (
+        ObserverReadError,
+        read_planned_unclaimed_from_entries,
+    )
+
+    with pytest.raises(ObserverReadError, match="worked overlay"):
+        read_planned_unclaimed_from_entries([_node("x-in")])

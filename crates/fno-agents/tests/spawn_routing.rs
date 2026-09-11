@@ -59,6 +59,10 @@ done
 if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
   mkdir -p "$FAKE_CLAUDE_SESSIONS"
   printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
+  # Real claude records the prompt as job-state intent before it returns.
+  jobs="$(dirname "$FAKE_CLAUDE_SESSIONS")/jobs/7c5dcf5d"
+  mkdir -p "$jobs"
+  printf '{"state":"running","intent":"seeded"}\n' > "$jobs/state.json"
 fi
 if [ -n "$FAKE_CLAUDE_DAEMON_DIR" ]; then
   mkdir -p "$FAKE_CLAUDE_DAEMON_DIR" "$FAKE_CLAUDE_CONTROL_DIR/spare"

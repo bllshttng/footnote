@@ -179,6 +179,7 @@ def test_advance_skipped_accepts_machine_scoped_reasons() -> None:
     _require_schema_loaded()
     validate(_advance_skipped("capacity-refused", exit_code=79, detail="spawn-gate: load"))
     validate(_advance_skipped("gate-unavailable", exit_code=81, detail="spawn-gate: registry"))
+    validate(_advance_skipped("sandbox-unreachable", exit_code=82, detail="sandbox-probe: gh is unreachable"))
     # Historic emission, declared late: the enum admits rows already in journals.
     validate(_advance_skipped("slot-queue-deferred", retry_at=1234.0))
 
@@ -192,6 +193,7 @@ def test_advance_skipped_declares_the_machine_scoped_vocabulary() -> None:
     assert set(props["reason"]["enum"]) >= {
         "capacity-refused",
         "gate-unavailable",
+        "sandbox-unreachable",
         "slot-queue-deferred",
     }
     assert "exit_code" in props and "attempted" in props

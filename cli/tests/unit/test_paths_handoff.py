@@ -2,11 +2,15 @@
 
 The verb surfaces paths.handoffs_dir() so a session or hook resolves the canon
 handoff doc through one door instead of composing a path. Filename key is the
-session's canonical handle (first-8) unless --slug overrides.
+session's canonical handle (first-8) unless --slug or --scope overrides. A
+crown outlives its sessions, so --scope keys the doc on the crown scope and
+returns the newest existing doc for that scope.
 """
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from pathlib import Path
 from typing import Generator
 
@@ -24,6 +28,13 @@ _ENV = {"COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"}
 # A uuid whose first-8 handle is unambiguous and not equal to its last-8.
 SID = "c35abbca-bd2d-4407-8365-cf468baa7eea"
 HANDLE = canonical_handle(SID)  # c35abbca (first-8), not 8baa7eea (last-8)
+
+
+def _unique_scope() -> str:
+    # The handoffs dir is shared across tests in a process (conftest hermetic
+    # sandbox), so every scope case keys on a one-off scope: two crowns in one
+    # dir must not collide, which is exactly the contract under test.
+    return f"x-{uuid.uuid4().hex[:8]}"
 
 
 @pytest.fixture(autouse=True)
@@ -66,3 +77,67 @@ def test_deprecated_session_alias_still_resolves() -> None:
     result = runner.invoke(app, ["config", "paths", "handoff", "--session", SID, "--name-only"], env=_ENV)
     assert result.exit_code == 0, result.output
     assert result.output.strip().endswith(f"-{HANDLE}.md")
+
+
+def test_scope_mints_a_dated_crown_keyed_name() -> None:
+    scope = _unique_scope()
+    result = runner.invoke(app, ["config", "paths", "handoff", "--scope", scope, "--name-only"], env=_ENV)
+    assert result.exit_code == 0, result.output
+    name = result.output.strip()
+    assert re.fullmatch(rf"\d{{8}}-crown-{re.escape(scope)}\.md", name), name
+
+
+def test_scope_returns_the_newest_existing_doc_for_that_crown() -> None:
+    scope = _unique_scope()
+    d = handoffs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    old = d / f"20260901-crown-{scope}.md"
+    new = d / f"20260909-crown-{scope}.md"
+    old.write_text("predecessor", encoding="utf-8")
+    new.write_text("successor", encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+    result = runner.invoke(app, ["config", "paths", "handoff", "--scope", scope], env=_ENV)
+    assert result.exit_code == 0, result.output
+    assert Path(result.output.strip()) == new
+
+
+def test_scope_newest_ignores_other_scopes_and_session_keys() -> None:
+    scope = _unique_scope()
+    d = handoffs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    other_scope = d / f"20260909-crown-{_unique_scope()}.md"
+    session_key = d / "20260909-c35abbca.md"
+    mine = d / f"20260901-crown-{scope}.md"
+    for p in (other_scope, session_key, mine):
+        p.write_text("x", encoding="utf-8")
+    os.utime(other_scope, (9_999_999, 9_999_999))
+    os.utime(session_key, (9_999_999, 9_999_999))
+    os.utime(mine, (1_000_000, 1_000_000))
+    result = runner.invoke(app, ["config", "paths", "handoff", "--scope", scope], env=_ENV)
+    assert result.exit_code == 0, result.output
+    assert Path(result.output.strip()) == mine
+
+
+def test_scope_sanitizes_a_portfolio_scope_into_the_key() -> None:
+    # A portfolio crown stores its scope comma-joined; commas and spaces are
+    # not filename-safe, so they collapse into the key separator.
+    scope = f"{_unique_scope()}, {_unique_scope()}"
+    result = runner.invoke(
+        app, ["config", "paths", "handoff", "--scope", scope, "--name-only"], env=_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().endswith(".md") and "-crown-x-" in result.output, result.output
+    assert "," not in result.output and " " not in result.output, result.output
+
+
+def test_scope_and_session_key_are_mutually_exclusive() -> None:
+    scope = _unique_scope()
+    result = runner.invoke(
+        app, ["config", "paths", "handoff", "--scope", scope, "--session-id", SID], env=_ENV
+    )
+    assert result.exit_code != 0
+    result = runner.invoke(
+        app, ["config", "paths", "handoff", "--scope", scope, "--slug", "s"], env=_ENV
+    )
+    assert result.exit_code != 0

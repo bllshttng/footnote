@@ -95,7 +95,7 @@ Crown a thread king for a pass, which abdicates before layout matters; crown a p
 
 A wrapped prompt ("run $fno:target ... and here is why") does not reliably load this file. One night's codex spawns, audited by `scripts/diagnostics/codex-skill-load-audit.py`, tell the shape. The harness injected the skill in 4 of 15 wrapped prompts. The worker's own first read carried 9 more. Three sessions never loaded it at all.
 
-The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a crown is the defect this rule exists to prevent.
+The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. Single-quote the codex payload: in double quotes the shell eats `$fno` and the verb with it. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a crown is the defect this rule exists to prevent.
 
 **A crown said in prose is not a crown.** Telling a session it is king does not stamp anything. Authority lives in three registry fields (`crown_level`, `crown_scope`, `crown_grantor`) that only `fno agents crown` and spawn-time `--crown` write, and `fno agents king init` deliberately never writes them: a session that could stamp its own crown could crown itself. So the handshake is two steps and both are required. The target runs `fno agents register` and prints a handle. An attended shell, or a king whose own crown strictly contains the scope, runs `fno agents crown <handle> --scope <scope>`.
 
@@ -409,7 +409,7 @@ The joiner half of this contract is the joiner posture in [/execute waves](../ex
 
 Before you abdicate, record every ruling that changes what a worker does. One `fno backlog note <node> <text>` call per ruling; for a rule the operator asked for, `fno inbox law set <subject> <decision> --rationale "<why>"`. `fno backlog decide` refuses every agent session, crowned included, so it is not a channel a king can open. Your context is the only place these rulings live, and it is about to end.
 
-Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
+Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. It also writes one `agent_crown_vacated` event to `~/.fno/events.jsonl`; a reader that finds a crown missing should look there before reading the absence as a loss. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
 
 No king outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.

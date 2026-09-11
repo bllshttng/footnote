@@ -55,9 +55,11 @@ Sessions that spin at the review step are usually polling GitHub for review stat
 This is by design. A target session refuses to stop until completion is proven by external truth: the PR exists, CI is green, every bot in `config.review.required_bots` has reviewed with no unaddressed blocking finding, and any budget cap has not tripped. User-initiated cancel is one of the most common ways real runs end, so when you need to stop one, do it explicitly:
 
 ```bash
-touch .fno/.target-cancelled    # or:
+printf 'author: operator\nreason: stopping the run\n' > .fno/.target-cancelled    # or:
 export TARGET_CANCEL=1
 ```
+
+The author and reason land in the run's Interrupted line, so a cancelled run explains itself afterward. A bare `touch .fno/.target-cancelled` also works and reads as unattributed.
 
 Do not try to stop a loop by editing `.fno/target-state.md`. That file is an immutable session manifest; the cancel sentinel is the supported off switch.
 

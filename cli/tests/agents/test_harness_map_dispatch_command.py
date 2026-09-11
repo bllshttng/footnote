@@ -408,3 +408,174 @@ def test_dispatch_command_posture_argument(allow, expected):
 
 def test_dispatch_command_defaults_to_no_merge():
     assert dispatch_command("claude") == "/target --no-merge {id}"
+
+
+# ---------------------------------------------------------------------------
+# x-ebd2: the lifecycle rung. Law d-834b6ff1: difficulty decides at intake
+# (no plan, no status to read); the plan's rung decides at re-dispatch. The
+# stored dispatch_verb is audit input, never truth.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "harness,expected",
+    [
+        ("claude", "/target --no-merge x-abcd"),
+        ("codex", "$fno:target --no-merge x-abcd"),
+        ("opencode", "/fno:target --no-merge x-abcd"),
+    ],
+)
+def test_intake_low_difficulty_planless_resolves_target(harness, expected):
+    out = resolve_dispatch(
+        harness=harness, node_id="x-abcd", difficulty="low", plan_rung="none"
+    )
+    assert out["command"] == expected
+    assert out["verb"] == "/target"
+    assert any("difficulty=low" in d for d in out["decision"])
+
+
+@pytest.mark.parametrize("difficulty", ["medium", "high"])
+def test_intake_planning_difficulties_planless_resolve_blueprint(difficulty):
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", difficulty=difficulty, plan_rung="none"
+    )
+    assert out["command"] == f"/blueprint x-abcd"
+    assert out["verb"] == "/blueprint"
+    assert any(f"difficulty={difficulty}" in d for d in out["decision"])
+
+
+@pytest.mark.parametrize(
+    "harness,expected",
+    [("codex", "$fno:blueprint x-abcd"), ("opencode", "/fno:blueprint x-abcd")],
+)
+def test_derived_blueprint_renders_harness_native(harness, expected):
+    out = resolve_dispatch(
+        harness=harness, node_id="x-abcd", difficulty="medium", plan_rung="none"
+    )
+    assert out["command"] == expected
+
+
+def test_redispatch_design_rung_keeps_blueprint_despite_stored_target():
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        verb="/fno:target",
+        difficulty="low",
+        plan_rung="design",
+    )
+    assert out["command"] == "/blueprint x-abcd"
+    assert any("reconciled" in d for d in out["decision"])
+
+
+@pytest.mark.parametrize("rung", ["ready", "in_progress", "in_review"])
+def test_redispatch_build_rungs_advance_to_target_despite_stored_blueprint(rung):
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", verb="/blueprint", plan_rung=rung
+    )
+    assert out["command"] == "/target --no-merge x-abcd"
+    assert out["verb"] == "/target"
+    assert any(f"plan {rung}" in d for d in out["decision"])
+
+
+@pytest.mark.parametrize("rung", ["unreadable", "done", "superseded"])
+def test_unanswerable_plan_rungs_refuse(rung):
+    with pytest.raises(DispatchResolveError, match=rung):
+        resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung=rung)
+
+
+def test_planless_node_without_difficulty_refuses_naming_the_field():
+    with pytest.raises(DispatchResolveError, match="difficulty"):
+        resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung="none")
+
+
+def test_planless_node_with_invalid_difficulty_refuses():
+    with pytest.raises(DispatchResolveError, match="difficulty"):
+        resolve_dispatch(
+            harness="claude", node_id="x-abcd", difficulty="spicy", plan_rung="none"
+        )
+
+
+def test_bare_resolve_without_node_context_keeps_target_template():
+    out = resolve_dispatch(harness="claude", node_id="x-abcd")
+    assert out["command"] == "/target --no-merge x-abcd"
+    assert out["verb"] is None
+
+
+def test_out_of_family_declared_verb_keeps_declared_precedence():
+    # /think is outside the lifecycle table: it dispatches as declared, even
+    # though a ready plan would otherwise advance to /target.
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        verb="/think",
+        difficulty="high",
+        plan_rung="ready",
+    )
+    assert out["command"] == "/think x-abcd"
+    assert out["verb"] is None
+
+
+def test_explicit_command_bypasses_the_lifecycle_refusal():
+    # A done rung would refuse the lifecycle; reconcile (and any other
+    # explicit-command door) never consults it.
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        command="/target --reconcile /tmp/m.md {id}",
+        plan_rung="done",
+    )
+    assert out["command"] == "/target --reconcile /tmp/m.md x-abcd"
+
+
+def test_stored_blueprint_verb_passes_the_default_allowlist():
+    # dispatch_cfg={} pins the BUILT-IN default allowlist; the ambient config
+    # may override allowed_verbs either way and is not this test's subject.
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", verb="/blueprint", dispatch_cfg={}
+    )
+    assert out["command"] == "/blueprint x-abcd"
+
+
+def test_derived_target_reads_the_auto_merge_grant():
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        difficulty="low",
+        plan_rung="none",
+        dispatch_cfg={"auto_merge": True},
+    )
+    assert out["command"] == "/target x-abcd"
+
+
+def test_derived_blueprint_ignores_the_operator_target_template():
+    # config.dispatch.command is a target-phase contract; a derived blueprint
+    # is a different phase and renders its own verb.
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        difficulty="high",
+        plan_rung="none",
+        dispatch_cfg={"command": "/target --special {id}"},
+    )
+    assert out["command"] == "/blueprint x-abcd"
+
+
+def test_stage_table_resolves_the_derived_verb_profile():
+    # Locked Decision 4: the resolved verb is the profile key, so a medium
+    # planless node reaches agents.profiles.blueprint.provider even though its
+    # stored verb (or the default) says target.
+    import types
+
+    stub = types.SimpleNamespace(
+        agents=types.SimpleNamespace(
+            profiles={
+                "blueprint": types.SimpleNamespace(provider="codex"),
+            }
+        ),
+        dispatch=None,
+    )
+    out = resolve_dispatch(
+        node_id="x-abcd", difficulty="medium", plan_rung="none", settings=stub
+    )
+    assert out["harness"] == "codex"
+    assert out["command"] == "$fno:blueprint x-abcd"

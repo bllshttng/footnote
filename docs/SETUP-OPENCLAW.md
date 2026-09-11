@@ -1,6 +1,6 @@
 # Install footnote under openclaw
 
-Run footnote skills - especially the loop family (target, megawalk, operator) - under openclaw instead of Claude Code.
+Run footnote skills - especially the loop family (target, execute) - under openclaw instead of Claude Code.
 
 ## Prerequisites
 

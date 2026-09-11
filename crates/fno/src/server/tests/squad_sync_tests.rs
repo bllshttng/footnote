@@ -9,6 +9,64 @@
 
 use super::*;
 
+/// (x-78c1) The reload is the prune's server-side arm: it must end in a
+/// layout push so EVERY attached client's catalog re-converges, not just the
+/// caller's receipt. Two clients, one reload, both reliable channels carry a
+/// Layout naming the live squads.
+#[test]
+fn squad_reload_pushes_a_layout_to_every_attached_client() {
+    let _s = StoreScratch::new("squad-sync-reload-push");
+    let mut core = empty_core();
+    core.session.add_squad(
+        7,
+        vec!["/repo".into()],
+        Some("harden".into()),
+        Tab {
+            name: None,
+            id: 5,
+            root: Node::Leaf(1),
+            focus: 1,
+        },
+    );
+    let (c1, mut rx1) = client_with_rx(1);
+    let (c2, mut rx2) = client_with_rx(2);
+    core.clients.push(c1);
+    core.clients.push(c2);
+    let layout_tabs = |rx: &mut mpsc::Receiver<ServerMsg>| -> Option<usize> {
+        let mut tabs = None;
+        while let Ok(ServerMsg::Layout { squads, .. }) = rx.try_recv() {
+            tabs = squads.iter().find(|s| s.id == 7).map(|s| s.tabs.len());
+        }
+        tabs
+    };
+    // The receipt counts squads the server holds members for.
+    core.squad_members
+        .insert(7, vec![stored_member("feed0002", false)]);
+
+    // Clients pushed directly onto the roster emit nothing until a mutation;
+    // drain both so only POST-reload traffic can satisfy the marker.
+    assert!(layout_tabs(&mut rx1).is_none());
+    assert!(layout_tabs(&mut rx2).is_none());
+
+    let (tx, mut rrx) = tokio::sync::oneshot::channel();
+    core.handle_squad_reload(tx);
+    let receipt = match rrx.try_recv() {
+        Ok(ServerMsg::SquadReloaded { squads, .. }) => squads,
+        other => panic!("reload answered with a receipt: {other:?}"),
+    };
+    assert_eq!(receipt, 1);
+    assert_eq!(
+        layout_tabs(&mut rx1),
+        Some(1),
+        "client 1 got a post-reload Layout"
+    );
+    assert_eq!(
+        layout_tabs(&mut rx2),
+        Some(1),
+        "client 2 got a post-reload Layout"
+    );
+}
+
 /// The operator's sequence with the fix in place: the CLI's file pass, the
 /// reload, then one pane event's persist. The reaped member is absent from
 /// BOTH the store and memory - the positive marker.
@@ -174,10 +232,12 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         worker: Some("w1".into()),
         harness: Some("claude".into()),
         harness_session_id: None,
+        pane_id: None,
     };
     let journal = crate::spawn_journal::SpawnJournal {
         receipts: HashMap::new(),
         never_bound: HashMap::new(),
+        reaped: HashMap::new(),
         spawned_names: ["w1".to_string()].into_iter().collect(),
         error: None,
     };

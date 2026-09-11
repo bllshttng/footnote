@@ -31,6 +31,15 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
     _build_backlog_node,
     _session_provenance,
 )
+from fno.graph.node_builder import (
+    DESCRIPTION_HELP,
+    ENCOUNTER_EVIDENCE_HELP,
+    ORIGIN_EVIDENCE_HELP,
+    RELATED_HELP,
+    SOURCE_KIND_HELP,
+    SOURCE_NODE_HELP,
+    TAG_HELP,
+)
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
 
@@ -55,13 +64,15 @@ cli = typer.Typer(
 # Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
 _register_node_builder(cli)
+from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
+
+cli.command("worked", hidden=True)(_cmd_worked)
 
 cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
 # `fno agents mail` (cross-project messaging).
-#
 # `inbox` was a SECOND registration of this same app, so all nine of its
 # subcommands were duplicates and the surface paid for them twice. It is gone;
 # `fno.tombstones` keeps the name reachable as a signpost.
@@ -747,13 +758,6 @@ def cmd_epic_status(
 cli.add_typer(_epic_cli, name="epic", hidden=True)
 
 
-# -- shared node construction --
-
-_NodeFields = dict
-
-
-
-
 def _stamp_ship_on_pr_link(node_id: str) -> None:
     """Stamp the ship lifecycle row when a node is first PR-linked.
 
@@ -1016,6 +1020,7 @@ def _create_node_impl(
     source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
+    origin_evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1142,6 +1147,8 @@ def _create_node_impl(
             tags=resolved_tags,
             source_node=resolved_source_node,
             source_kind=source_kind,
+            origin_channel="idea",
+            origin_evidence=origin_evidence,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1323,47 +1330,23 @@ def cmd_add(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
 ) -> None:
     _create_node_impl(
@@ -1388,6 +1371,7 @@ def cmd_add(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1518,47 +1502,23 @@ def cmd_idea(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
@@ -1769,6 +1729,7 @@ def cmd_idea(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -2110,6 +2071,8 @@ def cmd_decompose(
                     difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    origin_channel="decompose",
+                    origin_evidence=f"parent:{epic_resolved_id}",
                     known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]
@@ -3670,6 +3633,11 @@ def cmd_update(
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
+            # An archived node must not read as absent (the reopen contract).
+            from fno.graph._archive_lookup import refuse_update_if_archived
+
+            if refuse_update_if_archived(task_id):
+                raise typer.Exit(code=1)
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
@@ -3955,7 +3923,6 @@ def cmd_update(
             # inside <owner>", a false completion note on work that never
             # shipped. It also keeps `parent` and `contained_in` from
             # disagreeing, which is what produced that false note.
-            #
             # Deliberately keyed on moving away from THE OWNER, not on any
             # re-parent: a contained node moved between two nodes that both sit
             # under its delivery unit is still contained.
@@ -4202,7 +4169,6 @@ def _starvation_receipts(
             # down a rung), so a node already ON the rung would fall through to
             # `selection_guards`, get None (it is gated on a persisted `ready`),
             # and be dropped by the `continue` - reporting nothing at all.
-            #
             # `idea` is the COMMON case for a linked decompose scaffold, since
             # recomputation persists that rung directly; without this arm a
             # backlog of nothing but undesigned children prints a bare `null`
@@ -4605,12 +4571,10 @@ def cmd_next(
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
                 # and routing alone gave only the first.
-                #
                 # ROUTE the root, or the lock lands in the cwd-default tree
                 # while every reader of a `node:` key resolves the global root
                 # through `claims_root_for`, so the node still reads `free`.
                 # `_read_node_claim` names the same trap from the other side.
-                #
                 # TTL, or the lock is visible and still not honored. Selection
                 # runs in a process that exits as soon as it prints the node,
                 # so a pid-liveness claim is dead on arrival: it reads `stale`,
@@ -4699,9 +4663,6 @@ def cmd_next(
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
 
-# -- undispatched --
-
-
 @cli.command("undispatched", hidden=True)
 def cmd_undispatched(
     project: Optional[str] = typer.Option(None, "--project", "-p"),
@@ -4747,9 +4708,6 @@ def cmd_undispatched(
     typer.echo(json.dumps(receipt, indent=2))
 
 
-# -- ready --
-
-
 @cli.command("ready", hidden=True)
 def cmd_ready(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
@@ -4777,9 +4735,6 @@ def cmd_ready(
         "--mission",
         help="Restrict to nodes whose mission_id matches (same contract as `next`).",
     ),
-    # ponytail: `ready` already always emits JSON; the flag exists only so a
-    # caller passing --json (inbox triage) isn't rejected with Typer exit 2.
-    # Accepted-and-ignored, never a behavior switch.
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
     ),
@@ -6916,14 +6871,12 @@ def cmd_remove(
 
 
 # -- defer / undefer --
-#
 # ``defer`` records a first-class pause on a backlog node via dedicated
 # ``deferred_at`` + ``deferred_reason`` fields. The cascade derives
 # ``status: deferred`` from those fields so the node disappears from the
 # default ``ready`` / ``next`` candidate sets and from triage proposals,
 # but resurfaces with ``--include-deferred``. Reversal is via ``undefer``
 # (idempotent: clearing already-clear state warns but exits 0).
-#
 # Predates the ``completed_at: "deferred:<ts>"`` workaround; ``recompute_statuses``
 # auto-migrates the prefix to the new schema, so callers should never see
 # the old shape after one mutation.
@@ -7028,7 +6981,6 @@ def cmd_defer(
 
 
 # -- queue / unqueue / queued --
-#
 # ``queue`` is the user-facing triage marker for "I'm pulling this off
 # the backlog and intend to work on it next" (e.g. "tomorrow I'm going
 # to queue x, y, z"). Orthogonal to ``status``: a queued node still has
@@ -7036,7 +6988,6 @@ def cmd_defer(
 # kanban renderer reads ``queued_at`` separately and promotes the card
 # into the Now column (between ``claimed`` and the priority-driven
 # promotion rule).
-#
 # Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
 
@@ -8886,68 +8837,7 @@ def _canonical_post_close(
 # -- reconcile (close merged-PR drift) --
 
 
-def _run_advance_epic(
-    epic: str,
-    *,
-    stop: bool,
-    max_dispatch: Optional[int],
-    json_out: bool,
-    verbose: bool,
-    model: Optional[str],
-    provider: Optional[str],
-    continuation: bool = False,
-) -> None:
-    """Run the epic advance and render its receipt ( K1).
-
-    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
-    merge-advance path (a dispatch decision is never an error), an operator naming
-    a bad node to --epic wants a clear failure. Everything else exits 0.
-
-    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
-    inactive mission).
-    """
-    from fno.backlog.advance import advance_epic
-
-    try:
-        result = advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
-    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
-        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
-        raise typer.Exit(code=0)
-
-    if json_out:
-        typer.echo(json.dumps(result.receipt(), indent=2))
-    else:
-        if result.error:
-            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
-        elif result.deactivated:
-            reason = "complete" if result.all_done else "stopped"
-            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
-        else:
-            n = len(result.dispatched)
-            skips = [r for r in result.child_results if r.decision == "skipped"]
-            fails = [r for r in result.child_results if r.decision == "failed"]
-            typer.echo(
-                f"epic {result.epic_id}: dispatched {n}"
-                + (f", skipped {len(skips)}" if skips else "")
-                + (f", failed {len(fails)}" if fails else "")
-            )
-
-    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
-    # loud receipt, not a verb error.
-    if result.error in ("no-such-node", "not-a-container"):
-        raise typer.Exit(code=1)
-
-
 # -- reopen --
-#
 # The inverse of `done`, and a deliberate inversion of its gate: `done` refuses
 # when no referenced PR is merged, `reopen` refuses when one IS. Both gates ask
 # the same question of the same evidence and disagree only about which answer
@@ -8956,38 +8846,11 @@ def _run_advance_epic(
 
 
 def _archived_entry(node_id: str) -> Optional[dict]:
-    """The node's row in graph-archive.json, or None. Read-only, never raises.
+    """The archive lookup, kept as a name for reopen's call sites; the
+    question owns the module now (fno.graph._archive_lookup)."""
+    from fno.graph._archive_lookup import archived_entry
 
-    Reopen needs this to tell "archived" apart from "absent". Without it an
-    archived node reports "not found", which is the same message a typo gets,
-    while the node sits readable in the sibling file - an absence with two
-    explanations and no way to distinguish them.
-    """
-    from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
-
-    try:
-        # The archive is default-backend storage: never consulted behind an
-        # external selection (the caller's refusal already fired; this guard
-        # keeps the helper honest for any future caller).
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
-            return None
-        # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
-        # already route through it, and a helper that resolves the archive its
-        # own way is a second path that drifts on the first config change.
-        path = _archive_path()
-        if not path.exists():
-            return None
-        # `_find_node`, not an exact compare: it is what resolved the id against
-        # the WORKING graph a line earlier, and a stricter match here recreates
-        # the very ambiguity this helper exists to remove. An exact compare made
-        # `reopen ab-9728` report "not found" for an archived ``,
-        # which is the same message a typo gets.
-        return _find_node(read_graph(path), node_id)
-    except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
-        return None
+    return archived_entry(node_id)
 
 
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
@@ -9110,7 +8973,6 @@ def cmd_reopen(
         return
 
     # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
-    #
     # Through `resolve_merge_evidence`, the SAME resolver `cmd_done` uses, and
     # over ALL refs rather than the primary. That is what makes this the same
     # gate inverted rather than a similar-looking one: a node can close on a
@@ -9385,22 +9247,44 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    from contextlib import nullcontext
+
+    from fno.backlog.advance import run_advance_epic
+    from fno.backlog.single_flight import advance_flight_scope
+
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        _run_advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
+        # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
+        # both spellings of an epic are one scope. --stop is a control action
+        # and never queues behind its own drain.
+        canonical_epic = epic
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _epic_node = _find_node(read_graph(_graph_path()), epic)
+            if _epic_node and _epic_node.get("id"):
+                canonical_epic = _epic_node["id"]
+        except Exception:  # noqa: BLE001 - an unreadable graph keys on the raw arg
+            pass
+        scope_cm = nullcontext(True) if stop else advance_flight_scope(canonical_epic, json_out=json_out)
+        with scope_cm as ok:
+            if not ok:
+                return
+            run_advance_epic(
+                epic,
+                stop=stop,
+                max_dispatch=max_dispatch,
+                json_out=json_out,
+                verbose=verbose,
+                model=model,
+                provider=provider,
+                continuation=continuation,
+            )
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
@@ -9424,40 +9308,46 @@ def cmd_advance(
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
 
-    try:
-        result = _advance(
-            closed_node_id=closed,
-            project=project,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
-        # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
-        # Only meaningful with --closed (an edge source); the project-scoped
-        # next selection above never reaches a foreign dependent. Shares the
-        # dispatch:<id> dedup with reconcile's call so a node seen by both the
-        # reconcile sweep and this explicit verb dispatches at most once.
-        if closed:
-            _advance_deps(
+    # One in flight for the board advance (x-ef2c): the merge event, a groom
+    # leg and a manual run all fire this verb, and nothing used to stop two
+    # of them from running at once.
+    with advance_flight_scope(None, json_out=json_out) as ok:
+        if not ok:
+            return
+        try:
+            result = _advance(
                 closed_node_id=closed,
-                closed_project=closed_project,
+                project=project,
                 verbose=verbose,
                 model=model,
                 provider=provider,
             )
-            # G4: route the closed node's contract dependents to a reconcile pass
-            # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
-            # advance paths so a node seen by all three dispatches at most once.
-            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
+            # Only meaningful with --closed (an edge source); the project-scoped
+            # next selection above never reaches a foreign dependent. Shares the
+            # dispatch:<id> dedup with reconcile's call so a node seen by both the
+            # reconcile sweep and this explicit verb dispatches at most once.
+            if closed:
+                _advance_deps(
+                    closed_node_id=closed,
+                    closed_project=closed_project,
+                    verbose=verbose,
+                    model=model,
+                    provider=provider,
+                )
+                # G4: route the closed node's contract dependents to a reconcile pass
+                # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
+                # advance paths so a node seen by all three dispatches at most once.
+                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
-    except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
-        # advance() is designed non-fatal (every path emits + returns), but the
-        # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
-        # decision is not an error to whoever invoked the verb. Report on stderr
-        # and exit 0.
-        typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
-        return
+                dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
+        except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
+            # advance() is designed non-fatal (every path emits + returns), but the
+            # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
+            # decision is not an error to whoever invoked the verb. Report on stderr
+            # and exit 0.
+            typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
+            return
     if json_out:
         typer.echo(
             json.dumps(
@@ -9598,6 +9488,31 @@ def cmd_reconcile(
     to it (no archiving). This fires on every throttled auto-reconcile,
     including the SessionStart hook - not just a manual invocation.
     """
+    from fno.backlog.single_flight import reconcile_gate
+
+    # The mutual-exclusion refusal, the dry-run bypass, and the one-in-flight
+    # gate (x-ef2c) all live in single_flight.reconcile_gate.
+    reconcile_gate(
+        dry_run=dry_run,
+        node=node,
+        json_out=json_out,
+        pr_number=pr_number,
+        once=lambda: _reconcile_once(
+            dry_run=dry_run, node=node, json_out=json_out,
+            pr_number=pr_number, repo=repo,
+        ),
+    )
+
+
+def _reconcile_once(
+    dry_run: bool,
+    node: Optional[str],
+    json_out: bool,
+    pr_number: Optional[int],
+    repo: Optional[str],
+) -> None:
+    """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
+    _refuse_tracker_owned_on_external_backend("reconcile")
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9613,22 +9528,6 @@ def cmd_reconcile(
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
-
-    # --node + --pr-number together is refused rather than silently
-    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
-    # PR's trailer claims, unconditional on --node, but the scan/close scope
-    # would then collapse to the single --node id - leaving newly-bound
-    # sibling claims stamped with a live PR ref but never closed until some
-    # later, unrelated sweep happens to revisit them (round-6/7 review,
-    # flagged twice with no caller ever exercising this combination). Loud
-    # refusal beats a latent gap a future caller could silently trip.
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
@@ -9791,7 +9690,6 @@ def cmd_reconcile(
             # fno do pr merge, the bare sweep) only ever reach this with an
             # already-merged PR; this guards a direct manual
             # `--pr-number` invocation against the same premature bind.
-            #
             # Only worth refusing (and reporting) when the body actually
             # names a trailer: a state-read blip on a PR with NO trailer
             # at all has nothing to bind either way, and the node this
@@ -11227,9 +11125,7 @@ def cmd_maintain(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
-            "backfill url-less pr_url). "
-            "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
+            "Apply the deterministic legs; the judgment legs stay "
             "proposal-only regardless of this flag."
         ),
     ),
@@ -11253,28 +11149,17 @@ def cmd_maintain(
         False,
         "--suspect-reverts",
         help=(
-            "Read-only retro sweep: print drained nodes that carry evidence of "
-            "a human curation decision, then exit. Runs no other leg, mutates "
-            "nothing, and emits no undefer command - the operator rules on the "
-            "list themselves."
+            "Read-only retro sweep: print drained nodes carrying evidence of "
+            "a human curation decision, then exit; mutates nothing."
         ),
     ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
-    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
-    carrying a ``pr_number`` with no url. Three are
-    judgment calls and only ever PROPOSE (never mutate, regardless of
-    ``--apply``): surface near-duplicate idea titles, propose a reversible
-    ``defer`` for stale ideas, and report a Now column over its WIP cap. The
-    last leg appends a summary to health-history so ``triage trend`` shows the
-    board trending cleaner.
-
-    Loop form: ``/loop 1d fno backlog maintain --apply``.
-
-    Best-effort: a malformed row is skipped, a single failed apply does not
-    abort the rest, and an empty graph is a clean no-op.
+    Deterministic legs apply under ``--apply``; the judgment legs (dedup,
+    drain-stale, cap-Now) only ever propose. Full leg list + loop form:
+    docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
+    apply does not abort the rest; an empty graph is a clean no-op.
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph.statuses import recompute_statuses
@@ -11378,6 +11263,10 @@ def cmd_maintain(
         defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
         defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
+
+    ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
+    if ab_warn:
+        typer.echo(f"warning: {ab_warn}", err=True)
 
     # --- apply (deterministic legs only) ---
     applied_rescope: list[str] = []
@@ -11785,6 +11674,8 @@ def cmd_maintain(
         typer.echo(_tl)
     for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
         typer.echo(_fl)
+    if ab_lines:
+        typer.echo("\n".join(ab_lines))
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
@@ -11978,35 +11869,6 @@ cli.command("rank")(_cmd_rank)
 
 # -- archive --
 
-_ARCHIVE_SKIP_REASONS = (
-    "referenced-by-open-node",
-    "related-peer-not-archived",
-    "too-recent",
-    "no-parseable-timestamp",
-)
-
-
-def _archive_bucket_counts(skipped: list) -> dict[str, int]:
-    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
-
-    Zero-filled so the receipt always names all four buckets (): a run
-    that holds back 0 for a reason reads as "checked, none held", not as an
-    absent line a reader has to interpret as either "zero" or "not measured".
-    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
-    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
-    (and in groom's regex sum over these lines) instead of vanishing.
-    """
-    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
-    for s in skipped:
-        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
-    return held
-
-
-def _receipt_reason_order(held: dict[str, int]) -> list[str]:
-    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
-    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
-
-
 @cli.command(
     "archive",
     hidden=True,
@@ -12038,9 +11900,13 @@ def cmd_archive(
         GraphCorruptError,
     )
     from fno.graph.archive import (
+        _archive_bucket_counts,
+        _last_sweep_line,
+        _receipt_reason_order,
         merge_into_archive,
         partition_for_archive,
         release_soft_edges,
+        retire_stale_postmortems,
         stamp_archived_at,
     )
 
@@ -12067,6 +11933,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
+        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -12094,11 +11961,13 @@ def cmd_archive(
             pass
 
     if not apply:
-        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        entries, retired = retire_stale_postmortems(read_graph(_graph_path()), now)
+        to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
+        typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
         # Every run emits, dry-run included: a leg that went silent must stay
@@ -12107,9 +11976,11 @@ def cmd_archive(
         _emit_swept_event(len(to_archive), _archive_bucket_counts(skipped), mode="dry-run")
         return
 
-    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0}
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0, "retired": 0}
 
     def mutator(entries):
+        entries, retired = retire_stale_postmortems(entries, now)
+        receipt["retired"] = len(retired)
         to_archive, remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
@@ -12143,6 +12014,10 @@ def cmd_archive(
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+    if receipt["retired"]:
+        typer.echo(
+            f"Retired {receipt['retired']} stale postmortem receipt(s) (closed by age rule)"
+        )
     _echo_receipt(receipt["moved"], receipt["held"], receipt["stripped"])
     _emit_swept_event(receipt["moved"], receipt["held"], receipt["stripped"])
 
@@ -12401,7 +12276,6 @@ def cmd_unarchive(
         raise typer.Exit(code=1)
 
     # TWO locked passes, and the split is the whole safety argument.
-    #
     # `archive` writes the archive inside its mutator because archive-FIRST is
     # safe for it: a crash leaves a duplicate. Inverting the verb inverts the
     # safe order, and the mutator cannot express it - `locked_mutate_graph`
@@ -12410,7 +12284,6 @@ def cmd_unarchive(
     # and a crash between them loses the node from both files. That is the one
     # outcome neither verb may produce, and doing it there quietly guaranteed
     # the ordering the comment claimed to prevent.
-    #
     # So: pass 1 adds the row to the working graph and persists it. Pass 2 takes
     # the lock again, re-reads the archive fresh (never a list read before the
     # first write, which a concurrent `archive --apply` could have grown), and
@@ -13217,12 +13090,13 @@ def cmd_supersede(
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets the compatibility edge plus a pending structured evidence record on
-    the old node. The old row stays active until a merged PR covers every
-    declared surface. Refuses if ``replaces`` still has live children unless
-    ``--force`` is given; under ``--force`` the live children's ``parent`` is
-    cleared so they stay dispatchable instead of stranding under a dead unit.
-    Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a structured evidence record on the old
+    node. The edge terminals the old row's status immediately (x-e8f3); the
+    record stays unverified until a merged PR covers every declared surface,
+    which reconcile reports as receipts. Refuses if ``replaces`` still has
+    live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -13244,10 +13118,11 @@ def cmd_supersede(
     if not cleaned_cause:
         typer.echo(
             "Error: --cause is required and cannot be blank.\n"
-            "A supersede now carries the evidence that closes it: what the old\n"
+            "A supersede carries the evidence trail: what the old\n"
             "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node stays open until a merged PR covers every\n"
-            "declared surface.\n"
+            "replaced it. The old node's status reads superseded from the edge\n"
+            "alone; a merged PR covering every declared surface later stamps the\n"
+            "evidence verified_at.\n"
             f"  {_SUPERSEDE_EXAMPLE}",
             err=True,
         )
@@ -13547,7 +13422,6 @@ def _exec_liveness(state: str) -> str:
 
 
 # -- task 4.2: the external-backend verb classification -----------------------
-#
 # Every registered backlog verb is classified exactly ONCE, here, against the
 # LIVE registry (never a frozen count): tracker-owned verbs wrap their
 # registered callback with the shared external refusal BEFORE any graph
@@ -13643,6 +13517,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "find",
         "next",
         "ready",
+        "worked",
         "queued",
         "provenance",
         "roadmap",

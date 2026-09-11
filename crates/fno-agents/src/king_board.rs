@@ -44,6 +44,8 @@ mod prs;
 mod queues;
 mod scope;
 
+pub(crate) use queues::not_read_status;
+
 use crate::graph_store;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -76,6 +78,7 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 /// The unplanned queue's ready source answers in-process now; the label
 /// names the function, the way `agents claim list` labels its source.
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
+pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
@@ -85,6 +88,16 @@ pub(crate) const SRC_NEEDS: &str = "fno agents needs --json";
 pub(crate) const SRC_DISTRESS: &str =
     "~/.fno/events.jsonl (blocked rows) + bus/messages.jsonl + fno agents distress-verdicts";
 
+fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
+    read.payload
+        .as_ref()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
 // ---------------------------------------------------------------------------
@@ -93,6 +106,8 @@ pub(crate) const SRC_DISTRESS: &str =
 pub(crate) struct SourceRead {
     pub(crate) payload: Option<Value>,
     pub(crate) error: Option<String>,
+    /// True when the read died at its budget slice, not at a source failure.
+    pub(crate) over_budget: bool,
 }
 
 impl SourceRead {
@@ -100,12 +115,30 @@ impl SourceRead {
         SourceRead {
             payload: Some(payload),
             error: None,
+            over_budget: false,
         }
     }
     pub(crate) fn err(msg: impl Into<String>) -> Self {
         SourceRead {
             payload: None,
             error: Some(msg.into()),
+            over_budget: false,
+        }
+    }
+    pub(crate) fn over_budget(msg: impl Into<String>) -> Self {
+        SourceRead {
+            payload: None,
+            error: Some(msg.into()),
+            over_budget: true,
+        }
+    }
+    /// Re-wrap a failed read under a new message, keeping its verdict: a
+    /// composition site must not flatten a budget kill into a plain failure.
+    pub(crate) fn rewrap(&self, msg: impl Into<String>) -> Self {
+        SourceRead {
+            payload: None,
+            error: Some(msg.into()),
+            over_budget: self.over_budget,
         }
     }
     pub(crate) fn is_ok(&self) -> bool {
@@ -291,6 +324,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_prs = budget.start(SRC_PRS);
     let s_stalled = budget.start("stalled_holder lookups");
     let s_ready = budget.start(SRC_READY);
+    let s_worked = budget.start(SRC_WORKED);
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
     let s_blocked_child = budget.start(SRC_DISTRESS);
@@ -380,12 +414,29 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         pr_nodes,
         pr_warnings,
         prs_truncated,
+        worked,
         ready,
         outstanding,
         needs,
         holder_activity,
         truth_panicked,
     ) = std::thread::scope(|s| {
+        // The worked read is a full fno-py cold start plus fleet roster read,
+        // so it rides the concurrent section too: its join waits below, after
+        // the other subprocess threads are already running, and only the
+        // ready thread (its one consumer) waits for the result.
+        let t_worked = s_worked.map(|slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let mut cmd = fno_py_cmd();
+                cmd.extend([
+                    "backlog".to_string(),
+                    "worked".to_string(),
+                    "--json".to_string(),
+                ]);
+                run_json(cmd, &cwd, slice)
+            })
+        });
         let t_prs = s_prs.map(|slice| {
             let cwd = cwd_for_threads.clone();
             s.spawn(move || {
@@ -394,9 +445,18 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 (prs, pr_nodes, w, truncated)
             })
         });
+        let worked = match t_worked {
+            None => SourceRead::err(budget.spent_error()),
+            Some(h) => h
+                .join()
+                .unwrap_or(SourceRead::err("worked: reader panicked")),
+        };
+        mark(&mut sources, "worked", &worked, false);
+        let worked_ids = worked_node_ids(&worked);
         let t_ready = s_ready.map(|_slice| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
+            let worked_ids = worked_ids.clone();
             s.spawn(move || {
                 // In-process now: the admission decision lives in this
                 // binary (backlog_ready::select) and reads the graph the
@@ -422,6 +482,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         claimed.insert(id.to_string());
                     }
                 }
+                claimed.extend(worked_ids);
                 let opts = crate::backlog_ready::ReadyOpts {
                     all: true,
                     repo_root: crate::paths::canonical_repo_root(&cwd)
@@ -562,6 +623,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             pr_nodes,
             pr_warnings,
             prs_truncated,
+            worked,
             ready,
             outstanding,
             needs,
@@ -782,6 +844,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let inputs = BoardInputs {
         ready,
         claims,
+        worked,
         claimed_nodes,
         holder_activity,
         prs,
@@ -832,6 +895,7 @@ mod tests {
         BoardInputs {
             ready: ok_read(ready),
             claims: ok_read(claims),
+            worked: ok_read(Value::Array(Vec::new())),
             claimed_nodes: ok_read(claimed_nodes),
             holder_activity: HashMap::new(),
             prs: ok_read(Value::Array(Vec::new())),
@@ -847,6 +911,40 @@ mod tests {
             scope_ids: None,
             crown_scope: None,
         }
+    }
+
+    #[test]
+    fn worked_source_extracts_node_ids() {
+        let read = SourceRead::ok(json!([{
+            "id": "x-live",
+            "workers": ["bp-worker"],
+        }]));
+
+        assert_eq!(
+            worked_node_ids(&read),
+            HashSet::from(["x-live".to_string()])
+        );
+    }
+
+    #[test]
+    fn unplanned_queue_is_unreadable_when_worked_source_fails() {
+        let mut inputs = inputs_with(
+            json!([{"id": "x-live", "priority": "p0", "plan_path": null}]),
+            json!([]),
+            json!([]),
+        );
+        inputs.worked = SourceRead::err("roster timeout");
+
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "unplanned")
+            .unwrap();
+        assert_eq!(queue["status"], "unreadable");
+        assert!(queue["rows"].as_array().unwrap().is_empty());
+        assert_eq!(queue["error"], "roster timeout");
     }
 
     #[test]
@@ -871,6 +969,28 @@ mod tests {
             .unwrap()
             .to_lowercase()
             .contains("blueprint"));
+    }
+
+    #[test]
+    fn a_budget_kill_and_a_failed_exit_tally_apart_but_both_hold_exit_code_1() {
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        // entries: None reads as an unreadable queue of its own; an empty
+        // list keeps the fixture's failure count at exactly the two legs.
+        inputs.entries = Some(Vec::new());
+        inputs.undispatched = SourceRead::over_budget(
+            "fno backlog undispatched --json: killed at its 28.5s slice of the board budget; the source did not fail",
+        );
+        inputs.prs = SourceRead::err("exit 1: gh pr list failed");
+        let board = build_board(&inputs);
+        assert_eq!(board["over_budget"], 1);
+        assert_eq!(board["unreadable"], 1);
+        assert_eq!(board["exit_code"], 1);
+        let queues = board["queues"].as_array().unwrap();
+        let undispatched = queues.iter().find(|q| q["name"] == "undispatched").unwrap();
+        assert_eq!(undispatched["status"], "over_budget");
+        let prs = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
+        assert_eq!(prs["status"], "unreadable");
+        assert_eq!(prs["count"], Value::Null);
     }
 
     #[test]

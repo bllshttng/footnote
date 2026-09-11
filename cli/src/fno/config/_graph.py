@@ -12,3 +12,4 @@ class GraphBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     commit_mode: Literal["rows", "whole"] = "rows"
+    read_source: Literal["json", "sqlite"] = "json"

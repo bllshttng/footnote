@@ -40,3 +40,21 @@ def test_an_unresolved_roster_is_never_cached(monkeypatch, tmp_path):
         assert harness_map._shipped_verbs.cache_info().hits == hits + 1
     finally:
         harness_map.footnote_verbs.cache_clear()
+
+
+def test_fno_me_ships_as_a_skill():
+    """The roster join must live under skills/, the only surface every harness ships.
+
+    Codex declares `skills/` only (.codex-plugin/plugin.json) and the agy bundle
+    copies `skills/` and `agents/` (scripts/install/agy-plugin.sh), so a file
+    under commands/ never reaches those harnesses and their agents cannot
+    invoke it. The verb matrix is generated from skills/*/SKILL.md, so the row
+    proves the projection sees the skill too."""
+    from fno.agents import harness_map
+
+    repo_root = Path(harness_map.__file__).resolve().parents[4]
+    assert (repo_root / "skills/fno-me/SKILL.md").is_file(), (
+        "skills/fno-me/SKILL.md missing: fno-me must ship as a skill, not a command"
+    )
+    matrix = (repo_root / "docs/harnesses/verb-matrix.md").read_text(encoding="utf-8")
+    assert "| fno-me |" in matrix, "verb-matrix.md has no fno-me row: regenerate it"

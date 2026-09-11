@@ -1768,14 +1768,16 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
 
 
 def _control_plane_arms_report() -> dict[str, Any]:
-    """Stale control-plane arms via the one Rust reader (shells
-    ``fno-agents status --json``): unknown on a failed read, never green.
+    """Red control-plane arms (stale or failing) via the one Rust reader
+    (shells ``fno-agents status --json``): unknown on a failed read, never
+    green. Rows carry the reader's rendered ``line``; rows from an older
+    binary without one fall back to the sentence render.
     """
     try:
         from fno import rust_binary
         binary = rust_binary.resolve_binary()
         if binary is None:
-            return {"stale": [], "unknown_reason": "fno-agents binary not found"}
+            return {"red": [], "unknown_reason": "fno-agents binary not found"}
         result = subprocess.run(
             [str(binary), "status", "--json"],
             capture_output=True, text=True, timeout=10, check=False,
@@ -1783,11 +1785,12 @@ def _control_plane_arms_report() -> dict[str, Any]:
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
         arms = payload.get("arms")
         if not isinstance(arms, list):
-            return {"stale": [], "unknown_reason": "status payload carries no arms"}
-        return {"stale": [a for a in arms if isinstance(a, dict) and a.get("stale")],
+            return {"red": [], "unknown_reason": "status payload carries no arms"}
+        return {"red": [a for a in arms if isinstance(a, dict)
+                        and (a.get("stale") or a.get("failing"))],
                 "unknown_reason": None}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return {"stale": [], "unknown_reason": f"read failed: {exc}"}
+        return {"red": [], "unknown_reason": f"read failed: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -2347,16 +2350,21 @@ def _emit_human(
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
-    # Control-plane arms (x-1b88), advisory: name every stale arm; an
-    # unreadable readout never reads as green.
+    # Control-plane arms (x-1b88), advisory: name every red (stale or
+    # failing) arm with the reader's own line; an unreadable readout never
+    # reads as green.
     cpa = result.get("control_plane_arms") or {}
     if cpa.get("unknown_reason"):
         out(f"fno doctor: control-plane arms readout unknown ({cpa['unknown_reason']}); "
             "staleness is unmeasured.")
-    for arm in cpa.get("stale") or []:
-        out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
-            f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
-            f"skip: {arm.get('skip_reason') or 'none'})")
+    for arm in cpa.get("red") or []:
+        line = arm.get("line")
+        if line:
+            out(f"fno doctor: control-plane arm {line}")
+        else:
+            out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
+                f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
+                f"skip: {arm.get('skip_reason') or 'none'})")
 
     # The durable-grant observer coupling: a standing dispatch grant
     # (auto_merge.enabled true, grant=dispatch) implies a live watcher -
@@ -2521,8 +2529,9 @@ def _emit_human(
             "`fno backlog archive-dedupe-ids --apply` to remint the archived side."
         )
 
-    # Canonical-sync freshness. Advisory like grooming: the alarm
-    # exists because process-liveness reads green through this exact failure.
+    export = result.get("graph_export") or {}
+    if export.get("stale"):
+        out(f"fno doctor: graph export STALE - SQLite {export.get('version')} is newer than graph.json {export.get('exported_version') or 'never exported'}; run `fno doctor graph export --now`.")
     pms = result.get("post_merge_sync") or {}
     if pms.get("stale"):
         out(
@@ -4118,9 +4127,8 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # changes status/exit.
     result["pre_push_hook"] = _pre_push_hook_report(src)
 
-    # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
-    # LaunchAgent DOES change the exit code - an installed-but-dead agent is
-    # exactly the silence this check exists to break.
+    from fno.doctor_graph import export_health
+    result["graph_export"] = export_health()
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()

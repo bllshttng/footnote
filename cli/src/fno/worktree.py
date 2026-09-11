@@ -430,51 +430,6 @@ class WorktreeManager:
 
         return dest
 
-    def list_active(self) -> list[Worktree]:
-        """Return all worktrees currently registered under base_dir.
-
-        Parses ``git worktree list --porcelain`` to get live git registrations,
-        then filters to paths under base_dir. Skips the main worktree.
-
-        Returns
-        -------
-        list[Worktree]
-            Worktrees with node_id inferred from the directory name.
-        """
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=self.repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return []
-
-        worktrees: list[Worktree] = []
-        current: dict[str, str] = {}
-
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                if current:
-                    wt = self._parse_porcelain_entry(current)
-                    if wt is not None:
-                        worktrees.append(wt)
-                    current = {}
-            elif " " in line:
-                key, _, value = line.partition(" ")
-                current[key] = value
-            else:
-                current[line] = ""
-
-        # Handle last entry if file doesn't end with blank line
-        if current:
-            wt = self._parse_porcelain_entry(current)
-            if wt is not None:
-                worktrees.append(wt)
-
-        return worktrees
-
     def list_orphaned(self, graph: dict) -> list[Worktree]:
         """Return worktrees with no live graph entry or whose node is done.
 
@@ -552,37 +507,6 @@ class WorktreeManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _parse_porcelain_entry(self, entry: dict[str, str]) -> Optional[Worktree]:
-        """Convert a parsed porcelain block into a Worktree if it's under base_dir."""
-        worktree_path_str = entry.get("worktree", "")
-        if not worktree_path_str:
-            return None
-
-        wt_path = Path(worktree_path_str)
-
-        # Skip the main worktree (the repo root itself)
-        if wt_path == self.repo_root:
-            return None
-
-        # Only include paths under our base_dir
-        try:
-            wt_path.relative_to(self.base_dir)
-        except ValueError:
-            return None
-
-        node_id = wt_path.name
-        branch = entry.get("branch", "").replace("refs/heads/", "")
-        if not branch:
-            branch = f"feature/{node_id[-8:]}"
-
-        return Worktree(
-            node_id=node_id,
-            path=wt_path,
-            branch=branch,
-            created_at="",
-            base_ref="main",
-        )
 
     def _git_status_quiet_since_last_poll(self, worktree: Worktree) -> bool:
         """Return True if the worktree's git status is unchanged since last poll.

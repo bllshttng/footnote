@@ -88,6 +88,7 @@ fn proto_v4_control_replies_roundtrip() {
                 tab_ordinal: Some(1),
                 fno_id: None,
                 orphaned_worker: false,
+                release: None,
                 harness_session_id: None,
                 predecessor_session_ids: Vec::new(),
                 forked_from_session_id: None,

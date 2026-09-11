@@ -365,26 +365,34 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
     }
 }
 
-/// Seconds since the newest of the store's matches was written. Newest, not
-/// first: a session can leave stubs in other project dirs, and a stub whose
-/// creation post-dates the real transcript's last turn must not read as
-/// fresher than it is. `None` when no match resolves: an unresolved
-/// transcript is never a quiet one.
-pub fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
-    let newest = store_hits?.iter().max_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    })?;
-    let mtime = std::fs::metadata(newest)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)?;
-    Some(now.saturating_sub(mtime))
+/// The production transcript-age seam (x-54cf): the NEWEST TIMESTAMPED
+/// transcript entry, read through the shared truth probe (one batched,
+/// single-flighted child per sweep) - not a file stat, whose untimestamped
+/// trailing records keep a dead file reading fresh (measured median +20 min,
+/// max +240 h). A handle the probe cannot resolve is absent from the map, and
+/// the sweep reads absence as `None`: an unresolved transcript is never a
+/// quiet one.
+pub(crate) fn probe_entry_ages(
+    entries: &[&crate::state::RegistryEntry],
+) -> std::collections::HashMap<String, Option<i64>> {
+    let handles: Vec<String> = entries.iter().map(|e| row_handle(e)).collect();
+    if handles.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    crate::truth_probe::family1_truth_probe_many(&handles)
+        .into_iter()
+        .map(|(handle, probe)| (handle, probe.last_activity_age_s.map(|a| a as i64)))
+        .collect()
+}
+
+/// Per-row arm of the same seam, for the reapers whose loop shape predates the
+/// batch: one single-flighted probe answers this row only. `pub` because the
+/// client binary's pair leg rides it too.
+pub fn probe_row_age(entry: &crate::state::RegistryEntry) -> Option<i64> {
+    probe_entry_ages(&[entry])
+        .get(&row_handle(entry))
+        .copied()
+        .flatten()
 }
 
 // --- the sweep shells -------------------------------------------------------
@@ -455,6 +463,7 @@ pub fn gc_sweep(
         retain_days,
         &gc_sweep::read_graph_entries,
         &|e| store.borrow_mut().matches(e),
+        &probe_entry_ages,
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &crate::claude_roster::read_all_agents,
@@ -491,6 +500,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         0, // dry-run never expires: a rehearsal that pruned would not be one
         &read,
         &|e| store.borrow_mut().matches(e),
+        &probe_entry_ages,
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
         &crate::claude_roster::read_all_agents,
@@ -799,6 +809,52 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
 /// check, one-in-flight swap, stamp, off-loop body. The emitted `retire`
 /// tick row carries the same `interval` the guard compared, so the arms
 /// readout and the loop read one number.
+/// The argv `fno mux workspace prune` is built from: one seam so the daemon
+/// (default flags) and the manual reap verb (`--include-used-shells`) cannot
+/// drift. Default flags already close an orphaned worker's tab; closing a
+/// human's spent shells stays opt-in.
+pub fn mux_prune_args(dry_run: bool, include_used_shells: bool) -> Vec<&'static str> {
+    let mut args = vec!["mux", "workspace", "prune", "--tabs-only"];
+    if include_used_shells {
+        args.push("--include-used-shells");
+    }
+    args.push("--json");
+    if dry_run {
+        args.push("--dry-run");
+    }
+    args
+}
+
+/// (x-91eb, moved from the manual verb) Shell out to the existing prune verb
+/// - one sweep body, reused, not reimplemented. Fail-closed: a spawn
+/// failure, a non-zero exit, or an unparsable receipt is `Unread`, never a
+/// measured zero.
+pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_render::MuxSweep {
+    let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+    cmd.args(mux_prune_args(dry_run, include_used_shells));
+    match cmd.output() {
+        Ok(out) => {
+            let code = out.status.code();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match (code, crate::reap_render::parse_prune_receipt(&stdout)) {
+                (Some(0), Some(receipt)) => crate::reap_render::MuxSweep::Ran { receipt },
+                (code, _) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stderr_first = stderr.lines().next().unwrap_or("").to_string();
+                    crate::reap_render::MuxSweep::Unread {
+                        exit_code: code,
+                        stderr_first,
+                    }
+                }
+            }
+        }
+        Err(e) => crate::reap_render::MuxSweep::Unread {
+            exit_code: None,
+            stderr_first: e.to_string(),
+        },
+    }
+}
+
 pub fn maybe_retirement_sweep(
     last_sweep: &mut Instant,
     in_flight: &Arc<AtomicBool>,
@@ -807,6 +863,7 @@ pub fn maybe_retirement_sweep(
     grace_cwd: PathBuf,
     events: PathBuf,
     interval: Duration,
+    tab_sweep: fn() -> crate::reap_render::MuxSweep,
 ) {
     if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -822,6 +879,30 @@ pub fn maybe_retirement_sweep(
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         unowned_sweeps(&home, &emitter, &grace_cwd);
+        // The mux surface is one of the stores a reap must clear: the
+        // default-flag prune closes an orphaned worker's tab on the retire
+        // cadence (Locked Decision 6), so the operator never runs the manual
+        // reap verb just to clear tabs.
+        let mux = tab_sweep();
+        let detail = match &mux {
+            crate::reap_render::MuxSweep::Ran { receipt } => {
+                format!("mux=ran closed={}", receipt.closed)
+            }
+            other => format!("mux={}", other.state()),
+        };
+        // A zero-acted tick says which zero it was: a sweep that could not
+        // read its registry, nothing classified, or work judged and held.
+        let skip_reason = if summary.retired.is_empty() {
+            Some(if summary.registry_unreadable {
+                "registry_unreadable"
+            } else if summary.kept_total() == 0 {
+                "no_rows"
+            } else {
+                "held"
+            })
+        } else {
+            None
+        };
         // Hand back the NEXT window's interval, resolved off-loop: the tick
         // that reads it never touches config.
         let next = crate::agents_config::retire_interval_s(&grace_cwd, grace_secs.max(0) as u64);
@@ -837,8 +918,8 @@ pub fn maybe_retirement_sweep(
             "retire",
             "daemon",
             summary.retired.len() as u64,
-            None,
-            None,
+            skip_reason,
+            Some(&detail),
             interval.as_secs(),
         );
     });
@@ -923,6 +1004,7 @@ mod tests {
                 grace_cwd.clone(),
                 home.events_jsonl(),
                 Duration::from_secs(300),
+                || crate::reap_render::MuxSweep::Skipped,
             );
             // A second tick inside the window is refused by the elapsed
             // check: no second run can start until the window closes.
@@ -934,6 +1016,7 @@ mod tests {
                 grace_cwd,
                 home.events_jsonl(),
                 Duration::from_secs(300),
+                || crate::reap_render::MuxSweep::Skipped,
             );
             let rows = wait_for_retire_row(&home.events_jsonl());
             assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
@@ -981,6 +1064,7 @@ mod tests {
                 grace_cwd.clone(),
                 home.events_jsonl(),
                 interval,
+                || crate::reap_render::MuxSweep::Skipped,
             );
             wait_for_retire_row(&home.events_jsonl());
             let row = std::fs::read_to_string(home.events_jsonl())
@@ -1026,6 +1110,191 @@ mod tests {
         std::env::remove_var("FNO_AGENTS_RETIRE_INTERVAL_SECS");
         assert_eq!(retire_interval_snapshot(&cell), expected);
         assert_eq!(retire_interval_snapshot(&cell).as_secs(), 45);
+    }
+
+    /// One retirement pass against a temp home, through the real spawn
+    /// path, returning the tick row it landed. The tab sweep arrives as a
+    /// seam, so no test reaches the shared mux.
+    fn run_retire_pass_and_read_tick(
+        dir: &std::path::Path,
+        home: &AgentsHome,
+        tab_sweep: fn() -> crate::reap_render::MuxSweep,
+    ) -> serde_json::Value {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let in_flight = Arc::new(AtomicBool::new(false));
+            let cell: Arc<RetireIntervalCell> = Arc::new(Mutex::new(None));
+            let mut last = Instant::now() - Duration::from_secs(301);
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                &cell,
+                home.clone(),
+                dir.to_path_buf(),
+                home.events_jsonl(),
+                Duration::from_secs(300),
+                tab_sweep,
+            );
+            wait_for_retire_row(&home.events_jsonl());
+            std::fs::read_to_string(home.events_jsonl())
+                .unwrap()
+                .lines()
+                .filter(|l| {
+                    l.contains("\"type\":\"control_plane_tick\"")
+                        && l.contains("\"arm\":\"retire\"")
+                })
+                .last()
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                .expect("row read back")
+        })
+    }
+
+    #[test]
+    fn retire_tick_names_the_tabs_the_sweep_closed() {
+        // AC5-HP: the tab sweep rides the retire pass and the tick's detail
+        // carries its receipt; the default argv carries no used-shells flag.
+        let (dir, home) = retirement_sweep_tmp_home("mux-ran");
+        let row =
+            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Ran {
+                receipt: crate::reap_render::PruneReceipt {
+                    closed: 2,
+                    would_close: 0,
+                    close_named: vec!["target-x-1-a".to_string(), "target-x-1-b".to_string()],
+                    sessions_unreachable: Vec::new(),
+                    notice: None,
+                },
+            });
+        assert_eq!(row["data"]["acted"], 0);
+        assert_eq!(row["data"]["skip_reason"], "no_rows");
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("mux=ran closed=2"),
+            "the tick must name the tab sweep's receipt: {:?}",
+            row["data"]["detail"]
+        );
+        assert_eq!(
+            mux_prune_args(false, false),
+            vec!["mux", "workspace", "prune", "--tabs-only", "--json"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retire_tick_survives_an_unread_tab_sweep() {
+        // AC5-UNREAD: a tab sweep that cannot be read never eats the tick;
+        // the detail says mux=unread.
+        let (dir, home) = retirement_sweep_tmp_home("mux-unread");
+        let row =
+            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Unread {
+                exit_code: Some(1),
+                stderr_first: "boom".to_string(),
+            });
+        assert_eq!(
+            row["data"]["skip_reason"], "no_rows",
+            "an empty registry with an unread mux still classified no row"
+        );
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("mux=unread"),
+            "the tick must name the unread sweep: {:?}",
+            row["data"]["detail"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retire_tick_says_held_when_it_kept_a_row() {
+        // AC5-SKIP: a pass that judged one row and kept it reports `held`,
+        // not the indistinguishable zero; `no_rows` stays the no-classified
+        // reading.
+        let (dir, home) = retirement_sweep_tmp_home("mux-held");
+        let registry = serde_json::json!({
+            "schema_version": 10,
+            "agents": [{
+                "name": "target-x-1-adopted",
+                "cwd": dir.display().to_string(),
+                "status": "exited",
+                "created_at": "2026-09-06T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "sess-adopted",
+                "short_id": "abc123",
+                "origin": "adopted",
+            }],
+        });
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&registry).unwrap(),
+        )
+        .unwrap();
+        let row =
+            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        assert_eq!(row["data"]["acted"], 0);
+        assert_eq!(
+            row["data"]["skip_reason"], "held",
+            "one judged-and-kept row is a hold, not a bare zero: {:?}",
+            row["data"]
+        );
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("mux=skipped"),
+            "the daemon stub skips the mux: {:?}",
+            row["data"]["detail"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_registry_renders_a_failure_not_no_rows() {
+        // A registry read that fails is not a census of zero: the tick names
+        // registry_unreadable, a FAILURE_SKIPS token, so the arms readout
+        // renders FAIL instead of a quiet ok.
+        let (dir, home) = retirement_sweep_tmp_home("registry-unreadable");
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(home.registry_json(), "{not json").unwrap();
+        let row =
+            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        assert_eq!(row["data"]["acted"], 0);
+        assert_eq!(row["data"]["skip_reason"], "registry_unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_reap_verb_argv_includes_used_shells() {
+        // AC5-CLI: the manual verb opts in to closing a human's spent
+        // shells; the daemon default never does.
+        assert_eq!(
+            mux_prune_args(false, true),
+            vec![
+                "mux",
+                "workspace",
+                "prune",
+                "--tabs-only",
+                "--include-used-shells",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            mux_prune_args(true, true),
+            vec![
+                "mux",
+                "workspace",
+                "prune",
+                "--tabs-only",
+                "--include-used-shells",
+                "--json",
+                "--dry-run"
+            ]
+        );
     }
 
     #[test]
@@ -1663,6 +1932,12 @@ mod tests {
             7,
             &|_h| graph.borrow_mut().take(),
             &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (row_handle(e), Some(2 * 3600)))
+                    .collect::<HashMap<_, _>>()
+            },
             &move |_e| {
                 flag.store(true, Ordering::SeqCst);
                 true
@@ -1753,7 +2028,18 @@ mod tests {
         let flag = Arc::clone(&stopped);
         let calls = Cell::new(0u32);
         let calls_ref = &calls;
-        let transcript_path = transcript.clone();
+        // Call 1 (classification): the age seam answers 2000s, past grace.
+        // Call 2 (the apply-window re-check): the SAME row reads fresh, as if
+        // the session just wrote a turn.
+        let age_many = move |entries: &[&crate::state::RegistryEntry]| {
+            let n = calls_ref.get();
+            calls_ref.set(n + 1);
+            let age = if n == 0 { 2000 } else { 0 };
+            entries
+                .iter()
+                .map(|e| (row_handle(e), Some(age)))
+                .collect::<HashMap<_, _>>()
+        };
         let summary = gc_sweep::run(
             &home,
             &emitter,
@@ -1761,27 +2047,8 @@ mod tests {
             false,
             7,
             &|_h| graph.borrow_mut().take(),
-            // Call 1 (classification): the transcript is 2000s old, past
-            // grace. Call 2 (the apply-window re-check): the SAME file reads
-            // fresh, as if the session just wrote a turn.
-            &move |_e| {
-                let n = calls_ref.get();
-                calls_ref.set(n + 1);
-                if n == 0 {
-                    Some(vec![transcript_path.clone()])
-                } else {
-                    let fresh_file = transcript_path.clone();
-                    std::fs::File::options()
-                        .write(true)
-                        .open(&fresh_file)
-                        .unwrap()
-                        .set_times(
-                            std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()),
-                        )
-                        .unwrap();
-                    Some(vec![fresh_file])
-                }
-            },
+            &|_e| Some(vec![transcript.clone()]),
+            &age_many,
             &move |_e| {
                 flag.store(true, Ordering::SeqCst);
                 true
@@ -1846,6 +2113,13 @@ mod tests {
             // graph-unreadable if the origin gate did not run first.
             &|_| None,
             &|_| None,
+            &|entries| {
+                use std::collections::HashMap;
+                entries
+                    .iter()
+                    .map(|e| (row_handle(e), Some(2 * 3600)))
+                    .collect::<HashMap<_, _>>()
+            },
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &no_agents,
@@ -2059,27 +2333,6 @@ mod tests {
             KeepReason::OpenDoRow { node: "N".into() }.as_str(),
             "open do row on done node"
         );
-    }
-
-    #[test]
-    fn transcript_age_reads_the_newest_store_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old.jsonl");
-        let fresh = dir.path().join("fresh.jsonl");
-        std::fs::write(&old, "{}").unwrap();
-        std::fs::write(&fresh, "{}").unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let hits = vec![old, fresh];
-        let age = transcript_age_s(Some(&hits), now).unwrap();
-        assert!(
-            age < 5,
-            "age {age} should be ~0 for a just-written transcript"
-        );
-        assert_eq!(transcript_age_s(None, now), None);
-        assert_eq!(transcript_age_s(Some(&[]), now), None);
     }
 
     // ── x-2774: the reaper asks the session, not only the node ──────────

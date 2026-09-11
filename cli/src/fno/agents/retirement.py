@@ -42,6 +42,14 @@ def _default_runner() -> str:
     return proc.stdout
 
 
+def _fmt_age(held_s: int) -> str:
+    if held_s >= 3600:
+        return f"{held_s // 3600}h{(held_s % 3600) // 60}m"
+    if held_s >= 60:
+        return f"{held_s // 60}m"
+    return f"{held_s}s"
+
+
 def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
     """Map one sweep summary onto per-row verdicts. Every bucket the Rust
     renderer emits is named here, so a NEW bucket cannot silently read as
@@ -73,8 +81,14 @@ def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
         out[ident] = Retirement(None, None, False, "no-node")
     for row in summary.get("kept_active", []):
         out[row["id"]] = Retirement(None, None, False, f"active: written {row['age_s']}s ago")
-    for ident in summary.get("kept_transcript_unresolved", []):
-        out[ident] = Retirement(None, None, False, "transcript unresolved")
+    for row in summary.get("kept_transcript_unresolved", []):
+        # (x-1b90 change 3) The hold names its age; an old hold on done work
+        # asks for a decision, and rm proves the death it prints.
+        held_s = row.get("held_s", 0)
+        reason = f"transcript unresolved for {_fmt_age(held_s)}"
+        if row.get("nodes_done") and held_s > 6 * 3600:
+            reason += f"; needs a decision: fno agents rm {row['id']}"
+        out[row["id"]] = Retirement(None, None, False, reason)
     for row in summary.get("stop_refused", []):
         out[row["id"]] = Retirement(None, None, False, f"stop refused: {row['reason']}")
     for row in summary.get("kept_no_receipt", []):

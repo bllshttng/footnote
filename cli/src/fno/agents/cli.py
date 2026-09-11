@@ -18,7 +18,11 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
-from fno.agents.harness_map import PERMISSION_MODE_HELP
+from fno.agents.harness_map import (
+    PERMISSION_MODE_HELP,
+    spawn_seed_receipt_fields,
+    spawn_seed_receipt_fragment,
+)
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -1032,14 +1036,16 @@ def cmd_spawn(
         ),
     ),
     substrate: str = typer.Option(
-        "pane",
+        "",
         "--substrate",
         help=(
-            "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
-            "4a-G2) | thread (claude --bg / opencode serve; bg is a deprecated "
-            "alias) | headless (-p/--exec one-shot). Python owns the pane back "
-            "half (fno mux pane run + registry mux ref); thread/headless keep "
-            "their existing lanes."
+            "Session substrate (x-2c27): thread (the default where the "
+            "harness seats one: persistent, viewed through a portal; bg is a "
+            "deprecated alias) | pane (mux-hosted PTY, the closable fallback "
+            "for harnesses with no thread lane) | headless (-p/--exec "
+            "one-shot). Pane placement flags and a `--` passthrough fence "
+            "imply pane. Python owns the pane back half (fno mux pane run + "
+            "registry mux ref); thread/headless keep their existing lanes."
         ),
     ),
     headless: bool = typer.Option(
@@ -1483,71 +1489,54 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-    # Provenance rides the pane receipt's harness_source field below (the
-    # default substrate) - it is the HARNESS axis's provenance, so it is not
-    # named provider_*, which now holds the vendor. The bg/once stdout
-    # receipts stay byte-parity-locked with the Rust client, so they don't
-    # carry it.
+    # Provenance rides the pane receipt's harness_source field below - it is
+    # the HARNESS axis's provenance, not the vendor's. The bg/once stdout
+    # receipts stay byte-parity-locked with the Rust client, so they skip it.
 
-    # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
-    # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
-    # spawns out of the binary route), `bg`/`headless` keep their existing
-    # lanes. Validate to parity with the Rust client (exit 2 on a bad value);
-    # headless still maps onto the `once` lever.
-    # --headless is the ergonomic shortcut for --substrate headless (x-c772). It
-    # wins over an explicit --substrate so `--headless` always resolves to the
-    # one-shot lane. (The -H short moved to --harness in x-6de8.)
+    # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
+    # an empty value resolves to the built-in default (thread where seated).
+    defaulted = False
     if headless:
         substrate = "headless"
-    # `--once` is the pre-substrate spelling of headless (the Rust client maps it to
-    # --substrate headless; the spawn gate counts it as headless) but Python leaves
-    # it on the pane default. That only bites the routed lane, where the substrate
-    # decides whether the route is materialized at all: without this a routed
-    # `--once` reaches dispatch as claude+once+not-headless and dies on the
-    # "claude peers are persistent bg threads" refusal.
+    if not substrate and once:  # --once always means a one-shot
+        substrate = "headless"
+    if not substrate:
+        # Empty = unset: pane capability implies pane; else thread where seated.
+        defaulted = True
+        from fno.agents.harness_map import DispatchResolveError, thread_seatable
+
+        pane_implied = bool(
+            passthrough or split or at or tab or bounded_placement or squad
+            or monitor is not None
+        )
+        try:
+            seatable = thread_seatable(harness)
+        except DispatchResolveError:  # an undeclared harness seats no thread
+            seatable = False
+        if pane_implied or not seatable:
+            substrate = "pane"
+        else:
+            substrate = "thread"
+    # `--once` is the pre-substrate spelling of headless, but Python leaves it on
+    # the pane default; a routed `--once` would then reach dispatch as
+    # claude+once+not-headless and die on the "persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    if substrate not in ("pane", "thread", "bg", "headless"):
-        print(
-            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if substrate == "bg":
-        print(
-            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
-            "the alias will be removed after one release",
-            file=sys.stderr,
-        )
-    # Keep the lower-level spawn branches stable while the public substrate
-    # vocabulary migrates to `thread`.
-    if substrate == "thread":
-        substrate = "bg"
-    # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
-    # composed-argv refusals live. The seam refuses the explicit-flag spelling
-    # for the Rust-routed lane; this is the same refusal for the Python lane,
-    # including a substrate that arrived by config default after the seam.
+    # Passthrough rides only the PANE argv; the seam covers explicit flags.
     if passthrough and (substrate != "pane" or once):
         from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
 
         print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    if monitor is not None and monitor != "happy":
-        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if monitor == "happy" and (substrate != "pane" or once):
-        print(
-            "--monitor happy is pane-only; bg and headless workers do not pass "
-            "the happy launcher seam",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if monitor == "happy" and harness != "claude":
-        print(
-            f"--monitor happy requires the claude harness; got harness {harness!r}",
-            file=sys.stderr,
-        )
+    from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
+
+    substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
+    seedless = seedless_thread_refusal(
+        harness, substrate, message, resume=resume, crown=bool(crown), name=name, node=node
+    )
+    if seedless:
+        print(f"fno agents spawn: {seedless}", file=sys.stderr)
         raise typer.Exit(code=2)
 
     if output_format is not None and (
@@ -2329,7 +2318,7 @@ def cmd_spawn(
                 receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
             if effective_message is not None:
-                receipt_obj["effective_message"] = effective_message
+                receipt_obj.update(spawn_seed_receipt_fields(effective_message))
             if pane_result.placement is not None:
                 # Server-authored exact-placement receipt (anchor/direction/
                 # fallback/squad/tab); never synthesized from the request.
@@ -2583,27 +2572,16 @@ def cmd_spawn(
             else ""
         )
         effective_message = getattr(result, "effective_message", None)
-        message_field = (
-            f', "effective_message": {json.dumps(effective_message)}'
-            if effective_message is not None
-            else ""
-        )
-        # provider/model axes: present only when an explicit route was applied
-        # (-P/--route) or a model named; absent otherwise. provider holds the
-        # model vendor, never a harness literal (the defect this corrects).
-        # `model` is the EFFECTIVE model: an explicit --model reaches claude as
-        # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
-        # wins the receipt too (see the pane branch above).
+        message_field = spawn_seed_receipt_fragment(effective_message)
+        # provider/model appear only for an explicit route or model. provider is the
+        # vendor, never a harness; `model` is the EFFECTIVE model (--model wins).
         receipt_provider = route_provider or recorded_provider
         provider_field = (
             f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
         receipt_model = model or route_model
-        # v23 (x-2019): a receipt that prints `model` labels it - the request
-        # is not the effect, and an unlabeled token reads as an observation.
-        # When the spawn-time check caught a substitution, the receipt carries
-        # the marker naming both values (the stderr line and the row already
-        # carry them; this is the machine-readable copy).
+        # A receipt that prints `model` labels it: the request is not the effect.
+        # A caught substitution carries the marker naming both values.
         substitution = getattr(result, "model_substituted", None)
         if receipt_model and substitution:
             model_field = (
@@ -2618,15 +2596,20 @@ def cmd_spawn(
             )
         else:
             model_field = ""
+        seed = getattr(result, "seed_unverified", None)
+        seed_field = (
+            f', "seed": "unverified", "seed_unverified": {json.dumps(seed)}' if seed else ""
+        )
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"harness": "{result.provider}"{provider_field}{model_field}, "status": "live"'
-            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}}}"
+            f'"harness": "{result.provider}"{provider_field}{model_field}, '
+            f'"status": "{"spawning" if seed else "live"}"'
+            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}{seed_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()
         # QoS (x-c5cc): a bg worker is claude's child, so its exec can't be
-        # wrapped — demote post-hoc via the roster, bounded and non-fatal.
+        # wrapped, demote post-hoc via the roster, bounded and non-fatal.
         # After the receipt flush so line-parsing consumers never wait on it.
         if substrate == "bg" and result.provider == "claude" and result.short_id:
             from fno.agents.spawn_gate import qos_demote_bg_worker
@@ -2636,6 +2619,16 @@ def cmd_spawn(
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
+
+    pane_view = (
+        defaulted and substrate == "bg" and spawn_succeeded
+        and result.kind == "created" and os.environ.get("FNO_PANE")
+    )
+    if pane_view:
+        # Post-receipt, best effort: a placement failure never recolors the verdict.
+        from fno.agents.spawn_defaults import place_default_view
+
+        place_default_view(result.name)
 
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:
@@ -3015,7 +3008,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); liveness is `fno agents truth`."
+        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); process liveness is the liveness field on fno agents list --json."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
@@ -4027,7 +4020,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
             "state",
             "reason",
             "last_activity_age_s",
-            "last_event_at",
+            "last_event_at", "last_activity_basis",
             "last_message",
             "session_id",
             "observed_model",
@@ -5070,4 +5063,4 @@ def harness_probe(
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
 
-from fno.agents import distress_reads as _dr, transcript_reads as _tr  # noqa: E402,F401
+from fno.agents import distress_reads, gate_reads, transcript_reads  # noqa: E402,F401

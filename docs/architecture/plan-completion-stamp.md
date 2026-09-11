@@ -97,7 +97,7 @@ flowchart TD
     SP --> FM[plan frontmatter updated]
     SP --> CM[COMPLETION.md appended]
 
-    MEGA[megawalk graduation step] -->|after target sub-session| GRAD[stamp-plan.py graduate]
+    FIN[fno-agents finalize] -->|terminal-allow, every mode| GRAD[stamp-plan.py graduate]
     GRAD -->|"len(urls) >= expected"| DONE[status: in_review -> done]
     GRAD -->|"len(urls) < expected"| NOOP[no-op, wait for more ships]
 
@@ -122,21 +122,16 @@ Stamp failure here is non-fatal. The graph and ledger writes are already
 committed by the time stamp runs, so the plan is recoverable via the
 stop-hook backfill or a manual invocation.
 
-### 2. Megawalk graduation
+### 2. Graduate (multi-ship plans)
 
-After each target sub-session completes, megawalk runs the graduate step:
+The retired megawalk walker ran the graduate step after each target sub-session. Today `fno-agents finalize` runs it on the terminal-allow boundary in every mode (attended, autonomous, worker). See `skills/target/references/pre-promise.md`:
 
 ```bash
 python3 "${REPO_ROOT}/scripts/lib/stamp-plan.py" graduate \
   --plan-path "$PLAN_PATH"
 ```
 
-`graduate` is conditional: it reads `expected_url_count` from the frontmatter,
-counts the current `urls` list, and only flips `in_review` to `done` when the
-count is met. On intermediate ships of a cross-project plan it exits 0 without
-touching the file. See `skills/megawalk/references/bare-loop-execution.md`
-step 7b (graduation step) for the surrounding protocol, including the
-graph.json sync that follows a `done` transition.
+`graduate` is conditional. It reads `expected_url_count` from the frontmatter and counts the current `urls` list. At the full count, `in_review` flips to `done`. On intermediate ships of a cross-project plan it exits 0 without touching the file. The graph.json sync follows a `done` transition.
 
 ### 3. Stop-hook backfill
 
@@ -238,7 +233,7 @@ Several extensions were considered and deliberately deferred:
 | `scripts/lib/stamp-plan.py` | Core stamper - stdlib only, ~430 lines. `stamp` and `graduate` subcommands. |
 | `hooks/target-stop-hook.sh` | Backfill path (lines 310-348). Runs at every session boundary. |
 | `skills/target/references/pre-promise.md` | "Stamp Plan Frontmatter" subsection. Primary stamp call site (extracted from SKILL.md in the 2026-04-29 diet). |
-| `skills/megawalk/references/bare-loop-execution.md` | Graduation step (step 7b). `graduate` call after each sub-session. |
+| `fno-agents finalize` | Runs the graduate step at terminal-allow in every mode (supersedes the retired megawalk graduation step). |
 | `tests/test-stamp-plan.sh` | 48 assertions covering parser, serializer, stamp, graduate, atomic write, idempotency. |
 | `tests/test-ship-stamp-integration.sh` | 5 end-to-end scenarios: single-project, cross-project, backfill, re-stamp, dry-run. |
 | `tests/test-quick-plan-sidecar.sh` | 9 assertions for single-file plan sidecar contract (flipped from folder behavior). |

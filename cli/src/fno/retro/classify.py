@@ -237,6 +237,11 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
     reason = item.subkind or ""
     if reason.lower() not in _PM_STUCK_REASONS and _PM_ONEOFF_RE.search(reason):
         return DISPOSITION_ARCHIVE, None
+    # A success terminal is a healthy session's receipt, not open work: consume
+    # it. The wedge regex matches pasted assistant prose constantly, so a Done*
+    # reason never reaches it.
+    if reason.lower().startswith("done"):
+        return DISPOSITION_ARCHIVE, None
 
     wedge = bool(_PM_WEDGE_RE.search(item.text or ""))
     # A genuine wedge always surfaces, even if its text happens to also match

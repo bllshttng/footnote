@@ -62,7 +62,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import rm_notice
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
-from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.harness_map import DispatchResolveError, render_seed
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
@@ -74,13 +74,18 @@ from fno.agents.registry import (
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
-    TERMINAL_STATUSES,
     load_registry,
     mint_agent_entry,
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
+from fno.agents.crown import (
+    calling_agent_row,
+    crown_validation_error,
+    grant_error,
+    journal_spawn_crown,
+    settle_spawn_crown,
+)
 from fno.harness_identity import (
     canonical_handle,
     session_identity_key,
@@ -1796,6 +1801,8 @@ def _claude_create_path(
 
     crown_declined = False
     crown_succeeded = False
+    crown_outcome: Optional[str] = None
+    crown_cleared: list = []
     king_loop_armed: Optional[bool] = None
     king_unarmed_reason = ""
 
@@ -1804,7 +1811,9 @@ def _claude_create_path(
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
+        nonlocal crown_declined, crown_succeeded
+        nonlocal crown_outcome, crown_cleared
+        nonlocal king_loop_armed, king_unarmed_reason
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
@@ -1823,37 +1832,16 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
-            # Reclaiming an abandoned scope also clears the terminal holder's
-            # stale crown in this same write. Terminal rows are excluded from
-            # `holders`, but their crown fields still make them appear crowned
-            # to readers and can create a double-rule after re-registration.
-            entries = [
-                replace(
-                    e,
-                    crown_level=None,
-                    crown_scope=None,
-                    crown_grantor=None,
-                )
-                if e.crown_scope == crown_scope and e.status in TERMINAL_STATUSES
-                else e
-                for e in entries
-            ]
-            contenders = [e for e in entries if not (revive and e.name == name)]
-            holders = [
-                e
-                for e in contenders
-                if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
-            ]
-
-            if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
-                entries = [
-                    replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and e.name == succession_caller_name
-                    else e
-                    for e in entries
-                ]
+            entries, crown_outcome, crown_cleared = settle_spawn_crown(
+                entries,
+                scope=crown_scope,
+                succession=succession,
+                succession_caller_name=succession_caller_name,
+                exclude_name=name if revive else None,
+            )
+            if crown_outcome == "succeeded":
                 crown_succeeded = True
-            elif holders:
+            elif crown_outcome == "declined":
                 entry = replace(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
@@ -1890,6 +1878,15 @@ def _claude_create_path(
 
     try:
         update_registry(_write)
+        if crown_scope:
+            journal_spawn_crown(
+                crown_outcome,
+                crown_cleared,
+                name=name,
+                level=crown_level,
+                scope=crown_scope,
+                grantor=crown_grantor_val,
+            )
         if crown_declined:
             print(
                 f"spawn: crown declined (scope {crown_scope!r} already held by a "
@@ -2054,16 +2051,14 @@ class SpawnResult:
     short_id: str
     reply: Optional[str] = None
     effective_message: Optional[str] = None
-    # v23 (x-2019): the requested-vs-observed verdict, carried to the receipt.
     # ``{"requested": ..., "observed": ...}`` when the spawn-time check found
-    # the session running something else; None means unknown-or-match, never a
-    # fabricated negative (a fresh spawn whose transcript has no sample yet
-    # says nothing).
+    # another model; None is unknown-or-match, never a fabricated negative.
     model_substituted: Optional[dict] = None
-    # x-04ce: the row's launch-account fact plus WHO chose it; None = nothing
-    # concrete to attribute.
+    # The row's launch-account fact plus WHO chose it; None = nothing to attribute.
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
+    # Why claude's job state never recorded the prompt; None = recorded.
+    seed_unverified: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -2589,7 +2584,7 @@ def dispatch_spawn(
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, harness)
+            message = render_seed(message, harness)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
@@ -2884,10 +2879,7 @@ def dispatch_spawn(
             )
             ctx_token = _DISPATCH_CTX.set(ctx_for_dispatch)
             try:
-                # Started event (pairs with the helpers' agent_ask_done /
-                # agent_ask_failed). Lived in dispatch_ask's routing before
-                # Task 1.1 removed the create branch; restored here so the
-                # spawn create keeps the started/done pair (codex P2 PR #457).
+                # Started event: pairs with the helpers' agent_ask_done / agent_ask_failed.
                 _emit_ev(
                     "agent_ask_started",
                     name=name,
@@ -2980,17 +2972,21 @@ def dispatch_spawn(
                         node=node,
                         route_model=route_model,
                     )
+                    from fno.agents.harnesses._claude_session_registry import seed_unverified_reason
                     return SpawnResult(
                         kind="created",
                         name=name,
                         provider="claude",
                         short_id=created.short_id,
                         effective_message=effective_message,
-                        # getattr: `created` is any ask-path result, including
-                        # duck-typed stubs minted before the field existed.
+                        # getattr: `created` may be a duck-typed stub minted before the field.
                         model_substituted=getattr(created, "model_substituted", None),
                         launch_account=row_launch_account,
                         launch_account_source=row_launch_account_source,
+                        seed_unverified=(
+                            seed_unverified_reason(created.short_id, account_env)
+                            if message.strip() else None
+                        ),
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm

@@ -108,6 +108,8 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
     "source_node_id",
     "source_plan_path",
     "source_inbox_msg",
+    "request_origin",
+    "origin_evidence",
     "spawned_by_session",
     "spawned_by_harness",
     "spawned_by_cwd",
@@ -190,6 +192,8 @@ pub enum StoreError {
     Invalid(String),
     #[error("{0}")]
     ClaimsUnavailable(String),
+    #[error("sqlite: {0}")]
+    Sqlite(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -767,62 +771,6 @@ pub fn compute_readiness(
     ("ready".to_string(), None)
 }
 
-/// Describe a proposed supersession that lacks merged-PR proof
-/// (statuses.pending_supersession_reason).
-pub fn pending_supersession_reason(entry: &Value) -> Option<String> {
-    let superseded_by = entry.get("superseded_by").map(|v| !v.is_null())?;
-    if !superseded_by {
-        return None;
-    }
-    let record = entry.get("supersession")?;
-    if !record.is_object() {
-        return None;
-    }
-    if record
-        .get("verified_at")
-        .map(|v| !v.is_null())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let successor = record
-        .get("successor")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            entry
-                .get("superseded_by")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "missing successor".to_string());
-    let cause = record
-        .get("cause")
-        .and_then(Value::as_str)
-        .unwrap_or("missing cause");
-    let surfaces = record
-        .get("surfaces")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .map(|s| match s {
-                    Value::String(x) => x.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_else(|| "missing surfaces".to_string());
-    let surface_text = if surfaces.is_empty() {
-        "missing surfaces".to_string()
-    } else {
-        surfaces
-    };
-    Some(format!(
-        "pending supersession: successor={successor}; cause={cause}; surfaces={surface_text}"
-    ))
-}
-
 /// Open in the `_reconcile.node_is_open` sense: neither done nor
 /// superseded-closed. Keyed off the underlying fields so it holds on rows
 /// that have not been through a status recompute.
@@ -1000,9 +948,6 @@ pub fn readiness_status(
             return (Some(s.to_string()), None);
         }
     }
-    if let Some(reason) = pending_supersession_reason(entry) {
-        return (Some("blocked".to_string()), Some(reason));
-    }
     let (kind, blocker_id) = compute_readiness(entry, by_id);
     if kind == "ready" {
         return (status.map(str::to_string), None);
@@ -1088,6 +1033,59 @@ pub fn lock_timestamp_quality(entry: &Value) -> &'static str {
         "old"
     } else {
         "fresh"
+    }
+}
+
+/// The open-do-row TTL, read from TASK_DO_TTL_HOURS at first use. 12.0 sits
+/// far above any legitimate do window (x-7649 was live at 2.5 hours) and far
+/// above the seventeen-minute spawn-handover window that made x-5c25 look
+/// identical to a strand, so youth is never misread as strandedness.
+fn do_ttl_hours() -> f64 {
+    static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        std::env::var("TASK_DO_TTL_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12.0)
+    })
+}
+
+/// The open do row `open_do_row_quality` reports: quality plus the offending
+/// row's session_id (the first row past the TTL, else the first whose
+/// started_at will not parse). None means fresh.
+fn open_do_quality_and_holder(entry: &Value) -> Option<(&'static str, String)> {
+    let rows = entry.get("sessions").and_then(Value::as_array)?;
+    let mut unreadable_holder: Option<String> = None;
+    for row in rows.iter().filter(|r| is_open_do_row(r)) {
+        let ts = row
+            .get("started_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let holder = row.get("session_id").and_then(Value::as_str).unwrap_or("");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"));
+        let Ok(parsed) = parsed else {
+            if unreadable_holder.is_none() {
+                unreadable_holder = Some(holder.to_string());
+            }
+            continue;
+        };
+        let elapsed = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+        if (elapsed as f64) / 3600.0 > do_ttl_hours() {
+            return Some(("old", holder.to_string()));
+        }
+    }
+    unreadable_holder.map(|h| ("unreadable", h))
+}
+
+/// Classify the node's open do row(s) by age without deciding writer death -
+/// the open-do counterpart of [`lock_timestamp_quality`] (x-f8b1 change 4).
+/// `fresh` when no open do row exists or the youngest reading is inside the
+/// TTL, `unreadable` when a row's started_at will not parse as RFC3339, `old`
+/// past the TTL.
+pub fn open_do_row_quality(entry: &Value) -> &'static str {
+    match open_do_quality_and_holder(entry) {
+        Some((quality, _)) => quality,
+        None => "fresh",
     }
 }
 
@@ -1192,6 +1190,8 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
             ("source_node_id", Value::Null),
             ("source_plan_path", Value::Null),
             ("source_inbox_msg", Value::Null),
+            ("request_origin", Value::Null),
+            ("origin_evidence", Value::Null),
             ("spawned_by_session", Value::Null),
             ("spawned_by_harness", Value::Null),
             ("spawned_by_cwd", Value::Null),
@@ -1487,7 +1487,6 @@ pub fn recompute_statuses_with_plan_rungs(
         // Decisions read first, mutations after: the derivation functions
         // borrow immutably, the writes need the mutable borrow.
         let completed = e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false);
-        let pending_reason = pending_supersession_reason(e);
         let superseded = e
             .get("superseded_by")
             .map(|v| !v.is_null())
@@ -1500,19 +1499,19 @@ pub fn recompute_statuses_with_plan_rungs(
             None
         };
         let has_pr = e.get("pr_number").map(|v| !v.is_null()).unwrap_or(false);
+        // Computed before the mutable borrow below, same as lock_quality:
+        // decisions read first, mutations after.
+        let do_quality = if !locked {
+            open_do_quality_and_holder(e)
+        } else {
+            None
+        };
         let open_do = e
             .get("sessions")
             .and_then(Value::as_array)
             .map(|rows| rows.iter().any(is_open_do_row))
             .unwrap_or(false);
-        let rung = if !locked
-            && !open_do
-            && !completed
-            && pending_reason.is_none()
-            && !superseded
-            && !deferred
-            && !has_pr
-        {
+        let rung = if !locked && !open_do && !completed && !superseded && !deferred && !has_pr {
             match plan_rungs {
                 Some(map) => Some(supplied_plan_rung(e, map)),
                 // No plan data supplied: the ladder write below is skipped and
@@ -1531,11 +1530,9 @@ pub fn recompute_statuses_with_plan_rungs(
             obj.insert("status".to_string(), Value::String("done".into()));
             continue;
         }
-        if let Some(reason) = pending_reason {
-            obj.insert("status".to_string(), Value::String("blocked".into()));
-            obj.insert("blocked_reason".to_string(), Value::String(reason));
-            continue;
-        }
+        // A superseded_by edge is the terminal fact (x-e8f3): supersession
+        // evidence stays with the record and the reconcile receipts, never in
+        // status, so a superseded row can no longer read as live held work.
         if superseded {
             obj.insert("status".to_string(), Value::String("superseded".into()));
             continue;
@@ -1563,6 +1560,32 @@ pub fn recompute_statuses_with_plan_rungs(
                     "holder".to_string(),
                     obj.get("locked_by").cloned().unwrap_or(Value::Null),
                 );
+                defect.insert("liveness".to_string(), Value::String("unverified".into()));
+                obj.insert("ownership_defect".to_string(), Value::Object(defect));
+            }
+        } else {
+            // The open-do route gets the same diagnostic, symmetric with the
+            // lock route above: a row whose writer died is otherwise
+            // indistinguishable from one whose writer is typing (x-f8b1). The
+            // status word is not touched - age records uncertainty, it never
+            // clears an owner. A lock defect already stamped keeps priority.
+            if let Some((quality, holder)) = do_quality {
+                let kind = if quality == "old" {
+                    "stale-open-do-unverified"
+                } else {
+                    "do-row-timestamp-unreadable"
+                };
+                let mut defect = Map::new();
+                defect.insert("kind".to_string(), Value::String(kind.into()));
+                defect.insert(
+                    "node_id".to_string(),
+                    obj.get("id").cloned().unwrap_or(Value::Null),
+                );
+                if !holder.is_empty() {
+                    defect.insert("holder".to_string(), Value::String(holder.to_string()));
+                } else {
+                    defect.insert("holder".to_string(), Value::Null);
+                }
                 defect.insert("liveness".to_string(), Value::String("unverified".into()));
                 obj.insert("ownership_defect".to_string(), Value::Object(defect));
             }
@@ -1639,17 +1662,6 @@ pub fn recompute_statuses_with_plan_rungs(
                 .as_object_mut()
                 .unwrap()
                 .insert("status".to_string(), Value::String("done".into()));
-            continue;
-        }
-        if let Some(reason) = pending_supersession_reason(&entries[pidx]) {
-            entries[pidx]
-                .as_object_mut()
-                .unwrap()
-                .insert("status".to_string(), Value::String("blocked".into()));
-            entries[pidx]
-                .as_object_mut()
-                .unwrap()
-                .insert("blocked_reason".to_string(), Value::String(reason));
             continue;
         }
         if entries[pidx]
@@ -2014,6 +2026,8 @@ pub struct MutateOutcome {
     /// that preserves them named.
     pub dropped: usize,
     pub backup: Option<String>,
+    /// Best-effort shadow failures are visible without failing the JSON publish.
+    pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
@@ -2021,6 +2035,11 @@ pub struct MutateOutcome {
     /// True when this graph file is the configured canonical graph
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
+    /// The content digest of the published bytes, computed from the same
+    /// `body` the atomic replace wrote (not re-read from the file). A caller
+    /// that pairs this digest with a file stat can PROVE the file still holds
+    /// this publish before caching against it.
+    pub version: String,
 }
 
 /// Inputs to the store-side mutate cycle that the CLIENT computes
@@ -2047,6 +2066,8 @@ pub struct MutateInput {
     /// plan-based statuses ONLY from this map; `None` keeps stored statuses
     /// (a caller that is not re-deriving from plans).
     pub plan_rungs: Option<BTreeMap<String, String>>,
+    /// True after the read cutover is proven and SQLite owns durable writes.
+    pub sqlite_authoritative: bool,
 }
 
 /// The content digest a begin/commit pair compares (the wire "version").
@@ -2079,12 +2100,21 @@ pub fn locked_mutate(
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
     if let Some(expected) = &input.base_version {
-        let current = file_content_version(path);
+        let current = if input.sqlite_authoritative {
+            crate::graph_sqlite::version(path).map_err(StoreError::Sqlite)?
+        } else {
+            file_content_version(path)
+        };
         if current != *expected {
             return Err(StoreError::Conflict);
         }
     }
-    let raw = match read_raw(path)? {
+    let raw_read = if input.sqlite_authoritative {
+        RawRead::Entries(crate::graph_sqlite::read_entries(path).map_err(StoreError::Sqlite)?)
+    } else {
+        read_raw(path)?
+    };
+    let raw = match raw_read {
         RawRead::Entries(v) => v,
         RawRead::Empty => vec![],
         RawRead::MalformedRoot => {
@@ -2099,6 +2129,8 @@ pub fn locked_mutate(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
+    let mut shadow_before = pre_normalized.clone();
+    canonicalize_entries(&mut shadow_before);
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2218,16 +2250,32 @@ pub fn locked_mutate(
 
     canonicalize_entries(&mut entries);
 
-    let backup = create_backup(path);
-    let body = serialize_graph_file(&entries);
-    write_atomic(path, &body)?;
+    let (backup, shadow_warning, version) = if input.sqlite_authoritative {
+        let version = crate::graph_sqlite::authoritative_sync(path, &shadow_before, &entries)
+            .map_err(StoreError::Sqlite)?;
+        (None, None, version)
+    } else {
+        let backup = create_backup(path);
+        let body = serialize_graph_file(&entries);
+        write_atomic(path, &body)?;
+        let version = {
+            use sha2::Digest as _;
+            format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
+        };
+        let warning = crate::graph_sqlite::shadow_sync(path, &shadow_before, &entries, &version)
+            .err()
+            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
+        (backup, warning, version)
+    };
 
     Ok(MutateOutcome {
         entries,
         dropped,
         backup: backup.map(|p| p.display().to_string()),
+        shadow_warning,
         closure_releases,
         is_canonical,
+        version,
     })
 }
 
@@ -2553,6 +2601,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2566,6 +2615,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2579,6 +2629,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2618,6 +2669,139 @@ mod tests {
         recompute_statuses(&mut entries);
         // Parent with all-done children and no live work of its own -> done.
         assert_eq!(s_str(&entries[0], "status"), Some("done"));
+    }
+
+    #[test]
+    fn open_do_row_quality_classifies_age() {
+        // No open do row at all -> fresh.
+        assert_eq!(open_do_row_quality(&json!({"id": "n"})), "fresh");
+        // A row started 17 minutes ago is inside the TTL: x-5c25's
+        // spawn-handover window must never read as strandedness.
+        let fresh = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-fresh",
+                "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
+            }],
+        });
+        assert_eq!(open_do_row_quality(&fresh), "fresh");
+        // 11 days old: x-4c23's specimen age.
+        let old = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-old",
+                "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
+            }],
+        });
+        assert_eq!(open_do_row_quality(&old), "old");
+        // A started_at that will not parse is unreadable, never silently fresh.
+        let bad = json!({
+            "id": "n",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-bad",
+                "started_at": "not-a-date",
+            }],
+        });
+        assert_eq!(open_do_row_quality(&bad), "unreadable");
+    }
+
+    #[test]
+    fn recompute_stamps_the_stale_open_do_row_and_keeps_the_status() {
+        // An 11-day-old open do row carries the diagnostic and the node is
+        // STILL in_progress: age records uncertainty, it never clears an owner.
+        let old_row = json!({
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "s-old",
+            "started_at": (chrono::Utc::now() - chrono::Duration::days(11)).to_rfc3339(),
+        });
+        let mut entries = vec![json!({
+            "id": "n-stale",
+            "status": "in_progress",
+            "sessions": [old_row],
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("in_progress"));
+        let defect = entries[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "stale-open-do-unverified");
+        assert_eq!(defect.get("holder").unwrap(), "s-old");
+        assert_eq!(defect.get("liveness").unwrap(), "unverified");
+
+        // Positive control: a 17-minute row gets NO marker and no status
+        // change - youth is not strandedness.
+        let fresh_row = json!({
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "s-fresh",
+            "started_at": (chrono::Utc::now() - chrono::Duration::minutes(17)).to_rfc3339(),
+        });
+        let mut fresh = vec![json!({
+            "id": "n-fresh",
+            "status": "in_progress",
+            "sessions": [fresh_row],
+        })];
+        recompute_statuses(&mut fresh);
+        assert_eq!(s_str(&fresh[0], "status"), Some("in_progress"));
+        assert!(fresh[0].get("ownership_defect").is_none());
+
+        // A locked node keeps the lock's own marker; the do stamp never
+        // overwrites it.
+        let mut locked = vec![json!({
+            "id": "n-locked",
+            "status": "in_progress",
+            "locked_by": "worker",
+            "locked_at": (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
+            "sessions": [old_row],
+        })];
+        recompute_statuses(&mut locked);
+        let defect = locked[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "stale-active-owner-unverified");
+    }
+
+    #[test]
+    fn recompute_stamps_the_unreadable_do_row_timestamp() {
+        let mut entries = vec![json!({
+            "id": "n-bad",
+            "status": "in_progress",
+            "sessions": [{
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "s-bad",
+                "started_at": "not-a-date",
+            }],
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("in_progress"));
+        let defect = entries[0].get("ownership_defect").unwrap();
+        assert_eq!(defect.get("kind").unwrap(), "do-row-timestamp-unreadable");
+        assert_eq!(defect.get("holder").unwrap(), "s-bad");
+    }
+
+    #[test]
+    fn recompute_persists_superseded_even_when_the_record_is_unverified() {
+        // The supersede edge is the terminal fact (x-e8f3): an unverified
+        // supersession record never holds the row at blocked, so a superseded
+        // node cannot read as live held work after the 19-row legacy drift.
+        let mut entries = vec![json!({
+            "id": "old",
+            "status": "blocked",
+            "superseded_by": "new",
+            "supersession": {
+                "successor": "new",
+                "cause": "consolidation",
+                "surfaces": ["src/old.py"],
+                "verified_at": null,
+            },
+        })];
+        recompute_statuses(&mut entries);
+        assert_eq!(s_str(&entries[0], "status"), Some("superseded"));
+        assert_eq!(entries[0].get("blocked_reason"), Some(&Value::Null));
     }
 
     #[test]
@@ -2681,6 +2865,7 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
+                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )

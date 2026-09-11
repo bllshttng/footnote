@@ -321,7 +321,7 @@ def test_direct_node_spawn_failure_releases_shared_reservation(
 
     res = runner.invoke(
         agents_app,
-        ["spawn", "--name", "failed-worker", "--node", "x-fail", "--here", "work"],
+        ["spawn", "--name", "failed-worker", "--node", "x-fail", "--here", "work", "--substrate", "pane"],
     )
 
     assert res.exit_code == 7

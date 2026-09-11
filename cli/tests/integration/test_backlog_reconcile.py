@@ -1556,7 +1556,10 @@ def test_reconcile_keeps_pending_supersession_when_files_do_not_cover_cause(cli_
     result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "902", "--json"])
     assert result.exit_code == 0, result.output
     updated = {e["id"]: e for e in _read_entries(graph_path)}["ab-old002"]
-    assert updated["status"] == "blocked"
+    # The uncovered surface keeps the EVIDENCE unverified and the receipt
+    # flowing, but the superseded_by edge still terminals the status (x-e8f3):
+    # a superseded row must not read as live held work.
+    assert updated["status"] == "superseded"
     assert updated["supersession"]["verified_at"] is None
     assert "supersession_unverified" in result.output
 

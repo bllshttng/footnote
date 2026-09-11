@@ -152,8 +152,8 @@ whoami ledger
 whoami scoreboard
 whoami status
 worker
-workspace register-worker
 workspace reap
+workspace register-worker
 workspace worktree archive
 workspace worktree cargo-offload
 workspace worktree cleanup

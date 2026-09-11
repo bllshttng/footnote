@@ -1010,7 +1010,6 @@ def resolve_promise_evidence(
     # parking every such node on autonomous /target. Coverage grows as
     # /blueprint stamps expected_url_count going forward; nothing retroactively
     # parks. A gate that only fires on an explicit promise cannot false-positive.
-    #
     # Condition B: run the declared outcome probes. Opt-in by construction (only
     # fires when the plan declared the field).
     if close_probes:
@@ -1049,7 +1048,6 @@ def resolve_promise_evidence(
                 # unconfirmed in BOTH directions. Closing here stamped a
                 # declared multi-ship node done on the strength of an outage.
                 # The node stays open and the sweep retries when gh answers.
-                #
                 # The remedy names the verb that can actually recover, which is
                 # NOT always reconcile. When `extra_refs` carried an explicit
                 # ship the close verb had not yet persisted, the refusal exits

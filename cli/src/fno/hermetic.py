@@ -114,6 +114,8 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "POSTMORTEM_CORRECTIONS_LOG",
     "WORKTREE_STATUS_REGISTRY",
     "TASK_LOCK_TTL_HOURS",
+    # The open-do-row TTL beside the lock TTL: same family, same scrub.
+    "TASK_DO_TTL_HOURS",
     "POST_MERGE_NONINTERACTIVE",
     "MCP_CHANNEL_INBOUND_POKE",
     # CI transport state, never developer intent: the push-event sha the

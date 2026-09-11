@@ -77,6 +77,8 @@ prefix = "fno"
 [graph]
 # Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).
 commit_mode = "rows"
+# Authoritative graph reader: json or the shadow SQLite row store (default json).
+read_source = "json"
 
 [obsidian]
 # Whether this project uses an Obsidian vault for plans/docs.
@@ -119,6 +121,8 @@ render_targets = []
 staleness_days = 30
 # Consecutive failures before a node auto-defers.
 max_failed_attempts = 3
+# Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone.
+abandoned_do_row_hours = 24
 # Age (days) before a stale idea enters the validity sweep.
 validity_days = 60
 # Oldest-first validity-sweep batch size (clamped to 100).
@@ -369,8 +373,8 @@ harness = ""
 substrate = ""
 # Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.
 command = ""
-# Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
-allowed_verbs = ["/target", "/think"]
+# Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think, /blueprint).
+allowed_verbs = ["/target", "/think", "/blueprint"]
 # DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none|dispatch>`. Formerly the per-project merge posture for autonomous dispatch.
 auto_merge = false
 # On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.

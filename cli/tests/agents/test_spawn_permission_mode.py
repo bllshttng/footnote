@@ -175,7 +175,7 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "hi", "--harness", "claude",
-         "--permission-mode", "acceptEdits"],
+         "--substrate", "pane", "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 0, result.output
     assert received["permission_mode"] == "acceptEdits"

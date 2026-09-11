@@ -7,15 +7,11 @@ the Rust ``pane`` arm re-execs this CLI), so every spawn passes exactly one.
 
 The gate is READ-ONLY: the ``max_live`` slot cap counts fno registry rows
 (worker provenance) and the RAM floor reads real system RAM. The claude daemon
-roster feeds the ``fno agents top`` display and serves as a LIVENESS ORACLE for
-fno bg rows that carry no local pid, but is never a population to count toward
-the slot cap (x-bdf9 — only a row that is ALSO in the fno registry counts, so
-non-work sessions never consume slots). Its only writes are its own claims
-(``spawn-gate`` check→dispatch mutex,
-``worker:<name>`` headless slot claims, both under the GLOBAL claims root —
-the RAM budget is machine-wide). Global guards fail OPEN on read errors. The
-per-provider cap is stricter: an unreadable live count refuses, never assumes
-zero.
+roster is never a population to count toward the slot cap (x-bdf9: only a row
+ALSO in the fno registry counts). Its only writes are its own claims under the
+GLOBAL claims root - the RAM budget is machine-wide. Global guards fail OPEN
+on read errors; the per-provider cap is stricter: an unreadable live count
+refuses, never assumes zero.
 """
 from __future__ import annotations
 
@@ -1057,22 +1053,10 @@ def _emit_gate_event(kind: str, **data: Any) -> None:
 def _check_registry_schema() -> None:
     """Refuse a spawn into a fleet whose shared registry this fno cannot write.
 
-    Claiming a node and stamping mail are both WRITES, so while the shared
-    registry sits ahead of this fno the whole spawn path is refused. On
-    2026-08-28 that produced a worker that reported "Claim store is not writable
-    for this Codex session", attributed it to a sandbox permission profile, and
-    was believed. Nothing in that chain named the registry.
-
-    So this refuses rather than warns, and the message carries both integers,
-    the file, and the repair verb. Same contract as :func:`_check_ram_floor` and
-    :func:`_check_load_ceiling` on the edges: an unreadable file skips, because
-    a spawn is not the place to adjudicate a torn registry and refusing there
-    would make the repair verb itself unspawnable.
-
-    The event is the other half. Every degraded READ prints a banner, but a
-    refused WRITE returns an error to one caller who reports it in its own words
-    to a king who is not watching; nothing collects those into "the fleet cannot
-    write". Emission is best-effort and never blocks the refusal.
+    The 2026-08-28 story and the edge contract live in
+    docs/architecture/spawn-gate.md. Unreadable file skips (a spawn is not the
+    place to adjudicate a torn registry); schema ahead refuses with both
+    integers, the file, and the repair verb. Emission stays best-effort.
     """
     from fno.agents.registry import (
         SCHEMA_VERSION,
@@ -1381,10 +1365,9 @@ def load_gate_decision(
 ) -> Optional[tuple[str, str, dict]]:
     """One (reason, message, event) triple answering what the load gate does.
 
-    ``None`` admits quietly (disabled or under trigger); a reason in
-    ``_LOAD_REFUSAL_REASONS`` refuses; anything else admits with ``message``.
-    Shared by ``_check_load_ceiling`` and the ``--explain`` preview, so a dry
-    run answers the question the real spawn will.
+    ``None`` admits quietly; a reason in ``_LOAD_REFUSAL_REASONS`` refuses;
+    anything else admits with ``message``. Shared by ``_check_load_ceiling``
+    and the ``--explain`` preview, so a dry run answers the real spawn.
     """
     snapshot = _load_snapshot(max_load_per_cpu)
     if snapshot.spawn_load_status == "disabled":
@@ -1463,34 +1446,12 @@ def _check_load_ceiling(
 ) -> None:
     """Refuse (never queue) when the FLEET is the reason the box is loaded.
 
-    Three thresholds, because the honest question needs two instruments:
-
-    1. ``max_load_per_cpu x cpus`` is a TRIGGER. Below it the gate admits
-       without probing, so the common path costs no subprocess.
-    2. Above the trigger the gate asks footprint whose CPU this is and
-       refuses only when the fleet holds more than ``max_fleet_cpu_share``
-       of capacity.
-    3. ``hard_max_load_per_cpu x cpus`` refuses regardless of attribution.
-
-    WHY (x-7c0f, measured twice). This check refused on the 1-min load
-    average while printing footprint's contradicting attribution in the same
-    refusal: `load 127.6 exceeds ... 96.0` beside `attributes 0.79/12.00
-    cores (6.6% capacity)`. Load average counts runnable PLUS blocked
-    processes, so it is not a CPU measure and belongs to nobody. On
-    2026-08-29 the three largest consumers on the refusing box were desktop
-    applications, and killing one unscoped ripgrep moved the 1-min load from
-    374 to 179 with no agent stopped. A gate that refuses beside its own
-    contradicting measurement teaches an operator to reach for --force,
-    which is how a guard becomes a formality.
-
-    Step 3 exists because a pure fleet-share governor would admit onto a box
-    already thrashing from foreign work. Keep the backstop well above the
-    trigger; :func:`AgentsBlock` defaults are 8 and 40.
-
-    Contract otherwise as :func:`load_gate_decision`: disabled skips, unreadable
-    LOAD skips (fail open), unreadable ATTRIBUTION refuses (fail closed). The
-    decision itself lives there, shared with the ``--explain`` preview so the
-    two surfaces cannot drift.
+    Trigger, attribution, hard backstop - the thresholds and the x-7c0f story
+    live in docs/architecture/spawn-gate.md. Contract otherwise as
+    :func:`load_gate_decision`: disabled skips, unreadable LOAD skips (fail
+    open), unreadable ATTRIBUTION refuses (fail closed). The decision itself
+    lives there, shared with the ``--explain`` preview so the two surfaces
+    cannot drift.
     """
     decision = load_gate_decision(
         max_load_per_cpu,
@@ -1655,6 +1616,35 @@ def _acquire_worker_slot(
         _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
 
 
+def gate_settings() -> tuple:
+    """The gate's knobs, shared by :func:`run_gate` and :func:`probe_capacity`
+    so the two cannot disagree about a cap. Machine THRESHOLDS read through
+    getattr (a missing one has a safe default); a missing CAP or the limits
+    table is a real attribute read (falling back would silently uncap a
+    provider). The fail-safe fallback carries the built-in budget table.
+    """
+
+    try:
+        from fno.config import load_settings
+
+        agents_cfg = load_settings().agents
+        cap = int(agents_cfg.max_live)
+        floor_gb = float(agents_cfg.min_free_gb)
+        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
+        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
+        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
+        limits = dict(agents_cfg.provider_limits)
+    except Exception:
+        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
+        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
+        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
+
+        limits = {
+            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
+        }
+    return cap, floor_gb, max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu, limits
+
+
 def run_gate(
     name: str,
     substrate: str,
@@ -1680,38 +1670,14 @@ def run_gate(
             _substrate=substrate,
             _admission_token=_PROVIDER_ADMISSION_TOKEN,
         )
-    try:
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        cap = int(agents_cfg.max_live)
-        floor_gb = float(agents_cfg.min_free_gb)
-        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
-        # These two read through getattr, and the distinction from the line
-        # below is deliberate. A missing CAP must fail loudly, because falling
-        # back would silently uncap a provider. A missing machine THRESHOLD has
-        # a safe default and no such consequence. Reading them strictly put
-        # them in the same failure class as `provider_limits`: any caller
-        # holding a settings object built before these fields existed dropped
-        # the WHOLE block into the fail-safe branch below, which silently
-        # discarded that caller's `max_live` too. That turned one new field
-        # into a cap bug three test modules away from it.
-        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
-        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
-        # A real attribute read, not a getattr fallback: a missing field must
-        # fail loudly here rather than silently uncapping every provider.
-        limits = dict(agents_cfg.provider_limits)
-    except Exception:
-        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
-        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
-        # The same budget the built-in table carries, coerced through the same
-        # model so this fail-safe path cannot disagree with the configured one
-        # about zai's caps.
-        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
-
-        limits = {
-            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
-        }
+    (
+        cap,
+        floor_gb,
+        max_load_per_cpu,
+        max_fleet_cpu_share,
+        hard_max_load_per_cpu,
+        limits,
+    ) = gate_settings()
 
     provider_cap = (
         provider_lanes_cap(limits.get(route_provider))
@@ -1961,6 +1927,121 @@ def run_gate(
             }
             _refuse(EXIT_QUEUE_TIMEOUT, receipt)
         time.sleep(QUEUE_POLL_S)
+
+
+def _probe_refused(reason: str, message: str, **fields: object) -> dict:
+    """One refused probe payload, receipt-shaped like the real gate's."""
+    return {"verdict": "refused", "reason": reason, "message": message, **fields}
+
+
+def probe_capacity() -> dict:
+    """Answer "would a dispatch be admitted right now" without touching anything.
+
+    Read-only sibling of :func:`run_gate` for the stop hook: no mutex, no
+    reservations, no refusal events. Same settings and condition order as
+    :func:`run_gate`; lanes refuse only when EVERY capped lane is full. Never
+    raises: an internal fault returns ``verdict: unknown``, never saturation.
+    """
+    (
+        cap,
+        floor_gb,
+        max_load_per_cpu,
+        max_fleet_cpu_share,
+        hard_max_load_per_cpu,
+        limits,
+    ) = gate_settings()
+
+    from fno.agents.registry import SCHEMA_VERSION, _read_raw_registry, _registry_path
+
+    try:
+        raw = _read_raw_registry(_registry_path(None))
+        on_disk = raw.get("schema_version") if raw else None
+        if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
+            return _probe_refused(
+                "registry_schema",
+                f"registry schema {on_disk} ahead of schema {SCHEMA_VERSION} "
+                "this fno understands; run fno doctor update",
+                on_disk=on_disk,
+                understood=SCHEMA_VERSION,
+            )
+    except Exception:  # noqa: BLE001 - unreadable registry skips, as the gate skips
+        pass
+
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        caller = resolve_self_identity().session_id
+    except Exception:  # noqa: BLE001 - no identity, no share check
+        caller = None
+
+    try:
+        c = census()
+        if c.slot_count >= cap:
+            return _probe_refused(
+                "max_live",
+                f"{c.slot_count} live worker slots >= max_live {cap}",
+                count=c.slot_count,
+                max_live=cap,
+            )
+        if floor_gb > 0:
+            avail = available_ram_gb()
+            if avail is not None and avail < floor_gb:
+                return _probe_refused(
+                    "ram_floor",
+                    f"available RAM {avail:.1f}GB below the min_free_gb floor {floor_gb:.1f}GB",
+                    available_gb=avail,
+                    min_free_gb=floor_gb,
+                )
+        decision = load_gate_decision(
+            max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu
+        )
+        if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
+            return _probe_refused(
+                f"load_{decision[0]}",
+                f"fleet load over the gate ceiling: {decision[0]}",
+                **decision[2],
+            )
+        if caller:
+            reading = share_reading(c, cap, caller)
+            held, share, kings = reading["held"], reading["share"], reading["kings"]
+            if None not in (held, share, kings) and held >= share:
+                return _probe_refused(
+                    "king_share",
+                    f"this reign holds {held} of max_live {cap} across "
+                    f"{kings} kings (share {share})",
+                    king=caller,
+                    held=held,
+                    share=share,
+                    max_live=cap,
+                    kings=kings,
+                )
+    except Exception as exc:  # noqa: BLE001 - a broken reading is not saturation
+        return {"verdict": "unknown", "reason": "reading_failed", "error": str(exc)}
+    lanes: dict[str, dict[str, int]] = {}
+    full: list[str] = []
+    for provider, budget in sorted(limits.items()):
+        lane_cap = provider_lanes_cap(budget)
+        if lane_cap is None:
+            continue
+        try:
+            live = provider_live_count(provider)
+        except Exception as exc:  # noqa: BLE001 - a partial lane read is not saturation
+            return {
+                "verdict": "unknown",
+                "reason": "lane_count_unavailable",
+                "provider": provider,
+                "error": str(exc),
+            }
+        lanes[provider] = {"cap": lane_cap, "live": live}
+        if live >= lane_cap:
+            full.append(f"{provider} {live}/{lane_cap}")
+    if lanes and len(full) == len(lanes):
+        return _probe_refused(
+            "provider_cap",
+            "every dispatch lane at cap: " + ", ".join(full),
+            lanes=lanes,
+        )
+    return {"verdict": "accepted", "lanes": lanes}
 
 
 # ---------------------------------------------------------------------------

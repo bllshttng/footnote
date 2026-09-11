@@ -808,3 +808,75 @@ def test_pr_url_backfill_keys_off_each_nodes_own_cwd(tmp_graph, stub_slugs):
         "ab-url0001": "https://github.com/o/a/pull/7",
         "ab-url0002": "https://github.com/o/b/pull/7",
     }
+
+
+# --- leg 9: abandoned do rows (x-f714) --------------------------------------
+
+_SID_GONE = "9f06a492-1111-4222-8333-444455556666"
+_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
+
+
+def _fixture_transcript(tmp_path, monkeypatch, sid, age_hours):
+    """A real claude transcript whose last event is age_hours old and whose
+    tail carries a <promise> (not an engaged signal)."""
+    from datetime import datetime, timedelta, timezone
+
+    stamp = (
+        datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    root = tmp_path / "projects" / "-some-worktree"
+    root.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "assistant",
+        "timestamp": stamp,
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "<promise>done</promise>"}]},
+    }
+    (root / f"{sid}.jsonl").write_text(json.dumps(record) + "\n")
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+
+@pytest.fixture
+def no_roster_workers(monkeypatch):
+    """Hermetic roster: no open-phase row names a live worker."""
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids", lambda **k: {}
+    )
+
+
+def test_maintain_abandoned_leg_reaps_gone_holds_active(
+    tmp_graph, tmp_path, no_roster_workers, monkeypatch
+):
+    """AC1-HP + AC3-HP at the CLI level: a node whose only open do row names a
+    session with a quiet transcript is reaped (row_removed true, status_after
+    idea); its active-transcript twin is held by name and keeps the row."""
+    _fixture_transcript(tmp_path, monkeypatch, _SID_GONE, age_hours=72)
+    _fixture_transcript(tmp_path, monkeypatch, _SID_LIVE, age_hours=0)
+    _seed(tmp_graph, [
+        _node("ab-gone01", cwd="/repo/x", sessions=[
+            {"phase": "do", "harness": "claude", "session_id": _SID_GONE,
+             "started_at": "2026-09-09T15:46:29Z"},
+        ]),
+        _node("ab-held01", cwd="/repo/x", sessions=[
+            {"phase": "do", "harness": "claude", "session_id": _SID_LIVE,
+             "started_at": "2026-09-09T15:46:29Z"},
+        ]),
+    ])
+
+    result = _invoke(["--apply", "--no-validity"])
+
+    assert result.exit_code == 0, result.output
+    assert "row_removed true" in result.output
+    assert "status_after idea" in result.output
+    assert "ab-held01" in result.output
+    assert "transcript active" in result.output
+
+    by_id = {n["id"]: n for n in _read(tmp_graph)}
+    assert by_id["ab-gone01"]["sessions"] == []
+    assert by_id["ab-gone01"]["status"] == "idea"
+    live_rows = by_id["ab-held01"]["sessions"]
+    assert len(live_rows) == 1
+    assert live_rows[0]["session_id"] == _SID_LIVE
+    assert "ended_at" not in live_rows[0]

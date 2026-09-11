@@ -25,7 +25,7 @@ use crate::paths::AgentsHome;
 /// other non-zero exit is the server refusing; surface it verbatim and
 /// never double-attach.
 fn attach_via_mux_thread(name: &str, harness: &str, events_path: &Path) -> Option<i32> {
-    let output = std::process::Command::new("fno")
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["mux", "thread", name])
         .stdin(std::process::Stdio::null())
         .output()

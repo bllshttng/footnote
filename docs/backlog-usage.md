@@ -173,7 +173,7 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 |--------|---------|--------|
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
-| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old stays `blocked` until a merged PR touches every `--surface`, then `superseded` |
+| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old's status reads `superseded` from the edge alone; a merged PR touching every `--surface` stamps the record's `verified_at` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
 | Reopen it | `fno backlog reopen <id> --reason "..."` | clears `completed_at`; refuses when a referenced PR is MERGED |
 | Remove permanently | `fno backlog remove <id>` | hard delete (use for dupes / dead nodes) |
@@ -289,6 +289,21 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from a missed one. Coverage counts only origins that still resolve to a live node, because an origin naming a deleted node joins nothing and would otherwise inflate coverage while contributing no growth; any such danglers are reported separately. Realized node and PR counts print either way, so a withheld figure explains itself.
 
+### Request origin: who asked for this
+
+`request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
+
+- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
+- `automated_followup`: a machine follow-up. Retro landings and decomposed children.
+- `unknown`: everything else.
+
+A node carries `origin_evidence`, the producing-event reference the birth had: a capture fu-id and its substrate ref, a plan's sources, or a causal node id.
+
+Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin. Every node born before this field existed reads unknown.
+
+On the local board the buckets appear as an `All origins` filter. Rows with a known origin wear a dashed pill. Each detail panel shows an origin line and its evidence. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
+
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
 `in_review` and closes on the actual merge via `reconcile` / merge-triggered
@@ -340,6 +355,10 @@ fno backlog triage health          # idea pile, stale ready, collisions, dupes
 fno backlog maintain --apply       # recurring sweep: re-scope, prune, pr_url backfill, auto-defer
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
+
+### Abandoned do rows
+
+An open do row wedges its node `in_progress`. The in-progress status hides the row from the Rust settle's done+merged gate. A session that died mid-do strands its node forever. `fno backlog maintain` carries the leg that watches this population. Read mode reports every candidate with its verdict (`gone` or `held`) and the reason. `--apply` reaps a `gone` row only after the transcript prover proves the session quiet. The bar is `config.backlog.maintain.abandoned_do_row_hours` (default 24) with a non-engaged tail. A live claim holds the row. A live roster worker holds the row. A transcript the prover cannot read holds the row and names the reason. Opencode rows always hold, because no file-backed transcript exists to prove against. A held row can still be reaped by hand. Run `fno backlog session reap-open` after you have proven the session dead yourself.
 
 ### The daily pass
 

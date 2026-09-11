@@ -119,7 +119,7 @@ so the portable driver-skill contract (CI-enforced self-containment) is intact.
 
 The front door is a claude-only sub-mode of `target`, not a row of its own in `docs/harnesses/verb-matrix.md`. `docs/SKILL-COMPAT-MATRIX.md` states the sub-mode rule.
 
-**Headless / megawalk runs skip the front door entirely** (it requires a human
+**Headless runs skip the front door entirely** (it requires a human
 confirm). The bundled `archer` agent carries an explicit attended-only guard, so
 a headless worker never detects, backfills, or consumes a sidecar
 (Open Question 2: headless never consumes).

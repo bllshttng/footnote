@@ -59,15 +59,18 @@ case "$sub $verb" in
       # linked idea stub (Rung.IDEA) for the --all-ready cold-dispatch gate.
       plan_fragment=""
       [[ -f "$S/plan_$id" ]] && plan_fragment=",\"plan_path\":\"$(cat "$S/plan_$id")\""
+      # x-ebd2: difficulty rides the projection; the node-aware resolve reads it.
+      diff_fragment=""
+      [[ -f "$S/diff_$id" ]] && diff_fragment=",\"difficulty\":\"$(cat "$S/diff_$id")\""
       # Emit _resolved_cwd when set, otherwise omit the field (stale-fno sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
-        printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s%s}\n' \
+        printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s%s%s}\n' \
           "$id" "$(cat "$S/status_$id")" \
           "$(cat "$S/resolved_cwd_$id")" \
-          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment"
+          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment" "$diff_fragment"
       else
-        printf '{"id":"%s","status":"%s","cwd":"%s"%s%s%s}\n' \
-          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment"
+        printf '{"id":"%s","status":"%s","cwd":"%s"%s%s%s%s}\n' \
+          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment" "$diff_fragment"
       fi
     else
       exit 1   # unknown node -> nonzero, no output (mirrors not-found)
@@ -174,13 +177,24 @@ case "$sub $verb" in
     pair="claude/bg"
     [[ -f "$S/resolve_pair" ]] && pair="$(cat "$S/resolve_pair")"
     h="${pair%%/*}"
-    # Parse the verb/brief/posture resolver path (--node <id> [--verb <v>]
-    # [--merge-posture <p>]).
-    r_node=""; r_verb=""; r_posture=""; _prev=""
+    # Parse the node-aware resolver path (--node <id> [--merge-posture <p>]
+    # [--autonomous]). x-ebd2: the REAL resolver loads the node and derives
+    # the workflow verb from plan rung + difficulty; the mock reads the same
+    # state files the node json builder emits (diff_<id>, rung_<id>, verb_<id>).
+    r_node=""; r_posture=""; _prev=""
     for a in "$@"; do
-      case "$_prev" in --node|--id) r_node="$a" ;; --verb) r_verb="$a" ;; --merge-posture) r_posture="$a" ;; esac
+      case "$_prev" in --node|--id) r_node="$a" ;; --merge-posture) r_posture="$a" ;; esac
       _prev="$a"
     done
+    r_diff=""; r_rung="none"; r_verb=""
+    # The mock fleet's default intake is planless low (the scenarios model
+    # plain ready nodes); nodiff_<id> models the absent field the real
+    # resolver refuses on, and diff_<id> overrides for the blueprint cases.
+    r_diff="low"
+    [[ -n "$r_node" && -f "$S/nodiff_$r_node" ]] && r_diff=""
+    [[ -n "$r_node" && -f "$S/diff_$r_node" ]] && r_diff="$(cat "$S/diff_$r_node")"
+    [[ -n "$r_node" && -f "$S/rung_$r_node" ]] && r_rung="$(cat "$S/rung_$r_node")"
+    [[ -n "$r_node" && -f "$S/verb_$r_node" ]] && r_verb="$(cat "$S/verb_$r_node")"
     # x-4391/x-8151: the RESOLVER owns the merge posture now; the launcher only
     # threads it. from-config folds the same grant source the config-get case
     # models, and every error shape degrades to no-merge.
@@ -192,26 +206,35 @@ case "$sub $verb" in
       [[ -f "$S/cfg_auto_merge_err" ]] && grant="unreadable"
       [[ "$grant" == "dispatch" ]] && posture="allow" || posture="no-merge"
     fi
+    # x-ebd2 lifecycle table (parody of the real one, same keys): a stored
+    # target/blueprint-family verb reconciles through the table; an
+    # out-of-family verb keeps declared precedence; a node-less resolve (the
+    # startup base) stays the node-agnostic builtin target.
+    case "$r_verb" in /target|/blueprint|/fno:target|/fno:blueprint) r_verb="" ;; esac
+    eff=""
     if [[ -n "$r_verb" ]]; then
-      # x-a5e4 verb path: the resolver NORMALIZES the verb per-harness. The
-      # posture (not the launcher) adds the carrier below.
-      bare="${r_verb#/}"
-      case "$h" in
-        claude|agy) cmd="/$bare {id}" ;;
-        codex)      cmd="\$fno:$bare {id}" ;;
-        opencode)   cmd="/fno:$bare {id}" ;;
-        *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
-      esac
+      eff="$r_verb"
+    elif [[ -z "$r_node" ]]; then
+      eff="/target"
     else
-      # builtin (no verb): the plain template; the posture below decides the
-      # carrier, mirroring resolve_dispatch's allow-override contract.
-      case "$h" in
-        claude|agy) cmd='/target {id}' ;;
-        codex)      cmd='$fno:target {id}' ;;
-        opencode)   cmd='/fno:target {id}' ;;
-        *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
+      case "$r_rung" in
+        none) case "$r_diff" in low) eff="/target" ;; medium|high) eff="/blueprint" ;; esac ;;
+        idea|design) eff="/blueprint" ;;
+        ready|in_progress|in_review) eff="/target" ;;
       esac
     fi
+    if [[ -z "$eff" ]]; then
+      echo "dispatch resolve: dispatch verb cannot be derived: the node has no plan (plan rung $r_rung) and its difficulty reads '${r_diff:-none}' (x-ebd2)" >&2
+      exit 2
+    fi
+    # x-a5e4: the resolver NORMALIZES the verb per-harness. The posture (not
+    # the launcher) adds the carrier below.
+    case "$h" in
+      claude|agy) cmd="$eff {id}" ;;
+      codex)      cmd="\$fno:${eff#/} {id}" ;;
+      opencode)   cmd="/fno:${eff#/} {id}" ;;
+      *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
+    esac
     # x-8151: no-merge injects on every rung, once, into family commands only.
     # allow never edits a command (a refusal it carries wins).
     if [[ "$posture" == "no-merge" && "$cmd" != *REFUSED* ]]; then
@@ -279,12 +302,15 @@ export NAME_BRIDGE
 
 set_status() { echo "$2" > "$MOCKSTATE/status_$1"; }
 set_plan()   { echo "$2" > "$MOCKSTATE/plan_$1"; }   # x-e24a: plan_path -> linked stub (Rung.IDEA)
+set_diff()   { echo "$2" > "$MOCKSTATE/diff_$1"; }   # x-ebd2: node difficulty
+set_nodiff() { touch "$MOCKSTATE/nodiff_$1"; }       # x-ebd2: difficulty absent
+set_rung()   { echo "$2" > "$MOCKSTATE/rung_$1"; }   # x-ebd2: linked plan's rung
 set_claim()  { echo "$2" > "$MOCKSTATE/claim_$1"; }
 set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2" > "$MOCKSTATE/agents_list.json"; }
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/diff_* "$MOCKSTATE"/rung_* "$MOCKSTATE"/nodiff_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 # Read repo_ensure.log joined on one line. cat + strip, never tail -1: the rtk
 # wrapper on this machine silently empties tail -1. One home for the join so
@@ -810,10 +836,52 @@ fi
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "codex/headless" > "$MOCKSTATE/resolve_pair"
 echo "/target" > "$MOCKSTATE/verb_ab-aaaa1111"
+echo low > "$MOCKSTATE/diff_ab-aaaa1111"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
 echo "$out" | grep -qF "'\$fno:target --no-merge ab-aaaa1111'" \
   && pass "x-a5e4 P1: no-merge injected into a codex \$fno:target verb-path command" \
   || fail "x-a5e4 P1: no-merge NOT injected into \$fno:target verb path: $out"
+
+# ============================================================
+# x-ebd2: the dispatch verb derives from lifecycle (difficulty at
+# intake, plan rung at re-dispatch), in the shell door too
+# ============================================================
+
+# ---- planless medium node: the intake law blueprints it (d-834b6ff1) ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo medium > "$MOCKSTATE/diff_ab-aaaa1111"
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -qF "'/blueprint ab-aaaa1111'" \
+  && pass "x-ebd2: planless medium resolves the blueprint intake" \
+  || fail "x-ebd2: planless medium should blueprint: $out"
+
+# ---- planless node WITHOUT difficulty: the resolve refuses, node stays ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+set_nodiff ab-aaaa1111
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+echo "$out" | grep -q '^failed ab-aaaa1111 reason="dispatch resolve refused' \
+  && pass "x-ebd2: planless no-difficulty refuses; node not dispatched" \
+  || fail "x-ebd2: expected a resolve refusal, got: $out"
+
+# ---- a READY plan advances a stale /fno:blueprint verb to target ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo "/fno:blueprint" > "$MOCKSTATE/verb_ab-aaaa1111"
+echo ready > "$MOCKSTATE/rung_ab-aaaa1111"
+echo high > "$MOCKSTATE/diff_ab-aaaa1111"
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -qF "'/target --no-merge ab-aaaa1111'" \
+  && pass "x-ebd2: ready plan advances a stale blueprint verb to target" \
+  || fail "x-ebd2: ready plan should dispatch target: $out"
+
+# ---- a DESIGN draft keeps blueprint despite a stored /fno:target verb ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo "/fno:target" > "$MOCKSTATE/verb_ab-aaaa1111"
+echo design > "$MOCKSTATE/rung_ab-aaaa1111"
+echo low > "$MOCKSTATE/diff_ab-aaaa1111"
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -qF "'/blueprint ab-aaaa1111'" \
+  && pass "x-ebd2: design draft keeps blueprint despite a stored target verb" \
+  || fail "x-ebd2: design draft should keep blueprint: $out"
 
 # ---- x-a5e4 codex review P2: --permission-mode is claude-only on the autonomous
 #      (bg/headless) lane - `fno agents spawn` rejects it for a non-claude headless

@@ -31,9 +31,9 @@ no trigger at all:   `fno backlog retro sweep-carveouts` reads the ledger direct
 `fno backlog reconcile` closes nodes whose PR merged outside the ship gate and drops a retro sentinel, but nothing invoked it. Two throttled surfaces now do:
 
 - **`hooks/reconcile-session-start.sh`** (SessionStart): renders the *prior* sweep's result as a reminder (only when a node was closed), then launches a fresh reconcile detached via `nohup` so session start never blocks.
-- **`hooks/megawalk-stop-hook.sh`** (between iterations): fires the same throttled reconcile so long autonomous runs reconcile without a fresh session.
+- **`hooks/megawalk-stop-hook.sh`** (between iterations): fired the same throttled reconcile so long autonomous runs reconciled without a fresh session. Removed with the megawalk walker; the SessionStart hook and the `/loop 30m fno backlog reconcile` cadence cover long-running work now.
 
-Both source `scripts/lib/reconcile-throttle.sh` and share one throttle stamp (`.fno/.reconcile-stamp`, ~15 min, `RECONCILE_THROTTLE_SECONDS` override) so parallel sessions don't hammer `gh`. Reconcile always runs in mutate mode here — writing the retro sentinel is the point. AGENTS.md documents the `/loop 30m fno backlog reconcile` cadence for non-megawalk terminals.
+Both source `scripts/lib/reconcile-throttle.sh` and share one throttle stamp (`.fno/.reconcile-stamp`, ~15 min, `RECONCILE_THROTTLE_SECONDS` override) so parallel sessions don't hammer `gh`. Reconcile always runs in mutate mode here — writing the retro sentinel is the point. AGENTS.md documents the `/loop 30m fno backlog reconcile` cadence for all terminals.
 
 ### Wave 2 — carve-out capture (`fno backlog carveout add`)
 

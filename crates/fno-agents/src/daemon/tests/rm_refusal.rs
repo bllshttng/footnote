@@ -127,3 +127,106 @@ async fn rm_accepts_a_dead_pid_as_provably_gone() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// Roster `blocked` is claude's "Needs input", not a model outage. A plain rm
+/// refuses through the live-row gate and names a verb the CLI has.
+#[tokio::test]
+async fn rm_refuses_a_blocked_claude_row_through_the_live_gate() {
+    let home = short_home("rmblocked");
+    let mut row = claude_rm_row(
+        "blocked-worker",
+        "dddd4444",
+        "dddd4444-1111-2222-3333-444444444444",
+    );
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "blocked-worker"}));
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("blocked")),
+            ])
+        },
+        &|_| panic!("a plain rm must not reach claude rm"),
+        &|_, _| panic!("a plain rm must not reach mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    let message = &response.error().unwrap().message;
+    assert!(
+        message.contains("fno agents stop blocked-worker"),
+        "{message}"
+    );
+    assert!(!message.contains("rotate"), "{message}");
+    assert!(!message.contains("model outage"), "{message}");
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// `--force` reaches a blocked row: a session that never got a prompt waits
+/// for input forever, and force is the documented way out.
+#[tokio::test]
+async fn rm_force_removes_a_blocked_claude_row() {
+    let home = short_home("rmblockedforce");
+    let mut row = claude_rm_row(
+        "blocked-worker",
+        "dddd4445",
+        "dddd4445-1111-2222-3333-444444444444",
+    );
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(
+        1,
+        "agent.rm",
+        json!({"name": "blocked-worker", "force": true}),
+    );
+    let first = std::sync::atomic::AtomicBool::new(true);
+    let removed = std::sync::atomic::AtomicBool::new(false);
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| {
+            if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("dddd4445", Some("blocked")),
+                ])
+            } else {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+            }
+        },
+        &|id| {
+            assert_eq!(id, "dddd4445");
+            removed.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        },
+        &|_, _| Ok(true),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "force must reach a blocked row: {:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert!(removed.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        0
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

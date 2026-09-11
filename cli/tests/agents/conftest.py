@@ -110,13 +110,15 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     on the bounded window) and stubs the underlying registry reader to ``None``
     (no read of the developer's real ``~/.claude/sessions``), so a claude spawn
     leaves ``claude_session_uuid`` unresolved without slowing or host-coupling
-    the suite. Tests that exercise resolution override these per-test
-    (monkeypatch order: the test-local setattr wins).
+    the suite. The spawn seed check reads claude's real job state the same
+    way, so it is stubbed to verified. Tests that exercise resolution override
+    these per-test (monkeypatch order: the test-local setattr wins).
     """
-    from fno.agents.harnesses import claude
+    from fno.agents.harnesses import _claude_session_registry, claude
 
     monkeypatch.setattr(claude, "_SPAWN_UUID_RETRY_BACKOFF_SEC", 0.0)
     monkeypatch.setattr(claude, "resolve_session_uuid", lambda short_id: None)
+    monkeypatch.setattr(_claude_session_registry, "seed_unverified_reason", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)

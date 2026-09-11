@@ -115,7 +115,16 @@ def _hold(key: str) -> None:
     acquire_claim(key, "test-holder", ttl_ms=60_000, root=adv._claims_root_for(key))
 
 
-NODE = {"id": "ab-2222aaaa", "title": "next", "project": "fno", "_resolved_cwd": "/tmp/x"}
+# A real selection projection row (x-0961/x-ebd2): the keys the node-aware
+# doors read. Planless low is the law's straight-to-target intake.
+NODE = {
+    "id": "ab-2222aaaa",
+    "title": "next",
+    "project": "fno",
+    "_resolved_cwd": "/tmp/x",
+    "difficulty": "low",
+    "dispatch_verb": "",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +264,103 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     res = adv.advance(project="fno", events_path=iso)
 
     assert res.decision == "skipped" and res.reason == "already-claimed"
+
+
+def test_live_worked_node_refuses_and_names_worker(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {NODE["id"]: ["bp-worker"]},
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+
+    observation = adv._observe_node_claim(NODE["id"])
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "already-claimed"
+    assert observation.worker == "bp-worker"
+    assert emitted[0][1]["worker"] == "bp-worker"
+
+
+def test_worked_authority_failure_refuses_dispatch(monkeypatch):
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.blocks_dispatch is True
+    assert observation.refusal_reason == "worked-authority-unavailable"
+    assert observation.block_reason == "worked-authority-unavailable"
+
+
+def test_dead_dispatch_limit_outranks_worked_error(monkeypatch):
+    """A durable refusal must not be masked by an authority error that merely
+    co-occurred: the caller can act on auto-deferred, and the remedy text that
+    names it is what spawn-guard renders."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        adv,
+        "_refuse_repeated_dead_dispatch",
+        lambda *_a, **_kw: "auto-deferred",
+    )
+
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.action == "auto-deferred"
+    assert observation.refusal_reason == "auto-deferred"
+    assert observation.blocks_dispatch is True
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
@@ -500,6 +606,32 @@ def test_gate_refusal_maps_the_gate_exit_family():
         )
         is None
     )
+
+
+def test_gate_refusal_reads_the_sandbox_probe_exit_as_lane_scoped():
+    """A sandbox that blocks gh blocks it for every node the codex lane takes,
+    so the refusal skips instead of charging the node."""
+    from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
+
+    line = (
+        "sandbox-probe: gh is unreachable inside the codex workspace-write sandbox "
+        "(error connecting to api.github.com); no worker launched, node stays dispatchable"
+    )
+    detail = adv._gate_refusal_detail(f"{line}\nremedy: allow it in ~/.codex/config.toml")
+    assert detail == line
+    refusal = adv.gate_refusal(
+        adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=detail)
+    )
+    assert refusal is not None and refusal.reason == "sandbox-unreachable"
+    assert refusal.exit_code == EXIT_SANDBOX_UNREACHABLE and refusal.detail == line
+    # The number alone is not proof, and neither is the gate family's marker.
+    for other in ("Traceback (most recent call last):", _GATE_LINE):
+        assert (
+            adv.gate_refusal(
+                adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=other)
+            )
+            is None
+        )
 
 
 def test_gate_refusal_carries_queue_retry_at():
@@ -823,7 +955,12 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
         lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
     sid = adv._spawn_worker(
-        "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
+        "x-grid1",
+        None,
+        "grid-slug",
+        # planless low: the law's straight-to-/target intake, so the grid
+        # consult this test exists for stays keyed on the target profile.
+        node={"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
     )
     assert sid == "sid-grid1"
     cmd = captured["cmd"]
@@ -844,7 +981,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     )
     adv._spawn_worker(
         "x-pin1", None, "pin-slug", provider="claude",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     i = cmd.index("--harness")
@@ -861,7 +998,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     (tmp_path / ".git").mkdir()
     node = {
         "id": "x-grid2", "slug": "grid-two", "difficulty": "high",
-        "priority": "p1", "cwd": str(tmp_path),
+        "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
@@ -912,7 +1049,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     (tmp_path / ".git").mkdir()
     node = {
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
-        "priority": "p1", "cwd": str(tmp_path),
+        "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
     capacity = {"claude": "exhausted", "codex": "exhausted"}
 
@@ -3096,7 +3233,15 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
 def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
     """AC5 + AC6: refuse before spawn; the lane fails loudly, never 'launched'."""
     node_id = "n-" + "z" * 70
-    node = {"id": node_id, "title": "irrelevant", "project": "fno", "_resolved_cwd": "/tmp/x"}
+    node = {
+        "id": node_id,
+        "title": "irrelevant",
+        "project": "fno",
+        "_resolved_cwd": "/tmp/x",
+        # a real projection row: planless low dispatches straight to target
+        "difficulty": "low",
+        "dispatch_verb": "",
+    }
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
     monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
     monkeypatch.setattr(
@@ -3298,12 +3443,15 @@ def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
         adv, "_grid_lane_for",
-        lambda node, *, model, provider: (
+        lambda node, *, model, provider, verb=None: (
             "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", "zai-main", None
         ),
     )
     adv._spawn_worker(
-        "x-route1", None, "route-slug", node={"difficulty": "high", "priority": "p1"}
+        "x-route1",
+        None,
+        "route-slug",
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--route" in cmd
@@ -3326,14 +3474,14 @@ def test_spawn_worker_preresolved_grid_route_survives_a_pinned_harness(monkeypat
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
 
-    def _must_not_consult(node, *, model, provider):
+    def _must_not_consult(node, *, model, provider, verb=None):
         raise AssertionError("grid consulted again under a pinned harness")
 
     monkeypatch.setattr(adv, "_grid_lane_for", _must_not_consult)
     adv._spawn_worker(
         "x-route3", None, "route-slug", harness="claude",
         grid_route="zai/glm-5.3-flash[1m]", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
@@ -3352,13 +3500,13 @@ def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
         adv, "_grid_lane_for",
-        lambda node, *, model, provider: (
+        lambda node, *, model, provider, verb=None: (
             "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None, None
         ),
     )
     adv._spawn_worker(
         "x-route2", None, "route-slug", vendor="zai",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "zai"
@@ -3377,7 +3525,121 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
         "x-route4", None, "route-slug", harness="codex", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--account" not in cmd
+
+
+def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeypatch):
+    """x-ebd2 acceptance: for the four lifecycle shapes, command, worker-name
+    qualifier, and receipt verb all state the SAME derived verb, and a stale
+    stored verb reconciles through the table instead of winning."""
+    design_plan = tmp_path / "design-plan.md"
+    design_plan.write_text("---\nstatus: design\n---\n# draft\n")
+    ready_plan = tmp_path / "ready-plan.md"
+    ready_plan.write_text("---\nstatus: ready\n---\n# contract\n")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[auto_merge]\nenabled = false\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setattr(
+        adv,
+        "_grid_lane_for",
+        lambda node, *, model, provider, verb=None: (
+            None, None, None, None, "grid=test-declined",
+        ),
+    )
+
+    cases = [
+        # (node fields, expected command, expected name suffix, receipt verb,
+        #  verb_source)
+        (
+            {"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
+            "/target --no-merge x-low", "target", "/target", "none-declared",
+        ),
+        (
+            {"difficulty": "medium", "priority": "p1", "dispatch_verb": ""},
+            "/blueprint x-med", "blueprint", "/blueprint", "none-declared",
+        ),
+        (
+            {
+                "difficulty": "low", "priority": "p1",
+                "dispatch_verb": "/fno:target",
+                "plan_path": str(design_plan), "cwd": str(tmp_path),
+            },
+            "/blueprint x-design", "blueprint", "/blueprint", "declared",
+        ),
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "/fno:blueprint",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/target --no-merge x-ready", "target", "/target", "declared",
+        ),
+    ]
+    for i, (fields, command, suffix, verb, source) in enumerate(cases):
+        nid = command.split(" ")[-1]
+        slug = f"matrix-{i}"
+        captured, fake_run = _fake_spawn_run(f"sid-m{i}")
+        monkeypatch.setattr(adv.subprocess, "run", fake_run)
+        events = tmp_path / f"matrix-{i}.jsonl"
+        adv._spawn_worker(
+            nid, None, slug, node={"id": nid, "slug": slug, **fields},
+            events_path=events,
+        )
+        assert captured["cmd"][-1] == command, (i, captured["cmd"][-1])
+        name = captured["cmd"][captured["cmd"].index("--name") + 1]
+        expected_name = (
+            f"target-{nid}-{suffix}-{slug}" if suffix else f"target-{nid}-{slug}"
+        )
+        assert name == expected_name, (i, name)
+        rows = [
+            json.loads(line)
+            for line in events.read_text().splitlines()
+            if line.strip()
+        ]
+        spawned = [r for r in rows if r.get("type") == "dispatch_spawned"]
+        assert spawned, (i, rows)
+        assert spawned[0]["data"]["verb"] == verb, (i, rows)
+        assert spawned[0]["data"]["verb_source"] == source, (i, rows)
+
+
+def test_spawn_worker_planless_without_difficulty_refuses(iso, monkeypatch):
+    """x-ebd2: a planless node with no difficulty cannot answer the intake
+    question; the dispatch refuses before anything is spent."""
+    captured, fake_run = _fake_spawn_run("sid-nodiff")
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    with pytest.raises(Exception, match="difficulty"):
+        adv._spawn_worker(
+            "x-nodiff", None, "nodiff-slug",
+            node={"id": "x-nodiff", "dispatch_verb": "", "priority": "p1"},
+        )
+    assert "cmd" not in captured, "no spawn may run for an unanswerable node"
+
+
+# ---------------------------------------------------------------------------
+# _undispatched_nodes: the observer timeout names what was being read (x-be7f)
+# ---------------------------------------------------------------------------
+
+
+def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise _subprocess_module.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match=r"60s budget: .*backlog undispatched"):
+        adv._undispatched_nodes("fno")
+
+
+def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
+    receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
+
+    def fake_run(cmd, **kwargs):
+        return _FakeProc(0, json.dumps(receipt))
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    assert adv._undispatched_nodes("fno") == receipt

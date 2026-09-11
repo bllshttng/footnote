@@ -378,7 +378,9 @@ def routing_for(node: Optional[dict]) -> dict:
     The chain is RECOVERED, not constructed: `route_resolve.resolve_slot`
     already returns ``(candidate, chain)`` whose last element is its terminal
     reason. The strings are the existing receipt vocabulary and are surfaced
-    verbatim - reformatting them would fork it.
+    verbatim - reformatting them would fork it. The slot is the node's
+    effective verb, derived through the same wrapper the dispatch grid pick
+    uses, so the narration cannot name a slot the dispatcher would not walk.
     """
     if node is None:
         return {"chain": [], "candidate": None, "inputs": {}, "routing": "unarmed", "skipped": []}
@@ -393,11 +395,24 @@ def routing_for(node: Optional[dict]) -> dict:
         "role": role,
         "plan_path": node.get("plan_path") or None,
     }
+    # The slot comes from the verb, never a literal: one derivation shared
+    # with the dispatch seam, and the same normalization on the canonical
+    # verb, so a blueprint-verb node walks agents.profiles.blueprint here.
+    try:
+        from fno.backlog import advance as adv
+
+        verb = adv._node_effective_verb(node)
+    except Exception as exc:  # noqa: BLE001 - an unanswerable verb is reported
+        return {
+            "chain": [f"verb unresolved: {exc}"], "candidate": None, "inputs": inputs,
+            "routing": "unarmed", "skipped": [],
+        }
+    profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
         inventory = route_resolve.resolve_inventory()
         capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
         candidate, chain, verdict = route_resolve.resolve_slot(
-            "target",
+            profile_verb,
             node,
             capacity,
             role=role,

@@ -31,6 +31,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `paths.spaces_dir` | str (optional) | _(none)_ | never | Override path to the per-repo spaces root. |
 | `graph.commit_mode` | typing.Literal['rows', 'whole'] | `rows` | advanced | Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows). |
+| `graph.read_source` | typing.Literal['json', 'sqlite'] | `json` | advanced | Authoritative graph reader: json or the shadow SQLite row store (default json). |
 | `obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
@@ -41,6 +42,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `blueprint.max_prs_per_epic` | int | `4` | advanced | Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
+| `backlog.maintain.abandoned_do_row_hours` | int | `24` | advanced | Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone. |
 | `backlog.maintain.validity_days` | int | `60` | advanced | Age (days) before a stale idea enters the validity sweep. |
 | `backlog.maintain.validity_batch_size` | int | `25` | advanced | Oldest-first validity-sweep batch size (clamped to 100). |
 | `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
@@ -146,7 +148,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `dispatch.harness` | str | `` | advanced | DEPRECATED: the stage table (config.agents.profiles.<verb>.provider) is the home for the harness axis; this key reads as the fallback rung beneath it for one release. Migrate with `fno config set agents.profiles.target.provider <harness>`. Formerly the configured harness for autonomous dispatch. |
 | `dispatch.substrate` | str | `` | advanced | Default dispatch substrate (thread\|headless\|pane); bg is a deprecated alias for thread for one release. Empty = per-harness default (claude=thread, else headless; a harness's thread bit must be journey-proven). |
 | `dispatch.command` | str | `` | advanced | Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally. |
-| `dispatch.allowed_verbs` | list[str] | `["/target", "/think"]` | advanced | Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think). |
+| `dispatch.allowed_verbs` | list[str] | `["/target", "/think", "/blueprint"]` | advanced | Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think, /blueprint). |
 | `dispatch.auto_merge` | bool | `false` | advanced | DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none\|dispatch>`. Formerly the per-project merge posture for autonomous dispatch. |
 | `dispatch.on_exhaustion` | str | `defer` | advanced | On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'. |
 | `dispatch.cutover_low_after_minutes` | int | `0` | advanced | Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0. |

@@ -99,6 +99,6 @@ Both are minimal (under 40 lines) and self-contained. Copy one as your template.
 
 ## Option A: SKILL.md-side fallback
 
-Even without a plugin installed, the target and megawalk loop skills themselves include an instruction for the LLM: "when emitting `<promise>X</promise>`, also write `.fno/target-promise.signal` with the content `X`." This is pure prompt-level enforcement - works on every driver that honors the skill markdown.
+The target loop skill includes a prompt-level fallback for sessions with no plugin. It instructs the LLM: "when emitting `<promise>X</promise>`, also write `.fno/target-promise.signal` with the content `X`." This works on every driver that honors the skill markdown.
 
 Plugin (Option B) is reinforcement against LLM forgetfulness. Install both for maximum robustness; either alone works for most sessions.

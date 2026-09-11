@@ -171,7 +171,7 @@ pub fn decide(
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
 /// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
 /// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
-fn fno_bin() -> std::ffi::OsString {
+pub fn fno_bin() -> std::ffi::OsString {
     std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
 }
 

@@ -2,6 +2,8 @@
 
 # Do-Roadmap: Multi-Session Task Orchestration
 
+> **Historical.** The megawalk skill and walker this document describes are retired (removed 2026-08-03, see [path-census.md](path-census.md)). Nothing below is runnable today. The supported multi-node routes: `/fno:target` per node, `/fno:target bg --all-ready` for a board, `fno backlog advance` for merge-triggered continuation. The active-backlog daemon is the always-on drain ([active-backlog-dispatcher.md](active-backlog-dispatcher.md)). Kept as the design record of the vision-to-backlog, one-task-per-session, discovery-relay pipeline.
+
 > Architecture doc for the megawalk skill - vision-to-backlog generation, one-task-per-session execution, and cross-task discovery relay.
 
 ## Overview
@@ -285,4 +287,4 @@ Slow integration tests are tagged `@pytest.mark.slow_e2e`; the 30-minute real-ti
 
 ### Migration from Shell Loop
 
-Users invoking the previous shell-driven megawalk (`/megawalk --next` / `--continue`) need no migration: the bare `/megawalk` form continues to work and now dispatches to the walker. The CLI surface adds `fno megawalk` for headless invocation (cron, CI, scripts) - see [megawalk-migration.md](../../megawalk-migration.md) for the surface-change history.
+Users invoking the previous shell-driven megawalk (`/megawalk --next` / `--continue`) need no migration: the bare `/megawalk` form continues to work and now dispatches to the walker. The CLI surface adds `fno megawalk` for headless invocation (cron, CI, scripts) - see [megawalk-migration.md](megawalk-migration.md) for the surface-change history.

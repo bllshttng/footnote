@@ -741,9 +741,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("events-discipline lint", ".", "bash scripts/lint/events-discipline.sh"),
     ("events-discipline lint self-test", ".", "bash tests/lint/test-events-discipline.sh"),
     ("No quarantined events.invalid.jsonl rows", ".", "bash scripts/lint/no-invalid-events.sh"),
-    ("ruff + mypy (both repo-wide)", "cli",
-     "uv run ruff check --no-respect-gitignore src/\n"
-     "uv run mypy src/"),
+    ("ruff + mypy (both repo-wide)", ".", "bash scripts/ci/check-python-static.sh"),
     ("Smoke tests", ".", "bash cli/tests/smoke/run-all.sh"),
     ("no hardcoded paths", ".", "bash scripts/ci/check-no-hardcoded-paths.sh"),
     ("placement rule", ".", "bash scripts/ci/check-placement-rule.sh"),
@@ -1681,9 +1679,13 @@ def _estimate_changed_minutes(root: Path, selections: Sequence[dict]) -> int:
     build = 1 if (_RUST_BUILD_STEP in structural
                   or any(_needs_rust_binary(root, rel) for rel in shell_rels)) else 0
     # Tenths of a minute, so the arithmetic stays in integers. The build is
-    # priced at 3 on its own; the other structural steps at 1 each.
+    # priced at 15 on its own; the other structural steps at 1 each. The build
+    # price is measured, not guessed: a Rust-source change invalidates the
+    # workspace cargo cache, and the CI rebuild ran 15 to 25 minutes across
+    # four consecutive runs on 2026-09-09 (a local cold build ran 30), while
+    # the old 3-minute price left every such packet half under its real cost.
     tenths = 50 + (pytest_files * 3) // 2 + shell * 10 \
-        + (len(structural) - build) * 10 + build * 30
+        + (len(structural) - build) * 10 + build * 150
     return max(15, -(-tenths // 10))
 
 

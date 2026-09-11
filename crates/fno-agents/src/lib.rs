@@ -84,7 +84,7 @@ pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
-mod distress;
+pub mod distress;
 pub mod drift;
 pub mod envelope;
 pub mod events;
@@ -93,6 +93,7 @@ pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod flight_gate;
 pub mod gc;
 pub mod gc_inventory;
 pub mod gc_native;
@@ -103,6 +104,7 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
+pub mod graph_sqlite;
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -112,6 +114,7 @@ pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
 pub mod king_termination;
+pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
@@ -130,6 +133,7 @@ pub mod merge_reap;
 mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod needs;
+pub mod node_origin;
 pub mod node_route;
 pub mod nudge;
 pub mod opencode_ask;
@@ -139,6 +143,7 @@ pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;
+pub mod pane_stop;
 pub mod paths;
 pub mod pi;
 pub mod protocol;
@@ -160,6 +165,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
 pub mod screen;
+pub(crate) mod served_liveness;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
@@ -906,6 +912,8 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_row_reaped",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
+    "graph_write_gate",
+    "graph_export_failed",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

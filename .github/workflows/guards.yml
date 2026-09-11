@@ -81,14 +81,7 @@ jobs:
 
       - name: Ruff + MyPy (repo-wide)
         if: ${{ !cancelled() }}
-        working-directory: cli
-        run: |
-          set -euo pipefail
-          python_files="$(find src -type f -name '*.py' -print | wc -l | tr -d '[:space:]')"
-          test "$python_files" -gt 0
-          uv run ruff check --no-respect-gitignore src/
-          uv run mypy src/
-          echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
+        run: bash scripts/ci/check-python-static.sh
 
       # The verb x harness doc is a projection of the capability table and
       # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because
@@ -347,6 +340,11 @@ jobs:
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
+      - name: File budget gate selftest
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_file_budget.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}
@@ -367,6 +365,11 @@ jobs:
         run: |
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
+
+      - name: Graph store parity guard
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-graph-parity.sh --self-test
 
       # From the installed-tree import crash: parents[N]/scripts joins in
       # cli/src/fno escape the package root and the wheel never ships them.

@@ -699,6 +699,11 @@ class TestControlPlaneArmRows:
         assert by_arm["king_wake"]["interval_s"] == 900
         assert by_arm["pr_watch_merge"]["skip_reason"] == "disabled"
         assert by_arm["pr_watch_merge"]["interval_s"] == 600
+        detail = by_arm["pr_watch_merge"]["detail"]
+        assert detail.startswith("outcome=disabled")
+        assert "phase" not in detail, (
+            f"a clean skip must not name a phase. Got: {detail}"
+        )
         from fno.events import validate
         for data in by_arm.values():
             validate(
@@ -709,3 +714,22 @@ class TestControlPlaneArmRows:
                     "data": data,
                 }
             )
+
+
+def test_tick_end_bits_names_the_phase_only_when_the_tick_broke():
+    from fno.pr_watch._install import tick_end_bits
+
+    timeout = tick_end_bits(
+        {"outcome": "timeout", "phase": "king_wake", "duration_s": 480.0}
+    )
+    assert "phase: king_wake" in timeout, f"timeout bits: {timeout}"
+    assert "480.0s" in timeout, f"timeout bits: {timeout}"
+
+    degraded = tick_end_bits(
+        {"outcome": "degraded", "phase": "catchup", "sweep_failures": 2,
+         "duration_s": 31.2}
+    )
+    assert "2 sweep failures" in degraded, f"degraded bits: {degraded}"
+    assert not any(b.startswith("phase:") for b in degraded), (
+        f"a degraded tick must not name a phase. Got: {degraded}"
+    )

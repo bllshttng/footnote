@@ -27,7 +27,9 @@ agents dispatch capabilities	T1	agents dispatch capabilities	0
 agents dispatch family	T1	agents dispatch family	1
 agents dispatch one	T1	agents dispatch one	9
 agents dispatch resolve	T1	agents dispatch resolve	23
+agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
+agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
 agents gate	T1	agents gate	6
@@ -240,6 +242,7 @@ backlog unqueue	T1	backlog unqueue	0
 backlog unsupersede	T1	backlog unsupersede	0
 backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
 backlog view	T1	backlog view	3
+backlog worked	T1	backlog worked	2
 bundle check	T1	bundle check	11
 bundle lint	T1	bundle lint	2
 carveout add	T1	carveout add	27
@@ -314,6 +317,7 @@ do pr info	T1	do pr info	10
 do pr list	T1	do pr list	3
 do pr logs	T1	do pr logs	1
 do pr merge	T1	do pr merge	55
+do pr merge-result-check	T1	do pr merge-result-check	0
 do pr next-receipt-generation	T1	do pr next-receipt-generation	0
 do pr rebase	T1	do pr rebase	21
 do pr review-hold	T1	do pr review-hold	0
@@ -493,6 +497,7 @@ pr info	T1	pr info	10
 pr list	T1	pr list	3
 pr logs	T1	pr logs	1
 pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
+pr merge-result-check	T1	pr merge-result-check	0
 pr next-receipt-generation	T1	pr next-receipt-generation	0
 pr rebase	T1	pr rebase	21
 pr review-hold	T1	pr review-hold	0
@@ -587,3 +592,4 @@ agents harness probe	T1	agents harness probe	0
 agents king shape	T1	agents king shape	5	
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
+doctor graph export	T1	doctor graph export	0

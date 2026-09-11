@@ -191,7 +191,7 @@ class TestReceipts:
             ),
         )
         result = CliRunner().invoke(
-            agents_app, ["spawn", "--name", "p-prov", "hi", "--harness", "claude"]
+            agents_app, ["spawn", "--name", "p-prov", "hi", "--harness", "claude", "--substrate", "pane"]
         )
         assert result.exit_code == 0, result.output
         receipt = self._receipt_of(result.output)
@@ -212,7 +212,7 @@ class TestReceipts:
             ),
         )
         result = CliRunner().invoke(
-            agents_app, ["spawn", "--name", "p-quiet", "hi", "--harness", "claude"]
+            agents_app, ["spawn", "--name", "p-quiet", "hi", "--harness", "claude", "--substrate", "pane"]
         )
         assert result.exit_code == 0, result.output
         receipt = self._receipt_of(result.output)

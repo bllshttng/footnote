@@ -347,9 +347,10 @@ class AgentEntry:
     - ``last_message_at`` is the UTC ISO timestamp of the most recent
       OBSERVED activity on the session. Two writers, and only the first is
       monotone: a successful follow-up send bumps it post-send under the
-      ``update_registry`` flock, and an adoption stamps the mtime of the
-      session's own transcript file (never a shared store's - see
-      ``store_fallback._transcript_last_write``). Read it as "newest activity
+      ``update_registry`` flock, and an adoption stamps the newest timestamped
+      entry of the session's own transcript file (never the file mtime, which
+      untimestamped trailing records keep artificially young, and never a
+      shared store's - see ``store_fallback._transcript_last_write``). Read it as "newest activity
       anything has seen", not as "last send": an adoption of a long-dead
       session writes an old stamp here on purpose, and re-adopting after the
       store changed can move it backwards.

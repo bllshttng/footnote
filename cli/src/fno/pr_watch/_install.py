@@ -582,6 +582,21 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def tick_end_bits(end: dict) -> list[str]:
+    """The parenthesised detail bits after a tick outcome: duration, sweep
+    failures, and the phase name only when the tick broke (timeout or error).
+    Shared by `fno do pr watch status` and the pr_watch_merge arm row, so the
+    arm row names the phase only when the tick broke."""
+    bits: list[str] = []
+    if end.get("duration_s") is not None:
+        bits.append(f"{end['duration_s']:.1f}s")
+    if end.get("sweep_failures"):
+        bits.append(f"{end['sweep_failures']} sweep failures")
+    if end.get("phase") and end.get("outcome") in ("timeout", "error"):
+        bits.append(f"phase: {end['phase']}")
+    return bits
+
+
 def status(
     *,
     launch_agents_dir: Path,
@@ -613,13 +628,7 @@ def status(
     if end is None:
         typer.echo("Last tick outcome: (no end record)")
     else:
-        bits: list[str] = []
-        if end.get("duration_s") is not None:
-            bits.append(f"{end['duration_s']:.1f}s")
-        if end.get("sweep_failures"):
-            bits.append(f"{end['sweep_failures']} sweep failures")
-        if end.get("phase") and end.get("outcome") in ("timeout", "error"):
-            bits.append(f"phase: {end['phase']}")
+        bits = tick_end_bits(end)
         detail = f" ({', '.join(bits)})" if bits else ""
         typer.echo(f"Last tick outcome: {end['outcome']}{detail}")
     completed = marks.get("completed_tick")
