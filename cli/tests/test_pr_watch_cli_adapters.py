@@ -638,6 +638,11 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
         ),
     )
     monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    # fleet_rows probes the live roster by exec'ing the real `claude`
+    # binary; the provider-exec guard blocks that, and the supervisor phase
+    # after it would never run. This test's subject is the leg order and the
+    # non-fatal exception, not the roster.
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
     recovery_calls = []
     monkeypatch.setattr(
         "fno.recovery.run_recovery_sweep",
