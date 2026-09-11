@@ -26,7 +26,7 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 Press `prefix` then `C` in the mux. The panel shows the fleet's CPU share against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
 
-The cap is the thing the panel exists to make visible. It is the fleet's share of CPU capacity (`agents.max_fleet_cpu_share`, x-7783), checked on every spawn. Before this panel, only an agent running a hidden verb saw it.
+The cap is the thing the panel exists to make visible. It is the fleet's share of CPU capacity (`agents.max_fleet_cpu_share`), checked on every spawn. Before this panel, only an agent running a hidden verb saw it.
 
 Three render rules keep the panel honest, and each closes a way a monitor can lie.
 

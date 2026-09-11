@@ -301,7 +301,7 @@ provider_limits = { zai = { lanes = 5, subagents = 1 } }
 pane_group_max = 4
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). Set it to what the OS needs to stay out of swap: 2 on an 8 GB box, 3 on 16 GB, 4 above.
 min_free_gb = 4.0
-# DEPRECATED and ignored since 2026-09-09 (x-7783): admission decides on the fleet's CPU share (agents.max_fleet_cpu_share) on every spawn, never on a load trigger - the 1-minute load moved 101 points in three minutes with no change in real work. The key parses for one release and prints one deprecation line when set; delete it.
+# DEPRECATED and ignored since 2026-09-09: admission decides on the fleet's CPU share (agents.max_fleet_cpu_share) on every spawn, never on a load trigger - the 1-minute load moved 101 points in three minutes with no change in real work. The key parses for one release and prints one deprecation line when set; delete it.
 max_load_per_cpu = 8.0
 # Share of CPU capacity the fleet may hold, checked on EVERY spawn (default 0.5). An attribution gap widens the share to an interval bounded above by the whole machine's measured CPU: over by its own attributed work the gate holds and re-samples; the ceiling inside the interval refuses and names both bounds plus the gap; above the interval the gate admits and says the reading was an upper bound. Leave 0.5 unless the box is dedicated, then 0.6.
 max_fleet_cpu_share = 0.5
