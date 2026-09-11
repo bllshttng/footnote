@@ -26,6 +26,14 @@ import typer
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
+# the external-backend verb classification: the sets live beside the data
+# they classify (the classification runner below fails the import when a
+# verb is missing from both lists)
+from fno.graph._verb_classification import (
+    _FOOTNOTE_OWNED_VERBS,
+    _NO_GRAIN_ON_EXTERNAL_BACKEND,
+    _TRACKER_OWNED_VERBS,
+)
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     _build_backlog_node,
     _session_provenance,
@@ -13468,16 +13476,8 @@ def _exec_liveness(state: str) -> str:
     }.get(state, "")
 
 
-# -- the external-backend verb classification. The sets live in
-# _verb_classification.py, beside the data they classify; this import is the
-# one consumer contract (the classification runner below fails the import
-# when a verb is missing from both lists).
-
-from fno.graph._verb_classification import (
-    _FOOTNOTE_OWNED_VERBS,
-    _NO_GRAIN_ON_EXTERNAL_BACKEND,
-    _TRACKER_OWNED_VERBS,
-)
+# -- the external-backend verb classification (the sets are imported at the
+# top of this module from _verb_classification.py, beside the data)
 
 
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:

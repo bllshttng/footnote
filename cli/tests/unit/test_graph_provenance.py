@@ -988,7 +988,7 @@ def test_merge_grant_malformed_is_refused(tmp_path, monkeypatch, bad, frag):
     time, never stored to be guessed at resolve time."""
     g = _make_graph(tmp_path, [{"id": "ab-grant002", "title": "t"}])
     _patch_graph(monkeypatch, g)
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record
 
     with pytest.raises(ValueError, match=frag):
         append_session_record(g, "ab-grant002", phase="do", harness="claude",
@@ -1002,7 +1002,7 @@ def test_merge_grant_duplicate_fills_but_never_overwrites(tmp_path, monkeypatch)
     which is a NEWER row and wins at resolve time."""
     g = _make_graph(tmp_path, [{"id": "ab-grant003", "title": "t"}])
     _patch_graph(monkeypatch, g)
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record
 
     refusal = {**_GRANT, "approved": False, "source": "no-merge-flag"}
     append_session_record(g, "ab-grant003", phase="do", harness="claude",
