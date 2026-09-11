@@ -1103,7 +1103,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             // Unknown claim state must refuse, not read as "nothing is
             // claimed": the Python leg this verb replaced failed closed
             // (`live_claimed_node_ids(strict=True)`).
-            _ => crate::claims::list_strict(Some("node:"), None, false)
+            _ => crate::claims::list(Some("node:"), None, false)
                 .map_err(|e| {
                     StoreError::ClaimsUnavailable(format!(
                         "live claim state is unavailable; ready selection refused: {e}"

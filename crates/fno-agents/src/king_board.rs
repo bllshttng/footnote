@@ -469,7 +469,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 // Strict claims read: an unreadable root is unknown claim
                 // state, surfaced as a source error rather than an empty
                 // set that would re-dispatch held work.
-                let claimed_records = crate::claims::list_strict(Some("node:"), None, false);
+                let claimed_records = crate::claims::list(Some("node:"), None, false);
                 let Ok(claim_records) = claimed_records else {
                     return SourceRead::err(format!(
                         "claims unreadable: {}",
@@ -1243,6 +1243,24 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_claims_source_reads_the_claims_queues_unreadable() {
+        // AC5-ERR (x-636f): the claims source's Err must arrive as unreadable
+        // queues, never as an empty-fleet success that would re-dispatch held
+        // work. This pins the existing `!inputs.claims.is_ok()` gates, which
+        // had no test on the claims leg.
+        let node = json!({"id": "x-blind", "priority": "p0", "status": "in_progress"});
+        let mut inputs = inputs_with(json!([]), json!([]), json!([node]));
+        inputs.claims = SourceRead::err("claims unreadable: x");
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        for name in ["unheld_progress", "undriven_pr", "stale_claim"] {
+            let q = queues.iter().find(|q| q["name"] == name).expect(name);
+            assert_eq!(q["status"], "unreadable", "{name}");
+            assert_eq!(q["rows"].as_array().unwrap().len(), 0, "{name}");
+        }
+    }
+
+    #[test]
     fn a_partially_answered_batch_names_its_unmeasured_holders() {
         // AC6-EDGE: the batch answered but skipped one holder. Its node lands
         // in no queue row, and the payload warnings name the hole so a
@@ -1333,7 +1351,7 @@ mod tests {
             now + 900_000
         );
         std::fs::write(dir.join("node%3Ax-lease.lock"), yaml).expect("write lock");
-        let rows = claims::scan_claims_dir(&dir);
+        let rows = claims::read_claims_in(std::slice::from_ref(&dir)).rows();
         assert_eq!(rows.len(), 1, "the live lock is one row: {rows:?}");
         let node = json!({"id": "x-lease", "priority": "p0", "status": "in_progress"});
         let mut inputs = inputs_with(json!([]), json!(rows), json!([node.clone()]));

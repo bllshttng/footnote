@@ -203,7 +203,7 @@ fn live_workers(claims_dir: Option<&PathBuf>, keys: &[String]) -> BTreeMap<Strin
     let Some(dir) = claims_dir else {
         return BTreeMap::new();
     };
-    let records = crate::claims::list_in(std::slice::from_ref(dir), None, true);
+    let records = crate::claims::list_in(std::slice::from_ref(dir), None, true).unwrap_or_default();
     let payload = crate::claim_verbs::claim_sweep_payload_from_records(&records, None, keys, false);
     let mut out = BTreeMap::new();
     if let Some(rows) = payload.get("claims").and_then(|v| v.as_array()) {

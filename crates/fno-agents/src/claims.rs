@@ -348,9 +348,19 @@ pub(crate) fn flight_dir(root: &Path) -> PathBuf {
 /// Enumerate readable claims from the global store and an optional repository
 /// store. The caller supplies the repository root; both stores are one logical
 /// view because a global node claim and a worktree-local claim can describe the
-/// same coordination key. A root read failure returns an empty view so callers
-/// fail toward report-only rather than applying on partial facts.
-pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> Vec<ClaimRecord> {
+/// same coordination key.
+///
+/// An unreadable claims root is UNKNOWN claim state, which must refuse
+/// selection rather than read as "nothing is claimed" (Python's
+/// `live_claimed_node_ids(strict=True)` contract). A missing directory is a
+/// legitimate empty root, not a fault. Corrupted rows stay withheld per the
+/// records contract above. A display reader that genuinely wants the old
+/// degrade-to-empty view takes `.unwrap_or_default()` at its own call.
+pub fn list(
+    prefix: Option<&str>,
+    root: Option<&Path>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
     let mut dirs = Vec::new();
     if let Some(global) = global_claims_root() {
         dirs.push(global.join(CLAIMS_DIRNAME));
@@ -364,29 +374,12 @@ pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> V
 /// Scan VERBATIM directories. Spaces-era claims live directly at
 /// `<space>/claims`, a layout no explicit-root spelling of [`list`] reaches
 /// (`--root` appends `.fno/claims` for repo-checkout roots).
-pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> Vec<ClaimRecord> {
-    list_in_result(dirs, prefix, include_stale).unwrap_or_default()
-}
-
-/// Strict twin of [`list`]/[`list_in`] for dispatch admission: an unreadable
-/// claims root is UNKNOWN claim state, which must refuse selection rather
-/// than read as "nothing is claimed" (Python's
-/// `live_claimed_node_ids(strict=True)` contract). A missing directory is a
-/// legitimate empty root, not a fault. Corrupted rows stay withheld per the
-/// records contract above.
-pub fn list_strict(
+pub fn list_in(
+    dirs: &[PathBuf],
     prefix: Option<&str>,
-    root: Option<&Path>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
-    let mut dirs = Vec::new();
-    if let Some(global) = global_claims_root() {
-        dirs.push(global.join(CLAIMS_DIRNAME));
-    }
-    if let Some(local) = root {
-        dirs.push(local.join(CLAIMS_DIRNAME));
-    }
-    list_in_result(&dirs, prefix, include_stale)
+    list_in_result(dirs, prefix, include_stale)
 }
 
 fn list_in_result(
@@ -4568,7 +4561,7 @@ mod tests {
             AcquireOutcome::Acquired(_)
         ));
 
-        let rows = list(Some("reap:"), Some(local.path()), false);
+        let rows = list(Some("reap:"), Some(local.path()), false).expect("claims read");
         let keys: Vec<_> = rows.iter().map(|row| row.key.as_str()).collect();
         assert_eq!(keys, vec!["reap:global", "reap:local"]);
 
