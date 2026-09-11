@@ -27,6 +27,14 @@ validate_event() {
     local type="${1:?type required}"
     local payload="${2:?payload required}"
 
+    # The caller's schema-path override stays a contract: an explicit path
+    # that cannot be read is a substrate failure, never a validation pass
+    # against some other schema.
+    if [ -n "${EVENTS_SCHEMA_PATH:-}" ] && [ ! -r "$EVENTS_SCHEMA_PATH" ]; then
+        printf '%s\n' "validate-event: schema unavailable: $EVENTS_SCHEMA_PATH" >&2
+        return 2
+    fi
+
     local lib_dir root
     lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
     root="$(cd "$lib_dir/../.." 2>/dev/null && pwd)"
