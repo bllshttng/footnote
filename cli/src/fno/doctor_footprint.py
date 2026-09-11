@@ -840,7 +840,7 @@ def cpu_admission(
     bound = "upper" if gap is not None else "exact"
     ceil_pct = share_ceiling * 100.0
     seg = _share_segment(share_low, share_high, bound, gap)
-    fields = dict(
+    fields: dict[str, Any] = dict(
         share_low=share_low,
         share_high=share_high,
         bound=bound,
