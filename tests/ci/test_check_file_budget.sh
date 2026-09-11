@@ -17,7 +17,7 @@ GATE="$(cd "${SCRIPT_DIR}/../.." && pwd)/scripts/ci/check-file-budget.sh"
 # The caller's git config (signing, hooks) must not reach the scratch repos.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-unset FILE_BUDGET_LINES PY_TREE_ALLOWANCE PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA
+unset FILE_BUDGET_LINES PY_TREE_ALLOWANCE PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA FILE_BUDGET_EXCEPTION_LABEL
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -77,6 +77,25 @@ check 'a module moved into the tree counts as growth' 1 'net +150 (allowance 100
 
 fresh; mkdir -p cli/src/fno/tests; lines 150 t > cli/src/fno/tests/test_x.py; commit
 check 'test files do not count against the tree' 0 'cli/src/fno net +0, allowance 100'
+
+# --- the operator label exception ---------------------------------------------
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+check 'the label waives the tree allowance and names itself' 0 \
+  'label file-budget-exception waives the tree allowance' \
+  FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
+
+fresh; lines 50 grow >> cli/src/fno/keep.py; commit
+out="$(FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception bash "$GATE" 2>&1)"
+if [[ "$out" == *'net +50, allowance 100'* && "$out" != *'waives'* ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: a within-allowance tree must not claim the waiver\n%s\n' "$out"
+fi
+
+fresh; lines 5 grow >> scripts/big.sh; commit
+check 'the label never waives the per-file budget' 1 \
+  'grows it by +5/-0' FILE_BUDGET_LINES=20 FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
 
 # --- the per-file budget ------------------------------------------------------
 fresh; git mv scripts/big.sh scripts/huge.sh; lines 5 grow >> scripts/huge.sh; commit

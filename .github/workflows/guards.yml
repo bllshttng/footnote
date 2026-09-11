@@ -338,6 +338,9 @@ jobs:
         env:
           PR_BASE_REF: ${{ github.base_ref || 'main' }}
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # Operator-applied only; an agent never sets it. It waives the
+          # Python tree allowance alone, never a per-file grow.
+          FILE_BUDGET_EXCEPTION_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'file-budget-exception') && 'file-budget-exception' || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
       - name: File budget gate selftest
