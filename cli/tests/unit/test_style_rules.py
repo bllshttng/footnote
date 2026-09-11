@@ -1,9 +1,10 @@
-"""Tests for the seven-rule style checker (``cli/src/fno/style.py``).
+"""Tests for the eight-rule style checker (``cli/src/fno/style.py``).
 
-Each rule is covered positive and negative, plus the two deliberate sharp
-edges: rule 4 must not flag the possessive "agent's", and rule 5 must skip the
-hyphenated compounds "if-branch" and "when-clause". Every masking construct is
-exercised, since "code does not count" is the load-bearing exemption.
+Each rule is covered positive and negative, plus the deliberate sharp edges:
+rule 4 must not flag the possessive "agent's", rule 5 must skip the hyphenated
+compounds "if-branch" and "when-clause", and rule 8 must stay silent on the
+rejected words the corpus measured as doing real work. Every masking construct
+is exercised, since "code does not count" is the load-bearing exemption.
 
 Rule 6 gets the widest negative coverage of the six. It is the only rule that
 reads a PAIR of lines, so every block that legally owns a newline (blank line,
@@ -54,19 +55,24 @@ def test_mail_body_at_80_masked_words_passes_word_cap():
     assert 7 not in {v.rule for v in style.check(body, surface="mail")}
 
 
-def test_mail_body_with_semicolons_passes_the_cap():
-    # Semicolons are prose shape for text a human reads; the relay contract
-    # caps length only, so an 80-word body carrying them is accepted.
+def test_mail_body_with_semicolons_is_refused_under_the_cap():
+    # Mail runs the full rule set beside the cap: an 80-word body carrying a
+    # semicolon is refused on rule 2 even though it fits the word budget.
     body = " ".join("word" for _ in range(77)) + " a; b; c"
-    assert style.check(body, surface="mail") == []
+    assert 2 in {v.rule for v in style.check(body, surface="mail")}
 
 
-def test_mail_body_runs_only_the_cap():
-    # Rules 1 to 6 do not run on mail: sentence shape that fails every prose
-    # rule still passes the gate at 80 words or fewer.
-    body = ("you should always run it; and don't stop if it fails; " * 3).strip()
-    assert len(body.split()) <= 80
-    assert style.check(body, surface="mail") == []
+def test_mail_body_runs_the_full_rule_set():
+    # The mail early return is gone: sentence shape that fails the prose rules
+    # is refused even at 80 words or fewer.
+    body = "you should always run it; and don't stop if it fails."
+    assert {2, 3, 4, 5} <= {v.rule for v in style.check(body, surface="mail")}
+
+
+def test_mail_sentence_over_25_words_is_refused_under_the_cap():
+    # AC6: rule 1 fires on mail independently of rule 7.
+    body = " ".join("word" for _ in range(26)) + "."
+    assert 1 in {v.rule for v in style.check(body, surface="mail")}
 
 
 def test_word_cap_is_not_used_on_other_surfaces_or_added_lines():
@@ -132,6 +138,57 @@ def test_approved_modals_pass():
 
 def test_modal_inside_code_span_passes():
     assert 3 not in rule_set("run `should` as a literal token.")
+
+
+# --- Rule 8: filler and pleasantries (closed list) ---------------------------
+
+def test_banned_filler_words_fail():
+    for word in ("please", "thanks", "basically"):
+        assert 8 in rule_set(f"{word} rerun the suite."), word
+
+
+def test_banned_filler_phrases_fail():
+    for phrase in ("thank you", "of course", "happy to", "feel free"):
+        assert 8 in rule_set(f"and {phrase} the merge waits."), phrase
+
+
+def test_filler_match_is_case_insensitive():
+    assert 8 in rule_set("Please re-attest the new head.")
+    assert 8 in rule_set("Of course the merge waits.")
+
+
+def test_filler_rule_runs_on_every_surface():
+    # Rule 8 rides _check_sentence, so it reaches every surface _run() does.
+    for surface in ("mail", "pr-body", "comment", "markdown"):
+        assert 8 in {v.rule for v in style.check("thanks for merging 1520.", surface=surface)}, surface
+
+
+def test_fix_does_not_delete_a_filler():
+    # Deleting a word blind can change meaning, the line FIXABLE_RULES draws.
+    fixed, residue = style.fix("please rerun the suite", surface="pr-body")
+    assert fixed == "please rerun the suite"
+    assert [v.rule for v in residue] == [8]
+
+
+def test_the_rejected_filler_words_stay_legal():
+    # AC8. Each word below was probed against every occurrence in the
+    # 6,964-message mail corpus and read as restrictive, contrastive, or
+    # epistemic there. Banning one refuses correct technical prose.
+    for sentence in (
+        "I just resumed the worker.",
+        "make sure CI is green.",
+        "confirm CI actually ran green.",
+        "the claim is almost certainly stale.",
+        "only resume what the shutdown really killed.",
+        "run it clearly labeled as such.",
+    ):
+        assert 8 not in rule_set(sentence), sentence
+
+
+def test_i_think_stays_legal():
+    # "I think" separates inference from measurement; AGENTS.md requires that
+    # separation. Banning it pushes agents to state guesses as facts.
+    assert 8 not in rule_set("I think the claim is stale.")
 
 
 # --- Rule 4: contractions (closed list) --------------------------------------
@@ -613,6 +670,13 @@ def test_rule_7_refusal_with_recipe_passes_rules_1_to_6():
     assert len(style._mask(msg).split()) <= style.MESSAGE_WORD_CAP
 
 
+def test_the_refusal_message_passes_at_the_mail_surface():
+    # AC9. Mail now runs rules 1 to 8, so a mail refusal must carry no
+    # violation of any rule it names, checked at the mail surface itself.
+    msg = style.format_violations(style.check("you should do this; now.", surface="mail"))
+    assert style.check(msg, surface="mail") == [], msg
+
+
 def test_enforce_style_refuses_81_words_with_positive_marker(capsys, monkeypatch):
     from fno.mail.cli import _enforce_style
 
@@ -662,7 +726,7 @@ def test_no_exception_is_none():
 # --- Boundaries ---------------------------------------------------------------
 
 def test_empty_body_is_clean():
-    assert style.check("") == []  # mail default: cap-only, empty passes
+    assert style.check("") == []  # mail runs the full rule set; empty passes
 
 
 def test_only_a_code_fence_is_clean():
