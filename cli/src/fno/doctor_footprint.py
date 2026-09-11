@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ from typing import Any, NoReturn
 
 import typer
 
-from fno.footprint import Footprint, parse_footprint
+from fno.footprint import Admission, Footprint, parse_footprint
 
 
 #: The sustained-CPU threshold derives from measured capacity at this fraction
@@ -765,6 +766,167 @@ def capacity_verdict(load_snapshot: Any) -> str:
     return "within"
 
 
+def _gap_row_count(gap: str | None) -> int | None:
+    """The row count a gap sentence opens with, when it names one.
+
+    ``AttributionGap.text`` leads with the number of unattributed rows
+    (``8 pidless row(s) ...``); sentences assembled from only a timeout note
+    carry no leading count."""
+    if not gap:
+        return None
+    match = re.match(r"(\d+)", gap)
+    return int(match.group(1)) if match else None
+
+
+def _share_segment(
+    share_low: float, share_high: float, bound: str, gap: str | None
+) -> str:
+    """The ``(41.1%[, up to ...])`` bracket shared by the reason sentences and
+    the ``cpu admission:`` line, so the two cannot disagree."""
+    seg = f"{share_low * 100:.1f}%"
+    if bound == "upper":
+        rows = _gap_row_count(gap)
+        seg += (
+            f", up to {share_high * 100:.1f}% with "
+            + (f"{rows} " if rows is not None else "")
+            + "rows unattributed"
+        )
+    return seg
+
+
+def _admission_config() -> tuple[float, float]:
+    """``(max_fleet_cpu_share, hard_max_load_per_cpu)``, degraded to defaults.
+
+    The same getattr pattern as the gate's own read: a missing threshold has
+    a safe default, and a broken settings load must not kill the diagnostic."""
+    try:
+        from fno.config import load_settings
+
+        agents = load_settings().agents
+        return (
+            float(getattr(agents, "max_fleet_cpu_share", 0.5)),
+            float(getattr(agents, "hard_max_load_per_cpu", 40.0)),
+        )
+    except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
+        return 0.5, 40.0
+
+
+def _compute_admission(reading: Footprint, load_snapshot: Any) -> Admission:
+    """Feed :func:`cpu_admission` from one load snapshot. The single seam the
+    verb payload and the exit decision share, so the two cannot disagree."""
+    share_ceiling, hard_max = _admission_config()
+    return cpu_admission(
+        reading,
+        capacity_cores=_cpu_capacity_cores(),
+        share_ceiling=share_ceiling,
+        load_15m=getattr(load_snapshot, "load_15m", None),
+        hard_max_load_per_cpu=hard_max,
+        cpus=int(getattr(load_snapshot, "load_cpu_count", 0) or 1),
+    )
+
+
+def cpu_admission(
+    reading: Footprint,
+    *,
+    capacity_cores: float,
+    share_ceiling: float,
+    load_15m: float | None,
+    hard_max_load_per_cpu: float,
+    cpus: int,
+) -> Admission:
+    """The one CPU-axis decider, consumed by both gates and every readout
+    (x-7783 LD1/LD3).
+
+    The fleet's attributed share of capacity decides. An attribution gap
+    widens the share to an interval bounded above by the whole machine's
+    measured CPU, because the unattributed rows cannot hold more than
+    everything not attributed: a ceiling above the interval admits (the
+    reading was an upper bound), a ceiling below its floor is the fleet over
+    by its own work and holds, a ceiling inside it is undecidable and
+    refuses. The fifteen-minute load is the absolute backstop and refuses
+    first; a disabled backstop (``hard_max_load_per_cpu <= 0``) or an
+    unreadable one (``load_15m is None``) passes onward. Pure: no clocks, no
+    subprocesses, no config reads."""
+    backstop = hard_max_load_per_cpu * cpus
+    if load_15m is not None and hard_max_load_per_cpu > 0 and load_15m > backstop:
+        return Admission(
+            verdict="refuse",
+            axis="load_15m",
+            reason=(
+                f"spawn-gate: 15-minute load {load_15m:.1f} against backstop "
+                f"{backstop:.1f} (hard_max_load_per_cpu "
+                f"{hard_max_load_per_cpu:g} x {cpus} cpus); refusing "
+                f"(--force to bypass)"
+            ),
+            share_low=0.0,
+            share_high=0.0,
+            bound="exact",
+            fleet_cores=reading.fleet_cpu_cores,
+            machine_cores=reading.measured_cpu_cores,
+            capacity_cores=float(capacity_cores),
+            ceiling=share_ceiling,
+            gap=reading.attribution_gap,
+            load_15m=load_15m,
+            backstop=backstop,
+        )
+    capacity = float(capacity_cores)
+    share_low = reading.fleet_cpu_cores / capacity if capacity > 0 else 0.0
+    gap = reading.attribution_gap
+    machine_share = reading.measured_cpu_cores / capacity if capacity > 0 else 0.0
+    share_high = max(share_low, machine_share) if gap is not None else share_low
+    bound = "upper" if gap is not None else "exact"
+    ceil_pct = share_ceiling * 100.0
+    seg = _share_segment(share_low, share_high, bound, gap)
+    fields = dict(
+        share_low=share_low,
+        share_high=share_high,
+        bound=bound,
+        fleet_cores=reading.fleet_cpu_cores,
+        machine_cores=reading.measured_cpu_cores,
+        capacity_cores=capacity,
+        ceiling=share_ceiling,
+        gap=gap,
+        load_15m=load_15m,
+        backstop=backstop,
+    )
+    if share_high <= share_ceiling:
+        return Admission(
+            verdict="admit",
+            axis="fleet_cpu_share",
+            reason=(
+                f"fleet CPU {reading.fleet_cpu_cores:.3f} of {capacity:.2f} "
+                f"cores ({seg}) against max_fleet_cpu_share {ceil_pct:.1f}%; "
+                f"admitting"
+            ),
+            **fields,
+        )
+    if share_low > share_ceiling:
+        return Admission(
+            verdict="hold",
+            axis="fleet_cpu_share",
+            reason=(
+                f"spawn held: the fleet holds {reading.fleet_cpu_cores:.2f}/"
+                f"{capacity:.2f} cores ({share_low * 100:.1f}%) over "
+                f"max_fleet_cpu_share {ceil_pct:.1f}%; waiting for the fleet's "
+                f"own work to drain (--no-wait to fail fast, --force to bypass)"
+            ),
+            **fields,
+        )
+    return Admission(
+        verdict="undecidable",
+        axis="fleet_cpu_share",
+        reason=(
+            f"spawn-gate: the fleet's CPU share cannot be decided: attributed "
+            f"{share_low * 100:.1f}% of capacity, up to "
+            f"{share_high * 100:.1f}% with rows unattributed, and "
+            f"max_fleet_cpu_share {ceil_pct:.1f}% falls inside that band; "
+            f"{gap}; close the attribution gap or lower foreign load "
+            f"(--force to bypass)"
+        ),
+        **fields,
+    )
+
+
 def leak_verdict(direct_processes: int, threshold: int | None) -> str:
     """``clean`` | ``unexplained`` | ``unknown`` from the roster arithmetic.
 
@@ -783,10 +945,13 @@ def _payload(
     top_limit: int | None = None,
     command_limit: int | None = None,
     load_snapshot: Any = _NO_LOAD_SNAPSHOT,
+    admission: Admission | None = None,
 ) -> dict[str, Any]:
     cpu_capacity = _cpu_capacity_cores()
     if load_snapshot is _NO_LOAD_SNAPSHOT:
         load_snapshot = _spawn_load_snapshot()
+    if admission is None:
+        admission = _compute_admission(reading, load_snapshot)
     threshold_cores = sustained_cpu_threshold(cpu_capacity)
     measured_share = (
         reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
@@ -809,9 +974,11 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        # x-5283 AC7: the verdict reads the LOAD snapshot, not sustained CPU.
-        "capacity_verdict": (cv := capacity_verdict(load_snapshot)),
-        "capacity_verdict_axis": "load_1m" if cv != "unknown" else "unknown",
+        # x-7783 AC8: the CPU axis's decision, computed once and carried on
+        # every emission; both spawn gates read THIS object, never the exit
+        # code. `capacity_verdict` stays one release as an alias of the verdict.
+        "admission": admission._asdict(),
+        "capacity_verdict": admission.verdict,
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -864,25 +1031,19 @@ def _emit_result(
 ) -> NoReturn:
     leak = "unknown"
     exit_code = 0
-    # Cause-only answers the capacity question too (x-a457): a None snapshot
-    # can only say unknown. Exit codes stay 0/4 for the Rust gate's 0-only read.
     load_snapshot = _spawn_load_snapshot()
-    capacity = capacity_verdict(load_snapshot)
+    admission = _compute_admission(reading, load_snapshot)
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
-        # Capacity keeps the historical exit (callers depend on 3); when BOTH
-        # alarms fire, capacity wins the exit and the leak still prints.
-        if capacity == "over":
+        # The CPU axis keeps the historical exit (callers depend on 3);
+        # x-7783 AC8: it fires on hold, undecidable, or the backstop - an
+        # attribution gap no longer forces an exit, because both gates read
+        # the admission interval, not the gap. When BOTH alarms fire, the
+        # CPU axis wins the exit and the leak still prints.
+        if admission.verdict != "admit":
             exit_code = EXIT_CAPACITY_OVER
         elif leak == "unexplained":
             exit_code = EXIT_LEAK
-    # A gapped reading answers, but it does not clear the gate: --cause-only
-    # keeps exit 4 so a human and a shell caller both see the disclaimer. The
-    # measurement itself is printed either way, and both spawn gates now read
-    # the PAYLOAD rather than this exit code - they key on `attribution_gap`,
-    # which is the same condition set here.
-    if reading.attribution_gap is not None and cause_only:
-        exit_code = 4
     top_limit = 5 if cause_only else None
     command_limit = 1024 if cause_only else None
     payload = _payload(
@@ -892,6 +1053,7 @@ def _emit_result(
         top_limit=top_limit,
         command_limit=command_limit,
         load_snapshot=load_snapshot,
+        admission=admission,
     )
     if note is not None:
         payload["degraded"] = note
@@ -904,32 +1066,27 @@ def _emit_result(
             f"({payload['fleet_percent_capacity']:.1f}% capacity, "
             f"{payload['fleet_percent_measured_cpu']:.1f}% of measured CPU)"
         )
-        load_status = payload["spawn_load_status"]
-        if load_status in {"within", "exceeded"}:
-            load_5m = payload.get("load_5m")
-            load_15m = payload.get("load_15m")
-            trend = (
-                f"; {load_5m:.1f} 5m, {load_15m:.1f} 15m"
-                if isinstance(load_5m, (int, float))
-                and isinstance(load_15m, (int, float))
-                else ""
-            )
+        adm = payload["admission"]
+        typer.echo(
+            f"cpu admission: fleet {adm['fleet_cores']:.3f} of "
+            f"{adm['capacity_cores']:.2f} cores "
+            f"({_share_segment(adm['share_low'], adm['share_high'], adm['bound'], adm.get('gap'))}) "
+            f"against max_fleet_cpu_share {adm['ceiling'] * 100:.1f}% "
+            f"-> {adm['verdict']}"
+        )
+        load15 = adm["load_15m"]
+        cpus = int(payload.get("load_cpu_count") or 1)
+        hard = adm["backstop"] / cpus if cpus else 0.0
+        if isinstance(load15, (int, float)):
             typer.echo(
-                f"spawn load: {payload['load_1m']:.1f} against "
-                f"{payload['load_ceiling']:.1f} (max_load_per_cpu "
-                f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus"
-                f"{trend}; "
-                f"{load_status})"
+                f"load_15m: {load15:.1f} against backstop {adm['backstop']:.1f} "
+                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
             )
         else:
-            if payload["max_load_per_cpu"] is None:
-                typer.echo(f"spawn load: {load_status} (cause-only snapshot)")
-            else:
-                typer.echo(
-                    f"spawn load: {load_status} (max_load_per_cpu "
-                    f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus; "
-                    f"{load_status})"
-                )
+            typer.echo(
+                f"load_15m: unavailable against backstop {adm['backstop']:.1f} "
+                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
+            )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
             f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
@@ -965,27 +1122,23 @@ def _emit_result(
         if reading.attribution_gap is not None:
             typer.echo(
                 f"attribution gap: {reading.attribution_gap} "
-                "(fleet share is an undercount, not headroom)"
+                "(the share reads as an interval bounded above by the "
+                "machine's measured CPU)"
             )
-        axis = payload["capacity_verdict_axis"]
-        axis_numbers = ""
-        if axis != "unknown":
-            value, threshold = payload["load_1m"], payload["load_ceiling"]
+        axis = adm["axis"]
+        if axis == "load_15m" and isinstance(adm.get("load_15m"), (int, float)):
+            axis_numbers = f" ({adm['load_15m']:.1f} against {adm['backstop']:.1f})"
+        elif axis == "fleet_cpu_share":
             axis_numbers = (
-                f" on {axis} ({value:.1f} against {threshold:.1f})"
-                if isinstance(value, (int, float))
-                and isinstance(threshold, (int, float))
-                else f" on {axis}"
+                f" ({adm['share_low'] * 100:.1f}% against "
+                f"{adm['ceiling'] * 100:.1f}%)"
             )
-        if exit_code == EXIT_CAPACITY_OVER:
-            typer.echo(f"verdict: capacity over{axis_numbers} (exit {exit_code})")
-        elif exit_code == EXIT_LEAK:
-            typer.echo(f"verdict: leak{axis_numbers} (exit {exit_code})")
         else:
-            typer.echo(
-                f"verdict: {payload['capacity_verdict']}{axis_numbers} "
-                f"(exit {exit_code})"
-            )
+            axis_numbers = ""
+        # A leak beside an admitting capacity still names itself on the
+        # verdict line; the CPU axis owns the wording everywhere else.
+        shown = "leak" if exit_code == EXIT_LEAK else adm["verdict"]
+        typer.echo(f"verdict: {shown} on {axis}{axis_numbers} (exit {exit_code})")
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:

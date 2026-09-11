@@ -52,6 +52,33 @@ class Footprint(NamedTuple):
     spare_pool_rss_gb: float = 0.0
 
 
+class Admission(NamedTuple):
+    """The CPU axis's decision, computed once and read by both gates (x-7783 LD1).
+
+    ``verdict`` is ``admit`` | ``hold`` | ``undecidable`` | ``refuse``;
+    ``axis`` names what decided: the fleet's CPU share, the fifteen-minute
+    backstop, or an unreadable instrument. ``reason`` is the full sentence
+    the gates print verbatim. An attribution gap widens the share to an
+    interval: ``share_low`` is the attributed share, ``share_high`` the
+    whole machine's, and ``bound`` records that the verdict read the upper
+    bound. ``backstop`` is ``hard_max_load_per_cpu x cpus``.
+    """
+
+    verdict: str
+    axis: str
+    reason: str
+    share_low: float
+    share_high: float
+    bound: str
+    fleet_cores: float
+    machine_cores: float
+    capacity_cores: float
+    ceiling: float
+    gap: str | None = None
+    load_15m: float | None = None
+    backstop: float = 0.0
+
+
 #: argv[0] basenames that are a test runner on their own.
 _TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
 
