@@ -72,6 +72,11 @@ _eval_sweep_canonical_root() {
 _eval_sweep_stage() {
     local log="$1" secs="$2"; shift 2
     local rc=0
+    # Announce the stage before it runs: a healthy stage's only log line is
+    # its own stdout, which for a quiet sweep is nothing - indistinguishable
+    # from a stage that never fired. This line is what makes ran vs skipped
+    # readable in the log.
+    printf '[eval-sweep] stage: %s\n' "$*" >> "$log" 2>/dev/null
     with_timeout "$secs" "$@" >> "$log" 2>&1 || rc=$?
     (( rc == 0 )) || printf '[eval-sweep] stage rc=%s: %s\n' "$rc" "$*" >> "$log" 2>/dev/null
     return 0
