@@ -581,11 +581,11 @@ Neither layer covers the specimens alone. The probe cannot see the window betwee
 
 | Site | Registers | Why it is the one that matters |
 |---|---|---|
-| `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
-| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, so every pipeline review is held on any harness without a reviewer doing anything. It takes nothing on a refused or unconfirmed send: no review is running |
+| `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own. The hold keys the named PR's head ref, resolved from GitHub, or a named branch; only an invocation with no target reads the cwd (x-b5f6) |
+| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, so every pipeline review is held on any harness without a reviewer doing anything. It takes nothing on a refused or unconfirmed send: no review is running. It passes the branch it resolved and takes no hold when the PR read has no head ref |
 | `skills/review/scripts/emit-attestation.sh` | releases it | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
 | `fno do review classify --attest` | releases it | the Python producer of the same row. It emitted the verdict and left the hold standing for the full TTL |
-| the TTL | ages it out | the reviewer died. See the receipt rule below |
+| the TTL | ages it out | the review did not attest inside its lease, whether or not its session still runs. See the receipt rule below |
 | a human or an unhooked harness | takes nothing | the named residual gap, covered only by the worktree probe |
 
 The requester site is the answer to PR 1575, merged 2026-09-07 while the only non-author review was still running. Eight findings, one HIGH, were discarded, and a review that finishes after a merge cannot post them. The hold existed and `fno do pr merge` was already fail-closed against it. Nothing took it. A hold nobody takes is identical to a hold that does not exist.
@@ -611,13 +611,15 @@ The release never names a holder, and `--holder` is optional on the verb for tha
 
 The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each. The harness hook budget is 60s, and the margin is under 6s. A killed hook emits no verdict at all.
 
-That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either. Hybrid liveness can keep a TTL-lapsed hold LIVE, so a TTL-only read here can ALLOW what the guard refuses. A wrong deny costs one command.
+That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either: it reads file presence only, and the first Python read of a lapsed hold deletes it, so nothing expired lingers for the hook to misread. A wrong deny costs one command.
 
 ### Failing safe in both directions
 
 A missing hold is never by itself the clear answer. It clears only after the worktree enumeration RAN and answered. Four readings block instead: a corrupted lockfile, an unreadable claims root, a failed `git worktree list`, and a PR whose head branch will not resolve. An unprobed PR is not a clear one.
 
 A hold that outlives a crashed reviewer wedges the merge lane permanently. That is worse than the defect it prevents. So it ages out on `config.review.hold_ttl_minutes`, which defaults to 90. It never ages out silently. The surface that clears past a lapsed hold prints the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt reads exactly like a lane nobody ever held.
+
+A live holder session does not extend the hold: the lease is on the review, not on the session that ran it (x-b5f6). A same-holder re-acquire renews it, which is how a genuinely long review keeps its lane.
 
 That same arm DELETES the lockfile, in one breath with the receipt. A lapsed file stops blocking the Python readers, which judge expiry, and keeps blocking the stdlib hook, which cannot. One crashed reviewer otherwise denies every bare `gh pr merge` in the repo, for every PR, until someone notices. The claims reaper does collect it eventually, but it is config-gated, so this path cannot lean on it.
 
