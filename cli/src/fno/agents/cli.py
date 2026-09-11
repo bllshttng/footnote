@@ -2687,7 +2687,7 @@ def cmd_retask(
     effort: Optional[str] = typer.Option(None, "--effort"),
     json_out: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Retask one finished blueprint pane through the verified transaction."""
+    """Retask one finished worker (pane or thread) onto the node's next verb."""
     from fno.agents.retask import run_retask
     from fno.config import load_settings
 

@@ -11,7 +11,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
-from fno.agents.harness_map import capabilities, dispatch_command
+from fno.agents.harness_map import (
+    DispatchResolveError, capabilities, dispatch_command,
+    normalize_command, resolve_effective_verb,
+)
 from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.registry import (
     AgentEntry,
@@ -27,6 +30,10 @@ from fno.agents.spawn_defaults import inject_spawn_defaults
 class RetaskTransportError(RuntimeError):
     """A pane read or send exceeded its bounded transport timeout."""
 
+    def __init__(self, reason: str, detail: Optional[str] = None):
+        super().__init__(reason)
+        self.detail = detail
+
 
 @dataclass(frozen=True)
 class RetaskCoordinate:
@@ -38,6 +45,8 @@ class RetaskCoordinate:
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
+    # The node's next lifecycle verb; profiles.<verb> supplies the tier.
+    verb: str = "target"
 
 
 def _resolve_retask_node(node: str) -> str:
@@ -166,6 +175,42 @@ def _flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     return None
 
 
+_TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+
+
+def _live_permission_mode(entry: AgentEntry) -> Optional[str]:
+    """The live permission mode from the worker's own transcript: the last
+    ``permission-mode`` record wins. None (other harness, missing transcript,
+    no record) must fail closed at the caller."""
+    if entry.harness != "claude":
+        return None
+    from fno.agents.dispatch import _mux_recipient_transcript
+
+    transcript = _mux_recipient_transcript(entry)
+    if transcript is None:
+        return None
+    try:
+        with transcript.open("rb") as handle:
+            handle.seek(max(0, os.fstat(handle.fileno()).st_size - _TRANSCRIPT_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    if tail and not tail.endswith("\n"):
+        # A concurrently appended torn record does not decide; complete records do.
+        tail = tail[: tail.rfind("\n") + 1]
+    mode: Optional[str] = None
+    for line in tail.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "permission-mode":
+            value = record.get("permissionMode")
+            if isinstance(value, str) and value:
+                mode = value
+    return mode
+
+
 def resolve_thread_viewport(
     entry: AgentEntry,
     *,
@@ -193,8 +238,14 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    if invoke(["mux", "thread", "--server", session, thread_id], 30).returncode:
-        raise RetaskTransportError("thread_view_unavailable")
+    # The door answers the row NAME, not the session uuid; fno_id guards the join.
+    door = invoke(["mux", "thread", "--server", session, entry.name], 30)
+    if door.returncode:
+        lines = (door.stderr or door.stdout or "").strip().splitlines()
+        raise RetaskTransportError(
+            "thread_view_unavailable",
+            detail=lines[-1] if lines else f"exit {door.returncode}",
+        )
     # The pane opened above stays open on a join miss and its name stamping
     # can lag the open, so the join retries; the miss names the opened pane.
     for _ in range(3):
@@ -223,6 +274,24 @@ def resolve_thread_viewport(
     raise RetaskTransportError("thread_view_join_missed")
 
 
+def _resolve_node_verb(node: str) -> str:
+    """The node's next lifecycle verb; an abstain (None) means ``target``.
+    Raises DispatchResolveError on a rung the table cannot answer."""
+    from fno.graph.ladder import plan_rung as node_plan_rung
+    from fno.graph.load import load_graph
+
+    rec = next(
+        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node), None
+    )
+    verb, _note = resolve_effective_verb(
+        verb=rec.get("dispatch_verb") if rec else None,
+        difficulty=rec.get("difficulty") if rec else None,
+        plan_rung=node_plan_rung(rec).value,
+    )
+    # The table answers canonical "/blueprint"; probe and rename take the bare word.
+    return (verb or "target").lstrip("/") or "target"
+
+
 def resolve_target_coordinate(
     node: str,
     *,
@@ -231,12 +300,13 @@ def resolve_target_coordinate(
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> RetaskCoordinate:
+    verb = _resolve_node_verb(node)
     args = ["spawn", "--name", "retask-probe"]
     if model is not None:
         args += ["--model", model]
     if effort is not None:
         args += ["--effort", effort]
-    args.append(f"/fno:target {node}")
+    args.append(f"/fno:{verb} {node}")
     # x-7198: a probe, not a real dispatch - the builtin rung would otherwise
     # read as an explicit override and force every retask to respawn.
     resolved = inject_spawn_defaults(
@@ -269,6 +339,7 @@ def resolve_target_coordinate(
         permission_mode=_flag_value(resolved, "--permission-mode"),
         route=route,
         account=_flag_value(resolved, "--account"),
+        verb=verb,
     )
 
 
@@ -277,6 +348,7 @@ def detect_retask(
     target: RetaskCoordinate,
     *,
     node: str,
+    live_permission_mode: Optional[str] = None,
 ) -> dict:
     if entry.status != "live":
         return {"outcome": "refused", "reason": "worker_not_live"}
@@ -297,9 +369,14 @@ def detect_retask(
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 
+    # Compare against the live worker, never mere presence: config defaults
+    # always resolve a permission_mode, and an unobservable mode fails closed.
     if target.permission_mode is not None:
-        return {"outcome": "spawn_required", "reason": "permission_mode"}
-    if target.account is not None:
+        if live_permission_mode is None:
+            return {"outcome": "spawn_required", "reason": "permission_mode_unobserved"}
+        if live_permission_mode != target.permission_mode:
+            return {"outcome": "spawn_required", "reason": "permission_mode"}
+    if target.account is not None and target.account != entry.launch_account:
         return {"outcome": "spawn_required", "reason": "account"}
     current_axes = {
         "harness": entry.harness,
@@ -326,6 +403,10 @@ def detect_retask(
             "to": {"model": desired_model, "effort": desired_effort},
             "mechanism": "pending_operator_decision",
         }
+    if target.verb == "target":
+        command_template = dispatch_command(target.harness)
+    else:
+        command_template = normalize_command(f"/{target.verb} {{id}}", target.harness)
     payload = {
         "schema_version": 1,
         "worker": entry.name,
@@ -334,7 +415,7 @@ def detect_retask(
         "thread_id": entry.fno_id,
         "node": node,
         "target": {**asdict(target), "substrate": target_axes["substrate"]},
-        "target_command": dispatch_command(target.harness).format(id=node),
+        "target_command": command_template.format(id=node),
         "switch": switch,
         "execution": {"mode": "read_only_plan"},
         "preconditions": [
@@ -346,6 +427,20 @@ def detect_retask(
     return {
         "outcome": "switch_pending" if switch_required else "retask_ready",
         "payload": payload,
+    }
+
+
+def _refused(reason: str, **overrides: object) -> dict:
+    """The shared refusal receipt; overrides restate the true partial state."""
+    return {
+        "status": "refused",
+        "cleared": False,
+        "session_restamped": False,
+        "switch": "not_started",
+        "switch_verified": False,
+        "target_submit_confirmed": False,
+        "reason": reason,
+        **overrides,
     }
 
 
@@ -418,6 +513,7 @@ def execute_retask(
     ready_frame: Optional[Callable[[str], Mapping[str, object]]] = None,
     settle: Callable[[], None] = lambda: None,
     source_preflight: Optional[Callable[[AgentEntry], Mapping[str, object]]] = None,
+    live_permission_mode: Optional[str] = None,
 ) -> dict:
     """Run the bounded retask transaction through injected pane seams."""
 
@@ -425,24 +521,17 @@ def execute_retask(
         settle()
         return read_frame()
 
-    refusal = {
-        "status": "refused",
-        "cleared": False,
-        "session_restamped": False,
-        "switch": "not_started",
-        "switch_verified": False,
-        "target_submit_confirmed": False,
-    }
+    refusal = _refused("refused")
     strategy = capabilities(entry.harness)["model_switch_strategy"]
-    desired_model = target.model or entry.model
-    desired_effort = target.effort or entry.effort
     if strategy["kind"] == "unsupported":
         return {**refusal, "reason": "unsupported_switch_strategy"}
     if source_preflight is not None:
         source = source_preflight(entry)
         if source.get("status") != "ready":
             return {**refusal, **source}
-    planned = detect_retask(entry, target, node=node)
+    planned = detect_retask(
+        entry, target, node=node, live_permission_mode=live_permission_mode
+    )
     if planned["outcome"] in {"spawn_required", "refused"}:
         return {**refusal, "reason": planned.get("reason", planned["outcome"])}
     initial_frame = read_frame()
@@ -477,7 +566,7 @@ def execute_retask(
         return {**refusal, "cleared": True, "reason": "successor_row_count_invalid"}
     if transition.get("lineage_recorded") is not True:
         return {**refusal, "cleared": True, "reason": "successor_lineage_unrecorded"}
-    renamed = rename(f"target-{node}")
+    renamed = rename(f"{target.verb}-{node}")
     if not renamed:
         return {
             **refusal,
@@ -646,13 +735,16 @@ def run_retask(
     """Resolve live seams and execute one retask transaction."""
     node = _resolve_retask_node(node)
     entry = resolve_agent(worker, path=registry_path).entry
-    target = resolve_target_coordinate(
-        node,
-        settings=settings,
-        model=model,
-        effort=effort,
-        env=env,
-    )
+    try:
+        target = resolve_target_coordinate(
+            node,
+            settings=settings,
+            model=model,
+            effort=effort,
+            env=env,
+        )
+    except DispatchResolveError as exc:
+        return _refused("dispatch_verb_unresolved", detail=str(exc))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]
@@ -833,19 +925,18 @@ def run_retask(
             ready_frame=ready_frame,
             settle=settle,
             source_preflight=_source_preflight,
+            live_permission_mode=_live_permission_mode(entry),
         )
     except RetaskTransportError as exc:
         # Preserve the partial transaction state in the refusal receipt.
         restamped = restamped_session[0] != entry.harness_session_id
-        receipt = {
-            "status": "refused",
-            "cleared": clear_sent[0] or restamped,
-            "session_restamped": restamped,
-            "switch": "not_started",
-            "switch_verified": False,
-            "target_submit_confirmed": False,
-            "reason": str(exc),
-        }
+        receipt = _refused(
+            str(exc),
+            cleared=clear_sent[0] or restamped,
+            session_restamped=restamped,
+        )
+        if exc.detail:
+            receipt["detail"] = exc.detail
         if renamed_name[0] != entry.name:
             receipt["registry_name"] = renamed_name[0]
         return receipt
