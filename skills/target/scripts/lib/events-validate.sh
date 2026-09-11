@@ -10,55 +10,23 @@
 #   validate_event TYPE JSON_PAYLOAD
 #       rc=0  valid
 #       rc=1  invalid (diagnostic names the failed field on stderr)
-#       rc=2  substrate failure (checkout not found, Python missing,
-#             schema unavailable, payload not one JSON object)
+#       rc=2  substrate failure (no usable Python, schema unavailable,
+#             payload not one JSON object)
 #
 # Compatibility:
 #   - bash 3.2 (macOS default). No associative arrays, no process
 #     substitution.
-#   - The interpreter resolves through scripts/lib/fno-python.sh: a
-#     linked worktree has cli/src but no cli/.venv, so the canonical
-#     checkout's venv is what runs, with PYTHONPATH pinned to THIS
-#     checkout's cli/src so the source under test is what validates.
+#   - Portability: a consumer project may carry ONLY scripts/lib from the
+#     plugin (the preflight orchestration self-test builds exactly that
+#     shape). When a checkout with cli/src sits above this lib, the
+#     payload validates against THAT tree's source; when the lib ships
+#     detached, the resolved installed interpreter validates against its
+#     own shipped schema instead. Either way there is exactly one
+#     validator.
 
 set -uo pipefail
 
-validate_event() {
-    local type="${1:?type required}"
-    local payload="${2:?payload required}"
-
-    # The caller's schema-path override stays a contract: an explicit path
-    # that cannot be read is a substrate failure, never a validation pass
-    # against some other schema.
-    if [ -n "${EVENTS_SCHEMA_PATH:-}" ] && [ ! -r "$EVENTS_SCHEMA_PATH" ]; then
-        printf '%s\n' "validate-event: schema unavailable: $EVENTS_SCHEMA_PATH" >&2
-        return 2
-    fi
-
-    local lib_dir root
-    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
-    root="$(cd "$lib_dir/../.." 2>/dev/null && pwd)"
-    if [[ -z "$lib_dir" || -z "$root" || ! -f "$root/cli/src/fno/events/__init__.py" ]]; then
-        printf '%s\n' \
-            "validate-event: cannot locate the fno checkout above ${BASH_SOURCE[0]:-this lib}" >&2
-        return 2
-    fi
-
-    if [[ -z "${FNO_PYTHON:-}" ]]; then
-        # shellcheck source=lib/fno-python.sh
-        source "$lib_dir/fno-python.sh"
-        fno_python_init "$root"
-    fi
-    if [[ -z "${FNO_PYTHON:-}" ]]; then
-        printf '%s\n' "validate-event: no usable Python resolved for the validator" >&2
-        return 2
-    fi
-    if [[ "$FNO_PYTHON" != "python3" && ! -x "$FNO_PYTHON" ]]; then
-        printf '%s\n' "validate-event: resolved interpreter is not executable: $FNO_PYTHON" >&2
-        return 2
-    fi
-
-    PYTHONPATH="$root/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$FNO_PYTHON" -c '
+_EV_PY='
 import json, sys
 from fno.events import SchemaUnavailableError, ValidationError, validate
 try:
@@ -81,5 +49,49 @@ except ValidationError as exc:
     print("validate-event:", exc, file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
-' "$type" <<<"$payload"
+'
+
+validate_event() {
+    local type="${1:?type required}"
+    local payload="${2:?payload required}"
+
+    # The caller's schema-path override stays a contract: an explicit path
+    # that cannot be read is a substrate failure, never a validation pass
+    # against some other schema.
+    if [ -n "${EVENTS_SCHEMA_PATH:-}" ] && [ ! -r "$EVENTS_SCHEMA_PATH" ]; then
+        printf '%s\n' "validate-event: schema unavailable: $EVENTS_SCHEMA_PATH" >&2
+        return 2
+    fi
+
+    local lib_dir root pin_src=0
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
+    root="$(cd "$lib_dir/../.." 2>/dev/null && pwd)"
+    if [[ -z "$lib_dir" ]]; then
+        printf '%s\n' "validate-event: cannot locate the validator lib" >&2
+        return 2
+    fi
+    if [[ -n "$root" && -f "$root/cli/src/fno/events/__init__.py" ]]; then
+        pin_src=1
+    fi
+
+    if [[ -z "${FNO_PYTHON:-}" ]]; then
+        # shellcheck source=lib/fno-python.sh
+        source "$lib_dir/fno-python.sh"
+        fno_python_init "$root"
+    fi
+    if [[ -z "${FNO_PYTHON:-}" ]]; then
+        printf '%s\n' "validate-event: no usable Python resolved for the validator" >&2
+        return 2
+    fi
+    if [[ "$FNO_PYTHON" != "python3" && ! -x "$FNO_PYTHON" ]]; then
+        printf '%s\n' "validate-event: resolved interpreter is not executable: $FNO_PYTHON" >&2
+        return 2
+    fi
+
+    if [[ "$pin_src" == 1 ]]; then
+        PYTHONPATH="$root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$FNO_PYTHON" -c "$_EV_PY" "$type" <<<"$payload"
+    else
+        "$FNO_PYTHON" -c "$_EV_PY" "$type" <<<"$payload"
+    fi
 }
