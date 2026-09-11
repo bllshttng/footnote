@@ -19,9 +19,17 @@ def _fake_daemon_binary(monkeypatch, path: str = "/cargo/bin/fno-agents") -> Non
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path(path))
 
 
+_REAL_RUN = __import__("subprocess").run
+
+
 def _record_run(calls: list) -> object:
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        # The name verbs execute in the binary; a blanket empty stub would
+        # answer the mint with an empty stdout.
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return _run
@@ -364,6 +372,9 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
 
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         rc = 1 if "spawn" in cmd else 0
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 

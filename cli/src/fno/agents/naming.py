@@ -45,7 +45,10 @@ def _mint(*args: str) -> str:
     )
     if proc.returncode == 0:
         lines = proc.stdout.strip().splitlines()
-        return lines[-1] if lines else ""
+        name = lines[-1] if lines else ""
+        if not name:
+            raise AgentNameError("name mint produced no name")
+        return name
     message = proc.stderr.strip()
     if message.startswith("error: "):
         message = message[len("error: "):]
@@ -88,16 +91,18 @@ def bridge_name(
             )
         code = verb if verb in dispatch_verbs() else (verb_code_for(verb) if verb else "")
         args: list[str] = []
-        if _opt(source):
-            args += ["--source", source or ""]
-        if _opt(code):
-            args += ["--verb", code]
-        if not _opt(code):
+        s = (source or "").strip()
+        if s:
+            args += ["--source", s]
+        c = (code or "").strip()
+        if c:
+            args += ["--verb", c]
+        if not c:
             raise BridgeUsageError("--source requires --verb")
         return _mint(*args, node_id,
-                     *( ["--slug", slug] if _opt(slug) else []),
-                     *( ["--qualifier", qualifier] if _opt(qualifier) else []),
-                     *( ["--discriminator", discriminator] if _opt(discriminator) else []))
+                     *(["--slug", slug or ""] if _opt(slug) else []),
+                     *(["--qualifier", qualifier or ""] if _opt(qualifier) else []),
+                     *(["--discriminator", discriminator or ""] if _opt(discriminator) else []))
     if not prefix:
         raise BridgeUsageError("a prefix or --verb is required")
     return agent_name(

@@ -43,6 +43,22 @@ import subprocess as _subprocess_module
 #: passthrough in _fake_spawn_run must reach the real binary even while a
 #: test has patched subprocess.run.
 _REAL_SUBPROCESS_RUN = _subprocess_module.run
+
+
+def _naming_passthrough(cmd, **kwargs):
+    """fno-invocations stay fakeable EXCEPT the name verbs: mint/codes/parse
+    execute in the binary and ride the real subprocess, so the tests assert
+    the shipped naming and not a mock's guess about it. Non-fno execs (the
+    config reader's git probes) ride real too - they are infrastructure, not
+    the behavior under test."""
+    parts = [str(part) for part in cmd]
+    is_fno = bool(parts) and (
+        parts[0].endswith("fno-py") or parts[0].endswith("fno") or "fno-agents" in parts[0]
+    )
+    if is_fno and not ({"name-mint", "name-codes", "name-parse"} & set(parts)):
+        return None
+    return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+
 from fno.claims.core import acquire_claim, claim_status
 from fno.cli import app
 
@@ -227,7 +243,7 @@ def test_skip_tick_without_detail_is_byte_identical(iso, monkeypatch):
 
 def test_no_work(iso, monkeypatch):
     monkeypatch.setattr(adv, "_next_node", lambda project: None)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -240,7 +256,7 @@ def test_next_error_skips_never_guesses(iso, monkeypatch):
         raise RuntimeError("gh exploded")
 
     monkeypatch.setattr(adv, "_next_node", boom)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -251,7 +267,7 @@ def test_walker_live_suppresses(iso, monkeypatch):
     """AC2-EDGE: a live walk owns the project -> skip."""
     _hold(adv._walker_key())
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -262,7 +278,7 @@ def test_node_already_claimed(iso, monkeypatch):
     """A live node:<id> claim means a worker is already running -> skip."""
     _hold(f"node:{NODE['id']}")
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -274,7 +290,7 @@ def test_dispatch_reservation_held(iso, monkeypatch):
     """A peer's live dispatch:<id> reservation -> already-claimed, no spawn."""
     _hold(f"dispatch:{NODE['id']}")
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -697,11 +713,14 @@ def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess,
         "run",
-        lambda cmd, **kw: _FakeProc(
-            79,
-            "",
-            "spawn-gate: 1 live row(s) were minted without a provider stamp\n"
-            f"{_GATE_LINE}\n",
+        lambda cmd, **kw: (
+            _naming_passthrough(cmd, **kw)
+            or _FakeProc(
+                79,
+                "",
+                "spawn-gate: 1 live row(s) were minted without a provider stamp\n"
+                f"{_GATE_LINE}\n",
+            )
         ),
     )
     with pytest.raises(adv.SpawnError) as ei:
@@ -716,7 +735,7 @@ def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
 def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
     """No spawn-gate: line on stderr -> the head of stderr is the detail."""
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(79, "", "daemon unreachable"),
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(79, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError) as ei:
         adv._spawn_worker("ab-2222aaaa", None)
@@ -979,6 +998,9 @@ def _fake_spawn_run(short_id):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -1065,6 +1087,9 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -1115,6 +1140,9 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         return tmp_path
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -1210,6 +1238,9 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1238,6 +1269,9 @@ def test_spawn_worker_threads_model_and_provider(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
@@ -1255,6 +1289,9 @@ def test_spawn_worker_default_provider_claude(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1269,6 +1306,9 @@ def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1287,6 +1327,9 @@ def test_spawn_worker_default_substrate_bg(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1302,6 +1345,9 @@ def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
@@ -1322,6 +1368,9 @@ def test_spawn_worker_verb_normalizes_codex_thread(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
@@ -1339,6 +1388,9 @@ def test_spawn_worker_thread_without_session_id_refuses(monkeypatch):
     """A Codex thread must return a session identity receipt."""
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         # A thread spawn without a session identity is not a launch receipt.
         return _FakeProc(0, "the model reply text, no json receipt here")
 
@@ -1354,7 +1406,7 @@ def test_spawn_worker_bg_still_requires_short_id(monkeypatch):
     headless one-shot is exempt."""
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(0, "no receipt on the claude bg lane"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "no receipt on the claude bg lane")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", "/w")  # default -> claude/bg
@@ -1367,6 +1419,9 @@ def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
 
@@ -1393,6 +1448,9 @@ def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypat
     calls: list[list[str]] = []
 
     def fake_run(cmd, **_kwargs):
+        passthrough = _naming_passthrough(cmd, **_kwargs)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd)
         return _FakeProc(0)
 
@@ -1491,6 +1549,9 @@ def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1506,7 +1567,9 @@ def test_spawn_worker_unknown_harness_raises_resolve_error(monkeypatch):
 
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: pytest.fail("must not spawn on a resolve error"),
+        lambda cmd, *a, **k: (
+            _naming_passthrough(cmd, **k) or pytest.fail("must not spawn on a resolve error")
+        ),
     )
     with pytest.raises(DispatchResolveError):
         adv._spawn_worker("ab-2222aaaa", "/w", harness="bogus")
@@ -1577,6 +1640,9 @@ def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1592,6 +1658,9 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1603,7 +1672,7 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
 def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(2, "", "agent tgt-x already exists"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(2, "", "agent tgt-x already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
         adv._spawn_worker("ab-2222aaaa", None)
@@ -1612,7 +1681,7 @@ def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
 def test_spawn_worker_other_failure_raises_spawn_error(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
@@ -1634,6 +1703,9 @@ def test_spawn_worker_receipt_carries_the_registered_name(monkeypatch):
     receipt: dict = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1653,7 +1725,7 @@ def test_spawn_worker_unknown_verb_word_refuses(monkeypatch):
     """AC1-EDGE: an out-of-vocabulary verb refuses before spawn, never a t."""
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: pytest.fail("must not spawn"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or pytest.fail("must not spawn")),
     )
     with pytest.raises(Exception, match="unknown dispatch verb"):
         adv._spawn_worker("x-1", None, "s", verb="/impeccable")
@@ -1663,14 +1735,14 @@ def test_spawn_worker_skips_noise_line_mentioning_short_id(monkeypatch):
     """A non-JSON stdout line that merely mentions short_id must not abort the
     parse; the real receipt on a later line still wins (gemini review)."""
     noisy = 'note: writing short_id to log\n' + _RECEIPT
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, noisy))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, noisy)))
     assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
 
 
 def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(0, "some banner noise\n", ""),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "some banner noise\n", "")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
@@ -1685,7 +1757,7 @@ def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
 
 def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _CODEX_THREAD_RECEIPT)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _CODEX_THREAD_RECEIPT))
     )
     identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
     assert identity == "0198c0de-1111-7000-8000-00000000000a"
@@ -1698,7 +1770,7 @@ def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
         '"harness_session_id":"01a025f8","status":"live","lane":"thread"}\n'
     )
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, head8_receipt)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, head8_receipt))
     )
     with pytest.raises(adv.SpawnError) as excinfo:
         adv._spawn_worker("ab-2222aaaa", None, harness="codex")
@@ -1708,7 +1780,7 @@ def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
 def test_spawn_worker_still_accepts_claude_head8_short_id(monkeypatch):
     """A claude jobId head-8 is 32 random bits (UUIDv4) and stays a legal
     launch identity; only codex is refused by shape."""
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT)))
     assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
 
 
@@ -1719,7 +1791,7 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
         '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
         '"session_id":"0198c0de-2222-7000-8000-00000000000b","status":"live"}\n'
     )
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, receipt))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, receipt)))
     identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
     assert identity == "0198c0de-2222-7000-8000-00000000000b"
 
@@ -1734,7 +1806,7 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
 
 def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT))
     )
     ev = tmp_path / "events.jsonl"
     receipt: dict = {}
@@ -1750,7 +1822,7 @@ def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
 def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
     receipt: dict = {}
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
@@ -1941,6 +2013,9 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd[:3])
         if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
@@ -1957,6 +2032,9 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
 
 def test_next_node_get_failure_is_nonfatal(monkeypatch):
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
         return _FakeProc(1, "", "get exploded")
@@ -1971,6 +2049,9 @@ def test_next_node_skips_get_when_already_resolved(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd[:3])
         return _FakeProc(0, json.dumps(
             {"id": "ab-2222aaaa", "cwd": "/raw", "_resolved_cwd": "/already"}))
@@ -2036,7 +2117,7 @@ def test_dependents_unmapped_project_refused(iso, monkeypatch):
     the project; no spawn."""
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {})  # "web" unmapped
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2051,7 +2132,7 @@ def test_dependents_unmapped_project_refused(iso, monkeypatch):
 def test_dependents_no_project_skipped(iso, monkeypatch):
     dep = {"id": "ab-3333bbbb", "project": None, "slug": "x", "cross_project": True}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2080,7 +2161,7 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     _hold(f"node:{_DEP['id']}")
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2242,7 +2323,7 @@ def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
     dep = {"id": "ab-4444cccc", "project": "fno", "slug": "x", "cross_project": False}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
     _map_project(monkeypatch, {})  # unmapped AND dep has no cwd
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
@@ -2259,7 +2340,7 @@ def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
         adv, "_direct_dependents",
         lambda cid, cproj: pytest.fail("must not read graph when closed_project is None"),
     )
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     # None (the normal last-resort) AND an empty-string project both fail closed:
     # an empty string would otherwise tag every dependent cross_project=True and
@@ -2352,7 +2433,7 @@ def test_dependents_dependents_error_skips_never_guesses(iso, monkeypatch):
         raise RuntimeError("graph read exploded")
 
     monkeypatch.setattr(adv, "_direct_dependents", boom)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2475,7 +2556,7 @@ def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
     monkeypatch.setattr(adv, "_walker_live_at", lambda root: root == "/mapped/web")
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2494,6 +2575,9 @@ def _capture_spawn_argv(monkeypatch):
     captured = {}
 
     def fake_run(cmd, *a, **k):
+        passthrough = _naming_passthrough(cmd, **k)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(returncode=0, stdout=_RECEIPT)
 
@@ -2532,14 +2616,17 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
     exit 2 + 'already exists' -> SpawnAlreadyRunning; other non-zero -> SpawnError."""
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: _FakeProc(returncode=2, stderr="agent already exists"),
+        lambda cmd, *a, **k: (_naming_passthrough(cmd, **k)
+                            or _FakeProc(returncode=2, stderr="agent already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
         adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
 
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: _FakeProc(returncode=1, stderr="boom"),
+        lambda cmd, *a, **k: (
+            _naming_passthrough(cmd, **k) or _FakeProc(returncode=1, stderr="boom")
+        ),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
@@ -2730,7 +2817,7 @@ def test_failover_provider_pin_bypasses(iso, monkeypatch):
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, lambda *a: pytest.fail("a provider pin must bypass failover"))
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", provider="ccm", events_path=iso)
 
@@ -2959,6 +3046,9 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
     captured: dict = {}
 
     def _fake_run(cmd, **_kw):
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_SUBPROCESS_RUN(cmd, **_kw)
         captured["cmd"] = cmd
         return _FakeProc(returncode=0, stdout=_RECEIPT if substrate == "bg" else "")
 
@@ -3344,6 +3434,9 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd)
         return _FakeProc(0, _RECEIPT)
 
@@ -3372,7 +3465,7 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
     monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
+        adv.subprocess, "run", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn"))
     )
 
     res = adv.advance(project="fno", events_path=iso)
@@ -3425,6 +3518,9 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         captured["env"] = kw.get("env")
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
@@ -3450,6 +3546,9 @@ def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -3467,6 +3566,9 @@ def test_spawn_worker_refuses_a_state_root_key_in_extra_env(monkeypatch):
     """
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         pytest.fail("must not spawn with a state-root override on the wrapper")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
@@ -3483,6 +3585,9 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
 
@@ -3567,6 +3672,9 @@ def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route1"}')
 
@@ -3599,6 +3707,9 @@ def test_spawn_worker_preresolved_grid_route_survives_a_pinned_harness(monkeypat
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route3"}')
 
@@ -3624,6 +3735,9 @@ def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route2"}')
 
@@ -3649,6 +3763,9 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route4"}')
 
@@ -3755,6 +3872,9 @@ def test_spawn_worker_planless_without_difficulty_refuses(iso, monkeypatch):
 
 def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         raise _subprocess_module.TimeoutExpired(cmd, 60)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
@@ -3767,6 +3887,9 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         return _FakeProc(0, json.dumps(receipt))
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)

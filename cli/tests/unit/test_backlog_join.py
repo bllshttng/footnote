@@ -162,6 +162,17 @@ tasks:
 """
 
 
+def _naming_real(cmd, **kw):
+    """The name verbs run in the binary; a blanket stub answers the mint with
+    a spawn receipt. Capture the real run before any test patches it."""
+    parts = [str(part) for part in cmd]
+    if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+        return _REAL_RUN(cmd, **kw)
+    return None
+
+_REAL_RUN = __import__("subprocess").run
+
+
 def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True):
     """Mock join's seams; returns the recorded spawn calls."""
     calls: list[dict] = []
@@ -213,7 +224,8 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
 
     monkeypatch.setattr(
         advance.subprocess, "run",
-        lambda cmd, **_kw: (calls.append({"cmd": cmd, "env": _kw.get("env")}), _Proc())[1],
+        lambda cmd, **_kw: (_naming_real(cmd, **_kw)
+                            or (calls.append({"cmd": cmd, "env": _kw.get("env")}), _Proc())[1]),
     )
     return calls
 
@@ -461,7 +473,8 @@ def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         advance.subprocess, "run",
-        lambda cmd, **_kw: (calls.append({"cmd": cmd}), _Bare())[1],
+        lambda cmd, **_kw: (_naming_real(cmd, **_kw)
+                            or (calls.append({"cmd": cmd}), _Bare())[1]),
     )
     with pytest.raises(SpawnError):
         join_node("x-8d1d", 3)
