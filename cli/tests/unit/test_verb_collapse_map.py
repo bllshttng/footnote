@@ -148,9 +148,7 @@ def test_map_covers_current_surface_once():
     # allocated 594 -> 595 on main in the same window: 595 -> 596. The
     # reign-readback branch allocates `agents king history` and its
     # help-injected `agents king-history` twin: counted from the merged
-    # file, 596 -> 598. The build-dir ruling deleted the two retired
-    # `cargo-offload` rows (the verb moved caches cargo now writes outside
-    # the checkout): 598 -> 596. x-caf8 allocates `doctor scratch sweep` +
+    # file, 596 -> 598. x-caf8 allocates `doctor scratch sweep` +
     # `doctor scratch report`, the scratch-shape sweep the daily eval-sweep
     # ignition runs as stage five (its Rust-runtime leaf): 598 -> 600.
     # x-77db allocates `agents incident` +
@@ -158,8 +156,11 @@ def test_map_covers_current_surface_once():
     # `agents mail team` + `mail team` (the fleet announcement fan-out):
     # counted from the merged file, 600 -> 604. The build-dir ruling deleted
     # the two retired `cargo-offload` rows (the verb moved caches cargo now
-    # writes outside the checkout): 604 -> 602.
-    assert len(mapped) == 602, (
+    # writes outside the checkout): 604 -> 602. The
+    # one install verb for every harness allocates `config plugin` and
+    # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
+    # from the merged file, 602 -> 603.
+    assert len(mapped) == 603, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

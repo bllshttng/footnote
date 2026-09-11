@@ -823,7 +823,6 @@ def inspect_freshness(
     live_env = {**os.environ, "CODEX_HOME": str(home)}
     marker_path = home / "footnote" / "plugin-channel.json"
     rollback_path = home / "footnote" / "rollback-failure.json"
-    remedy_channel = "dev"
     if rollback_path.is_file():
         try:
             rollback = _object(
@@ -841,7 +840,7 @@ def inspect_freshness(
             "status": "error",
             "issue": "rollback-failure",
             "detail": detail[-_OUTPUT_LIMIT:],
-            "remedy": f"fno config setup codex-plugin --channel {rollback_channel} --refresh",
+            "remedy": "fno config plugin install codex --force",
         }
     marker: dict[str, object] | None = None
     marker_error: Exception | None = None
@@ -852,7 +851,6 @@ def inspect_freshness(
         channel = marker.get("channel")
         if channel not in {"release", "dev"}:
             raise CodexPluginError("desired-channel-marker", "missing or unsupported channel")
-        remedy_channel = str(channel)
         expected_marketplace = MARKETPLACE
         expected_source = str(marker.get("source", ""))
         marker_source_ok = (
@@ -874,7 +872,7 @@ def inspect_freshness(
             "status": "unknown",
             "issue": "state-unreadable",
             "detail": detail[-_OUTPUT_LIMIT:],
-            "remedy": f"fno config setup codex-plugin --channel {remedy_channel} --refresh",
+            "remedy": "fno config plugin install codex --force",
         }
 
     installed = [p for p in state.plugins if p.installed and p.plugin_id in OWNED_PLUGIN_IDS]
@@ -900,20 +898,20 @@ def inspect_freshness(
             "enabled_plugin_ids": [p.plugin_id for p in enabled],
             "status": "conflict",
             "issue": "ambiguous-duplicate-state",
-            "remedy": f"fno config setup codex-plugin --channel {remedy_channel} --refresh",
+            "remedy": "fno config plugin install codex --force",
         }
     if marker_error is not None:
         if isinstance(marker_error, FileNotFoundError):
             return {
                 "status": "unknown",
                 "issue": "desired-channel-missing",
-                "remedy": "fno config setup codex-plugin --channel release",
+                "remedy": "fno config plugin install codex --force",
             }
         return {
             "status": "unknown",
             "issue": "state-unreadable",
             "detail": str(marker_error)[-_OUTPUT_LIMIT:],
-            "remedy": f"fno config setup codex-plugin --channel {remedy_channel} --refresh",
+            "remedy": "fno config plugin install codex --force",
         }
     assert marker is not None
     channel = str(marker["channel"])
@@ -926,7 +924,7 @@ def inspect_freshness(
         "marketplace_source": expected_source,
         "installed_plugin_ids": [p.plugin_id for p in installed],
         "enabled_plugin_ids": [p.plugin_id for p in enabled],
-        "remedy": f"fno config setup codex-plugin --channel {channel} --refresh",
+        "remedy": "fno config plugin install codex --force",
     }
     if not enabled:
         return {**base, "status": "missing", "issue": "plugin-missing"}

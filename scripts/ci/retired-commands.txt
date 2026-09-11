@@ -11,6 +11,7 @@
 # act. Only the second is the moment that matters.
 claude rm|fno agents rm, then fno agents adopt <session-id> to reverse it|d-1900e419
 worktree cargo-offload|nothing: cargo writes outside the checkout now (build.build-dir); reclaim stale intermediates with fno agents workspace worktree cleanup --cargo-targets|x-7ca7
+config setup codex-plugin|fno config plugin install codex [--force], the one install verb for every harness|x-7ca7
 claude stop|fno agents stop|d-1900e419
 # x-6233 root folds: the old root spellings forward for one release, but no
 # caller-facing string may TEACH them. Full two-token paths so the canonical
