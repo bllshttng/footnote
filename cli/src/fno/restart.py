@@ -285,9 +285,10 @@ def restart_command(
                         keepers = parsed
                 elif line.startswith("fno agents restart:") and not line.startswith("fno agents restart: FAILED"):
                     say(line)
-            if rc != 0 and keepers is not None and any(
+            spared = keepers is not None and any(
                 c.get("result") != "cycled" for c in keepers.get("store_keepers", [])
-            ):
+            )
+            if rc != 0 and spared:
                 pass  # the nonzero exit IS the spared keeper, not the daemon
             elif rc == 0:
                 result["daemon"] = "restarted"

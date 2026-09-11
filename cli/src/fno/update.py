@@ -429,10 +429,9 @@ def _live_mux_sessions(
 def running_components(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> "list[dict]":
-    """One row per long-lived process, from ``fno-agents census --json``
-    (x-f188; the walking and classifying live in
-    ``crates/fno-agents/src/census.rs``). ``[]`` on any failure: an
-    unavailable census is not an empty fleet's verdict."""
+    """One row per long-lived process from ``fno-agents census --json``
+    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``[]``
+    on any failure, never a false all-clear."""
     try:
         from fno import rust_binary
 
@@ -639,10 +638,11 @@ def _build_update_guidance(
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
-    if not update_ready and revs_known:
+    # "Up to date" used to report no action while stale processes ran
+    # (x-f1f4); when any are stale the line names what restart cycles and
+    # what it keeps instead.
+    if not update_ready and (revs_known or not degraded_reason):
         if running_stale > 0:
-            # x-f188 change 7: "up to date" reported no action while stale
-            # processes ran (x-f1f4); the branch no longer returns early.
             return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
@@ -658,11 +658,6 @@ def _build_update_guidance(
             f"update check degraded ({degraded_reason}) - {wire_label}; "
             f"{shells_label} at risk, --revive respawns {revivable_label}"
         )
-
-    if not update_ready:
-        if running_stale > 0:
-            return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
-        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if wire_bump:
         return (
