@@ -1126,7 +1126,20 @@ async fn run(args: Vec<String>) -> i32 {
             }
         },
         Err(e) => {
-            eprintln!("fno-agents: {e}");
+            if verb_owned == "rm" && !agent_name.is_empty() {
+                // A dead connection does not prove the daemon skipped the
+                // removal; read the store rather than assert the outcome.
+                let still_registered = fno_agents::state::load_registry(&home.registry_json())
+                    .unwrap_or_default()
+                    .find_name_or_full_session_id(&agent_name)
+                    .is_some();
+                eprintln!(
+                    "{}",
+                    rm_failure_line(&agent_name, &e.to_string(), still_registered)
+                );
+            } else {
+                eprintln!("fno-agents: {e}");
+            }
             1
         }
     }
@@ -3565,6 +3578,19 @@ fn str_arg(
     it.next()
         .map(Value::String)
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// The stderr line a transport-level `rm` failure prints. The pre-exec removal
+/// banner is past tense and the transport error alone reads like a completed
+/// removal, so the line names the row and answers from the registry: a dead
+/// connection does not prove the daemon skipped the write, and the store is
+/// the receipt.
+fn rm_failure_line(name: &str, err: &str, still_registered: bool) -> String {
+    if still_registered {
+        format!("fno-agents: rm {name}: {err}; nothing was removed - the row is still registered")
+    } else {
+        format!("fno-agents: rm {name}: {err}; the row is no longer registered")
+    }
 }
 
 /// Format a successful daemon response for human-readable stdout.

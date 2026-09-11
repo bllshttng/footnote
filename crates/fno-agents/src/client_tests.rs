@@ -484,6 +484,22 @@ fn format_success_rm() {
     assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
 }
 
+/// The transport-failure line names the row and answers from the registry
+/// verdict the caller passed, never from the past-tense pre-exec banner.
+#[test]
+fn rm_failure_line_names_the_row_and_the_registry_verdict() {
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", true),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         nothing was removed - the row is still registered"
+    );
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", false),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         the row is no longer registered"
+    );
+}
+
 #[test]
 fn format_success_rm_warns_when_a_worktree_was_removed() {
     let result = json!({
