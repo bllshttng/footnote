@@ -23,7 +23,7 @@ export FNO_INBOX_KNOWN_PROJECTS="fno,example-pipeline"
 
 # 1) example-pipeline sends a fyi to fno (replaces the old `notification` kind).
 SEND_OUT=$(uv run fno-py agents mail send --to-project fno --kind fyi \
-    --body "region data source live in PR 112 please be advised" \
+    --body "region data source live in PR 112. be advised." \
     --from-name example-pipeline --json)
 THREAD_PATH=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['thread_path'])")
 case "$THREAD_PATH" in

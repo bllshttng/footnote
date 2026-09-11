@@ -26,7 +26,7 @@ export FNO_INBOX_KNOWN_PROJECTS="proj-a,proj-b"
 
 # 1) Send from proj-a to proj-b's inbox/.
 SEND_OUT=$(uv run fno-py agents mail send --to-project proj-b --kind heads-up \
-    --body "hello from a please respond" --from-name proj-a --json)
+    --body "hello from a. respond soon." --from-name proj-a --json)
 THREAD_PATH=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['thread_path'])")
 MSG_ID=$(echo "$SEND_OUT" | python3 -c "import json, sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
 
