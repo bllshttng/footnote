@@ -1005,12 +1005,87 @@ def _try_mux_pane(
     return EXIT_OK
 
 
+def _peek_all(
+    *,
+    lines: int,
+    grep: Optional[str],
+    json_out: bool,
+    out,
+    err,
+    projects_root: Optional[Path],
+    codex_sessions_dir: Optional[Path],
+    opencode_storage_dir: Optional[Path],
+) -> int:
+    """``--all``: run the tail (and ``--grep``) over every registry session that
+    carries a transcript. The stderr summary names sessions READ, so zero
+    matches across a searched corpus never reads as an unsearched one."""
+    from fno.agents.registry import load_registry
+
+    try:
+        rows = load_registry(None)
+    except Exception:  # noqa: BLE001 - a torn registry is an answer, not a crash
+        err.write("registry unreadable; --all has no sessions to enumerate\n")
+        return EXIT_UNSUPPORTED
+    seen: set[tuple[str, str]] = set()
+    sessions_read = 0
+    matched_total = 0
+    for row in rows:
+        sid = getattr(row, "harness_session_id", None)
+        agent = getattr(row, "harness", None)
+        if not sid or not agent or (agent, sid) in seen:
+            continue
+        seen.add((agent, sid))
+        try:
+            records = recent_records(
+                agent,
+                sid,
+                getattr(row, "cwd", "") or "",
+                lines,
+                projects_root=projects_root,
+                codex_sessions_dir=codex_sessions_dir,
+                opencode_storage_dir=opencode_storage_dir,
+            )
+        except ObserveUnsupported:
+            continue
+        sessions_read += 1
+        hits = (
+            [r for r in records if grep in r.text or grep in r.role]
+            if grep is not None
+            else list(records)
+        )
+        matched_total += len(hits)
+        if grep is not None and not hits:
+            continue
+        if json_out:
+            for r in hits:
+                out.write(
+                    json.dumps(
+                        {"session_id": sid, "agent": agent, "role": r.role, "text": r.text}
+                    )
+                    + "\n"
+                )
+        else:
+            out.write(f"# {agent} {sid}\n")
+            for r in hits:
+                out.write(_render(r) + "\n")
+    if grep is not None:
+        err.write(
+            f"grep {grep!r}: {matched_total} matching record(s) across "
+            f"{sessions_read} session(s)\n"
+        )
+    else:
+        err.write(f"{sessions_read} session(s) read\n")
+    return EXIT_OK
+
+
 def peek(
     handle: str,
     *,
     lines: int = 15,
     follow: bool = False,
     json_out: bool = False,
+    grep: Optional[str] = None,
+    all_sessions: bool = False,
     stdout=None,
     stderr=None,
     resolve: Optional[Callable[[str], tuple]] = None,
@@ -1032,6 +1107,18 @@ def peek(
     out = stdout if stdout is not None else sys.stdout
     err = stderr if stderr is not None else sys.stderr
     resolver = resolve if resolve is not None else _default_resolve
+
+    if all_sessions:
+        return _peek_all(
+            lines=lines,
+            grep=grep,
+            json_out=json_out,
+            out=out,
+            err=err,
+            projects_root=projects_root,
+            codex_sessions_dir=codex_sessions_dir,
+            opencode_storage_dir=opencode_storage_dir,
+        )
 
     session, suggestions = resolver(handle)
     # True when `session` was rebuilt from a registry row rather than found by
@@ -1141,6 +1228,20 @@ def peek(
     except ObserveUnsupported as exc:
         err.write(f"observe not yet supported for {exc.agent}\n")
         return EXIT_UNSUPPORTED
+
+    if grep is not None:
+        # A search reports its own count: a zero on stderr with exit 0 is a
+        # measured absence, never a silent one (AGENTS.md, assert a positive
+        # marker).
+        records = [r for r in records if grep in r.text or grep in r.role]
+        err.write(
+            f"grep {grep!r}: {len(records)} matching record(s) in {agent} {session_id}\n"
+        )
+        for rec in records:
+            _emit_record(out, rec, json_out)
+        if not records:
+            _emit_no_activity(out, json_out)
+        return EXIT_OK
 
     if not records and row_derived and lines > 0:
         # An empty record list has at least four causes: the transcript did not
