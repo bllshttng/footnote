@@ -416,4 +416,5 @@ def test_doctor_test_leaves_tmpdir_ambient():
     from fno import test_cmd
 
     env = test_cmd._child_env(Path(__file__).resolve().parents[2])
-    assert env["TMPDIR"] == os.environ.get("TMPDIR")
+    # .get on both sides: a runner legitimately carries no TMPDIR at all.
+    assert env.get("TMPDIR") == os.environ.get("TMPDIR")
