@@ -132,7 +132,11 @@ use crate::client_verbs::shlex_quote;
 /// gesture needs them SPLIT: the grant follows the directory the worker will
 /// actually get, while `--cd` must not pin a fallback directory (AC3-GONE),
 /// so it calls [`build_resume_argv_split`] directly.
-pub(crate) fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+pub(crate) fn build_resume_argv(
+    provider: &str,
+    session_id: &str,
+    cwd: Option<&str>,
+) -> Option<Vec<String>> {
     let cwd = cwd.filter(|c| !c.is_empty());
     build_resume_argv_split(provider, session_id, cwd, cwd.is_some())
 }
