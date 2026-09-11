@@ -870,6 +870,10 @@ pub fn classify_with_basis_and_exclusivity(
             })
     };
     if is_expired(rec, now) {
+        // A review hold is a lease on the review; the holder's session answers another question.
+        if rec.key.starts_with("review:branch:") {
+            return (ClaimState::Stale, basis::TTL_EXPIRED);
+        }
         // A key whose holder is ONE SHORT-LIVED PROCESS reads its recorded
         // pid as the verdict: `dispatch:` reservations (x-41f7) and the
         // `gate:` spawn mutex (x-dead direction three). The session witness
