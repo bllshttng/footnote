@@ -18,6 +18,9 @@ from typing import List, Optional
 
 import typer
 
+from fno.decide import READ_HELP
+from fno.decide.graduation import REFERENCE_HELP as grad_reference_help
+
 shim_app = typer.Typer(
     help=(
         "One-release root registration for `decide` (x-6233). Unreachable "
@@ -157,14 +160,9 @@ def legacy_record(
         help="enforced, guidance, or should-be-enforced-but-i-did-not.",
     ),
     graduation_ref: Optional[str] = typer.Option(
-        None,
-        "--graduation-ref",
-        help=(
-            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
-            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
-            "Follow-up: node:<id>."
-        ),
+        None, "--graduation-ref", help=grad_reference_help
     ),
+    read: List[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Warn once, then delegate the old spelling to the backlog leaf."""
     typer.echo(_DEPRECATION_NOTICE, err=True)
@@ -182,6 +180,7 @@ def legacy_record(
         origin=None,
         graduation=graduation,
         graduation_ref=graduation_ref,
+        read=read,
     )
 
 
@@ -198,6 +197,7 @@ def _record(
     origin: Optional[str],
     graduation: Optional[str],
     graduation_ref: Optional[str],
+    read: List[str],
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
@@ -215,6 +215,11 @@ def _record(
         WaiverAuthorityRefusedError,
         record_decision,
     )
+    from fno.decide import (
+        UnmeasuredClaimError,
+        UnresolvableCitationError,
+    )
+    from fno.rust_binary import VerbUnavailable
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
 
     # Validated here, on the write path, and deliberately NOT in schema.yaml:
@@ -248,7 +253,14 @@ def _record(
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
+            reads=list(read) or None,
         )
+    except (UnmeasuredClaimError, UnresolvableCitationError, VerbUnavailable) as exc:
+        # Same ladder as the law door: the ruling was refused before any
+        # write, so the caller must not re-run it expecting a different id.
+        # VerbUnavailable rides it: a gate that cannot run refuses too.
+        typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
+        raise typer.Exit(3)
     except UnknownOriginError as exc:
         typer.echo(f"decide: refused. {exc}", err=True)
         raise typer.Exit(3)
@@ -373,14 +385,9 @@ def backlog_decide(
         help="enforced, guidance, or should-be-enforced-but-i-did-not.",
     ),
     graduation_ref: Optional[str] = typer.Option(
-        None,
-        "--graduation-ref",
-        help=(
-            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
-            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
-            "Follow-up: node:<id>."
-        ),
+        None, "--graduation-ref", help=grad_reference_help
     ),
+    read: List[str] = typer.Option([], "--read", help=READ_HELP),
     origin: Optional[str] = typer.Option(
         None,
         "--origin",
@@ -423,6 +430,7 @@ def backlog_decide(
         origin=origin,
         graduation=graduation,
         graduation_ref=graduation_ref,
+        read=read,
     )
 
 
@@ -943,6 +951,12 @@ def _list_decisions(
             )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
+        for read_row in d.get("reads") or []:
+            head = str(read_row.get("out_head") or "")
+            first = head.splitlines()[0] if head else "(no output)"
+            typer.echo(
+                f"    read: {read_row.get('cmd')} -> exit {read_row.get('exit')} | {first}"
+            )
         if d.get("question"):
             typer.echo(f"    question: {d['question']}")
         if d.get("options"):

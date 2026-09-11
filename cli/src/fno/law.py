@@ -1,34 +1,12 @@
 """One-step law recording: `fno inbox law set`.
 
-The operator types one ruling and it records. There is no staged proposal, no
-content hash, no one-shot approval receipt, and no resume path (ruling
-d-e1eec854). The whole ceremony was deleted because it charged for a property it did not buy:
-it refused the honest headless path at the last step while an attended chat
-approved the same enactment without reading the hash.
-
-WHAT THAT TRADE COSTS, measured rather than assumed, and stated at its real
-WIDTH. `require_marked_caller` answers `chat_attested` off
-`resolve_self_identity`, which walks process ancestry. So the door is not
-"a mail-injected slash command". It is ANY process descended from a harness
-session, including an agent's own Bash call with no user-shaped text anywhere.
-The door is the law LANE and never the `operator` VALUE: `_resolve_decider`
-still refuses an `operator` claim from a resolved session.
-The narrower mail shape is merely the one that is impossible to detect: across
-every transcript in this machine's claude project directory, 2173 user turns
-carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"`
-and 2439 with `origin: {"kind": "human"}`, and `fno agents mail send --raw`
-strips the envelope that is the one remaining marker.
-
-What survives is the honest attribution: a chat recording lands as
-`chat_attested`, never as `operator`, so a reader can always tell it from a
-person at a terminal. Note the asymmetry that buys: a session can mint a law
-row and cannot retract one, because `retract_decision` requires `operator`.
-
-One family is closed to this door entirely: subjects under
-`review-coverage-waiver` (the merge gate's waiver evidence) refuse every
-non-operator authority at the write chokepoint, because a waiver asserts a
-person read the diff and no chat row can carry that fact. The attended
-`fno do pr coverage-waive` command is the only path.
+The operator types one ruling and it records; there is no staged proposal and
+no resume path (ruling d-e1eec854). The door resolves its caller by process
+ancestry and answers `chat_attested`, never `operator`, so a reader can
+always tell a chat recording from a person at a terminal - and a session can
+mint a law row while `retract_decision` stays operator-only. The measured
+narrative of that trade, and the `review-coverage-waiver` carve-out, live in
+docs/architecture/decision-record.md.
 """
 
 from __future__ import annotations
@@ -36,6 +14,8 @@ from __future__ import annotations
 import re
 
 import typer
+
+from fno.decide import READ_HELP
 
 DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 COORDINATION_MARKERS = (
@@ -107,6 +87,7 @@ def record_command(
     supersedes: str | None = typer.Option(None, "--supersedes"),
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
+    read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (
@@ -118,6 +99,7 @@ def record_command(
         require_marked_caller,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
+    from fno.rust_binary import VerbUnavailable
 
     try:
         validate_durable_law(
@@ -141,12 +123,14 @@ def record_command(
             supersedes=supersedes,
             authority_source=authority,
             graduation=graduation_data,
+            reads=list(read) or None,
         )
-    except (InvalidGraduationError, ValueError) as exc:
+    except (InvalidGraduationError, ValueError, VerbUnavailable) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no
-        # recoverable decision. It must land on 3 with the rest: exit 1 is the
+        # recoverable decision; VerbUnavailable is the evidence gate refusing
+        # to run at all. Both must land on 3 with the rest: exit 1 is the
         # code reserved for "recorded, index write failed, do NOT re-run", so
-        # letting it escape told a caller the opposite of what happened.
+        # letting either escape told a caller the opposite of what happened.
         typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
         raise typer.Exit(3) from exc
     except WaiverAuthorityRefusedError as exc:

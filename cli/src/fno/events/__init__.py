@@ -1204,6 +1204,7 @@ def operator_decision(
     graduation: dict[str, str] | None = None,
     rationale: str | None = None,
     supersedes: str | None = None,
+    reads: "list[dict[str, Any]] | None" = None,
     source: str = "target",
 ) -> dict[str, Any]:
     """Build an ``operator_decision`` event (a durable decision record).
@@ -1211,7 +1212,9 @@ def operator_decision(
     Modeled on ``approval_decided``: who decided, under what authority, and
     what was on the table. ``subject`` is the recovery key a later agent
     queries; ``supersedes`` orders two decisions on one subject so a reader
-    of the older one can tell it is not current.
+    of the older one can tell it is not current. ``reads`` carries the
+    executed evidence rows for a code fact the ruling asserts (see
+    :mod:`fno.decide`): cmd, exit code, output head.
     """
     data: dict[str, Any] = {"decision_id": decision_id, "decision": decision[:QUESTION_CAP]}
     for key, value in (
@@ -1230,6 +1233,7 @@ def operator_decision(
         ("graduation", graduation),
         ("rationale", rationale[:QUESTION_CAP] if rationale else None),
         ("supersedes", supersedes),
+        ("reads", reads),
     ):
         if value is not None:
             data[key] = value
