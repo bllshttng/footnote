@@ -720,6 +720,42 @@ def test_unsupersede_preserves_plain_deferral(tmp_graph, tmp_path):
     assert by_id["ab-old"]["deferred_reason"] == "parked"
 
 
+def test_unsupersede_prints_the_cleared_cause_and_any_plan_ruling(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC6-HP (x-6f98): the reversal names the cause it erases and any plan
+    ruling against the node, on stderr, without changing the exit."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "plan-x-aaaa.md").write_text(
+        "---\nclaims: ab-new\ntitle: T\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: ab-old\n"
+        "      reason: ruled out\n"
+        "---\n\n# T\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
+
+    _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+
+    assert res.exit_code == 0, res.output
+    assert (
+        "unsupersede: cleared the supersession of ab-old by ab-new: fold"
+        in res.stderr
+    )
+    assert "unsupersede: ab-old is rejected by ab-new" in res.stderr
+
+
 def test_unsupersede_blocked_plan_fails_closed_to_design(tmp_graph, tmp_path):
     """A revived node that is still blocked has no plan rung to restore to (the
     prior rung was overwritten by supersede). Fail closed to a non-dispatchable

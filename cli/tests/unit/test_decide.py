@@ -3596,3 +3596,101 @@ def test_agent_lane_refusal_exits_3_and_names_the_claim(
     assert "advance.py:167" in result.stderr, result.stderr
     assert not index.exists() or index.read_text() == ""
     assert calls[0]["reads"] is None
+
+
+# -- plan rulings (x-6f98): sibling plans' consolidation.rejected reach the verb --
+
+
+def _write_plans_dir(tmp_path: Path) -> Path:
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "plan-x-aaaa.md").write_text(
+        "---\nclaims: x-aaaa\ntitle: T\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        "    - id: x-bbbb\n"
+        "      reason: R\n"
+        "---\n\n# T\n",
+        encoding="utf-8",
+    )
+    return plans
+
+
+def test_decisions_prints_plan_rulings_before_the_empty_answer(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
+):
+    from fno.graph.cli import cli as backlog_app
+
+    plans = _write_plans_dir(tmp_path)
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
+
+    result = runner.invoke(backlog_app, ["decisions", "x-bbbb"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"PLAN RULING  x-bbbb  rejected by x-aaaa  {plans / 'plan-x-aaaa.md'}"
+        in result.stdout
+    )
+    assert "reason: R" in result.stdout
+    # The empty index answer keeps its own honest wording, plan ruling or not.
+    assert "no decision is indexed under the subject 'x-bbbb'" in result.stderr
+
+
+def test_decisions_json_carries_plan_rulings(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
+):
+    from fno.graph.cli import cli as backlog_app
+
+    plans = _write_plans_dir(tmp_path)
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
+
+    result = runner.invoke(backlog_app, ["decisions", "x-bbbb", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["plan_rulings"]["status"] == "ok"
+    assert len(payload["plan_rulings"]["rulings"]) == 1
+    assert payload["plan_rulings"]["rulings"][0]["by"] == ["x-aaaa"]
+
+
+def test_decisions_json_names_an_unreadable_plans_dir(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
+):
+    from fno.graph.cli import cli as backlog_app
+
+    missing = tmp_path / "no" / "such" / "dir"
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: missing)
+
+    result = runner.invoke(backlog_app, ["decisions", "x-bbbb", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["plan_rulings"]["status"] == "unavailable"
+    assert str(missing) in result.stderr
+
+
+def test_a_subject_query_reads_the_graph_once(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
+):
+    import fno.decide as decide_engine
+    from fno.graph.cli import cli as backlog_app
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
+
+    calls = {"soft": 0}
+    real = decide_engine._graph_entries
+
+    def counting(*, required: bool = False):
+        if not required:
+            calls["soft"] += 1
+        return real(required=required)
+
+    monkeypatch.setattr(decide_engine, "_graph_entries", counting)
+
+    result = runner.invoke(backlog_app, ["decisions", "x-7d94"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["soft"] == 1, calls

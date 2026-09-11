@@ -38,7 +38,7 @@ _DEPRECATION_NOTICE = (
 )
 
 
-def _subject_node_id(subject: str) -> Optional[str]:
+def _subject_node_id(subject: str, entries: Optional[list] = None) -> Optional[str]:
     """The graph node a query subject names, when it names one.
 
     The empty-answer text uses it to point at the one authority surface that
@@ -54,7 +54,8 @@ def _subject_node_id(subject: str) -> Optional[str]:
         # case-fold. A private copy that skips a tier here drifts from the
         # matcher's answer for the same subject.
         subject = subject.strip()
-        entries = _graph_entries()
+        if entries is None:
+            entries = _graph_entries()
         return _resolved_node(subject, entries) or _resolved_node(
             subject.strip().casefold(), entries
         )
@@ -745,11 +746,20 @@ def _list_decisions(
         raise typer.Exit(2)
 
     try:
-        # No cap on the read. The cap is applied HERE so the total is known,
-        # and a truncated answer can say so - a silent cut on a recall verb is
-        # the same lie as a missing record.
+        # No cap on the read; the total is known here, so a truncated answer
+        # can say so. One soft graph read per subject query, passed down to
+        # every resolver that used to re-read it.
+        entries = None
+        if subject:
+            from fno.decide import _graph_entries
+
+            entries = _graph_entries()
         label, found, damaged = list_decisions(
-            subject, limit=None, lane=lane, state=state if state is not None else "all"
+            subject,
+            limit=None,
+            lane=lane,
+            state=state if state is not None else "all",
+            entries=entries,
         )
         standing_law = (
             current_law(subject)
@@ -772,7 +782,31 @@ def _list_decisions(
     # four rulings filed under `x-f7b9 scope`. A near-miss scan that only runs
     # when the answer is empty would have stayed silent on exactly that case,
     # and a partial answer reads as a whole one.
-    near = near_miss_subjects(subject) if subject else []
+    near = near_miss_subjects(subject, entries=entries) if subject else []
+
+    # Plan rulings: sibling plans whose consolidation.rejected names this
+    # node. The index cannot hold them, so this scan is the one surface the
+    # ruled-out node's readers consult. Prints before the index answer, on
+    # the empty answer too.
+    plan_rulings_result = None
+    if subject:
+        from fno.graph._constants import is_wellformed_node_id
+        from fno.paths import plans_content_dir
+        from fno.plan.rulings import plan_rulings
+
+        stripped = subject.strip()
+        node_id = stripped if is_wellformed_node_id(stripped) else None
+        if node_id is None:
+            node_id = _subject_node_id(subject, entries=entries)
+        if node_id:
+            plan_rulings_result = plan_rulings(node_id, plans_content_dir())
+            if plan_rulings_result["status"] == "unavailable":
+                # A degraded read names itself in every mode, JSON included.
+                typer.echo(
+                    f"backlog decisions: plan rulings not read "
+                    f"({plan_rulings_result['dir']}: {plan_rulings_result['detail']})",
+                    err=True,
+                )
 
     # matched_by tells a machine reader WHICH key answered, so an id lookup is
     # never mistaken for a subject hit. A LIST is a union: `--subject d-XXXX`
@@ -793,6 +827,13 @@ def _list_decisions(
         "matched_by": matched if subject else None,
         "near_misses": [{"subject": s, "count": n} for s, n in near],
     }
+    if plan_rulings_result is not None:
+        payload["plan_rulings"] = {
+            "status": plan_rulings_result["status"],
+            "dir": plan_rulings_result["dir"],
+            "rulings": plan_rulings_result["rulings"],
+            "skipped": plan_rulings_result["skipped"],
+        }
     if standing_law is not None:
         payload.update(standing_law)
     if output:
@@ -824,6 +865,12 @@ def _list_decisions(
                 "sit in another lane or on the node itself)"
             )
 
+    if plan_rulings_result is not None:
+        from fno.plan.rulings import ruling_lines
+
+        for line in ruling_lines(plan_rulings_result, "", "", style="recall"):
+            typer.echo(line)
+
     if not decisions:
         # Exit 0: a read that answered "none" is a successful read. Only a read
         # that could not run is a failure.
@@ -844,7 +891,9 @@ def _list_decisions(
             # only the pre-cutover rows, so a subject with 2 unattributed and 3
             # coord rulings heard about the 2 and never the 3: the more
             # specific branch gave the less complete answer.
-            _, unfiltered, _ = list_decisions(subject, limit=None, state="all")
+            _, unfiltered, _ = list_decisions(
+                subject, limit=None, state="all", entries=entries
+            )
             if unfiltered:
                 noun = "decision" if len(unfiltered) == 1 else "decisions"
                 verb = "sits" if len(unfiltered) == 1 else "sit"
@@ -905,7 +954,7 @@ def _list_decisions(
             # is the difference between an honest empty and "no rule exists".
             node_surface = ""
             if subject:
-                node_id = _subject_node_id(subject)
+                node_id = _subject_node_id(subject, entries=entries)
                 if node_id:
                     node_surface = (
                         " That is not a finding that no rule exists: a king's "

@@ -53,6 +53,12 @@ consolidation:
   proceed_alone_against: []      # ids considered and rejected, each with a reason:
   #  - id: x-0000
   #    reason: <why it is not the same work, in text a later reader can check>
+  rejected: []                   # a node THIS plan rules out - stronger than the
+  #                              # contrast above: its reason says why the node
+  #                              # should not proceed, and where the idea belongs
+  #                              # instead. Sits beside any outcome. Defer the node
+  #                              # after intake: fno backlog defer <id> -K wont_do
+  #                              # -R "rejected by <this node> in <plan path>".
   decisions_acknowledged: []     # one per graph.decisions row:
   #  - decision_id: d-00000000
   #    reason: <why this ruling does not close this work>

@@ -947,7 +947,7 @@ def _resolved_node(subject: str, entries: "list[dict]") -> str | None:
     return str(match.id) if match.kind == "exact" and match.id else None
 
 
-def _subject_matcher(subject: str):
+def _subject_matcher(subject: str, entries: "list[dict] | None" = None):
     """A predicate over a recorded subject string, matching the same node.
 
     BOTH sides expand, not just the query. The operator records under whatever
@@ -957,9 +957,13 @@ def _subject_matcher(subject: str):
     the receipt makes it worse by printing the canonical id as the way back.
 
     A subject that names no node matches itself and nothing more.
+
+    ``entries`` lets a caller that ALREADY holds the graph pass it in, so a
+    query that resolves the subject for several readers reads it once.
     """
     subject = subject.strip()
-    entries = _graph_entries()
+    if entries is None:
+        entries = _graph_entries()
     node_id = _resolved_node(subject, entries) or _resolved_node(
         subject.strip().casefold(), entries
     )
@@ -1134,7 +1138,9 @@ def looks_like_decision_id(token: str) -> bool:
     return bool(_DECISION_ID_RE.match(token.strip()))
 
 
-def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
+def near_miss_subjects(
+    subject: str, entries: "list[dict] | None" = None
+) -> "list[tuple[str, int]]":
     """Recorded subjects that nearly match, newest-heaviest first.
 
     A near miss is indistinguishable from a real absence today: four rulings
@@ -1159,7 +1165,7 @@ def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
     want = subject.strip().casefold()
     if not want:
         return []
-    matches = _subject_matcher(subject)
+    matches = _subject_matcher(subject, entries=entries)
     rows, _ = _read_index(_index_path(), warn=False)
     seen: "dict[str, set[str]]" = {}
     for row in rows:
@@ -1180,6 +1186,7 @@ def list_decisions(
     limit: int | None = None,
     lane: str | None = None,
     state: str | None = None,
+    entries: "list[dict] | None" = None,
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -1190,7 +1197,9 @@ def list_decisions(
 
     ``subject=None`` returns every decision, which is the only way to reach a
     record written with no subject at all - what ``fno inbox outstanding clear
-    --answer`` writes for a question that names no node.
+    --answer`` writes for a question that names no node. ``entries`` is an
+    already-read graph, so a caller resolving one subject through several
+    readers reads it once.
     """
     if state not in {
         None,
@@ -1250,7 +1259,7 @@ def list_decisions(
         if subject and looks_like_decision_id(subject)
         else ""
     )
-    by_subject = _subject_matcher(subject) if subject else None
+    by_subject = _subject_matcher(subject, entries=entries) if subject else None
 
     def keep(row: dict) -> bool:
         """Id OR subject, never id INSTEAD OF subject.

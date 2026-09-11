@@ -93,6 +93,16 @@ It does NOT ask for a retry. The durable event has already landed by then, so a 
 
 A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
 
+## A ruling an agent makes about another node
+
+The decide verb refuses agent sessions. An agent that rules out another node's work records the verdict where that node's readers already look.
+
+The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
+
+Four readers surface it. `fno backlog decisions <id>` prints the ruling before the index answer. The think inspect receipt carries it as `graph.plan_rulings`, where the blueprint Consolidation Gate reads it and halts. `fno backlog undefer` and `fno backlog unsupersede` print it to whoever reverses the node's park. The readers resolve the plans directory with `plans_content_dir()`, so the `.claude` plansDirectory override holds.
+
+A plan ruling is coordination between sessions. It is never law: the law lane stays operator-only, and nothing here changes that.
+
 
 ## Why the index is separate from the global journal
 
