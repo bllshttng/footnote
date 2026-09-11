@@ -3433,10 +3433,10 @@ def test_team_stopped_fleet_still_delivers(tmp_path: Path, monkeypatch) -> None:
     _register_team_rows()
     injects = _team_inject_ok(monkeypatch)
 
-    # The incident record lives in a pinned home: the default home is the
-    # per-worker sandbox every other test in this process shares, and a
-    # stopped record there refuses every later spawn-gate test on the worker.
-    agents_home = tmp_path / "agents-home"
+    # The incident record lives in a pinned home shaped like the default:
+    # the sandbox home is one per pytest process, and a stopped record there
+    # refuses every later spawn-gate test on the worker.
+    agents_home = tmp_path / ".fno" / "agents"
     agents_home.mkdir(parents=True, exist_ok=True)
     (agents_home / "fleet-stop.json").write_text(json.dumps({
         "version": 1,

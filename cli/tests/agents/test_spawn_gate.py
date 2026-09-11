@@ -1545,8 +1545,8 @@ class TestReignTyped:
 
 def _write_incident_state(tmp_path: Path, state: str) -> Path:
     """Point FNO_AGENTS_HOME at a home whose fleet-stop.json holds `state`."""
-    home = tmp_path / "agents-home"
-    home.mkdir(exist_ok=True)
+    home = tmp_path / ".fno" / "agents"
+    home.mkdir(parents=True, exist_ok=True)
     (home / "fleet-stop.json").write_text(json.dumps({
         "version": 1,
         "state": state,
@@ -1602,6 +1602,41 @@ def test_fleet_incident_clear_admits(tmp_path, monkeypatch):
         spawn_gate,
         "_refuse",
         lambda *a, **k: pytest.fail("a clear verdict must refuse nothing"),
+    )
+
+    assert spawn_gate._fleet_incident_gate() is None
+
+
+def test_fleet_incident_without_a_runtime_defaults_clear(monkeypatch):
+    """No fno-agents runtime means no incident authority to ask: the python
+    fallback's own contracts (e.g. the exit-13 missing-runtime refusal) hold."""
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(
+        spawn_gate,
+        "_refuse",
+        lambda *a, **k: pytest.fail("a binary-less machine must not refuse"),
+    )
+
+    assert spawn_gate._fleet_incident_gate() is None
+
+
+def test_fleet_incident_stale_runtime_without_the_verb(tmp_path, monkeypatch):
+    """An installed runtime that predates the breaker does not answer for it:
+    unknown-verb on the check is no authority, not a cannot-tell."""
+    from fno import rust_binary
+
+    stale = tmp_path / "stale-fno-agents"
+    stale.write_text("#!/bin/sh\nexit 2\n")
+    stale.chmod(0o755)
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: stale)
+    monkeypatch.setattr(
+        spawn_gate,
+        "_refuse",
+        lambda *a, **k: pytest.fail("a pre-breaker runtime must not refuse"),
     )
 
     assert spawn_gate._fleet_incident_gate() is None

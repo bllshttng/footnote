@@ -559,7 +559,7 @@ def _hermetic_fleet_incident_home(monkeypatch, tmp_path):
     exercises a real incident state pins ``FNO_AGENTS_HOME`` itself (monkeypatch
     applies in order, so the test-local pin wins).
     """
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents-home"))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / ".fno" / "agents"))
 
 
 @pytest.fixture(autouse=True)
