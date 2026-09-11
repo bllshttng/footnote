@@ -113,7 +113,6 @@ mail_app = typer.Typer(
 )
 
 
-# Helpers
 
 _OLD_PATH_WARNED = False
 
@@ -539,7 +538,6 @@ def _validate_kind(kind: str) -> str:
     raise typer.Exit(code=1)
 
 
-# Notification helpers
 
 # Status helpers
 
@@ -716,7 +714,6 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     )
 
 
-# Refs collection
 
 def _collect_refs(
     ref_pr: Optional[int],
@@ -742,7 +739,6 @@ def _collect_refs(
     return refs
 
 
-# Commands
 
 def _is_job_name(name: Optional[str]) -> bool:
     """True when ``name`` is a ``node:<id>`` / ``pr:<n>`` job address."""

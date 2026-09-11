@@ -676,12 +676,8 @@ def _emit_drain_marker(
 
 def cmd_notify_self() -> None:
     """Body of ``fno agents mail notify-self`` (hidden): one atomic
-    ``UserPromptSubmit`` mail payload, then acknowledge it.
-
-    The CLI owns the complete hook envelope so no shell capture can advance the
-    cursor before the JSON is ready. A write or flush failure leaves the cursor
-    unchanged; the next SessionStart or active-turn boundary can retry.
-    Moved verbatim from mail/cli.py (file budget); the composition registers it.
+    ``UserPromptSubmit`` mail payload, then acknowledge it. Moved from
+    mail/cli.py (file budget); the composition registers it.
     """
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.bus.cursor import advance_cursor, scan_unread
@@ -698,15 +694,10 @@ def cmd_notify_self() -> None:
 
     handle = canonical_handle(ident.session_id)
 
-    # Busy mode (x-481e). This hook fires on every UserPromptSubmit. For an idle
-    # hold that is the re-arm signal. For a wall hold it only keeps the policy
-    # live without moving its fixed deadline. A lapsed one is tidied here rather
-    # than on the send path, where the gate stays a pure read to avoid a
-    # re-entrant registry lock.
-    # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
-    # tidied must degrade to rendering the mail, never to swallowing this
-    # turn's delivery. Busy mode is a convenience layered over the bus, and it
-    # does not get to break the bus.
+    # Busy mode (x-481e): the hook fires on every UserPromptSubmit - an idle
+    # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
+    # hold failure must degrade to rendering the mail, never to swallowing
+    # this turn's delivery.
     try:
         if extend(handle) is not None:
             return

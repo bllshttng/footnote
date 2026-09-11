@@ -38,10 +38,8 @@ EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
-# Durable fleet incident stop (x-77db): refused before every bypass branch,
-# FNO_SPAWN_GATE=0 included. 80/81 are taken in this table (king share,
-# registry schema), so the fleet codes sit at 82/83 - the NAME in the
-# refusal, not the number, is the cross-gate contract.
+# Fleet incident stop (x-77db): 80/81 are taken in this table, so the fleet
+# codes sit at 82/83; the NAME in the refusal is the cross-gate contract.
 EXIT_FLEET_STOP = 82
 EXIT_FLEET_STOP_UNAVAILABLE = 83
 

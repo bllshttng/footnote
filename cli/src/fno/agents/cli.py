@@ -455,7 +455,8 @@ def _spawn_guard_decision(
     #: claim below is the barrier that replaced it, so a failure to take it
     #: means something different on this path than on the ordinary one.
     reservation_recovered = False
-    try:
+
+    def _reserve_dispatch_slot() -> None:
         acquire_claim(
             res_key,
             holder,
@@ -463,6 +464,9 @@ def _spawn_guard_decision(
             ttl_ms=_parse_ttl(ttl),
             root=claims_root_for(res_key),
         )
+
+    try:
+        _reserve_dispatch_slot()
     except CLAIM_UNAVAILABLE:
         # A dead spawner's reservation blocks nothing. `spawn-cli:<pid>` is one
         # process that launches and exits, so it cannot come back under a new
@@ -508,13 +512,7 @@ def _spawn_guard_decision(
                    else {}),
             }, 0
         try:
-            acquire_claim(
-                res_key,
-                holder,
-                reason=f"bg-dispatch reservation for {node_id}",
-                ttl_ms=_parse_ttl(ttl),
-                root=claims_root_for(res_key),
-            )
+            _reserve_dispatch_slot()
         except CLAIM_UNAVAILABLE:
             return {
                 "verdict": "already-running",
@@ -734,7 +732,6 @@ def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
     return canonical
 
 
-# Group 2, Task 4.3: `fno agents watch` — observe a held stream-json thread
 
 
 def _agents_home_dir() -> Path:
