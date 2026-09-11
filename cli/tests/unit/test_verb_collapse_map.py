@@ -258,7 +258,9 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `workspace reap`, the explicit state-retention operator control.
     # +3 for the inbox user queue leaves (ack/list/status under the renamed
     # verb); the pre-rename operator spelling stays as a hidden alias the
-    # ratchet still counts, so the rename nets +3, not 0.
+    # ratchet still counts, so the rename nets +3, not 0. Counted from the
+    # merged file, not taken from either side: 133, with `agents autonomy
+    # provenance` (x-84b2) among them - the group row split into leaves.
     assert len(leaves) <= 133
     assert "fno-agents" in leaves
 
