@@ -365,7 +365,11 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
                 break  # first failure wins; its output is the log tail
         fh.write(f"EXIT={rc}\n")
     if rc == 0:
-        lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
+        # The EXIT marker is bookkeeping, not a verdict summary; the terse
+        # PASS line shows the suite's own last output.
+        lines = [
+            ln.rstrip() for ln in _tail(log, 5) if ln.strip() and not ln.startswith("EXIT=")
+        ]
         summary = lines[-1] if lines else "(no output)"
         print(f"PASS | {summary}")
     else:
