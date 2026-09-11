@@ -2392,6 +2392,33 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::merge_reap::consume_merge_cleanup_requests(
                             &home, &roots, &emitter, grace_secs,
                         );
+                        // Daily machine janitor (x-7ca7): plugin-cache build
+                        // copies, leaked test HOMEs, stale scratch. Gated on
+                        // the receipt's own mtime - `fno doctor reclaim
+                        // --apply` rewrites it, so gate and effect share one
+                        // file and a crashed child just retries next tick.
+                        // cfg'd out of unit tests: the sweep closure runs
+                        // in-process under `cargo test`, and the janitor is a
+                        // machine-wide side effect no test may fire.
+                        #[cfg(not(test))]
+                        if let Some(state_root) = home.root().parent() {
+                            let receipt = state_root.join("reclaim").join("last-run.json");
+                            let stale = match std::fs::metadata(&receipt) {
+                                Ok(meta) => meta
+                                    .modified()
+                                    .ok()
+                                    .and_then(|m| m.elapsed().ok())
+                                    .map(|age| age.as_secs() > 24 * 3600)
+                                    .unwrap_or(true),
+                                Err(_) => true,
+                            };
+                            if stale {
+                                let _ = std::process::Command::new("fno")
+                                    .env("FNO_AGENTS_HOME", home.root())
+                                    .args(["doctor", "reclaim", "--apply"])
+                                    .output();
+                            }
+                        }
                     });
                 }
                 // Orphaned-test-binary reap: the waitpid sweep above only ever

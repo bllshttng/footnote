@@ -9,21 +9,21 @@ Use the release channel for normal Codex sessions.
 It installs `fno@footnote` from the Git-backed `bllshttng/footnote` marketplace and keeps the version in `.codex-plugin/plugin.json` authoritative.
 
 ```bash
-fno config setup codex-plugin --channel release
+fno config plugin install codex
 ```
 
 Use the dev channel while changing plugin content locally.
 It installs `fno@footnote` from the durable canonical checkout rather than a disposable feature worktree.
 
 ```bash
-fno config setup codex-plugin --channel dev
+fno config plugin install codex
 ```
 
 Codex caches plugins by version, so local edits at the same manifest version require an explicit refresh.
 Refresh removes and re-adds the selected copy through Codex, which deterministically rebuilds its cache without changing release version files.
 
 ```bash
-fno config setup codex-plugin --channel dev --refresh
+fno config plugin install codex --force
 ```
 
 Setup first validates the requested marketplace and plugin in an isolated temporary `CODEX_HOME`, leaving the working channel untouched when the candidate is invalid.

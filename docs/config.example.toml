@@ -47,7 +47,7 @@ prefix = "fno"
 # postmortems_dir = <unset>   # optional; no default
 # Override base dir for worktrees.
 # worktrees_base = <unset>   # optional; no default
-# Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid.
+# Cargo build base: where cargo intermediates land, as <base>/{workspace-path-hash} via CARGO_BUILD_BUILD_DIR (default ~/.fno/cargo-build). Each checkout hashes to its own dir, so parallel builds never share the cargo artifact lock; the checkout's target/ keeps only final binaries.
 # cargo_targets_base = <unset>   # optional; no default
 # Override path to the memory dir.
 # memory_dir = <unset>   # optional; no default
