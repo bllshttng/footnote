@@ -198,7 +198,12 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
         .transaction()
         .map_err(|error| error.to_string())?;
     for (ordinal, row) in rows.iter().enumerate() {
-        let mut node = Node::from_json(row).map_err(|error| format!("import: {error}"))?;
+        // A row the model cannot represent (a minimal legacy fixture row with
+        // no slug/status) is skipped, not fatal: JSON stays authoritative,
+        // the shadow is best-effort, and parity surfaces the gap honestly.
+        let Ok(mut node) = Node::from_json(row) else {
+            continue;
+        };
         node.ordinal = ordinal as i64;
         save_aggregate(&transaction, &node).map_err(|error| format!("import: {error}"))?;
     }
@@ -360,10 +365,15 @@ fn write_changed(connection: &Connection, before: &[Value], after: &[Value]) -> 
         }
         match new {
             Some(body) => {
-                let row: Value = serde_json::from_str(body)
-                    .map_err(|error| format!("changed row {id} is invalid JSON: {error}"))?;
-                let mut node =
-                    Node::from_json(&row).map_err(|error| format!("changed row {id}: {error}"))?;
+                // Same best-effort rule as the import: a row the model cannot
+                // represent is skipped so the JSON publish never inherits a
+                // shadow failure.
+                let Ok(row) = serde_json::from_str::<Value>(body) else {
+                    continue;
+                };
+                let Ok(mut node) = Node::from_json(&row) else {
+                    continue;
+                };
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
             }
