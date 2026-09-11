@@ -39,6 +39,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "digest",
     "drive",
     "drive-authority",
+    "evidence-gate",
     "finalize",
     "graph-get",
     "grid",
@@ -187,6 +188,18 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
     if matches!(verb, "component-verdict") {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
+    }
+
+    // `evidence-gate` is the hidden binary-direct transport for the ruling and
+    // note evidence gates (x-90fa): the checker + bounded read runner ported
+    // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
+    // one JSON request on stdin (lane, text, reads, root, timeout) and prints
+    // one JSON answer on stdout; a refusal is data (`ok: false`), not a
+    // process error. Same `matches!` treatment as `component-verdict` so the
+    // routable-verb parity guard does not see it - no advertised fno verb is
+    // added.
+    if matches!(verb, "evidence-gate") {
+        return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
