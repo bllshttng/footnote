@@ -126,9 +126,9 @@ A refusal message can name the wrong cause while still being right to refuse. Fi
 
 **A capacity refusal is a hold.** One sample is not the band. Four readings of the gating load average landed inside forty minutes, with no change in real work. They read 182.7 over, 99.7 under, 153.2 over and 186.0 over, against a ceiling of 120. Sustained CPU over the same window read 2.458, 3.304, 4.252 and 2.838 cores of twelve. The last pair moved in opposite directions. Retrying because one sample came back under is edge-triggering on a signal that flaps.
 
-Read the refusal's own words before you name the cause. One refusal blamed load. A later one from the same caller said `30/30 live worker slots` and queued 271 seconds, which is a different gate entirely. The slot cap counts registry rows, so quiet and parked workers hold slots while consuming nothing.
+This graduated on 2026-09-10: the gate no longer decides on the one-minute load at all. Admission reads the fleet's attributed share of CPU capacity, an over sample holds and re-samples, and the load average survives only as the fifteen-minute backstop.
 
-*Graduates to:* every refusal naming a cause it actually verified, and an admission decision that reads work rather than a one-minute load average.
+Read the refusal's own words before you name the cause. One refusal blamed load. A later one from the same caller said `30/30 live worker slots` and queued 271 seconds, which is a different gate entirely. The slot cap counts registry rows, so quiet and parked workers hold slots while consuming nothing.
 
 ## An absence, a zero, or an unconfirmed result is not a verdict
 

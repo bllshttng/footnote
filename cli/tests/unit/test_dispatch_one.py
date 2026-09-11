@@ -258,8 +258,34 @@ def test_full_fleet_refuses_in_the_gate_not_a_verdict(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [live_row])
     monkeypatch.setattr("fno.agents.session_procs.bg_socket_pid_map", lambda root=None: {})
+    # This test pins the slot-cap refusal (EXIT_NO_WAIT), not the CPU axis:
+    # pin the axis admitting so the verdict is the variable under test.
+    from fno import doctor_footprint
+    from fno.footprint import Admission, Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    admit = Admission(
+        verdict="admit",
+        axis="fleet_cpu_share",
+        reason="test admit",
+        share_low=0.1,
+        share_high=0.1,
+        bound="exact",
+        fleet_cores=1.2,
+        machine_cores=6.0,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap=None,
+        load_15m=1.0,
+        backstop=480.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
     census = spawn_gate.census()
-    monkeypatch.setattr(spawn_gate, "census", lambda: census)
+    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: census)
 
     with pytest.raises(SystemExit) as exc:
         dispatch._dispatch_one(session="s", node=None, project=None)

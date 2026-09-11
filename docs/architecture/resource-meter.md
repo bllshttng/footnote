@@ -8,7 +8,7 @@ The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is A
 
 ## What you get without macmon
 
-Two arms still work, because they read fno's own numbers. The spawn-load arm compares the 1-minute load against `max_load_per_cpu x ncpu`. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
+Two arms still work, because they read fno's own numbers. The cpu-admission arm reads the fleet's share of CPU capacity through `cpu_admission`, the same decider the spawn gate uses. The advisor can never disagree with a refusal. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
 
 ## Why whole-machine
 
@@ -20,13 +20,13 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 ## The two verdicts are different alarms
 
-`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Capacity" is a planning alarm: the spawn load against its ceiling, exit 3. When both fire, capacity takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
+`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold, an undecidable band, or the fifteen-minute backstop. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
 
 ## The court panel
 
-Press `prefix` then `C` in the mux. The panel shows the 1-minute load against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
+Press `prefix` then `C` in the mux. The panel shows the fleet's CPU share against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
 
-The cap is the thing the panel exists to make visible. It is `max_load_per_cpu` times the CPU count, and it is the only gate on a spawn. Before this panel, only an agent running a hidden verb saw it.
+The cap is the thing the panel exists to make visible. It is the fleet's share of CPU capacity (`agents.max_fleet_cpu_share`), checked on every spawn. Before this panel, only an agent running a hidden verb saw it.
 
 Three render rules keep the panel honest, and each closes a way a monitor can lie.
 
