@@ -297,6 +297,12 @@ pub fn global_claims_root_from(
         .map(PathBuf::from)
 }
 
+/// The global claims DIRECTORY (the resolver callers should hold, not a
+/// hand-built `<root>/.fno/claims`).
+pub fn global_claims_dir() -> Option<PathBuf> {
+    global_claims_root().map(|root| root.join(CLAIMS_DIRNAME))
+}
+
 /// Resolve the claims ROOT for `key` by prefix (mirrors `io.claims_root_for`):
 /// `<prefix>:<id>` with a global-id prefix routes to the global root; a
 /// colon-less key or unrecognized prefix returns `None` (caller must pass an

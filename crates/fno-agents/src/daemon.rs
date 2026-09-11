@@ -6092,8 +6092,8 @@ fn release_stopped_claims_into(
         return;
     };
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(global) = crate::claims::global_claims_root() {
-        dirs.push(global.join(".fno/claims"));
+    if let Some(global) = crate::claims::global_claims_dir() {
+        dirs.push(global);
     }
     if let Some(space_claims) = cwd
         .as_deref()
