@@ -1052,9 +1052,8 @@ def cmd_spawn(
         None,
         "--sandbox-write-policy",
         help=(
-            "JSON policy file whose `sandbox` block composes into the "
-            "worker's ONE --settings file beside the hook layer's deny_edit "
-            "list. Refused on the pane substrate."
+            "JSON policy whose `sandbox` block joins the worker's ONE "
+            "--settings file beside the hook deny_edit list. Pane refuses."
         ),
     ),
     cwd: str | None = typer.Option(
@@ -1125,9 +1124,8 @@ def cmd_spawn(
         None,
         "--dispatch-account",
         help=(
-            "Provider RECORD from `dispatch resolve --autonomous`: its "
-            "dispatch env rides for ANY harness; credentials never travel. "
-            "Fail-closed."
+            "Provider RECORD from `dispatch resolve --autonomous`; its env "
+            "rides for ANY harness, credentials never travel. Fail-closed."
         ),
     ),
     model: str | None = typer.Option(
@@ -1303,7 +1301,7 @@ def cmd_spawn(
             "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h). "
             "Waitable: load_backstop, ram_floor, cpu_instrument_unreadable, "
             "cpu_share_undecidable, fleet_cpu_share, provider_cap, max_live. "
-            "Any other reason exits at once with its receipt. Conflicts with "
+            "Anything else exits at once with its receipt. Conflicts with "
             "--no-wait."
         ),
     ),
