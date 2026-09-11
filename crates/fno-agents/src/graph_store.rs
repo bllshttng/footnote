@@ -2066,8 +2066,6 @@ pub struct MutateInput {
     /// plan-based statuses ONLY from this map; `None` keeps stored statuses
     /// (a caller that is not re-deriving from plans).
     pub plan_rungs: Option<BTreeMap<String, String>>,
-    /// True after the read cutover is proven and SQLite owns durable writes.
-    pub sqlite_authoritative: bool,
 }
 
 /// The content digest a begin/commit pair compares (the wire "version").
@@ -2099,8 +2097,12 @@ pub fn locked_mutate(
         std::fs::create_dir_all(parent)?;
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
+    // The store names its own backend in graph_meta; this cycle reads it
+    // under the lock, so every caller (keeper, daemon settle, direct) agrees
+    // by construction and a mid-flight flip lands on the next mutation.
+    let sqlite_backend = crate::graph_sqlite::backend(path) == crate::graph_sqlite::Backend::Sqlite;
     if let Some(expected) = &input.base_version {
-        let current = if input.sqlite_authoritative {
+        let current = if sqlite_backend {
             crate::graph_sqlite::version(path).map_err(StoreError::Sqlite)?
         } else {
             file_content_version(path)
@@ -2109,7 +2111,7 @@ pub fn locked_mutate(
             return Err(StoreError::Conflict);
         }
     }
-    let raw_read = if input.sqlite_authoritative {
+    let raw_read = if sqlite_backend {
         RawRead::Entries(crate::graph_sqlite::read_entries(path).map_err(StoreError::Sqlite)?)
     } else {
         read_raw(path)?
@@ -2250,7 +2252,7 @@ pub fn locked_mutate(
 
     canonicalize_entries(&mut entries);
 
-    let (backup, shadow_warning, version) = if input.sqlite_authoritative {
+    let (backup, shadow_warning, version) = if sqlite_backend {
         let version = crate::graph_sqlite::authoritative_sync(path, &shadow_before, &entries)
             .map_err(StoreError::Sqlite)?;
         (None, None, version)
@@ -2601,7 +2603,6 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
-                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2615,7 +2616,6 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
-                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2629,7 +2629,6 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
-                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )
@@ -2865,7 +2864,6 @@ mod tests {
                 canonical_path: None,
                 base_version: None,
                 plan_rungs: None,
-                sqlite_authoritative: false,
             },
             Duration::from_secs(2),
         )

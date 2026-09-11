@@ -28,6 +28,54 @@ pub fn database_path(graph: &Path) -> PathBuf {
     graph.with_extension("db")
 }
 
+/// The backend the store names in `graph_meta.backend`. Unset reads as json:
+/// the rollback default, so a pre-name db or a reverted binary keeps serving
+/// the JSON leg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Json,
+    Sqlite,
+}
+
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
+/// The backend named RIGHT NOW: every keeper request and every settle call
+/// re-reads it, so a backend change by another process lands on the next
+/// request without a restart. Read-only: never creates graph.db, and an
+/// absent db or table reads as json.
+pub fn backend(graph: &Path) -> Backend {
+    let connection = match Connection::open_with_flags(
+        database_path(graph),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(connection) => connection,
+        Err(_) => return Backend::Json,
+    };
+    match meta(&connection, "backend") {
+        Ok(Some(value)) if value == Backend::Sqlite.name() => Backend::Sqlite,
+        _ => Backend::Json,
+    }
+}
+
+pub fn set_backend(graph: &Path, backend: Backend) -> Result<(), String> {
+    let connection = open(graph)?;
+    connection
+        .execute(
+            "INSERT INTO graph_meta(key, value) VALUES('backend', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![backend.name()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn open(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
     if let Some(parent) = path.parent() {
@@ -283,4 +331,53 @@ pub fn export_if_due(graph: &Path, debounce: Duration) -> Result<bool, String> {
     drop(connection);
     export_now(graph)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn fixture(name: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let graph = dir.path().join(name);
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        (dir, graph)
+    }
+
+    #[test]
+    fn backend_reads_json_when_db_absent() {
+        let (_dir, graph) = fixture("graph.json");
+        assert_eq!(backend(&graph), Backend::Json);
+        // The probe is read-only: it never creates graph.db.
+        assert!(!database_path(&graph).exists());
+    }
+
+    #[test]
+    fn backend_reads_graph_meta_backend() {
+        let (dir, graph) = fixture("graph.json");
+        set_backend(&graph, Backend::Sqlite).unwrap();
+        assert_eq!(backend(&graph), Backend::Sqlite);
+        // An unset key keeps the rollback default.
+        let connection = open(&graph).unwrap();
+        connection
+            .execute("DELETE FROM graph_meta WHERE key = 'backend'", [])
+            .unwrap();
+        drop(connection);
+        assert_eq!(backend(&graph), Backend::Json);
+        drop(dir);
+    }
+
+    #[test]
+    fn backend_change_is_visible_without_restart() {
+        // AC5-EDGE: a second process flips the backend; the next read on a
+        // pre-existing connection sees it.
+        let (dir, graph) = fixture("graph.json");
+        let connection = open(&graph).unwrap();
+        assert_eq!(backend(&graph), Backend::Json);
+        set_backend(&graph, Backend::Sqlite).unwrap();
+        drop(connection);
+        assert_eq!(backend(&graph), Backend::Sqlite);
+        drop(dir);
+    }
 }
