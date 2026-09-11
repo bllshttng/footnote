@@ -453,7 +453,14 @@ def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> N
         calls.append(list(cmd))
         return types.SimpleNamespace(
             returncode=0,
-            stdout=f"restarted: pid 1 -> 2\nfno agents restart: keepers {keeper_json}",
+            stdout=(
+                "restarted: pid 1 -> 2\n"
+                "fno agents restart: store keeper /tmp/graph.json pid 11 shut down "
+                "(stale build; respawns on next read).\n"
+                "fno agents restart: 1 pane keeper(s) run an older build; kept with "
+                "their panes, current when each pane ends.\n"
+                f"fno agents restart: keepers {keeper_json}"
+            ),
             stderr="",
         )
 
@@ -462,7 +469,7 @@ def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> N
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0, result.output
-    assert "store keeper /tmp/graph.json shut down (stale build" in result.output
+    assert "store keeper /tmp/graph.json pid 11 shut down" in result.output, result.output
     assert "1 pane keeper(s) run an older build" in result.output
     assert "kept with their panes" in result.output
     assert ["--json"] == calls[0][-1:], "the daemon leg asks for --json"
@@ -520,7 +527,6 @@ def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 1, result.output
-    assert "spared" in result.output
-    assert "mutation is in flight" in result.output
+    assert "spared: a mutation is in flight" in result.output
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
     assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
