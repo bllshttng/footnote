@@ -1547,7 +1547,9 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     monkeypatch, no_worker_roots
 ) -> None:
     """A leak without a capacity breach exits 5 - the leak's own code, not the
-    capacity code the old merged verdict borrowed (defect 1 in the plan)."""
+    capacity code the old merged verdict borrowed (defect 1 in the plan). The
+    verdict names the unexplained processes as the cause; the admitted CPU
+    axis is context, not the cause."""
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
@@ -1571,7 +1573,11 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 5
-    assert "verdict: leak on fleet_cpu_share (5.0% against 50.0%)" in result.stdout
+    assert (
+        "verdict: leak on unexplained processes (1 of 2 direct, roster explains 1; "
+        "cpu admission: admit on fleet_cpu_share (5.0% against 50.0%), a separate "
+        "axis - it did not decide the verdict) (exit 5)" in result.stdout
+    )
     assert "sustained CPU: 0.200 cores" in result.stdout
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout

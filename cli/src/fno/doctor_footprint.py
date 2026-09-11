@@ -1095,10 +1095,23 @@ def _emit_result(
             )
         else:
             axis_numbers = ""
-        # A leak beside an admitting capacity still names itself on the
-        # verdict line; the CPU axis owns the wording everywhere else.
-        shown = "leak" if exit_code == EXIT_LEAK else adm["verdict"]
-        typer.echo(f"verdict: {shown} on {axis}{axis_numbers} (exit {exit_code})")
+        # A leak beside an admitting capacity names the unexplained processes
+        # as the cause; the CPU axis numbers are context there, not the cause.
+        if exit_code == EXIT_LEAK:
+            unexplained = max(
+                0, reading.direct_process_count - (process_threshold or 0)
+            )
+            typer.echo(
+                f"verdict: leak on unexplained processes "
+                f"({unexplained} of {reading.direct_process_count} direct, "
+                f"roster explains {process_threshold}; cpu admission: "
+                f"{adm['verdict']} on {axis}{axis_numbers}, a separate axis - "
+                f"it did not decide the verdict) (exit {exit_code})"
+            )
+        else:
+            typer.echo(
+                f"verdict: {adm['verdict']} on {axis}{axis_numbers} (exit {exit_code})"
+            )
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:
