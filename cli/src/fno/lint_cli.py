@@ -46,6 +46,7 @@ CHECKS: dict[str, str] = {
     "seam-crossings": "seam_crossings",
     "field-coverage": "field_coverage",
     "graph-parity": "graph_parity",
+    "preamble-budget": "preamble_budget",
 }
 
 
@@ -1544,6 +1545,32 @@ def _git_added_line_nums(
         else:
             pos += 1
     return nums
+
+
+def preamble_budget() -> None:
+    """Report the SessionStart preamble byte budget; refuse when over it.
+
+    Thin wrapper over the source-of-truth bash gate
+    scripts/ci/check-preamble-budget.sh, whose exit code passes through: 0 at
+    or under the ceiling, 1 over it or on a discovery failure. This verb is the
+    local signal, not a second CI registration - the gate already runs in
+    guards.yml on every push and pull_request, and the smoke-registry copy it
+    replaced made one AGENTS.md breach red three check runs at once.
+    """
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import resolve_repo_root
+
+    repo_root = Path(resolve_repo_root())
+    script = repo_root / "scripts" / "ci" / "check-preamble-budget.sh"
+    if not script.exists():
+        typer.echo(f"gate script not found at {script}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = subprocess.run(["bash", str(script)], cwd=repo_root)
+    except FileNotFoundError as exc:
+        typer.echo(f"failed to run gate script: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 def stale_skill_refs() -> None:

@@ -741,7 +741,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("events-discipline lint", ".", "bash scripts/lint/events-discipline.sh"),
     ("events-discipline lint self-test", ".", "bash tests/lint/test-events-discipline.sh"),
     ("No quarantined events.invalid.jsonl rows", ".", "bash scripts/lint/no-invalid-events.sh"),
-    ("ruff + mypy (both repo-wide)", ".", "bash scripts/ci/check-python-static.sh"),
     ("Smoke tests", ".", "bash cli/tests/smoke/run-all.sh"),
     ("no hardcoded paths", ".", "bash scripts/ci/check-no-hardcoded-paths.sh"),
     ("placement rule", ".", "bash scripts/ci/check-placement-rule.sh"),
@@ -753,14 +752,15 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Company module boundary check", ".", "bash scripts/ci/check-company-boundaries.sh --baseline"),
     ("Skill snippet hazard lint", ".", "bash scripts/ci/check-skill-snippets.sh"),
     ("Skill snippet lint self-test", ".", "bash tests/ci/test_check_skill_snippets.sh"),
-    # Both gates measure the always-loaded SessionStart preamble. Neither could
-    # FAIL anywhere but CI before this entry: `fno doctor` prints the number,
-    # but advisorily, and never changes its own exit code. So the only local
-    # signal was a line nobody had to act on, and an AGENTS.md edit went green
-    # locally and red on push - which is how the preamble reached 55 bytes of
-    # headroom with nobody watching the slope.
-    ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
-    ("Oversized files are shrink-only", ".", "bash scripts/ci/check-file-budget.sh"),
+    # CI gates under scripts/ci/ that guards.yml already runs on every push and
+    # pull_request are NOT registered here. A second registration makes one
+    # failure red two check runs (guards plus smoke/changed-smoke), which is how
+    # one prose breach in AGENTS.md went three-checks-red in one night. The
+    # preamble byte budget keeps its local signal through
+    # `fno doctor lint preamble-budget`, which exits with the gate's own code;
+    # `fno doctor` also prints the number advisorily at session start. The
+    # ruff+mypy and file-budget gates are reachable by running their scripts.
+    # test_smoke_registry_shares_no_ci_scripts_with_guards holds this open.
     ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
