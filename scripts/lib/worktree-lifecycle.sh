@@ -6,8 +6,6 @@
 #   worktree-lifecycle.sh cleanup --merged [--apply]
 #   Both cleanup removal modes are dry-run by default; --apply executes.
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
-#   worktree-lifecycle.sh cargo-offload [--apply]   # Move crates/*/target caches
-#                                                   # out of the repo root (x-f96e)
 set -uo pipefail
 
 # The one "is removing this worktree safe?" answer, shared with
@@ -436,10 +434,10 @@ _cargo_target_inventory() {
         for target in "$wt/target" "$wt"/crates/*/target; do
             prot="$protection"
             if [[ -L "$target" ]]; then
-                # A cache cargo-offload relocated. The sweep follows the link
+                # A cache the retired offload verb relocated. The sweep follows the link
                 # or the relocation strands the bytes with no reclaimer at
                 # all. Following is gated by BOTH conjuncts of
-                # _cargo_target_offload_owns_path (under the fno base, tagged
+                # _cargo_cache_dir_owned (under an fno base, tagged
                 # CACHEDIR.TAG); bytes and age read from the RESOLVED dir
                 # (BSD du does not follow a command-line symlink). A link
                 # failing either conjunct rides the protected lane as
@@ -450,7 +448,7 @@ _cargo_target_inventory() {
                 bytes="$(_cargo_target_bytes "$resolved")"
                 mtime="$(_cargo_target_mtime "$resolved")"
                 if [[ "$prot" == "-" ]] \
-                    && ! _cargo_target_offload_owns_path "$resolved"; then
+                    && ! _cargo_cache_dir_owned "$resolved"; then
                     prot="link-not-owned"
                 fi
             elif [[ -d "$target" ]]; then
@@ -463,6 +461,25 @@ _cargo_target_inventory() {
         done
         shopt -u nullglob
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
+    # Build-base hash dirs: cargo writes intermediates at
+    # <base>/<h2>/<hash> under build.build-dir, outside every checkout, so
+    # the worktree walk above never sees them. Rows carry wt=build-base;
+    # _cargo_target_cleanup protects the dirs live workspaces resolve to and
+    # never deletes here when that resolution is unverifiable.
+    local base hash
+    base="$(_cargo_build_base)"
+    if [[ -d "$base" ]]; then
+        shopt -s nullglob
+        for hash in "$base"/*/*/; do
+            [[ -d "$hash" ]] || continue
+            hash="${hash%/}"
+            [[ -f "$hash/CACHEDIR.TAG" ]] || continue
+            bytes="$(_cargo_target_bytes "$hash")"
+            mtime="$(_cargo_target_mtime "$hash")"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "-" "build-base" "$hash" >> "$output"
+        done
+        shopt -u nullglob
+    fi
 }
 
 _cargo_target_registered() {
@@ -470,8 +487,34 @@ _cargo_target_registered() {
     git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}' | grep -Fqx "$wanted"
 }
 
+_cargo_live_build_dirs() {
+    # Resolved build_directory (cargo metadata, one call per workspace) of
+    # every live registered worktree, one path per line. cargo >= 1.91
+    # reports the field the tracked config's build-dir lands in. Exit 1 when
+    # any read fails: the caller must then treat EVERY build-base dir as
+    # protected, because a blind sweep is the one mistake this lane cannot
+    # undo.
+    local wt manifest
+    while IFS= read -r wt; do
+        _wt_live "$wt" || continue
+        for manifest in "$wt"/crates/*/Cargo.toml; do
+            [[ -f "$manifest" ]] || continue
+            cargo metadata --format-version 1 --no-deps --manifest-path "$manifest" 2>/dev/null \
+                | grep -o '"build_directory"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                | sed 's/.*:[[:space:]]*"//; s/"$//' || return 1
+        done
+    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
+}
+
 _cargo_target_path_is_owned() {
     local wt="$1" target="$2" resolved=""
+    if [[ "$wt" == "build-base" ]]; then
+        # A hash-dir row: owned iff it still sits under a managed base and
+        # carries cargo's tag. Registration is the base itself.
+        [[ -d "$target" ]] || return 1
+        _cargo_cache_dir_owned "$target" || return 1
+        return 0
+    fi
     case "$target" in
         "$wt/target"|"$wt"/crates/*/target) ;;
         *) return 1 ;;
@@ -480,7 +523,7 @@ _cargo_target_path_is_owned() {
         # Relocated cache: the link must sit where a glob found it AND the
         # resolved directory must be one the offload created.
         resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || return 1
-        _cargo_target_offload_owns_path "$resolved" || return 1
+        _cargo_cache_dir_owned "$resolved" || return 1
         return 0
     fi
     [[ -d "$wt" && -d "$target" ]] || return 1
@@ -497,10 +540,10 @@ _cargo_free_bytes() {
     df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4*1024}'
 }
 
-_cargo_offload_base() {
-    # Where relocated cargo caches live: paths.cargo_targets_base when set,
-    # else ~/.fno/cargo-targets. FNO_CARGO_TARGETS_BASE overrides the read so
-    # tests can point both the offload and the sweep at a sandbox.
+_cargo_build_base() {
+    # Where cargo intermediates live: paths.cargo_targets_base when set, else
+    # ~/.fno/cargo-build. FNO_CARGO_TARGETS_BASE overrides the read so tests
+    # can point the sweep at a sandbox. Mirrors fno.paths.cargo_build_dir_value.
     local raw=""
     if [[ -n "${FNO_CARGO_TARGETS_BASE:-}" ]]; then
         printf '%s\n' "${FNO_CARGO_TARGETS_BASE/#\~/$HOME}"
@@ -511,25 +554,37 @@ _cargo_offload_base() {
     fi
     # The state-dir fallback form is the shape the hardcoded-path gate
     # exempts: honor a configured state_dir, else the standard ~/.fno.
-    [[ "$raw" == "null" || -z "$raw" ]] && raw="${STATE_DIR:-$HOME/.fno}/cargo-targets"
+    [[ "$raw" == "null" || -z "$raw" ]] && raw="${STATE_DIR:-$HOME/.fno}/cargo-build"
     # Config stores ~ literally; expand a leading ~ to $HOME.
     printf '%s\n' "${raw/#\~/$HOME}"
 }
 
-_cargo_target_offload_owns_path() {
-    # Is $1 a directory this repo's cargo-offload created: resolved under the
-    # offload base AND carrying cargo's own CACHEDIR.TAG? Both conjuncts are
-    # load-bearing: the base is fno-owned, the tag is cargo's, so a symlink
-    # reaching outside either is not ours to delete.
+_cargo_legacy_offload_base() {
+    # The retired offload verb's relocation base. Its symlinks survive in
+    # old trees; the sweep removes each link together with its resolved dir
+    # when the dir sits under THIS base and is tagged. Never configurable: the
+    # base died with the verb, and a config key would teach it back.
+    printf '%s\n' "${STATE_DIR:-$HOME/.fno}/cargo-targets"
+}
+
+_cargo_cache_dir_owned() {
+    # Is $1 a directory this repo's tooling created: under the build base (or
+    # the retired offload base) AND carrying cargo's own CACHEDIR.TAG? Both
+    # conjuncts are load-bearing: the base is fno-owned, the tag is cargo's,
+    # so a symlink reaching outside either is not ours to delete. Both sides
+    # are normalised through pwd -P: /tmp is a symlink to /private/tmp, and a
+    # logical row path never matches a physical base prefix.
     local resolved="$1" base
     [[ -d "$resolved" ]] || return 1
     [[ -f "$resolved/CACHEDIR.TAG" ]] || return 1
-    base="$(_cargo_offload_base)"
-    base="$(cd -- "$base" 2>/dev/null && pwd -P)" || return 1
-    case "$resolved/" in
-        "$base/"*) return 0 ;;
-        *) return 1 ;;
-    esac
+    resolved="$(cd -- "$resolved" 2>/dev/null && pwd -P)" || return 1
+    for base in "$(_cargo_build_base)" "$(_cargo_legacy_offload_base)"; do
+        base="$(cd -- "$base" 2>/dev/null && pwd -P)" || continue
+        case "$resolved/" in
+            "$base/"*) return 0 ;;
+        esac
+    done
+    return 1
 }
 
 _cargo_target_cleanup() {
@@ -578,12 +633,33 @@ _cargo_target_cleanup() {
     before_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
     projected_after="$before_bytes"
 
+    # Build-base protection: the hash dirs LIVE workspaces resolve to. An
+    # unreadable resolution (no cargo, a bad manifest) marks every build-base
+    # row unverifiable - protected this run, never deleted blind.
+    local live_build_dirs="" build_dirs_unverifiable=0
+    if ! live_build_dirs="$(_cargo_live_build_dirs)"; then
+        build_dirs_unverifiable=1
+        live_build_dirs=""
+    fi
+
     while IFS=$'\t' read -r mtime bytes protection wt target; do
         [[ -n "$target" ]] || continue
         if [[ "$protection" != "-" ]]; then
             protected=$((protected + 1))
             printf 'cargo-target protected bytes=%s reason=%s path=%s\n' "$bytes" "$protection" "$target"
             continue
+        fi
+        if [[ "$wt" == "build-base" ]]; then
+            if [[ "$build_dirs_unverifiable" == "1" ]]; then
+                protected=$((protected + 1))
+                printf 'cargo-target protected bytes=%s reason=build-dir-unverifiable path=%s\n' "$bytes" "$target"
+                continue
+            fi
+            if printf '%s\n' "$live_build_dirs" | grep -Fqx "$target"; then
+                protected=$((protected + 1))
+                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
+                continue
+            fi
         fi
         printf '%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" >> "$candidates"
     done < "$inventory"
@@ -625,9 +701,41 @@ _cargo_target_cleanup() {
 
     mode="apply"
     _wt_refresh_cwd_snapshot || true
+    # Re-resolve live workspaces' build dirs for the delete pass: selection
+    # and deletion are separate walks over the same inventory, and a session
+    # that went live in between must find its hash dir protected here too.
+    local apply_live_dirs="" apply_unverifiable=0
+    if ! apply_live_dirs="$(_cargo_live_build_dirs)"; then
+        apply_unverifiable=1
+        apply_live_dirs=""
+    fi
     while IFS=$'\t' read -r mtime bytes wt target reason; do
         [[ -n "$target" ]] || continue
-        if ! _cargo_target_registered "$wt" || ! _cargo_target_path_is_owned "$wt" "$target"; then
+        if ! _cargo_target_path_is_owned "$wt" "$target"; then
+            printf 'cargo-target kept bytes=%s reason=ownership-recheck path=%s\n' "$bytes" "$target"
+            continue
+        fi
+        if [[ "$wt" == "build-base" ]]; then
+            # Registration recheck does not apply (the base is the registrar)
+            # and there is no cwd to be rooted in; the live guard is the
+            # resolved-dir membership above, re-read for this pass.
+            if [[ "$apply_unverifiable" == "1" ]] \
+                || printf '%s\n' "$apply_live_dirs" | grep -Fqx "$target"; then
+                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
+                protected=$((protected + 1))
+                continue
+            fi
+            rm -rf -- "$target"
+            if [[ ! -e "$target" ]]; then
+                printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
+                reaped=$((reaped + 1))
+                reclaimed=$((reclaimed + bytes))
+            else
+                printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
+            fi
+            continue
+        fi
+        if ! _cargo_target_registered "$wt"; then
             printf 'cargo-target kept bytes=%s reason=ownership-recheck path=%s\n' "$bytes" "$target"
             continue
         fi
@@ -655,7 +763,7 @@ _cargo_target_cleanup() {
             # re-verify here anyway: the check and the delete are separate
             # walks, and the cheap conjuncts are what keep rm inside the base.
             resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || resolved=""
-            if [[ -z "$resolved" ]] || ! _cargo_target_offload_owns_path "$resolved"; then
+            if [[ -z "$resolved" ]] || ! _cargo_cache_dir_owned "$resolved"; then
                 printf 'cargo-target kept bytes=%s reason=link-target-not-owned path=%s\n' "$bytes" "$target"
                 continue
             fi
@@ -692,158 +800,9 @@ _cargo_target_cleanup() {
     [[ "$status" == "ok" ]]
 }
 
-# Relocate every crates/<crate>/target cache out of the repo root, leaving a
-# symlink at the old path (x-f96e). The repo root is what a harness plugin
-# update copies, and 36.8 of its 41 GB is cargo build output, so MOVING the
-# bytes - not deleting them - is the lever: a cache is regenerable, so moving
-# it out of a dirty, unpushed or unmerged tree costs rebuild time and never
-# costs work. Every tree keeps its OWN destination <base>/<repo>/<tree>/<crate>
-# so sibling builds never share an artifact lock. Selection is by the
-# crates/*/target filesystem glob ONLY, never by directory name: cli/src/fno/target,
-# skills/target and tests/target are SOURCE dirs, and a name-based sweep
-# deleted 66 of them across 26 worktrees on 2026-09-02.
-_cargo_target_offload() {
-    local apply="${1:-}"
-    local base repo main_wt wt target crate tree dest bytes resolved
-    local protection pids pids_rc diag_file
-    local moved=0 moved_bytes=0 kept=0 already=0 mode
-    base="$(_cargo_offload_base)"
-    main_wt="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /, ""); print}')"
-    repo="$(basename "${main_wt:-$(pwd)}")"
-    mode="dry-run"
-    [[ -n "$apply" ]] && mode="apply"
-    diag_file="${TMPDIR:-/tmp}/fno-wt-pids-diag.$$"
-    : > "$diag_file" || diag_file="/dev/null"
-    _wt_refresh_cwd_snapshot || true
-    while IFS= read -r wt; do
-        [[ -d "$wt" ]] || continue
-        # Same protection lane as the sweep, computed once per worktree: an
-        # in-flight cargo build holds open descriptors under a target dir
-        # being moved, so a tree with a live session or any rooted process is
-        # reported and left for the next run.
-        protection="-"
-        if _wt_live "$wt"; then
-            protection="live-session"
-        else
-            # _wt_pids runs inside a command substitution: globals it sets
-            # die with the subshell (CI 2026-09-07: the protection line kept
-            # printing an empty pid list). Its diagnostic rides stderr to a
-            # file the parent reads back with the `read` builtin.
-            : > "$diag_file"
-            pids="$(_wt_pids "$wt" 2>"$diag_file")"
-            pids_rc=$?
-            _WT_PIDS_DIAG=""
-            IFS= read -r _WT_PIDS_DIAG < "$diag_file" || true
-            if [[ "$pids_rc" -ne 0 ]]; then
-                protection="process-snapshot-unreadable"
-            elif [[ -n "$pids" ]]; then
-                protection="processes:$(printf '%s\n' "$pids" | grep -c .)"
-            fi
-        fi
-        shopt -s nullglob
-        for target in "$wt"/crates/*/target; do
-            [[ -e "$target" || -L "$target" ]] || continue
-            if [[ "$wt" == "$main_wt" ]]; then
-                tree="canonical"
-            else
-                tree="$(basename "$wt")"
-            fi
-            crate="$(basename "$(dirname "$target")")"
-            dest="$base/$repo/$tree/$crate"
-            if [[ -L "$target" ]]; then
-                resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || resolved=""
-                if [[ "$resolved" == "$dest" ]]; then
-                    already=$((already + 1))
-                    continue
-                fi
-                printf 'cargo-offload kept bytes=%s reason=already-a-symlink path=%s dest=%s\n' \
-                    "$(_cargo_target_bytes "$resolved")" "$target" "$dest"
-                kept=$((kept + 1))
-                continue
-            fi
-            bytes="$(_cargo_target_bytes "$target")"
-            if [[ "$protection" != "-" ]]; then
-                # pid:cmd@cwd rides last (tail position, like detail): a
-                # diagnostic for a protection verdict, never parsed by
-                # consumers. Snapshot-time truth from _wt_pids: a later
-                # `ps -p` re-read reports the empty command of a process
-                # that died in between and names nothing.
-                pid_diag="${_WT_PIDS_DIAG%,}"
-                printf 'cargo-offload protected bytes=%s reason=%s path=%s v=%s cwd_rows=%s pids=%s\n' \
-                    "$bytes" "$protection" "$target" "$_WT_PIDS_DIAG_VERSION" \
-                    "${_WT_CWD_ROWS:-?}" "${pid_diag%,}"
-                kept=$((kept + 1))
-                continue
-            fi
-            if [[ -e "$dest" ]]; then
-                # Two trees can share a basename. The bytes stay in place and
-                # the collision is named rather than merged - one artifact
-                # lock per tree is the invariant the layout exists to keep.
-                printf 'cargo-offload kept bytes=%s reason=dest-collision path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                kept=$((kept + 1))
-                continue
-            fi
-            if [[ -z "$apply" ]]; then
-                printf 'cargo-offload would-move bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                continue
-            fi
-            if mkdir -p "$(dirname "$dest")" && mv -- "$target" "$dest"; then
-                # A concurrent cargo can recreate the path between the mv and
-                # the ln. An empty recreation yields to rmdir (nothing written
-                # yet, nothing lost); anything else, or a failed link, undoes
-                # the move so the tree is exactly as it was.
-                if ln -s "$dest" "$target" \
-                    || { rmdir -- "$target" 2>/dev/null && ln -s "$dest" "$target"; }; then
-                    printf 'cargo-offload moved bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                    moved=$((moved + 1))
-                    moved_bytes=$((moved_bytes + bytes))
-                else
-                    # Undo: the bytes go back, the tree is as it was.
-                    mv -- "$dest" "$target" 2>/dev/null || true
-                    printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                    kept=$((kept + 1))
-                fi
-            else
-                printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                kept=$((kept + 1))
-            fi
-        done
-        shopt -u nullglob
-    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
-    printf 'cargo-offload status=ok mode=%s base=%s moved=%s moved_bytes=%s already-offloaded=%s kept=%s\n' \
-        "$mode" "$base" "$moved" "$moved_bytes" "$already" "$kept"
-    [[ "$diag_file" == "/dev/null" ]] || rm -f "$diag_file"
-}
-
-# The holder stamp records the pid AND its start time, so a pid recycled to a
-# long-lived process is no longer read as a live holder. The start identity is
-# pinned to UTC at the call site: ps -o lstart= answers in local time, and a
-# writer and reader with different TZ would disagree about a live holder.
-# events-lock.sh's own consumers compare local-time strings among themselves
-# and must stay untouched.
-_wt_stamp_identity() {
-    TZ=UTC0 _event_process_identity "$1"
-}
-
-# Judge a holder stamp. 0 = live holder, 1 = dead or empty, 2 = live pid that
-# did not stamp this lock (its start time moved: the pid was recycled).
-_wt_holder_live() {
-    local stamp="$1" pid started="" now
-    pid="${stamp%%$'\n'*}"
-    [[ "$stamp" == *$'\n'* ]] && started="${stamp#*$'\n'}"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
-    [[ -z "$started" ]] && return 0
-    now="$(_wt_stamp_identity "$pid")"
-    # A live pid with an unreadable start time (busybox ps has no lstart)
-    # still counts as a holder: a wedged sweep is recoverable, a stolen live
-    # lock is two sweeps running as one.
-    [[ -z "$now" || "$now" == "$started" ]] && return 0
-    return 2
-}
-
-# One sweep at a time, shared by cleanup and cargo-offload. The lock lives
-# in the git common dir, resolved absolutely so the answer holds from any
-# cwd; the function leaves the trap armed on success.
+# One sweep at a time, shared by cleanup callers. The lock lives in the
+# git common dir, resolved absolutely so the answer holds from any cwd;
+# the function leaves the trap armed on success.
 _acquire_sweep_lock() {
     # --- mutual exclusion --------------------------------------------------
     # A sweep is idempotent read-only-ish work (the --merged path only mutates
@@ -1465,24 +1424,9 @@ case "${1:-status}" in
         fi
         ;;
 
-    cargo-offload)
-        shift
-        OFFLOAD_APPLY=""
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --apply) OFFLOAD_APPLY="true"; shift ;;
-                --dry-run) OFFLOAD_APPLY=""; shift ;;
-                *) shift ;;
-            esac
-        done
-        MAIN_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
-        _acquire_sweep_lock
-        _cargo_target_offload "$OFFLOAD_APPLY"
-        exit $?
-        ;;
 
     *)
-        echo "Usage: worktree-lifecycle.sh {status|cleanup|archive|cargo-offload} [args]"
+        echo "Usage: worktree-lifecycle.sh {status|cleanup|archive} [args]"
         exit 1
         ;;
 esac
