@@ -310,6 +310,11 @@ def list_cmd(
                     continue
                 row["node_id"] = binding.node_id
                 row["node_binding"] = binding.verdict
+                if binding.detail:
+                    row["node_binding_detail"] = binding.detail
+    for row in rows:
+        # Internal to the binding reader; the listing keeps its current width.
+        row.pop("body", None)
     typer.echo(json.dumps(rows, separators=(",", ":")))
 
 
