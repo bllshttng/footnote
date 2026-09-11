@@ -560,10 +560,14 @@ impl JournalCache {
         self.refresh_at(&agents_view::registry_path().with_file_name("events.jsonl"))
     }
 
-    /// Path-injected core of [`JournalCache::refresh`].
+    /// Path-injected core of [`JournalCache::refresh`]. A standing read
+    /// error also forces the rescan (mode-only heal moves neither mtime nor
+    /// len), so a broken segment's error never outlives the segment getting
+    /// readable again; a clean scan returns the cache to the cheap stamp
+    /// gate.
     pub(crate) fn refresh_at(&mut self, live: &std::path::Path) -> bool {
         let stamps = segment_stamps(live);
-        if stamps == self.stamps {
+        if stamps == self.stamps && self.journal.error.is_none() {
             return false;
         }
         self.rescan(live);
@@ -879,6 +883,74 @@ mod tests {
         assert_eq!(from_noisy.spawned_names.len(), 1);
         assert_eq!(from_noisy.reaped.len(), 1);
         assert_eq!(from_noisy.never_bound.len(), 1);
+    }
+
+    /// The prefilter const and the parse's type match must name one set: a
+    /// type on the match side only is silently dropped before it parses, and
+    /// a type on the const side only pays the parse for nothing. Reads the
+    /// module source so the two lists cannot drift apart quietly.
+    #[test]
+    fn the_prefilter_const_and_the_type_match_name_one_set() {
+        let src = include_str!("spawn_journal.rs");
+        let start = src
+            .find("match value.get(\"type\")")
+            .expect("the type match exists");
+        let end = src[start..]
+            .find("_ => continue")
+            .expect("the match's drop arm exists")
+            + start;
+        let mut from_match = std::collections::HashSet::new();
+        for line in src[start..end].lines() {
+            let Some(rest) = line.trim().strip_prefix("Some(\"") else {
+                continue;
+            };
+            from_match.insert(rest.split('"').next().expect("a quoted name").to_string());
+        }
+        let from_const: std::collections::HashSet<String> =
+            HANDLED_TYPES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            from_const, from_match,
+            "HANDLED_TYPES and the type match drifted: resync them"
+        );
+    }
+
+    /// A cached read error does not outlive the segment healing: while the
+    /// error stands the refresh rescans (a chmod round-trip moves neither
+    /// mtime nor len), and once it reads clean the cheap stamp gate resumes.
+    #[cfg(unix)]
+    #[test]
+    fn a_cached_read_error_self_heals_once_the_segment_is_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = JournalScratch::new("cache-heal");
+        let live = s.segment("events.jsonl");
+        std::fs::write(
+            &live,
+            r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&live).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&live, perms).unwrap();
+        let mut cache = JournalCache::load_at(&live);
+        assert!(
+            cache.journal.error.is_some(),
+            "the unreadable segment cached its error"
+        );
+        let mut perms = std::fs::metadata(&live).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&live, perms).unwrap();
+        assert!(
+            cache.refresh_at(&live),
+            "the standing error forces a healing rescan"
+        );
+        assert!(
+            cache.journal.error.is_none(),
+            "the rescan cleared the error"
+        );
+        assert!(
+            !cache.refresh_at(&live),
+            "healthy again: the stamp gate answers, no rescan"
+        );
     }
 
     #[test]
