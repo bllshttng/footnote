@@ -4362,9 +4362,7 @@ def cmd_send(
 
 def _team_recipients(scope: str) -> list[tuple[str, str]]:
     """Snapshot a fleet scope: sorted (name, identity), deduped by identity.
-
-    ``all``/``kings`` are live-row filters; else crown scope via the readers'
-    own crown_scope_matches territory equality.
+    ``all``/``kings`` are live-row filters; else crown territory equality.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
     from fno.harness_identity import session_identity_key
@@ -5256,8 +5254,7 @@ def cmd_drain_self(
                 )
 
 
-# Moved to fno.mail.hold (file budget); the composition stays here. The
-# drain-marker helper moved with it - the ack/drain commands below import it.
+# Moved to fno.mail.hold (file budget); the ack/drain commands below import it.
 from fno.mail.hold import _emit_drain_marker, cmd_notify_self  # noqa: E402,F401
 
 mail_app.command("notify-self", hidden=True)(cmd_notify_self)

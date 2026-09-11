@@ -1522,8 +1522,7 @@ def run_gate(
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
-    # x-77db: the incident stop gates BEFORE the bypass below - a circuit
-    # breaker a flag can bypass is not a circuit breaker.
+    # The incident stop gates BEFORE the bypass: a breaker a flag bypasses is no breaker.
     _fleet_incident_gate()
     # FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     # precedent): test suites exercising spawn plumbing must not queue behind
