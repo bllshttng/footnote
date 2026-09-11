@@ -1515,8 +1515,7 @@ def update_command(
         from fno.pr_watch.cli import _ENV_ACTIVE_TICK, _resolve_fno_binary
 
         _fno = _resolve_fno_binary()
-        # x-d211: an update inside a pr-watch tick (marker set) skips the
-        # watcher refresh - it bootouts the job owning the running tick.
+        # x-d211: inside a pr-watch tick (marker set), skip the job-bouncing refresh.
         refresh_cmds = [[_fno, "backlog", "groom", "--refresh-agent"]]
         if not os.environ.get(_ENV_ACTIVE_TICK):
             refresh_cmds.insert(0, [_fno, "do", "pr", "watch", "refresh"])
