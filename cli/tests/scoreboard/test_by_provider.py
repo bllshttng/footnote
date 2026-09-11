@@ -54,8 +54,13 @@ def _wire(monkeypatch, tmp_path, ledger_path):
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
 
 
-# Graph with W4 causal telemetry so shipped nodes are judgeable.
-GRAPH = [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}]
+# Graph with W4 causal telemetry so shipped nodes are judgeable. The nodes
+# are merged: a delivered terminal proves a run shipped only when the node
+# actually delivered, so a fixture that means "shipped" must say merged.
+GRAPH = [
+    {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+    {"id": "x-2", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+]
 
 
 # --- AC1-HP -------------------------------------------------------------------

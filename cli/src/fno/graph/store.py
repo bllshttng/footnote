@@ -762,6 +762,27 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     return result["entries"]
 
 
+def request_scoreboard_classify(entries: list[dict], rows: list[dict]) -> dict:
+    """The delivery classifier (scoreboard.rs) over client-shipped rows.
+
+    The terminal vocabulary stays owned by ``fno.terminals`` on this side; the
+    keeper owns the decision. Raises like every store op when the worker is
+    unavailable - a scoreboard that cannot classify must not fall back to the
+    terminal union the classifier replaced."""
+    from fno.terminals import DELIVERED_TERMINALS
+
+    return _client_for(GRAPH_JSON).request(
+        "scoreboard_classify",
+        {
+            "entries": entries,
+            "rows": rows,
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": sorted(DELIVERED_TERMINALS - {"DoneAdvisory", "DoneDelivery"}),
+        },
+    )
+
+
 def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":
     """Node id -> the rung of the node's linked plan, computed client-side.
 

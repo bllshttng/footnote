@@ -47,6 +47,30 @@ def _is_shipped_reason(termination_reason: str | None) -> bool:
     return tr in _SHIPPED_TERMINALS
 
 
+def classify_deliveries(graph_nodes: list[dict], rows: list[dict]) -> dict:
+    """The one delivery classification, answered by the Rust keeper
+    (scoreboard.rs via the graph store): node id -> {class, delivered,
+    confirmed, evidence, ship_ts, cost_known}. Every view reads this one
+    decision. Test seam: monkeypatch this name to keep a fold test hermetic."""
+    from fno.graph.store import request_scoreboard_classify
+
+    return request_scoreboard_classify(graph_nodes, rows).get("by_node", {})
+
+
+def _row_shipped(row: dict, deliveries: dict | None) -> bool:
+    """Row-level ship check through the classifier. A delivered terminal
+    proves the ROW shipped only when the node it links to actually delivered
+    (a known unmerged node never ships from its terminal); a row with no node
+    keeps the terminal check, since there is nothing else to consult."""
+    if not _is_shipped_reason(row.get("termination_reason")):
+        return False
+    nid = row.get("graph_node_id")
+    if not isinstance(nid, str) or not nid or deliveries is None:
+        return True
+    c = deliveries.get(nid)
+    return bool(c and c.get("delivered"))
+
+
 # A plan-only thread produces planning output and no build phase. The
 # discriminator is the phase SET (or a quick-entry type), never the terminal
 # reason: a build that wedged after planning carries a do/review/ship phase and
@@ -285,8 +309,14 @@ def build_scoreboard(
     *,
     since_days: int,
     now: datetime,
+    deliveries: dict | None = None,
 ) -> dict:
-    """Fold the three sources into a render-ready dict. Pure; no I/O."""
+    """Fold the three sources into a render-ready dict. Pure when
+    ``deliveries`` is passed; otherwise the keeper answers one classifier call.
+
+    Delivery is the one classifier's answer (``deliveries``), not a union:
+    a merge delivers with no ledger row, and a session terminal on a known
+    unmerged node records evidence without shipping anything."""
     cutoff = now - timedelta(days=since_days)
 
     def _in_window(ts_raw) -> bool:
@@ -296,7 +326,17 @@ def build_scoreboard(
     windowed = [r for r in rows if _in_window(r.get("completed"))]
     total = len(windowed)
 
-    if total == 0:
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
+    delivered_nodes = {
+        nid
+        for nid in set(deliveries) | window_node_ids
+        if (c := deliveries.get(nid))
+        and c.get("delivered")
+        and _in_window(c.get("ship_ts"))
+    }
+
+    if total == 0 and not delivered_nodes:
         return {"state": "no_data", "since_days": since_days, "rows": 0}
 
     with_tr = sum(1 for r in windowed if r.get("termination_reason"))
@@ -311,20 +351,12 @@ def build_scoreboard(
         Counter(r["termination_reason"] for r in windowed if r.get("termination_reason"))
     )
 
-    # Shipped is the merge (x-b6bd): a graph node whose PR merged, in window.
-    # termination_reason is the session's last word about itself - a PR that
-    # merges after the session stopped is a `reconcile-backstop` row, not a
-    # Done* terminal, so the terminal alone undercounts ~2x. It survives as a
-    # fallback for nodes the graph has since lost (archived/deleted), and as
-    # the `shipped_by_terminal` breakdown.
-    merged_nodes = {
-        n["id"]
-        for n in graph_nodes
-        if n.get("id") and n.get("merge_status") == "merged" and _in_window(n.get("completed_at"))
-    }
-    ship_rows = [r for r in windowed if _is_shipped_reason(r.get("termination_reason"))]
+    ship_rows = [r for r in windowed if _row_shipped(r, deliveries)]
     terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
-    shipped_nodes = merged_nodes | terminal_shipped
+    shipped_nodes = delivered_nodes
+    delivery_classes = dict(
+        Counter(deliveries[nid].get("class") for nid in delivered_nodes if nid in deliveries)
+    )
 
     # Spend follows the node, not the reason: a run whose PR merged is ship
     # spend regardless of how its session stopped. A row with no node keeps
@@ -353,8 +385,6 @@ def build_scoreboard(
         "other_usd": round(other_cost, 2),
     }
 
-    window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
-
     autonomy = _autonomy(touch_events, shipped_nodes, cutoff, now)
     survival = _survival(shipped_nodes, ship_rows, graph_nodes)
 
@@ -365,7 +395,12 @@ def build_scoreboard(
         "coverage": coverage,
         "shipped_nodes": len(shipped_nodes),
         "shipped_by_terminal": len(terminal_shipped),
-        "merged_nodes_without_ledger_row": len(merged_nodes - window_node_ids),
+        "merged_nodes_without_ledger_row": sum(
+            1
+            for nid in delivered_nodes
+            if deliveries.get(nid, {}).get("class") == "merged" and nid not in window_node_ids
+        ),
+        "delivery_classes": delivery_classes,
         "stop_cause": stop_cause,
         "spend": spend,
         "autonomy": autonomy,
@@ -473,8 +508,14 @@ def _node_outcome(nid: str, shipped_at, by_id: dict, fixes: dict) -> str:
     return "merged_clean"
 
 
-def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes: list[dict]) -> dict:
-    """Join verifier_verdict events to per-node outcomes. Pure; no I/O.
+def build_calibration(
+    verdict_events: list[dict],
+    rows: list[dict],
+    graph_nodes: list[dict],
+    deliveries: dict | None = None,
+) -> dict:
+    """Join verifier_verdict events to per-node outcomes. Pure when
+    ``deliveries`` is passed; otherwise the keeper answers one classifier call.
 
     Latest verdict per node wins (events arrive in append order). error /
     not_applicable finals are excluded from the table and reported as counts so
@@ -508,13 +549,16 @@ def build_calibration(verdict_events: list[dict], rows: list[dict], graph_nodes:
         origin = g.get("caused_by")
         if origin:
             fixes.setdefault(origin, []).append(g)
+    # Ship times come from the one classifier, so a merged node carries its
+    # merged_at even with no delivered-terminal row.
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
     ship_ts: dict[str, datetime] = {}
-    for r in rows:
-        nid = r.get("graph_node_id")
-        if nid and _is_shipped_reason(r.get("termination_reason")):
-            dt = _parse_ts(r.get("completed"))
-            if dt and (nid not in ship_ts or dt > ship_ts[nid]):
-                ship_ts[nid] = dt
+    for nid, c in deliveries.items():
+        if not c.get("delivered"):
+            continue
+        dt = _parse_ts(c.get("ship_ts"))
+        if dt:
+            ship_ts[nid] = dt
 
     table = {v: {o: 0 for o in _OUTCOMES} for v in _COUNTABLE_VERDICTS}
     for nid, v in counted.items():
@@ -711,6 +755,7 @@ def build_skill_scoreboard(
     now: datetime,
     read_transcript=None,
     resolve_skill_version=None,
+    deliveries: dict | None = None,
 ) -> dict:
     """Join session -> skill(s) -> node -> outcome/touches/cost. Pure except
     for the two injectable I/O hooks (transcript read, git-hash resolve),
@@ -764,9 +809,11 @@ def build_skill_scoreboard(
     buckets: dict[tuple[str, str], dict] = {}
     attributed = 0
 
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+
     for r in windowed:
         skills, method = _extract_skill_runs(r, read_transcript=read_transcript)
-        shipped = _is_shipped_reason(r.get("termination_reason"))
+        shipped = _row_shipped(r, deliveries)
         nid = r.get("graph_node_id")
         cost = _num(r.get("cost_usd"))
         touches = touches_by_node.get(nid, 0) if nid else 0
@@ -864,9 +911,11 @@ def build_lanes(
     *,
     since_days: int,
     now: datetime,
+    deliveries: dict | None = None,
 ) -> dict:
     """Fold retrospective ledger axes and live registry occupancy together."""
     cutoff = now - timedelta(days=since_days)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
     in_window = [
         row
         for row in rows
@@ -894,7 +943,7 @@ def build_lanes(
             {"runs": 0, "ok": 0, "wall_minutes": 0.0, "carveouts_filed": 0},
         )
         bucket["runs"] += 1
-        bucket["ok"] += int(_is_shipped_reason(row.get("termination_reason")))
+        bucket["ok"] += int(_row_shipped(row, deliveries))
         bucket["wall_minutes"] += _num(row.get("duration_minutes"))
         bucket["carveouts_filed"] += int(
             _num(row.get("carveouts_filed", row.get("carveouts", 0)))
@@ -976,9 +1025,11 @@ def build_provider_scoreboard(
     *,
     since_days: int,
     now: datetime,
+    deliveries: dict | None = None,
 ) -> dict:
     """Group in-window execution rows by (provider_id, model) and attribute
-    spend to outcomes. Pure; no I/O.
+    spend to outcomes. Pure when ``deliveries`` is passed; otherwise the
+    keeper answers one classifier call.
 
     Only `type == "execution"` rows count: the ledger's ~2k backfill entries
     carry session-scoped costs and would silently inflate both coverage and
@@ -994,6 +1045,7 @@ def build_provider_scoreboard(
     total = len(windowed)
     if total == 0:
         return {"state": "no_data", "since_days": since_days, "rows": 0}
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
@@ -1031,7 +1083,7 @@ def build_provider_scoreboard(
         if nid:
             b["nids"].add(nid)
             b["nid_rows"] += 1
-        if _is_shipped_reason(r.get("termination_reason")):
+        if _row_shipped(r, deliveries):
             b["shipped"] += 1
             it = _num_opt(r.get("iterations"))
             if it is not None:
@@ -1187,6 +1239,7 @@ def build_efficiency(
     since_days: int,
     now: datetime,
     read_transcript=None,
+    deliveries: dict | None = None,
 ) -> dict:
     """Fold ledger rows + loop_check events + graph into per-outcome-class costs
     and fleet distributions for session-efficiency. Pure except the injectable
@@ -1203,6 +1256,7 @@ def build_efficiency(
     total = len(windowed)
     if total == 0:
         return {"state": "no_data", "since_days": since_days, "rows": 0}
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
 
     # Index loop_check fires by session id: (ts_sort_key, ci) so a session's
     # fires order deterministically even when ts is missing (undated last).
@@ -1272,7 +1326,7 @@ def build_efficiency(
         if nid:
             node_linked += 1
 
-        shipped = _is_shipped_reason(r.get("termination_reason"))
+        shipped = _row_shipped(r, deliveries)
         if shipped:
             shipped_rows += 1
             if w4_available and nid and nid in by_id:
@@ -2171,6 +2225,7 @@ def build_plan_fidelity(
     comparison_contract: dict | None = None,
     event_coverage: dict | None = None,
     unmeasurable: str = "unjoined",
+    deliveries: dict | None = None,
 ) -> dict:
     """Join each `planned` row (W1) to its delivery and score plan fidelity.
 
@@ -2219,9 +2274,10 @@ def build_plan_fidelity(
         if origin:
             fixes.setdefault(origin, []).append(gn)
 
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
     shipped_by_plan: dict[str, list[dict]] = {}
     for r in windowed:
-        if _is_shipped_reason(r.get("termination_reason")):
+        if _row_shipped(r, deliveries):
             key = _plan_key(r.get("plan_path"), r.get("project"))
             if key:
                 shipped_by_plan.setdefault(key, []).append(r)
@@ -2234,13 +2290,13 @@ def build_plan_fidelity(
             continue
         plan_path = r.get("plan_path")
         key = _plan_key(plan_path, r.get("project"))
-        deliveries = shipped_by_plan.get(key, []) if key else []
+        plan_deliveries = shipped_by_plan.get(key, []) if key else []
         sid = r.get("session_id")
-        if not deliveries:
+        if not plan_deliveries:
             results.append({"session_id": sid, "plan_path": plan_path, "status": "unjoined"})
             continue
         joined += 1
-        d = deliveries[0]
+        d = plan_deliveries[0]
         nid = d.get("graph_node_id")
         plan_doc = read_plan_doc(plan_path) if plan_path else None
         score = _score_fidelity(plan_doc, read_summary(d), read_diff(d))

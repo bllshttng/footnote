@@ -92,7 +92,7 @@ def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
     # W4 signals present: a human_touch event + a graph node carrying a causal field.
     rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
     (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": _days_ago(1, hour=9)}) + "\n")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False}]}))
+    (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": _RECENT}]}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
     sb = json.loads(res.output)
@@ -185,7 +185,7 @@ def test_survival_ignores_fix_predating_ship(tmp_path, monkeypatch):
     # deterministic and must NOT follow the wall clock.
     rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
     graph = [
-        {"id": "x-1", "reverted": False},
+        {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
         {"id": "x-fix", "caused_by": "x-1", "created_at": "2026-07-01T00:00:00"},  # 2 days BEFORE ship
     ]
     sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
@@ -378,6 +378,34 @@ def test_undated_touch_never_inflates_autonomy():
     out = _autonomy(events, {"x-1"}, cutoff, now)
     assert out["available"] is True
     assert out["touches"] == 1
+
+
+# --- AC1: one delivery classification across the main view ------------------
+def test_in_review_node_does_not_ship_and_document_stays_delivered():
+    # AC1-HP: a DonePRGreen terminal on a known unmerged code node is a
+    # session stop, not a delivery; an explicitly delivered doc stays one.
+    rows = [
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-code", "cost_usd": 1.0},
+        {"completed": _RECENT, "termination_reason": "DoneAdvisory", "graph_node_id": "x-doc", "cost_usd": 1.0},
+    ]
+    graph = [
+        {"id": "x-code", "merge_status": None, "completed_at": _RECENT},
+        {"id": "x-doc", "merge_status": None, "completed_at": _RECENT},
+    ]
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 1
+    assert sb["delivery_classes"] == {"delivered_doc": 1}
+
+
+def test_merged_node_without_ledger_row_is_delivery_with_missing_cost():
+    # AC1-EDGE: the merge alone delivers; no ledger row means cost coverage
+    # is missing, never no_data.
+    graph = [{"id": "x-m", "merge_status": "merged", "completed_at": _RECENT}]
+    sb = build_scoreboard([], [], graph, since_days=28, now=datetime.now())
+    assert sb["state"] != "no_data"
+    assert sb["shipped_nodes"] == 1
+    assert sb["merged_nodes_without_ledger_row"] == 1
+    assert sb["spend"]["ship_terminal_usd"] == 0.0
 
 
 # --- x-fe4d: the JSON stream stays strict (no NaN/Infinity tokens) ----------

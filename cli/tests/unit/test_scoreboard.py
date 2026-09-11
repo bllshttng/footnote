@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from fno.events.log import normalize_event, read_events
+from fno.scoreboard import fold
 from fno.scoreboard.fold import (
     _comparison_contract_from_events,
     _num_opt,
@@ -23,10 +24,18 @@ from fno.scoreboard.fold import (
     read_jsonl_events_with_coverage,
     render_context_trace_field_docs,
 )
+from tests._delivery_reference import reference_deliveries
 
 
 ROOT = Path(__file__).resolve().parents[3]
 NOW = datetime(2026, 7, 3, 20, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def hermetic_deliveries(monkeypatch):
+    # The fold tests here run the real graph reads in a subprocess CLI or
+    # none at all; the classifier seam stays hermetic either way.
+    monkeypatch.setattr(fold, "classify_deliveries", reference_deliveries)
 
 
 def _snapshot_event(session_id: str, context_bytes: int, ts: str) -> dict:
@@ -927,7 +936,7 @@ def test_plan_fidelity_includes_the_derived_trace() -> None:
     ]
     result = build_plan_fidelity(
         rows,
-        [{"id": "x-1", "title": "Observe context"}],
+        [{"id": "x-1", "title": "Observe context", "merge_status": "merged", "completed_at": "2026-07-03T11:00:00"}],
         since_days=28,
         now=NOW,
         read_plan_doc=lambda _path: "## Acceptance Criteria\n#### AC1-HP: yes\n",
@@ -1229,7 +1238,18 @@ def test_scoreboard_cli_joins_canonical_project_context_journal(
         json.dumps({"entries": rows}), encoding="utf-8"
     )
     (state_dir / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-1", "title": "Observe context"}]}),
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-1",
+                        "title": "Observe context",
+                        "merge_status": "merged",
+                        "completed_at": delivery_at,
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     event_at = (now - timedelta(minutes=90)).astimezone().isoformat()
@@ -1327,8 +1347,18 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
         json.dumps(
             {
                 "entries": [
-                    {"id": "x-1", "title": "First root"},
-                    {"id": "x-2", "title": "Second root"},
+                    {
+                        "id": "x-1",
+                        "title": "First root",
+                        "merge_status": "merged",
+                        "completed_at": completed,
+                    },
+                    {
+                        "id": "x-2",
+                        "title": "Second root",
+                        "merge_status": "merged",
+                        "completed_at": completed,
+                    },
                 ]
             }
         ),
