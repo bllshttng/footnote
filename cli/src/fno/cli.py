@@ -26,6 +26,7 @@ from typing import Any, Optional
 import click
 import typer
 
+from fno import _is_fno_module, _reinstall_hint
 from fno._lazy_group import make_lazy_group_cls
 
 
@@ -901,5 +902,30 @@ def version(ctx: typer.Context) -> None:
     _run_rust_front(["version", *ctx.args])
 
 
+def main() -> None:
+    """Console entrypoint: append the reinstall hint to a bare mid-reinstall ImportError.
+
+    The meta-path guard in ``fno/__init__.py`` shapes ModuleNotFoundError, but two
+    shapes reach the operator bare: ``from fno import submodule`` (CPython's
+    ``_handle_fromlist`` replaces our ModuleNotFoundError with ``cannot import
+    name ...``) and a module already in ``sys.modules``, which no finder is ever
+    consulted for. Both arrive here as a plain ImportError whose ``exc.name`` is
+    the module. ModuleNotFoundError is skipped: the finder already stamped its
+    hint. This is not the import layer, so it can read the exception instead of
+    shaping it, and the failure path first-imports nothing (the reason typer's
+    own reporter is disabled in this module).
+    """
+    try:
+        app()
+    except ImportError as exc:
+        if (
+            not isinstance(exc, ModuleNotFoundError)
+            and isinstance(exc.name, str)
+            and _is_fno_module(exc.name)
+        ):
+            exc.msg = f"{exc.msg}{_reinstall_hint(exc.name)}"
+        raise
+
+
 if __name__ == "__main__":
-    app()
+    main()
