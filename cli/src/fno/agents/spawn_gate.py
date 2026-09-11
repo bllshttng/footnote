@@ -55,9 +55,7 @@ def _fleet_incident_gate() -> None:
         proc = (
             subprocess.run(
                 [str(binary), "fleet-incident", "check", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=10,
+                capture_output=True, text=True, timeout=10,
             )
             if binary
             else None

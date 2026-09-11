@@ -692,8 +692,7 @@ def cmd_notify_self() -> None:
 
     # Busy mode (x-481e): the hook fires on every UserPromptSubmit - an idle
     # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
-    # hold failure must degrade to rendering the mail, never to swallowing
-    # this turn's delivery.
+    # hold failure must degrade to rendering the mail, never swallowing this turn.
     try:
         if extend(handle) is not None:
             return

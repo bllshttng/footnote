@@ -4675,8 +4675,8 @@ def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker (x-77db).
 
     stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
-    Relays the native `fno-agents fleet-incident` verb - exit code, stdout,
-    stderr - and decides nothing: the file is the authority. Mail is never gated.
+    Relays the native `fno-agents fleet-incident` verb and decides nothing:
+    the file is the authority. Mail is never gated.
     """
     import subprocess
 

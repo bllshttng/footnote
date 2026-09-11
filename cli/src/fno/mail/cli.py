@@ -4373,11 +4373,7 @@ def _team_recipients(scope: str) -> list[tuple[str, str]]:
     if scope not in ("all", "kings"):
         from fno.agents.crown import crown_scope_matches
 
-        rows = [
-            row
-            for row in rows
-            if crown_scope_matches(getattr(row, "crown_scope", None), scope)
-        ]
+        rows = [r for r in rows if crown_scope_matches(getattr(r, "crown_scope", None), scope)]
     pairs: dict[str, str] = {}
     for row in rows:
         if getattr(row, "status", None) in TERMINAL_STATUSES or not getattr(row, "session_id", None):
