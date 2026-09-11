@@ -3687,7 +3687,15 @@ fn format_success(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             match result.get("pane_removed").and_then(Value::as_bool) {
-                Some(true) => removed.push("mux"),
+                Some(true) => {
+                    removed.push("mux");
+                    // x-9485: the confirmed stop's measurement (pane killed,
+                    // pid gone) is the printed proof - a bare "mux" would
+                    // name the surface but not the death it claims.
+                    if !pane_reason.is_empty() {
+                        notes.push(pane_reason.to_string());
+                    }
+                }
                 Some(false) if pane_reason.contains("already absent") => {
                     notes.push("mux pane already absent".to_string())
                 }

@@ -1000,6 +1000,22 @@ fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     stopped && roster_lists(&short, sid) == Some(false)
 }
 
+/// The stop detail for the arms whose injected seam answers a bare bool
+/// (x-9485 change 1): which arm ran, the session, and the registered pid.
+/// The pane arm carries its own measurement; this fills the gap so a
+/// confirmed-removed effect names the pid the outcome is about, and the
+/// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) verifies
+/// that pid reads gone.
+fn stop_row_detail(e: &state::RegistryEntry) -> Option<String> {
+    if e.harness_name() == "claude" {
+        let sid = e.harness_session_id.as_deref()?;
+        Some(format!("claude stop ran; session {sid}"))
+    } else {
+        let pid = e.pid.map(|p| format!("; pid {p}")).unwrap_or_default();
+        Some(format!("worker socket stop ran{pid}"))
+    }
+}
+
 /// Whether the live roster still lists the session, by short id or session
 /// id. `None` when the roster cannot be read: a torn read is not an exited
 /// proof in either direction.
@@ -2097,10 +2113,21 @@ pub(crate) fn stage_session_retirement(
         .as_ref()
         .map(|s| s.confirmed)
         .unwrap_or_else(|| stop_confirmed(e));
-    receipt.effects.push(crate::gc_native::stop_outcome_effect(
-        stopped,
-        pane_stop.as_ref().map(|s| s.detail.clone()),
-    ));
+    // x-9485 change 1: a confirmed stop names what it stopped. The pane arm
+    // carries what actually ran (x-1b90); the other arms go through the
+    // injected bool seam, so the detail names the arm and the row's
+    // registered pid - the process the outcome is about - and the checked-in
+    // probe verifies that pid reads gone.
+    let stop_detail = pane_stop.as_ref().map(|s| s.detail.clone()).or_else(|| {
+        if stopped {
+            stop_row_detail(e)
+        } else {
+            None
+        }
+    });
+    receipt
+        .effects
+        .push(crate::gc_native::stop_outcome_effect(stopped, stop_detail));
     if !stopped {
         let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
@@ -3073,6 +3100,41 @@ mod tests {
             SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << 20),
             SETTLE_BACKOFF_CAP_MS
         );
+    }
+
+    // x-9485 change 1: the non-pane stop arms name the arm and the process
+    // the receipt's confirmed-removed outcome is about, so the checked-in
+    // probe can verify the pid reads gone.
+    #[test]
+    fn stop_row_detail_names_the_arm_and_the_registered_pid() {
+        let mut claude = state::RegistryEntry::default();
+        claude.harness = Some("claude".into());
+        claude.harness_session_id = Some("aaaa-bbbb".into());
+        claude.pid = Some(40001);
+        assert_eq!(
+            stop_row_detail(&claude).as_deref(),
+            Some("claude stop ran; session aaaa-bbbb")
+        );
+
+        let mut codex = state::RegistryEntry::default();
+        codex.harness = Some("codex".into());
+        codex.harness_session_id = Some("01a08db0-0000".into());
+        codex.pid = Some(50678);
+        assert_eq!(
+            stop_row_detail(&codex).as_deref(),
+            Some("worker socket stop ran; pid 50678")
+        );
+
+        // No pid: the row is still named, the pid slot is not invented.
+        codex.pid = None;
+        assert_eq!(
+            stop_row_detail(&codex).as_deref(),
+            Some("worker socket stop ran")
+        );
+
+        // A claude row with no session id has nothing honest to say.
+        claude.harness_session_id = None;
+        assert_eq!(stop_row_detail(&claude), None);
     }
 
     fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {

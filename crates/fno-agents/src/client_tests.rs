@@ -620,6 +620,32 @@ fn format_success_rm_names_a_forced_mux_orphan() {
     );
 }
 
+// x-9485: a confirmed pane stop prints its measurement - the pid that died -
+// not a bare surface name.
+#[test]
+fn format_success_rm_names_the_confirmed_pane_death() {
+    let result = json!({
+        "removed": true,
+        "registry_removed": true,
+        "harness": "claude",
+        "harness_removed": false,
+        "harness_reason": "claude row already absent",
+        "pane_session": "x9485live",
+        "pane_id": 0,
+        "pane_removed": true,
+        "pane_reason": "pane x9485live:0 (child 43225) killed; pid 43225 gone"
+    });
+    let out = format_success("rm", "bar-agent", &result, false, true, false);
+    assert_eq!(
+        out,
+        Some(
+            "removed: bar-agent (fno + mux; claude row already absent; \
+             pane x9485live:0 (child 43225) killed; pid 43225 gone)"
+                .to_string()
+        )
+    );
+}
+
 #[test]
 fn format_success_rm_names_an_event_write_failure() {
     let result = json!({
