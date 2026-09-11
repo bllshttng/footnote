@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -42,6 +43,19 @@ def no_worker_roots(monkeypatch):
         doctor_footprint,
         "_codex_app_server_serve",
         lambda _snapshot: (set(), "absent"),
+    )
+    # Settings resolution shells git on a cold cache (repo-root discovery);
+    # a shard that runs a footprint test first must not pay it, or the
+    # ps-is-the-only-subprocess assertions see a git argv.
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(agents=SimpleNamespace(max_load_per_cpu=4.0)),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda _root: SimpleNamespace(
+            agents=SimpleNamespace(footprint_sustained_cpu_cores=None)
+        ),
     )
 
 

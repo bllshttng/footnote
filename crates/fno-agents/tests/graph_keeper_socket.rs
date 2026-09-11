@@ -513,7 +513,9 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
             let _ = read_frame(&mut s);
         }
     });
-    std::thread::sleep(Duration::from_millis(300));
+    // Give the ops a real head start: on a loaded runner 300ms let Shutdown
+    // reach a still-free gate, and the keeper answered ok instead of busy.
+    std::thread::sleep(Duration::from_secs(2));
     let mut s = UnixStream::connect(&sock).unwrap();
     write_frame(&mut s, TAG_SHUTDOWN, &[]);
     let started = Instant::now();
