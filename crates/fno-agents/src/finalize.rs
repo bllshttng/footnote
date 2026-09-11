@@ -173,7 +173,7 @@ struct ManifestFields {
     /// config arm on its own, exactly as init folded it and the docs promise.
     auto_merge_source: Option<String>,
     /// The run's node claim, written to the manifest body by init when it
-    /// claimed `node:<id>` (init:1670). The cancel settle releases it with
+    /// claimed `node:<id>`. The cancel settle releases it with
     /// `--stamp-do`, closing the do row the session's acquire opened.
     target_claim_key: Option<String>,
     /// Who holds the claim above: the `--holder` the release must match.
@@ -301,7 +301,7 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             // itself - prose inside the `input` scalar must not be able to
             // claim an origin either. Advisory, so no separate trust gate.
             "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
-            // The run's node claim (x-9d3b): init writes both keys into the
+            // The run's node claim: init writes both keys into the
             // manifest BODY, and this parser scans the body for exactly that
             // reason. Plain `set`, never trust-gated: a cancelled run must
             // release the claim the manifest NAMES, and prose cannot mint a
@@ -891,7 +891,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // not returned into `failed` (a guard skip must never wedge the loop).
     stamp_node_do(&cwd, &m, &reason);
 
-    // ── cancel settle: release the claim a cancelled run still holds (x-9d3b)
+    // ── cancel settle: release the claim a cancelled run still holds ────────
     // Interrupted is deliberately absent from the stop hook's terminal release
     // case (a hand-maintained mirror of this enum; growing it by one more
     // entry is what the plan refused), so the settle belongs beside the
@@ -2382,7 +2382,7 @@ fn cancel_release_args(key: &str, holder: &str) -> Vec<String> {
     ]
 }
 
-/// The cancel settle (x-9d3b). An `Interrupted` terminal never reaches the
+/// The cancel settle. An `Interrupted` terminal never reaches the
 /// stop hook's terminal release case (a hand-maintained mirror of the Rust
 /// enum; the string `Interrupted` appears in that file zero times by design),
 /// so before this the claim stayed held and the do row stayed open, pinning
@@ -2393,7 +2393,7 @@ fn cancel_release_args(key: &str, holder: &str) -> Vec<String> {
 ///
 /// Non-fatal, like every finalize side effect: one named stderr line per
 /// skip or failure, the exit code untouched. A manifest naming no claim key
-/// prints one line and stops - the sweep (x-8739) is the path for a row no
+/// prints one line and stops - the sweep is the path for a row no
 /// claim opened.
 fn cancel_settle_claims(cwd: &Path, m: &ManifestFields) {
     let (Some(key), Some(holder)) = (
@@ -3331,7 +3331,7 @@ mod tests {
         assert!(!args.contains(&"--guard-plan".to_string()));
     }
 
-    // ── x-9d3b: the cancel terminal settles its own claim ───────────────────
+    // ── the cancel terminal settles its own claim ────────────────────────────
 
     #[test]
     fn cancel_release_args_carries_stamp_do() {
@@ -3347,7 +3347,7 @@ mod tests {
 
     #[test]
     fn parse_manifest_fields_reads_claim_keys_from_body() {
-        // Both keys live in the manifest BODY (init:1670), below the closing
+        // Both keys live in the manifest BODY, below the closing
         // `---`, so a frontmatter-only parse would miss them.
         let m = parse_manifest_fields(
             "---\nsession_id: s1\n---\n# Target Session State\ngraph_node_id: x-9d3b\ntarget_claim_key: \"node:x-9d3b\"\ntarget_claim_holder: \"holder-s1\"\n",

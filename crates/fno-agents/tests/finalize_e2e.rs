@@ -2119,7 +2119,7 @@ fn run_finalize_with_stub(
 }
 
 /// Append the `target_claim_*` lines to the manifest body, as init does when
-/// it claims the run's node (init-target-state.sh:1670).
+/// it claims the run's node.
 fn manifest_with_claim(env: &Env, key: &str, holder: &str) {
     let mut m = fs::read_to_string(&env.state).unwrap();
     m.push_str(&format!(
@@ -2128,7 +2128,7 @@ fn manifest_with_claim(env: &Env, key: &str, holder: &str) {
     fs::write(&env.state, m).unwrap();
 }
 
-// ── x-9d3b: the cancel terminal settles its own claim ──────────────────────
+// ── the cancel terminal settles its own claim ───────────────────────────────
 
 /// AC1-HP: a cancelled run releases the claim its manifest names, and the
 /// release carries `--stamp-do` (which fills `ended_at` on the do row the
