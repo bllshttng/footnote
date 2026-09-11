@@ -130,10 +130,15 @@ def _worker_reachability(worker: dict):
         )
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         facts = None
-    # A FRESH tail is a resumed session's witness (x-a613) over a corpse pid.
-    falsifier = pid_falsifier(worker.get("pid"), worker.get("pid_start_time")) or pane_falsifier(
-        worker.get("mux")
-    )
+    # The pid falsifier fires only on an INCARNATION-PROVEN pid (a recorded
+    # start token, the same bound the claims layer's hybrid arm uses): a bare
+    # stale pid on a live worker must never read as death. A FRESH tail is a
+    # resumed session's witness (x-a613) over even a proven corpse.
+    pid = worker.get("pid")
+    proven = pid is not None and worker.get("pid_start_time") is not None
+    falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None
+    if falsifier is None:
+        falsifier = pane_falsifier(worker.get("mux"))
     if facts is None:
         # No transcript: the supervisor word is the only evidence. An active
         # word stays reachable; a terminal word positively ended the row.

@@ -139,7 +139,7 @@ def test_a_dead_pid_falsifies_a_silent_row(cwd_tmp, roster, monkeypatch):
     )
     roster(_workers({"name": "bp-1939-arm-timeout", "state": "working",
                      "cwd": "/wt/ac1-node", "row_id": "bp-1939",
-                     "pid": 999999, "pid_start_time": None, "mux": None}))
+                     "pid": 999999, "pid_start_time": 12345, "mux": None}))
     r = runner.invoke(cli, ["status", NODE, "--json"])
     assert r.exit_code == 0, r.output
     info = json.loads(r.output)
@@ -168,7 +168,7 @@ def test_a_fresh_transcript_outranks_a_dead_pid(cwd_tmp, roster, monkeypatch):
     )
     roster(_workers({"name": "t-resumed", "state": "working",
                      "cwd": "/wt/ac1-node", "row_id": "t-resumed",
-                     "pid": 999999, "pid_start_time": None, "mux": None}))
+                     "pid": 999999, "pid_start_time": 12345, "mux": None}))
     r = runner.invoke(cli, ["status", NODE, "--json"])
     assert r.exit_code == 0, r.output
     info = json.loads(r.output)
