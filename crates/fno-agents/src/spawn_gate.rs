@@ -726,9 +726,19 @@ fn loadavg_1m() -> Option<f64> {
 
 #[derive(Debug, Deserialize)]
 struct FootprintCausePayload {
+    /// Defaulted so the `_emit_failure` shape (`{"error": ..., "exit_code":
+    /// 4}`, no numbers) still parses and its words can travel. A payload
+    /// with NO error and defaulted numbers reaches the classifier, which
+    /// rejects a non-positive capacity as unparseable - the same answer the
+    /// missing fields produced before, via the same fn a complete payload
+    /// passes through.
+    #[serde(default)]
     fleet_cpu_cores: f64,
+    #[serde(default)]
     cpu_capacity_cores: f64,
+    #[serde(default)]
     fleet_percent_capacity: f64,
+    #[serde(default)]
     fleet_percent_measured_cpu: f64,
     /// Footprint's own sentence naming what it could not attribute. Present
     /// only when there IS a gap, which is also what drives its exit 4 under
@@ -755,6 +765,12 @@ struct FootprintCausePayload {
     /// shelled-out copy).
     #[serde(default)]
     load_1m: Option<f64>,
+    /// The `_emit_failure` shape: when footprint cannot measure at all it
+    /// still answers, carrying this key and exit 4. An answered failure is a
+    /// different fact from a probe that never answered, so it is read FIRST
+    /// and its words travel into the refusal.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// Name the spare pool when it holds any CPU, else nothing.
@@ -791,8 +807,11 @@ enum FleetReading {
     Known(f64, f64),
     /// Footprint answered and disclaimed its own answer. Carries its words.
     Incomplete(String),
-    /// No usable answer at all.
-    Unreadable,
+    /// No usable answer at all. Carries why, in the probe's own words where
+    /// there are any: "attribution unavailable" with no cause once sent its
+    /// readers hunting load averages for an hour while the instrument was
+    /// fine and the transport was not.
+    Unreadable(String),
 }
 
 /// Footprint's attribution as numbers: `(fleet_cores, capacity_cores)`.
@@ -852,19 +871,40 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
 }
 
 /// Wall-clock budget for the out-of-process footprint probe: the Python
-/// twin's 5s measurement budget plus an allowance for interpreter startup.
+/// twin's 5s measurement budget plus an allowance for a ONE-module
+/// interpreter start. The allowance is not sized for a full CLI boot on
+/// purpose: the probe binary (`fno-footprint-cause`) imports only
+/// `fno.doctor_footprint` (measured 0.11s wall at load 117), where the old
+/// `fno` shim route paid a full typer-app import plus provisioning waits and
+/// timed out under exactly the load this gate exists to measure.
 const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
 
-fn footprint_cli_binary() -> Option<&'static str> {
-    ["fno", "fno-py"]
-        .into_iter()
-        .find(|name| resolves_on_path(name))
+/// The probe argv: the narrow console script when it resolves, else the
+/// same `--json --cause-only` reading through `fno-py` (version skew: an
+/// older wheel without the script). `fno` itself is deliberately NOT a
+/// candidate: it is the Rust shim, and a gate probe must not route through
+/// its provisioning waits. `None` means no probe resolves, and the refusal
+/// names that instead of pretending the instrument answered.
+fn footprint_probe_argv() -> Option<Vec<String>> {
+    if resolves_on_path("fno-footprint-cause") {
+        return Some(vec!["fno-footprint-cause".to_string()]);
+    }
+    if !resolves_on_path("fno-py") {
+        return None;
+    }
+    let mut argv = crate::king_board::fno_py_cmd();
+    argv.extend(
+        ["doctor", "footprint", "--json", "--cause-only"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    Some(argv)
 }
 
 fn fleet_cpu_reading() -> FleetReading {
     match footprint_cause_raw() {
-        Some(raw) => classify_footprint_cause_json(&raw),
-        None => FleetReading::Unreadable,
+        Ok(raw) => classify_footprint_cause_json(&raw),
+        Err(cause) => FleetReading::Unreadable(cause),
     }
 }
 
@@ -876,19 +916,26 @@ fn fleet_cpu_reading() -> FleetReading {
 /// the Python twin keys on, so the two gates admit the same machines.
 fn classify_footprint_cause_json(raw: &str) -> FleetReading {
     let Ok(payload) = serde_json::from_str::<FootprintCausePayload>(raw) else {
-        return FleetReading::Unreadable;
+        return FleetReading::Unreadable("footprint payload unparseable".into());
     };
+    // An answered failure names itself (`_emit_failure` writes `{"error": ...,
+    // "exit_code": 4}`); its words beat any generic "unavailable".
+    if let Some(error) = payload.error {
+        return FleetReading::Unreadable(format!("footprint answered: {error}"));
+    }
     if let Some(gap) = payload.attribution_gap {
         return FleetReading::Incomplete(gap);
     }
     match parse_footprint_cause_json(raw) {
         Some((fleet, capacity)) => FleetReading::Known(fleet, capacity),
-        None => FleetReading::Unreadable,
+        None => FleetReading::Unreadable("footprint payload unparseable".into()),
     }
 }
 
 fn footprint_cause_evidence() -> Option<String> {
-    footprint_cause_raw().and_then(|raw| format_footprint_cause_json(&raw))
+    footprint_cause_raw()
+        .ok()
+        .and_then(|raw| format_footprint_cause_json(&raw))
 }
 
 /// One line for `fno agents status`: 1-min load, CPU capacity, and the claude
@@ -896,7 +943,7 @@ fn footprint_cause_evidence() -> Option<String> {
 /// caller can see the pool's share BEFORE a spawn ever gets refused on it.
 /// `None` when footprint could not be read (best-effort, never blocks status).
 pub fn machine_status_line() -> Option<String> {
-    format_machine_status_line(&footprint_cause_raw()?)
+    format_machine_status_line(&footprint_cause_raw().ok()?)
 }
 
 /// The pure formatter behind [`machine_status_line`], split out so it is
@@ -925,23 +972,30 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
     ))
 }
 
-fn footprint_cause_raw() -> Option<String> {
-    let binary = footprint_cli_binary()?;
-    let mut child = Command::new(binary)
-        .args(["doctor", "footprint", "--json", "--cause-only"])
+fn footprint_cause_raw() -> Result<String, String> {
+    let argv = footprint_probe_argv().ok_or_else(|| {
+        "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
+    })?;
+    footprint_cause_raw_with(&argv, FOOTPRINT_PROBE_BUDGET)
+}
+
+/// The transport, split from [`footprint_cause_raw`] so tests can pass a
+/// short budget and a script instead of loading a real machine.
+///
+/// `Err` carries WHY the probe has no answer, as text a refusal can print.
+/// A deadline miss is a fact about the probe's clock, never about the
+/// machine: printing a clock miss as if it were a CPU reading is how a
+/// healthy instrument once read as "attribution unavailable" at load 511
+/// while the same instrument, read in process, answered 3.69/12.00 in 1.6s.
+fn footprint_cause_raw_with(argv: &[String], budget: Duration) -> Result<String, String> {
+    let bin = argv[0].clone();
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    // 5s of MEASUREMENT plus 3s of interpreter start, and the two halves are
-    // why this is not the 5s its Python twin passes to `cause_reading`.
-    // Python spends its whole budget measuring; this budget also has to cover
-    // spawning `fno doctor footprint` and importing it. Matching the numbers
-    // would make the Rust gate time out first on a loaded box, and since
-    // x-7c0f a timeout REFUSES rather than merely losing the explanation. Two
-    // admission gates disagreeing about the same machine is the defect beside
-    // the one this check fixes.
-    let deadline = Instant::now() + FOOTPRINT_PROBE_BUDGET;
+        .map_err(|e| format!("footprint probe {bin} could not run: {e}"))?;
+    let deadline = Instant::now() + budget;
     loop {
         match child.try_wait() {
             // The exit code is not the discriminator; the payload is. Footprint
@@ -953,19 +1007,31 @@ fn footprint_cause_raw() -> Option<String> {
             // probe exited 4. A genuinely failed run writes nothing parseable and
             // still reaches `Unreadable` through the classifier.
             Ok(Some(_)) => {
-                let output = child.wait_with_output().ok()?;
-                return Some(std::str::from_utf8(&output.stdout).ok()?.to_string());
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("footprint probe {bin} could not run: {e}"))?;
+                return std::str::from_utf8(&output.stdout)
+                    .map(|s| s.to_string())
+                    .map_err(|_| format!("footprint probe {bin} wrote non-UTF-8 output"));
             }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                let budget_s = if budget.as_secs() > 0 {
+                    format!("{}s", budget.as_secs())
+                } else {
+                    format!("{}ms", budget.as_millis())
+                };
+                return Err(format!(
+                    "footprint probe {bin} did not answer inside {budget_s}; \
+                     that is the probe's clock, not a reading of fleet CPU"
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(_) => {
+            Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(format!("footprint probe {bin} could not run: {e}"));
             }
         }
     }
@@ -1050,14 +1116,13 @@ fn check_load_ceiling(
             );
             return Err((EXIT_LOAD_REFUSED, true));
         }
-        FleetReading::Unreadable => {
+        FleetReading::Unreadable(cause) => {
             eprintln!(
-                "spawn-gate: 1-min load {load1:.1} is over the max_load_per_cpu trigger \
-                 {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and fleet CPU attribution \
-                 unavailable; refusing to spawn (--force to bypass)"
+                "{}",
+                attribution_unavailable_line(load1, max_load_per_cpu, cpus, &cause)
             );
-            // The attribution read produced nothing parseable; the caller's
-            // probe reads the same instrument and fails the same way.
+            // The attribution read produced nothing usable; the refusal names
+            // why instead of leaving "unavailable" to be read as a CPU fact.
             return Err((EXIT_LOAD_REFUSED, true));
         }
     };
@@ -1087,6 +1152,23 @@ fn check_load_ceiling(
 /// inclusive-boundary convention).
 fn load_over_ceiling(load1: f64, max_load_per_cpu: f64, cpus: usize) -> bool {
     load1 > max_load_per_cpu * cpus as f64
+}
+
+/// The refusal line for an unusable attribution read, pure so the text is
+/// testable without capturing stderr. Keeps the `attribution unavailable`
+/// substring operator greps and the Python twin's assertions key on.
+fn attribution_unavailable_line(
+    load1: f64,
+    max_load_per_cpu: f64,
+    cpus: usize,
+    cause: &str,
+) -> String {
+    let trigger = max_load_per_cpu * cpus as f64;
+    format!(
+        "spawn-gate: 1-min load {load1:.1} is over the max_load_per_cpu trigger \
+         {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and fleet CPU attribution \
+         unavailable ({cause}); refusing to spawn (--force to bypass)"
+    )
 }
 
 fn acquire_worker_slot(guard: &mut GateGuard, name: &str, holder: &str) {
@@ -1449,8 +1531,8 @@ MemAvailable:    8000000 kB\n";
             FleetReading::Known(fleet, capacity) => {
                 panic!("an undercounted share must never decide admission: {fleet}/{capacity}")
             }
-            FleetReading::Unreadable => {
-                panic!("footprint answered and named its gap; that is not unreadable")
+            FleetReading::Unreadable(cause) => {
+                panic!("footprint answered and named its gap; that is not unreadable: {cause}")
             }
         }
     }
@@ -1564,7 +1646,7 @@ MemAvailable:    8000000 kB\n";
             assert!(
                 matches!(
                     classify_footprint_cause_json(junk),
-                    FleetReading::Unreadable
+                    FleetReading::Unreadable(_)
                 ),
                 "{junk}"
             );
@@ -1596,6 +1678,171 @@ MemAvailable:    8000000 kB\n";
             ),
             None
         );
+    }
+
+    /// The `_emit_failure` shape (`{"error": ..., "exit_code": 4}`) is an
+    /// ANSWER, not a silence: its words must reach the refusal, because
+    /// "attribution unavailable" with no cause is exactly what sent an hour
+    /// of hunting after load averages while the instrument was fine.
+    #[test]
+    fn an_error_payload_classifies_unreadable_carrying_footprints_words() {
+        let raw =
+            r#"{"error":"footprint unavailable: worker root liveness unavailable","exit_code":4}"#;
+        match classify_footprint_cause_json(raw) {
+            FleetReading::Unreadable(cause) => {
+                assert!(cause.contains("footprint answered: "), "{cause}");
+                assert!(
+                    cause.contains("worker root liveness unavailable"),
+                    "{cause}"
+                );
+            }
+            FleetReading::Known(fleet, capacity) => {
+                panic!("an error payload is not a reading: {fleet}/{capacity}")
+            }
+            FleetReading::Incomplete(gap) => {
+                panic!("an error payload has no gap to carry: {gap}")
+            }
+        }
+    }
+
+    /// A probe that misses its budget must say so: the miss is a fact about
+    /// the probe's clock, and a bare "unavailable" once let a healthy
+    /// instrument read as attribution failure at load 511. The budget is
+    /// passed explicitly so the test does not depend on machine speed.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_misses_its_deadline_names_the_clock_not_the_machine() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("fno-gate-probe-deadline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp probe dir");
+        let script = dir.join("fno-footprint-cause");
+        std::fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write probe script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod probe script");
+
+        let argv = vec![script.display().to_string()];
+        let err = footprint_cause_raw_with(&argv, Duration::from_millis(200))
+            .expect_err("a sleeping probe must miss a 200ms budget");
+        assert!(err.contains("did not answer inside 200ms"), "{err}");
+        assert!(err.contains("the probe's clock"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The happy path through the same seam: an executable that answers with
+    /// a complete payload reads Ok and classifies Known, so the deadline
+    /// test above cannot pass on a transport that answers nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_complete_probe_payload_reads_ok_and_classifies_known() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("fno-gate-probe-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp probe dir");
+        let script = dir.join("fno-footprint-cause");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"fleet_cpu_cores\":3.6,\"cpu_capacity_cores\":12,\"fleet_percent_capacity\":30.0,\"fleet_percent_measured_cpu\":45.0}'\n",
+        )
+        .expect("write probe script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod probe script");
+
+        let argv = vec![script.display().to_string()];
+        let raw = footprint_cause_raw_with(&argv, Duration::from_secs(5))
+            .expect("a complete payload must read Ok");
+        match classify_footprint_cause_json(&raw) {
+            FleetReading::Known(fleet, capacity) => {
+                assert_eq!((fleet, capacity), (3.6, 12.0))
+            }
+            FleetReading::Incomplete(gap) => {
+                panic!("a complete payload carries no gap: {gap}")
+            }
+            FleetReading::Unreadable(cause) => {
+                panic!("a complete payload must classify Known: {cause}")
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The refusal text is pinned as a pure formatter so it cannot drift
+    /// from what an unavailable read owes the reader: WHICH probe, whose
+    /// clock, and the bypass. `(footprint probe` shows the cause landing
+    /// inside the refusal's parentheses.
+    #[test]
+    fn the_unavailable_refusal_names_the_probe_its_clock_and_the_bypass() {
+        let line = attribution_unavailable_line(
+            511.0,
+            8.0,
+            12,
+            "footprint probe fno-footprint-cause did not answer inside 8s; \
+             that is the probe's clock, not a reading of fleet CPU",
+        );
+        assert!(
+            line.contains("attribution unavailable (footprint probe"),
+            "{line}"
+        );
+        assert!(line.contains("did not answer inside 8s"), "{line}");
+        assert!(line.contains("--force"), "{line}");
+    }
+
+    /// AC4-ERR's missing-binary half: with neither probe on PATH there is no
+    /// argv (the refusal then names the missing binaries), the console
+    /// script wins when present, and `fno` (the Rust shim, with its
+    /// provisioning waits) is never a candidate.
+    #[test]
+    fn probe_argv_prefers_the_console_script_and_absence_names_the_binaries() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-probe-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp path dir");
+        let old_path = std::env::var("PATH").ok();
+        std::env::set_var("PATH", &dir);
+
+        assert!(
+            footprint_probe_argv().is_none(),
+            "a PATH with no probe must produce no argv"
+        );
+
+        let script = dir.join("fno-footprint-cause");
+        std::fs::write(&script, "#!/bin/sh\ntrue\n").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        }
+
+        let argv = footprint_probe_argv().expect("the console script must resolve");
+        assert_eq!(argv, vec!["fno-footprint-cause".to_string()]);
+
+        std::fs::remove_file(&script).expect("remove console-script stub");
+        let py = dir.join("fno-py");
+        std::fs::write(&py, "#!/bin/sh\ntrue\n").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        }
+
+        let argv = footprint_probe_argv().expect("fno-py must resolve as the fallback");
+        assert!(argv[0].ends_with("fno-py"), "{argv:?}");
+        assert!(argv.contains(&"doctor".to_string()), "{argv:?}");
+        assert!(
+            !argv.iter().any(|arg| arg == "fno"),
+            "the shim is not a candidate: {argv:?}"
+        );
+
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
