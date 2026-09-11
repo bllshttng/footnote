@@ -3124,8 +3124,7 @@ class StopResult:
 
     ``claude_exit`` is the shellout's exit code on the claude path; ``None``
     for codex / gemini where stop is a synchronous no-op between asks.
-    ``noop`` marks the codex/gemini no-op arm: no stop happened, so no
-    stopped session's claims get released (x-9c91 change 5).
+    ``noop`` marks that arm: no stop happened, so no claims get released.
     """
 
     name: str
@@ -6406,25 +6405,17 @@ def _hold_lapsed_for(entry) -> bool:
 def _delivery_policy_refusal(target) -> Optional[str]:
     """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
     belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
-    unreadable registry).
-
-    The gate every shared injector consults BEFORE any transport call, so the
-    no-paste guarantee holds on every reachable lane (name/reply, job, project,
-    raw, dispatch, ask, annotate) rather than on whichever lane remembered to
-    check. Accepts the target in whatever form the lane holds: a registry
-    ``AgentEntry``, or an id/handle token matched against ``harness_session_id``,
-    ``short_id``, and ``name``. Unresolvable reads as no-policy -- failing open
-    here fails toward today's behavior (live delivery to workers), never toward
-    stranding a worker's mail on a registry hiccup.
-
-    Never raises."""
+    unreadable registry). The gate every shared injector consults BEFORE any
+    transport call, so the no-paste guarantee holds on every reachable lane
+    rather than on whichever lane remembered to check. Accepts an
+    ``AgentEntry``, or an id/handle token matched against
+    ``harness_session_id``, ``short_id``, and ``name``; an unresolvable read
+    fails open toward live delivery, never toward stranding mail. Never
+    raises."""
     try:
         if target is None:
             return None
-        # Two branches, and the expiry check belongs on BOTH. A caller holding
-        # an AgentEntry never reaches the registry loop below, so a self-heal
-        # on one branch is decorative on the other (dispatch.py:576, :5741 and
-        # :6773 all pass an entry).
+        # The expiry check belongs on BOTH entry and token branches.
         if hasattr(target, "delivery_policy"):
             if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
                 return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY
