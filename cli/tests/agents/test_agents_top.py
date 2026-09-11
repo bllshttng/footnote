@@ -697,3 +697,67 @@ def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, r
     for line in result.output.splitlines():
         if "fresh-worker" in line or "stale-worker" in line:
             assert " live" not in f" {line}", line
+
+
+class TestLongHolds:
+    """AC7 (x-9c91): single-flight holds over 12m are visible in `top`."""
+
+    @staticmethod
+    def _dead_pid() -> int:
+        import psutil
+
+        pid = 999_999
+        while psutil.pid_exists(pid):
+            pid += 1
+        return pid
+
+    def test_AC7_HP_long_hold_row_in_json_and_text(self, tmp_path, monkeypatch):
+        import time as _time
+
+        from fno.agents import top as top_mod
+
+        pid = self._dead_pid()
+        row = {
+            "key": "flight:abc",
+            "holder": "single-flight:xyz",
+            "pid": pid,
+            "state": "stale",
+            "acquired_at": int(_time.time() * 1000) - (13 * 60 * 1000),
+        }
+        monkeypatch.setattr("fno.claims.core.list_claims", lambda **_kw: [row])
+        cdir = tmp_path / "claims-root" / ".fno" / "claims"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "flight%3Aabc.held-requests").write_text("1 1\n2 2\n3 3\n")
+
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert len(payload["long_holds"]) == 1
+        hold = payload["long_holds"][0]
+        assert hold["key"] == "flight:abc"
+        assert hold["pid"] == pid
+        assert hold["pid_observed"] == "absent"
+        assert hold["held_s"] >= 780
+        assert hold["requests"] == 3
+
+        out = top_mod.render_top()
+        assert "single-flight holds over 12m:" in out
+        assert "flight:abc" in out
+        assert "absent" in out
+
+    def test_AC7_ERR_read_failure_sets_error_and_warning(self, monkeypatch):
+        from fno.agents import top as top_mod
+
+        def _boom(**_kw):
+            raise RuntimeError("claims root unreadable")
+
+        monkeypatch.setattr("fno.claims.core.list_claims", _boom)
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert "long_holds" not in payload
+        assert "claims root unreadable" in payload["long_holds_error"]
+        assert any("long holds read failed" in w for w in payload["warnings"])
+        assert "long holds read failed" in top_mod.render_top()
+
+    def test_no_long_holds_still_reads_as_an_empty_list(self):
+        from fno.agents import top as top_mod
+
+        payload = json.loads(top_mod.render_top(as_json=True))
+        assert payload["long_holds"] == []

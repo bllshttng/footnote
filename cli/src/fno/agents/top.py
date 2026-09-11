@@ -11,6 +11,7 @@ slot-counted, observable, not addressable.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -593,6 +594,94 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     return out
 
 
+#: Twelve-minute reconcile runs are measured, per the FLIGHT_TTL_MS doc in
+#: flight_gate.rs; a single-flight hold older than this shows in `top`.
+LONG_HOLD_S = 12 * 60
+
+
+def _pid_observed(pid: object) -> str:
+    """present / absent / unreadable: name the probe, never infer from it."""
+    if pid is None:
+        return "unreadable"
+    try:
+        import psutil
+
+        psutil.Process(int(pid))  # noqa: BLE001
+        return "present"
+    except psutil.NoSuchProcess:
+        return "absent"
+    except psutil.AccessDenied:
+        return "unreadable"
+    except Exception:  # noqa: BLE001 - an unprobeable pid stays unreadable
+        return "unreadable"
+
+
+def _sidecar_requests(cdir: Path, key: str) -> int:
+    """Lines in the flight gate's .held-requests sidecar (per-holder count)."""
+    from fno.claims.io import encode_key
+
+    try:
+        text = (cdir / f"{encode_key(key)}.held-requests").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return 0
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def long_hold_rows() -> dict:
+    """Single-flight holds older than LONG_HOLD_S across both claims roots.
+
+    The block exists because a held counter that only lived inside
+    flight-acquire receipts was invisible from `top` (x-9c91 change 7). A
+    row carries the key, holder, pid with its observed probe, held age, and
+    the sidecar's request count. A failed claims read returns
+    ``{"error": ...}`` and never raises: a top render must not die on it.
+    """
+    from fno.claims.core import list_claims
+    from fno.claims.io import dedup_claims_roots, global_claims_root
+
+    try:
+        now_ms = int(time.time() * 1000)
+        rows: list[dict] = []
+        for raw_root, cdir in dedup_claims_roots([global_claims_root(), None]):
+            for claim in list_claims(prefix="flight:", root=raw_root, include_stale=True):
+                held_s = (now_ms - int(claim.get("acquired_at") or 0)) // 1000
+                if held_s <= LONG_HOLD_S:
+                    continue
+                rows.append(
+                    {
+                        "key": claim.get("key"),
+                        "holder": claim.get("holder"),
+                        "pid": claim.get("pid"),
+                        "pid_observed": _pid_observed(claim.get("pid")),
+                        "held_s": max(0, held_s),
+                        "requests": _sidecar_requests(cdir, str(claim.get("key"))),
+                    }
+                )
+        rows.sort(key=lambda r: -r["held_s"])
+    except Exception as exc:  # noqa: BLE001 - a top render never dies on a claims read
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {"rows": rows}
+
+
+def _render_long_hold_lines(long_holds: dict) -> list[str]:
+    """The text block after the lanes; silent when nothing is over 12m."""
+    if "error" in long_holds:
+        return [f"long holds read failed: {long_holds['error']}"]
+    rows = long_holds["rows"]
+    if not rows:
+        return []
+    out = [f"single-flight holds over {LONG_HOLD_S // 60}m:"]
+    for r in rows:
+        out.append(
+            f"  {r['key']}  holder {r['holder']}  pid {r['pid']} "
+            f"({r['pid_observed']})  held {_fmt_age(r['held_s'])}  "
+            f"requests {r['requests']}"
+        )
+    return out
+
+
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
@@ -611,6 +700,10 @@ def render_top(
         "whose run ended is under run_ended, not missing; per-session "
         "liveness is fno agents truth <handle>"
     )
+    long_holds = long_hold_rows()
+    long_hold_warning = (
+        [f"long holds read failed: {long_holds['error']}"] if "error" in long_holds else []
+    )
     if as_json:
         payload: dict = {
             "workers": rows,
@@ -618,11 +711,17 @@ def render_top(
             "predicate": predicate,
             "lanes": lanes,
             "slot_claims": c.slot_claims,
-            "warnings": list(c.warnings),
+            "warnings": list(c.warnings) + long_hold_warning,
         }
+        if "error" in long_holds:
+            # long_holds stays absent: a reader must tell "read, none" from
+            # "not read" (x-9c91 change 7).
+            payload["long_holds_error"] = long_holds["error"]
+        else:
+            payload["long_holds"] = long_holds["rows"]
         if subagents is not None:
             payload["subagents"] = subagents["rows"]
-            payload["warnings"] = c.warnings + subagents["warnings"]
+            payload["warnings"] = c.warnings + long_hold_warning + subagents["warnings"]
         if pane_stats is not None:
             payload["pane_stats"] = pane_stats
         return json.dumps(payload, indent=2)
@@ -632,6 +731,10 @@ def render_top(
     # Lanes lead: a provider cap refuses spawns the table below calls healthy.
     if lanes:
         out.extend(_render_lane_lines(lanes))
+        out.append("")
+    hold_lines = _render_long_hold_lines(long_holds)
+    if hold_lines:
+        out.extend(hold_lines)
         out.append("")
     # The retirable line leads with the lanes (x-1379): the same shape of
     # fact as a full lane - a cap refusing spawns the table calls healthy.
