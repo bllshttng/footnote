@@ -40,22 +40,15 @@ EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
 
 #: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
-#: HERE because these tokens are the gate's vocabulary; the CLI retry loop
-#: imports this set rather than re-spelling it.
+#: HERE because these tokens are the gate's vocabulary; the CLI imports this
+#: set rather than re-spelling it. no_wait/no_wait_mutex_held surface only
+#: when an attempt runs no_wait (spawn --wait forces that), so the CLI
+#: deadline - not this gate's 600s queue - bounds the wait.
 WAITABLE_REFUSAL_REASONS = frozenset(
     {
-        "load_backstop",
-        "ram_floor",
-        "cpu_instrument_unreadable",
-        "cpu_share_undecidable",
-        "fleet_cpu_share",
-        "provider_cap",
-        "max_live",
-        # Surfaced only when an attempt runs no_wait (spawn --wait forces
-        # that), so the CLI deadline - not this gate's 600s queue - bounds
-        # the wait.
-        "no_wait",
-        "no_wait_mutex_held",
+        "load_backstop", "ram_floor", "cpu_instrument_unreadable",
+        "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
+        "max_live", "no_wait", "no_wait_mutex_held",
     }
 )
 
