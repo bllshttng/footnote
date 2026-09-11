@@ -378,3 +378,35 @@ def test_undated_touch_never_inflates_autonomy():
     out = _autonomy(events, {"x-1"}, cutoff, now)
     assert out["available"] is True
     assert out["touches"] == 1
+
+
+# --- x-fe4d: the JSON stream stays strict (no NaN/Infinity tokens) ----------
+def test_num_never_returns_nonfinite():
+    from fno.scoreboard.fold import _num
+
+    assert _num(float("nan")) == 0.0
+    assert _num(float("inf")) == 0.0
+    assert _num(float("-inf")) == 0.0
+    assert _num("nan") == 0.0
+    assert _num(None) == 0.0
+    assert _num("junk") == 0.0
+    assert _num("12.5") == 12.5
+    assert _num(3) == 3.0
+
+
+def test_scoreboard_json_stream_is_strict(tmp_path, monkeypatch):
+    rows = [
+        {
+            "completed": _RECENT,
+            "termination_reason": "DonePRGreen",
+            "graph_node_id": "x-1",
+            "cost_usd": float("inf"),
+        }
+    ]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), ["--json"])
+    assert res.exit_code == 0, res.output
+    import json as _json
+
+    parsed = _json.loads(res.output, parse_constant=lambda c: pytest.fail(f"non-finite {c}"))
+    assert isinstance(parsed, dict)

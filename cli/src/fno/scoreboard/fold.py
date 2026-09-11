@@ -252,11 +252,16 @@ def _pct(n: int, d: int) -> int:
 
 
 def _num(v) -> float:
-    """Coerce a possibly-malformed ledger cost to float; junk -> 0.0."""
+    """Coerce a possibly-malformed ledger cost to float; junk -> 0.0.
+
+    NaN and the infinities parse as float but are junk: they would ride into
+    the -J stream and break strict JSON, so they read as 0.0 like any other
+    malformed value."""
     try:
-        return float(v or 0.0)
+        value = float(v or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def _num_opt(v) -> float | None:
