@@ -1538,11 +1538,8 @@ def cmd_idea(
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
     Equivalent to `fno backlog add <title>` but signals intent to skip the
-    spec/plan ceremony for now. The new node has no ``plan_path`` and so
-    derives to ``status: idea`` until a plan is associated (via
-    ``fno backlog intake`` or by setting ``--plan-path`` on
-    ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
-    can carry parent/size/domain without a follow-up ``fno backlog update``.
+    spec/plan ceremony: no ``plan_path`` derives to ``status: idea`` until
+    one is bound. Shares ``add``'s full option set.
     """
     from fno.text_or_file import read_text_arg
 

@@ -1982,8 +1982,10 @@ def probe_capacity() -> dict:
             lanes=lanes,
         )
     # The same readings the refusal paths name, so an accepted verdict carries
-    # the headroom that admitted it: a trigger value is only actionable beside
-    # its reading.
+    # the headroom that admitted it: a trigger is only actionable beside its
+    # reading.
+    from fno.doctor_footprint import _admission_config
+
     accepted: dict[str, object] = {
         "verdict": "accepted",
         "lanes": lanes,
@@ -1992,15 +1994,13 @@ def probe_capacity() -> dict:
         "share_low": admission.share_low,
         "ceiling": admission.ceiling,
         "load_15m": admission.load_15m,
+        "hard_max_load_per_cpu": _admission_config()[1],
     }
     if floor_gb > 0:
         accepted["min_free_gb"] = floor_gb
         avail = available_ram_gb()
         if avail is not None:
             accepted["available_ram_gb"] = avail
-    from fno.doctor_footprint import _admission_config
-
-    accepted["hard_max_load_per_cpu"] = _admission_config()[1]
     return accepted
 
 

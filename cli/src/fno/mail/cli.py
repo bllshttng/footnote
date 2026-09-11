@@ -294,12 +294,9 @@ def _vet_body(body: str, *, allow_reason: str | None = None) -> None:
 def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
-    Fail-open: a disabled tier (0) or an unset body never blocks coordination.
-    The refusal teaches the rule: put the detail in a node or doc and send a
-    short pointer, since the mail is re-read far more often than the node.
-    ``usage=True`` exits 2: under ``--raw --check`` an over-cap payload is a
-    malformed CALL, and exit 1 there would read as a not-injectable verdict
-    about a session the run never measured.
+    Fail-open: a disabled tier (0) or an unset body never blocks
+    coordination; the refusal teaches "pointer, not payload". Under
+    ``--raw --check`` an over-cap payload is a malformed CALL, hence exit 2.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:

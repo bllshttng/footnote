@@ -52,18 +52,14 @@ def cmd_peek(
     from fno.agents.peek import peek
     from fno.paths import state_dir
 
-    if all_sessions:
-        if handle is not None:
-            sys.stderr.write("--all searches every session; drop the handle argument\n")
-            raise typer.Exit(code=2)
-        if follow:
-            sys.stderr.write("--all reads tails, not streams; drop --follow\n")
-            raise typer.Exit(code=2)
-    elif handle is None:
+    if all_sessions and handle is not None:
+        sys.stderr.write("--all searches every session; drop the handle argument\n")
+        raise typer.Exit(code=2)
+    if not all_sessions and handle is None:
         sys.stderr.write("usage: fno agents peek <handle>  (or --all)\n")
         raise typer.Exit(code=2)
-    if grep is not None and follow:
-        sys.stderr.write("--grep filters a tail; run it without --follow\n")
+    if follow and (all_sessions or grep is not None):
+        sys.stderr.write("--follow streams one peer; --all/--grep read a tail\n")
         raise typer.Exit(code=2)
 
     if lines < 0:

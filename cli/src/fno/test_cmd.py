@@ -2345,10 +2345,9 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     type=click.Path(path_type=Path),
     default=None,
     help=(
-        "Capture to this file instead of .fno/last-test.log; the file's last "
-        "line is always EXIT=<rc>, so `tail -1` recovers the real code an "
-        "outer tee or bg harness would flatten. (Claims the token: pytest's "
-        "own passthrough has no bare --log.)"
+        "Capture here instead of .fno/last-test.log; the file's last line is "
+        "always EXIT=<rc>. (Claims the token: pytest's passthrough has no "
+        "bare --log.)"
     ),
 )
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)
