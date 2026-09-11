@@ -1,4 +1,4 @@
-"""``fno inbox operator`` - the operator conversation queue.
+"""``fno inbox user`` (old spelling ``fno inbox operator`` still works) - the user conversation queue.
 
 A king records from the direction it is pushed: worker mail arrives as a
 discrete event with an id and a queue, so it gets recorded, while operator
@@ -58,11 +58,11 @@ class OperatorCaptureError(Exception):
 
 
 operator_app = typer.Typer(
-    name="operator",
-    help="Queue of this session's undispositioned operator turns, derived "
+    name="user",
+    help="Queue of this session's undispositioned user turns, derived "
     "from the transcript and acked to a per-session ledger under "
     "~/.fno/operator-capture/. Hole: raw mail (send --raw) reads as "
-    "operator; over-counting is the safe direction.",
+    "a user turn; over-counting is the safe direction.",
     no_args_is_help=True,
 )
 
@@ -330,7 +330,7 @@ def cmd_list(
     limit: int = typer.Option(None, "--limit", "-L", min=1, help="Max turns to show."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON array."),
 ) -> None:
-    """Undispositioned operator turns, oldest first."""
+    """Undispositioned user turns, oldest first."""
     sid, path = _resolve_with_transcript()
     acked = read_acked_turn_ids(sid)
     pending = [t for t in read_operator_turns(path) if t["turn_id"] not in acked]
@@ -340,7 +340,7 @@ def cmd_list(
         typer.echo(json.dumps(pending, indent=2))
         return
     if not pending:
-        typer.echo("no undispositioned operator turns")
+        typer.echo("no undispositioned user turns")
         return
     now = datetime.now(timezone.utc).timestamp()
     for t in pending:
@@ -350,7 +350,7 @@ def cmd_list(
 
 @operator_app.command("ack")
 def cmd_ack(
-    turn_id: str = typer.Argument(..., help="The operator turn id to dispose."),
+    turn_id: str = typer.Argument(..., help="The user turn id to dispose."),
     outcome: str = typer.Option(
         ...,
         "--outcome",
@@ -358,7 +358,7 @@ def cmd_ack(
     ),
     why: str = typer.Option(None, "--why", help="One-line reason, kept in the ledger."),
 ) -> None:
-    """Dispose one operator turn, naming what it produced."""
+    """Dispose one user turn, naming what it produced."""
     sid, _ = _resolve_or_fail(require_transcript=False)
     try:
         row = ack_turn(sid, turn_id, outcome, why or "")
@@ -379,10 +379,10 @@ def cmd_status(
         typer.echo(json.dumps(depth, indent=2))
         return
     if depth["depth"] == 0:
-        typer.echo("operator queue: 0")
+        typer.echo("user queue: 0")
         return
     age = depth["oldest_age_s"]
     age_text = f", oldest {age}s old" if age is not None else ""
-    typer.echo(f"operator queue: {depth['depth']} undispositioned turn(s){age_text}")
+    typer.echo(f"user queue: {depth['depth']} undispositioned turn(s){age_text}")
     if depth["oldest_excerpt"]:
         typer.echo(f"  oldest: {depth['oldest_excerpt']}")
