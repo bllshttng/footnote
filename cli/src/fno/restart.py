@@ -283,9 +283,7 @@ def restart_command(
                     say(line)
                 elif line.strip():
                     say(line)  # unprefixed daemon receipts ("restarted: pid A -> B")
-            spared = keepers is not None and any(
-                c.get("result") != "cycled" for c in keepers.get("store_keepers", [])
-            )
+            spared = keepers is not None and any(c.get("result") != "cycled" for c in keepers.get("store_keepers", []))
             if rc == 0 or spared:  # a nonzero exit that IS the spared keeper
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")

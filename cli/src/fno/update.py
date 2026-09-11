@@ -431,8 +431,7 @@ def running_components(
 ) -> "list[dict] | None":
     """One row per long-lived process from ``fno-agents census --json``
     (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``None``
-    when the census itself could not run: a dark census is not an empty
-    machine, and [] here would read as an all-clear."""
+    when the census itself could not run: a dark census is not an empty machine."""
     try:
         from fno import rust_binary
 
@@ -592,10 +591,8 @@ def _wire_label(wires: list[int]) -> str:
 
 
 def _current_but_stale(rev_label: str, stale: int, restartable: int, pane_kept: int) -> str:
-    return (
-        f"installed {rev_label} is current; {stale} running process(es) are older builds - restart "
-        f"cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end"
-    )
+    return (f"installed {rev_label} is current; {stale} running process(es) are older builds - restart "
+            f"cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end")
 
 
 def _build_update_guidance(
@@ -764,8 +761,7 @@ def update_readiness(
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
-    # Census rows (x-f188 change 7). `running_rows`, never `running`: that
-    # name is the interpreter string python_tool carries.
+    # Census rows (x-f188); never the name `running`: python_tool owns it.
     census_rows = running_components(runner)
     if census_rows is None:
         degraded.append("running-process census unavailable")
