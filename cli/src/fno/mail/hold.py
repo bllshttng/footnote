@@ -652,12 +652,9 @@ def _emit_drain_marker(
     """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
 
     Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
-    state, and lets the dead-letter sweep prefer a positive marker over cursor
-    inference. ``reason`` distinguishes a message that was printed from one
-    skipped as a duplicate (W2), so the receipt never silently swallows a
-    message. Swallowed on any failure: the caller has already printed and acked
-    the message, so a missing receipt degrades to the cursor fallback rather than
-    failing the drain (AC9-ERR).
+    state; ``reason`` distinguishes printed from skipped-duplicate (W2).
+    Swallowed on any failure: the caller has already printed and acked the
+    message, so a missing receipt degrades to the cursor fallback (AC9-ERR).
     """
     from fno.agents import events
 

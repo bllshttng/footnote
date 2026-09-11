@@ -969,8 +969,7 @@ def _parse_wait_seconds(raw: str) -> float:
     return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
 
 
-# Shared option types for the spawn/ask pair: declared once so the two
-# commands cannot drift apart on the flags they both carry.
+# Shared option types for the spawn/ask pair, declared once.
 CwdOpt = Annotated[Optional[str], typer.Option("--cwd", "-c", help="Working directory for the agent subprocess.")]
 FreshOpt = Annotated[
     bool,
