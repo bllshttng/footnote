@@ -51,6 +51,7 @@ pub mod agents_config;
 pub mod agy_ask;
 pub mod attach;
 pub mod authorized_merge;
+pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
 mod bounded_spawn;
