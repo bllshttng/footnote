@@ -2,9 +2,10 @@
 //! (crown ruling on laws d-4b39ad4c / d-52ae01cb: the tree budget ports the
 //! touched verb to crates/ rather than raising the allowance).
 //!
-//! One data file stays the contract: the tables are read from
-//! `cli/src/fno/agents/naming-codes.yaml` at compile time, so Python and Rust
-//! cannot drift on the codes - only on behavior, which the ported tests pin.
+//! One data file stays the contract: the tables are read from the crate-local
+//! `naming-codes.yaml` at compile time (the Python copy is deleted; the
+//! Python side reads the tables back through `name-codes`), so Python and
+//! Rust cannot drift on the codes - only on behavior, which the ported tests pin.
 
 use regex::Regex;
 use serde::Deserialize;

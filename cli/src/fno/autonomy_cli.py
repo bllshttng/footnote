@@ -49,8 +49,8 @@ class SpawnerStatus:
 def dispatch_provenance() -> list[tuple[str, str, str]]:
     """The 18 dispatch paths (x-84b2) as ``(site, source, verb)`` rows: the 13
     autonomous spawners of the status table plus spawn-on-blueprint and the
-    four extra paths from the operator input brief. Data lives in
-    ``cli/src/fno/agents/naming-codes.yaml``."""
+    four extra paths from the operator input brief. Data lives in the binary
+    (``name-codes``); the crate-local yaml is the source of record."""
     from fno.agents.naming import provenance_rows
 
     return list(provenance_rows())

@@ -1,7 +1,7 @@
-"""The single owner of agent-name generation: :func:`agent_name` budgets the
-64-char daemon contract; :func:`dispatch_agent_name` owns the x-84b2
-source/verb vocabulary (data in ``naming-codes.yaml``). The daemon stays the
-validator at the spawn boundary and must never become the generator."""
+"""The single owner of agent-name generation. The vocabulary - codes, mint,
+parse - lives in the fno-agents binary (``crates/fno-agents/src/naming.rs``);
+this module is its Python door. The daemon stays the validator at the spawn
+boundary and must never become the generator."""
 
 from __future__ import annotations
 
@@ -18,12 +18,13 @@ MAX_LEN = 64
 #: ``cut -c1-30``.
 SLUG_CAP = 30
 
+
 def _binary() -> str:
     from fno import rust_binary
 
-    # The full resolver (env override -> bundled -> sibling -> PATH -> cargo
-    # dev), not the installed-only one: the vocabulary owner lives in the
-    # binary, so a dev checkout resolves its own fresh build.
+    # Full resolver (env override -> bundled -> sibling -> PATH -> cargo dev):
+    # the vocabulary owner lives in the binary, so a dev checkout must resolve
+    # its own fresh build.
     binary = rust_binary.resolve_binary()
     if binary is None:
         raise AgentNameError(
@@ -33,16 +34,30 @@ def _binary() -> str:
     return str(binary)
 
 
-def _mint(*args: str) -> str:
+def _run(*args: str, stdin: Optional[str] = None) -> subprocess.CompletedProcess:
     import os
 
-    proc = subprocess.run(
-        [_binary(), "name-mint", *args],
+    return subprocess.run(
+        [_binary(), *args],
+        input=stdin,
         capture_output=True,
         text=True,
         timeout=30,
         env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
     )
+
+
+class AgentNameError(ValueError):
+    """The required identity cannot be represented under the daemon contract."""
+
+
+class BridgeUsageError(ValueError):
+    """`fno agents name` invoked with no usable form (exit 2) - never
+    conflated with the exit-3 naming refusal."""
+
+
+def _mint(*args: str) -> str:
+    proc = _run("name-mint", *args)
     if proc.returncode == 0:
         lines = proc.stdout.strip().splitlines()
         name = lines[-1] if lines else ""
@@ -62,66 +77,18 @@ def _opt(value: Optional[str]) -> list[str]:
     return [] if not value else [value]
 
 
-class AgentNameError(ValueError):
-    """The required identity cannot be represented under the daemon contract."""
-
-
-class BridgeUsageError(ValueError):
-    """`fno agents name` invoked with no usable form (a usage error, exit 2 -
-    never conflated with the exit-3 naming refusal a stale install cannot
-    distinguish from a usage error otherwise)."""
-
-
-def bridge_name(
-    prefix: str,
-    node_id: str,
-    *,
-    slug: Optional[str] = None,
-    qualifier: Optional[str] = None,
-    discriminator: Optional[str] = None,
-    source: Optional[str] = None,
-    verb: Optional[str] = None,
-) -> str:
-    """The `fno agents name` assembly: ``--verb``/``--source`` select the
-    x-84b2 dispatch form; a positional prefix alone is the legacy form."""
-    if verb or source:
-        if prefix:
-            raise BridgeUsageError(
-                "pass the legacy prefix form or --source/--verb, not both"
-            )
-        code = verb if verb in dispatch_verbs() else (verb_code_for(verb) if verb else "")
-        args: list[str] = []
-        s = (source or "").strip()
-        if s:
-            args += ["--source", s]
-        c = (code or "").strip()
-        if c:
-            args += ["--verb", c]
-        if not c:
-            raise BridgeUsageError("--source requires --verb")
-        return _mint(*args, node_id,
-                     *(["--slug", slug or ""] if _opt(slug) else []),
-                     *(["--qualifier", qualifier or ""] if _opt(qualifier) else []),
-                     *(["--discriminator", discriminator or ""] if _opt(discriminator) else []))
-    if not prefix:
-        raise BridgeUsageError("a prefix or --verb is required")
-    return agent_name(
-        prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator
-    )
+def _flags(*pairs: tuple[str, Optional[str]]) -> list[str]:
+    out: list[str] = []
+    for flag, value in pairs:
+        if _opt(value):
+            out += [flag, value or ""]
+    return out
 
 
 @lru_cache(maxsize=1)
 def _codes() -> dict:
     """The vocabulary tables, served by the binary that owns them."""
-    import os
-
-    proc = subprocess.run(
-        [_binary(), "name-codes", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
-    )
+    proc = _run("name-codes", "--json")
     if proc.returncode != 0:
         raise AgentNameError("name-codes read failed: the fno-agents binary is stale")
     raw = json.loads(proc.stdout)
@@ -165,32 +132,53 @@ def agent_name(
     discriminator: Optional[str] = None,
 ) -> str:
     """Build ``<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]``.
-
-    The name is the dedup token for ``fno agents spawn``: required identity
-    never shaves; only the human slug gives way. :raises AgentNameError:
-    over-budget required identity.
-    """
-    flags: list[str] = []
-    for flag, value in (
-        ("--slug", slug),
-        ("--qualifier", qualifier),
-        ("--discriminator", discriminator),
-    ):
-        if _opt(value):
-            flags += [flag, value or ""]
+    Required identity never shaves (the name IS the spawn dedup token); only
+    the slug gives way."""
     if not (prefix or "").strip() and not (node_id or "").strip():
-        # The bridge reads empty-everything as a usage error; the Python owner
-        # always refused it as a naming error - keep that contract for the
-        # in-process producers.
+        # The bridge reads empty-everything as usage (exit 2); in-process
+        # producers keep the naming-error contract.
         raise AgentNameError("agent name needs at least a prefix or a node id")
-    return _mint(prefix, node_id, *flags)
+    return _mint(
+        prefix,
+        node_id,
+        *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)),
+    )
+
+
+def bridge_name(
+    prefix: str,
+    node_id: str,
+    *,
+    slug: Optional[str] = None,
+    qualifier: Optional[str] = None,
+    discriminator: Optional[str] = None,
+    source: Optional[str] = None,
+    verb: Optional[str] = None,
+) -> str:
+    """The `fno agents name` assembly: ``--verb``/``--source`` select the
+    x-84b2 dispatch form (``--verb`` takes a code or a work-verb word); a
+    positional prefix alone is the legacy form."""
+    if verb or source:
+        if prefix:
+            raise BridgeUsageError("pass the legacy prefix form or --source/--verb, not both")
+        if not verb:
+            raise BridgeUsageError("--source requires --verb")
+        return _mint(
+            *(["--source", source] if _opt(source) else []),
+            "--verb",
+            verb if verb in dispatch_verbs() else verb_code_for(verb),
+            node_id,
+            *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)),
+        )
+    if not prefix:
+        raise BridgeUsageError("a prefix or --verb is required")
+    return agent_name(prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator)
 
 
 def verb_code_for(word: Optional[str]) -> str:
     """The verb code for a work-verb word (``/target``, ``/fno:blueprint``,
-    ``builtin``, ...). Unknown words raise: nothing defaults to ``t``. The
-    word-normalization is trivial text handling; the TABLE it reads is the
-    binary's (``name-codes``), so no second copy of the vocabulary exists."""
+    ``builtin``, ...); unknown words raise, nothing defaults to ``t``. The
+    table is the binary's; only the trivial normalization is local."""
     v = (word or "").strip()
     if v.startswith("/fno:"):
         v = v[len("/fno:"):]
@@ -212,27 +200,18 @@ def dispatch_agent_name(
     qualifier: Optional[str] = None,
     discriminator: Optional[str] = None,
 ) -> str:
-    """Build ``[<source>-]<verb>-<identity>[-...]`` (x-84b2). ``source``
-    None is the attended manual form; unknown codes raise rather than
-    fabricating provenance."""
-    v = (verb or "").strip()
-    if v not in dispatch_verbs():
-        # The bridge maps work-verb words; the dispatch seam takes codes only.
+    """Build ``[<source>-]<verb>-<identity>[-...]`` (x-84b2); ``source`` None
+    is the attended manual form."""
+    # The bridge maps work-verb words; the dispatch seam takes codes only.
+    if (verb or "").strip() not in dispatch_verbs():
         raise AgentNameError(f"unknown dispatch verb {verb!r}")
-    flags: list[str] = []
-    for flag, value in (
-        ("--slug", slug),
-        ("--qualifier", qualifier),
-        ("--discriminator", discriminator),
-    ):
-        if _opt(value):
-            flags += [flag, value or ""]
-    args: list[str] = []
-    if _opt(source):
-        args += ["--source", source or ""]
-    if _opt(verb):
-        args += ["--verb", verb or ""]
-    return _mint(*args, identity, *flags)
+    return _mint(
+        *(["--source", source] if _opt(source) else []),
+        "--verb",
+        verb,
+        identity,
+        *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)),
+    )
 
 
 @dataclass(frozen=True)
@@ -249,21 +228,11 @@ class DispatchName:
 
 
 def parse_many(names: list[str]) -> list[Optional[DispatchName]]:
-    """Batch parse: one binary exec for a whole list of candidate names. The
-    hot readers (cleanup candidate scan, truth-status row reads) call this;
-    single-name callers use :func:`parse_dispatch_agent_name`."""
+    """Batch parse in one binary exec; single-name callers use
+    :func:`parse_dispatch_agent_name`."""
     if not names:
         return []
-    import os
-
-    proc = subprocess.run(
-        [_binary(), "name-parse"],
-        input="\n".join(names),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env={**os.environ, "FNO_AGENTS_RUNTIME": "rust"},
-    )
+    proc = _run("name-parse", stdin="\n".join(names))
     if proc.returncode != 0:
         raise AgentNameError("name-parse failed: the fno-agents binary is stale")
     out: list[Optional[DispatchName]] = []
@@ -282,10 +251,9 @@ def parse_many(names: list[str]) -> list[Optional[DispatchName]]:
 
 
 def parse_dispatch_agent_name(name: Optional[str]) -> Optional[DispatchName]:
-    """Parse ``[<source>-]<verb>-<identity>``, else None. Positional
-    grammar: the first token is a source only when the second is a verb, so a
-    node prefix colliding with a code cannot misread. Pre-cutover names are
-    not canonical (AC3-EDGE)."""
+    """Parse ``[<source>-]<verb>-<identity>``, else None. The first token is a
+    source only when the second is a verb, so a colliding node prefix cannot
+    misread. Pre-cutover names are not canonical (AC3-EDGE)."""
     if not name:
         return None
     return parse_many([name])[0]
