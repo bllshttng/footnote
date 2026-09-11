@@ -296,10 +296,11 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
             )
 
     try:
+        from fno.agents.spawn_gate import _cpu_axis
         from fno.footprint import Admission
 
         admission = (
-            _cpu_axis_fresh() if load_decision is _UNSAMPLED else cast("Admission", load_decision)
+            _cpu_axis() if load_decision is _UNSAMPLED else cast("Admission", load_decision)
         )
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("cpu-share", exc, key="agents.max_fleet_cpu_share"))
@@ -334,12 +335,6 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
         )
     )
     return out
-
-
-def _cpu_axis_fresh() -> object:
-    from fno.agents.spawn_gate import _cpu_axis
-
-    return _cpu_axis()
 
 
 def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:

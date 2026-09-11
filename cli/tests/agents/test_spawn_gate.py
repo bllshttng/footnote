@@ -79,17 +79,16 @@ def _load(load1: float):
     return lambda: (load1, 0.0, 0.0)
 
 
-def test_load_snapshot_exposes_shared_trigger_measurement(monkeypatch):
+def test_load_snapshot_is_display_only(monkeypatch):
+    """x-7783: the load reading is a trend line. Nothing on it gates."""
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
 
     snapshot = spawn_gate._load_snapshot(8.0)
 
     assert snapshot.load_1m == pytest.approx(141.6)
-    assert snapshot.max_load_per_cpu == pytest.approx(8.0)
     assert snapshot.load_cpu_count == 12
-    assert snapshot.load_ceiling == pytest.approx(96.0)
-    assert snapshot.spawn_load_status == "exceeded"
+    assert snapshot.load_15m is not None
 
 
 def test_load_snapshot_marks_unreadable_load(monkeypatch):
@@ -102,8 +101,6 @@ def test_load_snapshot_marks_unreadable_load(monkeypatch):
     snapshot = spawn_gate._load_snapshot(8.0)
 
     assert snapshot.load_1m is None
-    assert snapshot.load_ceiling == pytest.approx(96.0)
-    assert snapshot.spawn_load_status == "unavailable"
 
 
 ALIVE = os.getpid()  # a pid that is definitely alive (this test process)

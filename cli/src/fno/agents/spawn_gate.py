@@ -273,13 +273,10 @@ class LiveCensus:
 
 @dataclass(frozen=True)
 class LoadSnapshot:
+    # x-7783: display/trend fields only. Nothing gates on any of them; the
+    # CPU axis reads its own inputs inside cpu_admission.
     load_1m: float | None
-    max_load_per_cpu: float
     load_cpu_count: int
-    load_ceiling: float
-    spawn_load_status: Literal["disabled", "unavailable", "within", "exceeded"]
-    # The 5m/15m averages ride along for the court panel: a climb and a spike
-    # look identical through the 1m figure alone. Nothing gates on them.
     load_5m: float | None = None
     load_15m: float | None = None
 
@@ -1247,13 +1244,6 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
     )
 
 
-#: The receipt `reason` tokens a CPU-axis refusal can carry. The hold is not
-#: here: a hold queues, it does not refuse.
-_CPU_REFUSAL_REASONS = frozenset(
-    {"load_backstop", "cpu_instrument_unreadable", "cpu_share_undecidable"}
-)
-
-
 def _load_cpus() -> int:
     """The CPU denominator for the CPU axis and the backstop.
 
@@ -1283,32 +1273,17 @@ def _load_cpus() -> int:
 
 
 def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
+    """The display/trend load reading. The retired per-cpu argument stays so
+    footprint's degraded-snapshot path keeps its shape; nothing gates here."""
+    del max_load_per_cpu
     cpus = _load_cpus()
-    ceiling = max_load_per_cpu * cpus
-    if max_load_per_cpu <= 0:
-        return LoadSnapshot(
-            load_1m=None,
-            max_load_per_cpu=max_load_per_cpu,
-            load_cpu_count=cpus,
-            load_ceiling=ceiling,
-            spawn_load_status="disabled",
-        )
     try:
         load1, load5, load15 = os.getloadavg()
     except (OSError, AttributeError):
-        return LoadSnapshot(
-            load_1m=None,
-            max_load_per_cpu=max_load_per_cpu,
-            load_cpu_count=cpus,
-            load_ceiling=ceiling,
-            spawn_load_status="unavailable",
-        )
+        return LoadSnapshot(load_1m=None, load_cpu_count=cpus)
     return LoadSnapshot(
         load_1m=load1,
-        max_load_per_cpu=max_load_per_cpu,
         load_cpu_count=cpus,
-        load_ceiling=ceiling,
-        spawn_load_status="within" if load1 <= ceiling else "exceeded",
         load_5m=load5,
         load_15m=load15,
     )

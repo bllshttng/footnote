@@ -1208,10 +1208,7 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
     snapshot = SimpleNamespace(
         load_1m=141.6,
-        max_load_per_cpu=8.0,
-        load_ceiling=96.0,
         load_cpu_count=12,
-        spawn_load_status="exceeded",
         load_5m=141.0,
         load_15m=140.0,
     )
@@ -1224,10 +1221,9 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
 
     assert payload["load_1m"] == pytest.approx(141.6)
-    assert payload["max_load_per_cpu"] == pytest.approx(8.0)
-    assert payload["load_ceiling"] == pytest.approx(96.0)
     assert payload["load_cpu_count"] == 12
-    assert payload["spawn_load_status"] == "exceeded"
+    assert "max_load_per_cpu" not in payload
+    assert "spawn_load_status" not in payload
 
     with pytest.raises(typer.Exit):
         doctor_footprint._emit_result(

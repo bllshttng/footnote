@@ -744,28 +744,6 @@ def live_registry_rows() -> tuple[list | None, str | None]:
     return [row for row in rows if row.status in LIVE_STATUSES], None
 
 
-def capacity_verdict(load_snapshot: Any) -> str:
-    """``within`` | ``near`` | ``over`` | ``unknown`` from the spawn-load
-    ceiling - the only reading here derived from hardware.
-
-    ``load_ceiling`` is ``max_load_per_cpu x ncpu``; 1-minute load against it
-    is a real ceiling in a way the roster-derived process arithmetic is not.
-    An unavailable snapshot is ``unknown``, never a verdict."""
-    status = getattr(load_snapshot, "spawn_load_status", "unavailable")
-    ceiling = getattr(load_snapshot, "load_ceiling", None)
-    load = getattr(load_snapshot, "load_1m", None)
-    if status not in ("within", "exceeded") or ceiling is None or load is None:
-        return "unknown"
-    if status == "exceeded":
-        return "over"
-    ratio = load / ceiling if ceiling > 0 else 0.0
-    if ratio > 1.0:
-        return "over"
-    if ratio >= 0.9:
-        return "near"
-    return "within"
-
-
 def _gap_row_count(gap: str | None) -> int | None:
     """The row count a gap sentence opens with, when it names one.
 
@@ -982,10 +960,7 @@ def _payload(
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
-        "max_load_per_cpu": getattr(load_snapshot, "max_load_per_cpu", None),
-        "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
         "load_cpu_count": getattr(load_snapshot, "load_cpu_count", None),
-        "spawn_load_status": getattr(load_snapshot, "spawn_load_status", "unavailable"),
         # The Claude Code background daemon's idle pre-warm pool. Outside the
         # fleet numbers above on purpose - fno neither owns nor bounds it - but
         # measured, because it can hold most of the machine whose load refuses
