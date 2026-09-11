@@ -1995,7 +1995,7 @@ def test_update_completion_note_unknown_node_errors(tmp_graph):
     assert r.exit_code != 0
 
 
-# --- note evidence (x-90fa): a note is a fact on the node ───────────────────
+# --- note evidence: a note is a fact on the node ─────────────────────────────
 
 
 def _note_node():

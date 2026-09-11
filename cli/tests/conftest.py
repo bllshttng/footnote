@@ -667,7 +667,7 @@ def _no_review_coverage_recompute(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_live_evidence_gate(monkeypatch):
-    """Hermetic default for the evidence gate (x-90fa).
+    """Hermetic default for the evidence gate.
 
     `fno.decide.check_ruling_evidence`/`note_evidence` transport to the
     `fno-agents evidence-gate` verb through `fno.rust_binary.verb_call`. In

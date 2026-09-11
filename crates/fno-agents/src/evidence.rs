@@ -1,8 +1,8 @@
 //! The read that produced a ruling's code fact, carried on the ruling.
 //!
 //! Rust port of the checker + bounded read runner that first shipped as
-//! Python `cli/src/fno/decide/evidence.py` (x-90fa), moved off the
-//! file-budget-gated Python tree. Contract: docs/architecture/decision-record.md.
+//! Python `cli/src/fno/decide/evidence.py`, moved off the file-budget-gated
+//! Python tree. Contract: docs/architecture/decision-record.md.
 //! Transport is the hidden binary-direct `evidence-gate` verb: one JSON
 //! request on stdin (lane, text, reads, root, timeout), one JSON answer on
 //! stdout. A refusal is DATA (`ok: false`), not a process error.

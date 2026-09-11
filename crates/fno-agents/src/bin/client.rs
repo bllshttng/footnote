@@ -193,7 +193,7 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `evidence-gate` is the hidden binary-direct transport for the ruling and
-    // note evidence gates (x-90fa): the checker + bounded read runner ported
+    // note evidence gates: the checker + bounded read runner ported
     // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
     // one JSON request on stdin (lane, text, reads, root, timeout) and prints
     // one JSON answer on stdout; a refusal is data (`ok: false`), not a
