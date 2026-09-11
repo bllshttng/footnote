@@ -556,13 +556,9 @@ pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
 pub const DEFAULT_MAX_LIVE: u32 = 3;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
-/// Default load factor at which spawn preflight stops trusting load average and
-/// consults fleet CPU attribution (x-3f84 W3, re-aimed by x-7c0f). A TRIGGER,
-/// not a refusal. `<= 0` disables the whole check. Matches the Pydantic default.
-pub const DEFAULT_MAX_LOAD_PER_CPU: f64 = 8.0;
-/// Default share of CPU capacity the fleet may hold before spawn preflight
-/// refuses, checked only above [`DEFAULT_MAX_LOAD_PER_CPU`]. Matches the
-/// Pydantic default.
+/// Default share of CPU capacity the fleet may hold, checked on EVERY spawn
+/// (x-7783): an attribution gap widens the share to an interval bounded above
+/// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
 /// Default absolute machine backstop: refuse above this times the CPU count no
 /// matter whose load it is, because pure fleet-share admits onto a box already
@@ -594,15 +590,6 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "min_free_gb")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_FREE_GB)
-}
-
-/// Resolve `agents.max_load_per_cpu` (x-3f84 W3). Same contract as
-/// [`min_free_gb`]: `<= 0` disables the guard, only unparseable input falls
-/// back to [`DEFAULT_MAX_LOAD_PER_CPU`].
-pub fn max_load_per_cpu(cwd: &Path) -> f64 {
-    resolve_agents_value(cwd, "max_load_per_cpu")
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.max_fleet_cpu_share`. Unparseable coerces to the default.
