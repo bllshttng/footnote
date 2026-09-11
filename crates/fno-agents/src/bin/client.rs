@@ -2084,7 +2084,7 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 /// but the arms rows print either way.
 async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
-    let mut arms = arms_readout(&home);
+    let (mut arms, trace) = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -2101,9 +2101,10 @@ async fn run_status(json_out: bool) -> i32 {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 let drifted = matches!(drift, DriftState::Drifted { .. });
-                fno_agents::tick_ledger::explain(
+                fno_agents::tick_ledger::explain_with_trace(
                     &mut arms,
                     &fno_agents::tick_ledger::DaemonFacts::Up { uptime_s, drifted },
+                    &trace,
                 );
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert(
@@ -2143,9 +2144,10 @@ async fn run_status(json_out: bool) -> i32 {
         Err(ClientError::DaemonNotRunning) => {
             // The arms table is exactly what a dead control plane needs to
             // show; print it beside the down-daemon signal rather than nothing.
-            fno_agents::tick_ledger::explain(
+            fno_agents::tick_ledger::explain_with_trace(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Down,
+                &trace,
             );
             let payload = json!({
                 "schema_version": 1,
@@ -2168,9 +2170,10 @@ async fn run_status(json_out: bool) -> i32 {
             // shape as DaemonNotRunning - the arms readout stands on its own.
             // Daemon rules do not fire on Unknown, so stale rows read
             // `unexplained` rather than blaming a daemon of unknown health.
-            fno_agents::tick_ledger::explain(
+            fno_agents::tick_ledger::explain_with_trace(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Unknown,
+                &trace,
             );
             let payload = json!({
                 "schema_version": 1,
@@ -2192,8 +2195,14 @@ async fn run_status(json_out: bool) -> i32 {
 }
 
 /// The control-plane arms rows, from the journals the arms write (agents home
-/// + the global mirror) plus their `.1` rotations.
-fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
+/// + the global mirror) plus their `.1` rotations, and the pr_watch tick
+/// trace the readout's cause rules consult (x-d211).
+fn arms_readout(
+    home: &AgentsHome,
+) -> (
+    Vec<fno_agents::tick_ledger::ArmStatus>,
+    fno_agents::tick_ledger::TickTrace,
+) {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2207,7 +2216,9 @@ fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
         .map(|p| p.join("events.jsonl"))
         .unwrap_or_else(|| home.events_jsonl());
     let journals = vec![home.events_jsonl(), global];
-    fno_agents::tick_ledger::read_arms(&journals, now_unix)
+    let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
+    let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
+    (arms, trace)
 }
 
 /// The human render: one owned line per arm (red rows first-class), then the

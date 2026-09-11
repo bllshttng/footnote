@@ -342,12 +342,137 @@ pub enum DaemonFacts {
     Unknown,
 }
 
+/// The newest pr_watch tick attempt and end records, folded from the same
+/// journals the arm rows come from. A tick attempt newer than the last
+/// recorded merge row is a tick that STARTED and left the arm stale - the
+/// evidence that separates a completion fault from a scheduler that never
+/// fired (x-d211). Ages are against the same `now_unix` the arm read used.
+#[derive(Debug, Serialize, Default)]
+pub struct TickTrace {
+    pub attempt_ts_unix: Option<u64>,
+    pub attempt_age_s: Option<u64>,
+    pub end_ts_unix: Option<u64>,
+    pub end_age_s: Option<u64>,
+    pub end_phase: Option<String>,
+    pub end_outcome: Option<String>,
+}
+
+/// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
+/// of the journals (plus `.1` rotations). Absent records leave defaults: the
+/// trace never invents a tick.
+pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for journal in journals {
+        paths.push(journal.clone());
+        paths.push(rotation_path(journal));
+    }
+    let mut trace = TickTrace::default();
+    for path in &paths {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        for line in std::io::BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
+            if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
+                continue;
+            }
+            let Some(ts_unix) = value
+                .get("ts")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_unix)
+            else {
+                continue;
+            };
+            let data = value.get("data").cloned().unwrap_or(Value::Null);
+            if typ == "pr_watch_tick_attempt" {
+                if trace.attempt_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+                    trace.attempt_ts_unix = Some(ts_unix);
+                    trace.attempt_age_s = Some(now_unix.saturating_sub(ts_unix));
+                }
+            } else if trace.end_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+                trace.end_ts_unix = Some(ts_unix);
+                trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
+                trace.end_phase = str_field(&data, "phase");
+                trace.end_outcome = str_field(&data, "outcome");
+            }
+        }
+    }
+    trace
+}
+
+/// The cause token + hint for a stale launchd arm while pr_watch_merge is
+/// itself stale. `tick_overdue` (x-e3cc) is a state, never a cause: the
+/// reader measured only that no completed tick stamp landed. The tick records
+/// say more when they can (x-d211): a tick attempt newer than the last
+/// recorded merge row is a tick that started and did not complete, and the
+/// newest end record names the phase. Genuine silence states itself as "no
+/// tick stamp".
+fn tick_overdue_cause(pm_last_ts: Option<&str>, trace: Option<&TickTrace>) -> (String, String) {
+    let pm_ts = pm_last_ts.and_then(parse_rfc3339_unix);
+    let tick_ts = trace.and_then(|t| {
+        [t.attempt_ts_unix, t.end_ts_unix]
+            .into_iter()
+            .flatten()
+            .max()
+    });
+    let started_after_pm = match (tick_ts, pm_ts) {
+        (Some(tick), Some(pm_ts)) => tick > pm_ts,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if started_after_pm {
+        if let Some(t) = trace {
+            if let (Some(phase), Some(outcome)) = (t.end_phase.as_deref(), t.end_outcome.as_deref())
+            {
+                return (
+                    "tick_overdue".to_string(),
+                    format!(
+                        "the tick started and did not complete (phase {phase}, outcome {outcome}); \
+                         run fno do pr watch status"
+                    ),
+                );
+            }
+            let age = match t.attempt_age_s {
+                Some(s) => format!("{s}s ago"),
+                None => "recently".to_string(),
+            };
+            return (
+                "tick_overdue".to_string(),
+                format!(
+                    "a tick started {age} and left no completion record; \
+                         run fno do pr watch status"
+                ),
+            );
+        }
+    }
+    (
+        "tick_overdue".to_string(),
+        "no tick stamp inside 2x interval; run fno do pr watch status".to_string(),
+    )
+}
+
 /// Fill `cause` and `line` on every row. A stale row takes the first cause
 /// that holds; a never-ticked or overdue daemon arm on a young daemon reads
 /// `pending` instead of red. `unexplained` is written when no rule fires, so
 /// a red row names its reason instead of daring the operator to guess
 /// whether the arm or its scheduler broke.
 pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
+    explain_inner(rows, daemon, None)
+}
+
+/// [`explain`] with the pr_watch tick trace folded in, so a stale launchd
+/// tier can say "the tick started and did not complete" instead of blaming
+/// the scheduler.
+pub fn explain_with_trace(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: &TickTrace) {
+    explain_inner(rows, daemon, Some(trace))
+}
+
+fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&TickTrace>) {
     let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
     let pm_fresh_failure = pm.is_some_and(|r| {
         !r.stale
@@ -356,14 +481,20 @@ pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
                 .is_some_and(|s| FAILURE_SKIPS.contains(&s))
     });
     let pm_stale = pm.is_some_and(|r| r.stale);
+    let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
     for row in rows.iter_mut() {
         if row.stale {
-            let cause = stale_cause(row, daemon, pm_fresh_failure, pm_stale)
-                .unwrap_or_else(|| "unexplained".to_string());
+            let (cause, hint) = if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
+                tick_overdue_cause(pm_last_ts.as_deref(), trace)
+            } else {
+                let cause = stale_cause(row, daemon, pm_fresh_failure)
+                    .unwrap_or_else(|| "unexplained".to_string());
+                let hint = cause_hint(&cause, daemon);
+                (cause, hint)
+            };
             if cause == "daemon_young" {
                 row.stale = false;
             }
-            let hint = cause_hint(&cause, daemon);
             row.cause = Some(cause.clone());
             let mut line = render_row(row);
             line.push_str(&format!(" cause={cause} ({hint})"));
@@ -375,13 +506,10 @@ pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
 }
 
 /// The first cause that holds for a stale row, in table order; `None` leaves
-/// the row to `unexplained`.
-fn stale_cause(
-    row: &ArmStatus,
-    daemon: &DaemonFacts,
-    pm_fresh_failure: bool,
-    pm_stale: bool,
-) -> Option<String> {
+/// the row to `unexplained`. A stale launchd tier with a stale
+/// pr_watch_merge is handled by the caller: it reads the tick trace and
+/// answers `tick_overdue` with evidence, not this table.
+fn stale_cause(row: &ArmStatus, daemon: &DaemonFacts, pm_fresh_failure: bool) -> Option<String> {
     let sched = row.scheduler.as_deref();
     if sched == Some(SCHED_DAEMON) {
         if let DaemonFacts::Up { uptime_s, drifted } = *daemon {
@@ -397,17 +525,8 @@ fn stale_cause(
         }
         return None;
     }
-    if sched == Some(SCHED_LAUNCHD) {
-        if row.arm != "pr_watch_merge" && pm_fresh_failure {
-            return Some("tick_timeout".to_string());
-        }
-        if pm_stale {
-            // A state, never a cause (x-e3cc): the reader measured only that
-            // no tick stamp landed inside 2x interval. A failed tick stamps
-            // nothing, so the scheduler may be running and its tick failing;
-            // "scheduler_silent" claimed more than the reader measured.
-            return Some("tick_overdue".to_string());
-        }
+    if sched == Some(SCHED_LAUNCHD) && row.arm != "pr_watch_merge" && pm_fresh_failure {
+        return Some("tick_timeout".to_string());
     }
     None
 }
@@ -425,9 +544,6 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
         "daemon_down" => "daemon not running".to_string(),
         "tick_timeout" => {
             "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
-        }
-        "tick_overdue" => {
-            "no tick stamp inside 2x interval; run fno do pr watch status".to_string()
         }
         _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
     }
@@ -895,15 +1011,18 @@ mod tests {
     #[test]
     fn explain_names_tick_overdue_when_the_whole_launchd_tier_stalled() {
         let (guard, journal) = empty_journal();
-        // Everything never-ticked: pr_watch_merge is itself stale, so the
-        // other launchd arms name the overdue tick, never the scheduler.
+        // Everything never-ticked: pr_watch_merge is itself stale, no attempt
+        // record exists, so the readout states the absence as a fact instead
+        // of blaming launchd (x-e3cc, x-d211).
         let mut rows = read_arms(&[journal], 1_800_000_000);
-        explain(
+        let trace = TickTrace::default();
+        explain_with_trace(
             &mut rows,
             &DaemonFacts::Up {
                 uptime_s: 40_000,
                 drifted: false,
             },
+            &trace,
         );
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
@@ -913,6 +1032,67 @@ mod tests {
             kw.line
         );
         drop(guard);
+    }
+
+    #[test]
+    fn explain_says_the_tick_started_and_did_not_complete_and_names_the_phase() {
+        // The x-d211 fault shape: launchd showed the job loaded and a tick
+        // was running throughout, yet pr_watch_merge is stale because ticks
+        // died before writing a merge row. The attempt + end records are the
+        // evidence; the cause must name the phase, not blame the scheduler.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-04T09:33:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                json!({
+                    "ts": "2026-09-04T11:58:00Z",
+                    "type": "pr_watch_tick_attempt",
+                    "source": "daemon",
+                    "data": {"pid": 32078, "phase": "entry"},
+                }),
+                json!({
+                    "ts": "2026-09-04T11:59:00Z",
+                    "type": "pr_watch_tick_end",
+                    "source": "daemon",
+                    "data": {"outcome": "error", "why": "self_killed",
+                             "phase": "catchup", "duration_s": 60.0, "pid": 32078},
+                }),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        let trace = read_tick_trace(&[dir.join("global.jsonl")], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
+        assert!(
+            kw.line.contains("the tick started and did not complete"),
+            "line: {}",
+            kw.line
+        );
+        assert!(kw.line.contains("phase catchup"), "line: {}", kw.line);
+        // The CAUSE blames no tier: no "silent" wording survives. The row's
+        // own `via=` scheduler label is fact, not blame, and stays.
+        assert!(!kw.line.contains("silent"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
