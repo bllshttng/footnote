@@ -1,6 +1,6 @@
-//! Reservation-arm tests, moved out of claims.rs when the file crossed the
-//! 5,000-line shrink-only budget (x-41f7): the classifier itself stays in
-//! claims.rs, these pins live beside it.
+//! Key-class arm tests for the claim classifier, moved out of claims.rs when
+//! the file crossed the 5,000-line shrink-only budget (x-41f7): the
+//! classifier itself stays in claims.rs, these pins live beside it.
 
 use super::*;
 
@@ -105,6 +105,67 @@ fn offhost_or_pid_unavailable_reservation_keeps_todayss_verdict() {
         (state, cause),
         (ClaimState::Live, basis::REGISTRY_SESSION_LIVE)
     );
+}
+
+/// One `review:branch:`-shaped record: the hold a review dispatch takes,
+/// carrying a session-prover pid and the reviewer session's own stamp - the
+/// shape that let a TTL-lapsed hold read Live off its live session (x-b5f6).
+fn review_hold(pid: i32, expires_at: Option<i64>, host: &str) -> ClaimRecord {
+    ClaimRecord {
+        schema_version: 1,
+        key: "review:branch:feature/x".into(),
+        holder: "review-session:s-reviewer".into(),
+        acquired_at: now_ms(),
+        pid: Some(pid),
+        host: host.into(),
+        pid_unavailable: false,
+        expires_at,
+        reason: None,
+        harness: Some("claude".into()),
+        session_id: Some("s-reviewer".into()),
+        pid_provenance: Some("session-prover".into()),
+        machine_id: None,
+        metadata: serde_json::Map::new(),
+    }
+}
+
+#[test]
+fn an_expired_review_hold_lapses_while_its_holder_session_still_runs() {
+    // The hold is a lease on the REVIEW: the transcript-live witness that kept
+    // a lapsed hold bucket-live 7h past expiry (PR 1709 wedged) never reaches
+    // this key class - the arm sits above both the hybrid and the witness.
+    let me = std::process::id() as i32;
+    let host = hostname();
+    let now = now_ms();
+    let witness: SessionWitness = &|_| SessionLiveness::Live(basis::TRANSCRIPT_LIVE);
+
+    let lapsed = review_hold(me, Some(now - 1), &host);
+    let (state, cause) =
+        classify_with_basis_and_exclusivity(&lapsed, Some(now), &probe_pid, None, Some(witness));
+    assert_eq!((state, cause), (ClaimState::Stale, basis::TTL_EXPIRED));
+    let (provably_dead, _) =
+        classify_for_sweep(&lapsed, Some(now), &probe_pid, None, Some(witness));
+    assert!(provably_dead);
+
+    // Scoping twin (x-37dd): the same expired shape under node: keeps today's
+    // verdict - Live, whichever live evidence answers first (hybrid pid or
+    // witness) - so no key class outside review:branch: flips polarity.
+    let mut other_key = review_hold(me, Some(now - 1), &host);
+    other_key.key = "node:x-t".into();
+    let (state, _) =
+        classify_with_basis_and_exclusivity(&other_key, Some(now), &probe_pid, None, Some(witness));
+    assert_eq!(state, ClaimState::Live);
+}
+
+#[test]
+fn an_unexpired_review_hold_with_a_dead_pid_still_protects() {
+    // Inside the TTL the hold keeps its Suspect arm and review_activity keeps
+    // blocking on it; only the expired arm changed.
+    let host = hostname();
+    let now = now_ms();
+    let unexpired = review_hold(-1, Some(now + 60_000), &host);
+    let (state, cause) = classify_with_basis(&unexpired, Some(now), &probe_pid);
+    assert_eq!((state, cause), (ClaimState::Suspect, basis::PID_ABSENT));
 }
 
 #[test]

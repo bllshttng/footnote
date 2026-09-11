@@ -1133,15 +1133,18 @@ def _self_review_refusal(
 
 
 def _hold_branch_under_review(
-    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str = ""
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str
 ) -> None:
     """Register that a review of ``branch`` at ``head_sha`` is RUNNING.
 
     The requester side, so every pipeline review is held without a reviewer
     remembering. On PR 1575 the merge fired mid-review and discarded eight
-    findings, one HIGH. The hold existed and nothing took it. ``branch`` is the
-    PR's own head ref on the post-push form: a local alias with a matching sha
-    keys a hold the merge guard, which reads GitHub, never looks up.
+    findings, one HIGH. The hold existed and nothing took it. ``branch`` is
+    what the caller resolved: the local branch on the pre-push form, the PR's
+    own head ref on the post-push form - a local alias with a matching sha
+    keys a hold the merge guard, which reads GitHub, never looks up. The cwd
+    is never read for one (x-b5f6): a hold on a guessed branch reports
+    protection of a PR it is not protecting.
 
     Best-effort throughout. An unconfirmed send takes nothing. A refused
     invocation takes nothing, since it emits no attestation and nothing would
@@ -1153,7 +1156,6 @@ def _hold_branch_under_review(
     try:
         from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
 
-        branch = branch or (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
         if not branch or branch == "HEAD":
             return
         if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
@@ -1181,7 +1183,7 @@ def request_self_review_cmd(
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
     branch = ""
-    hold_branch = ""  # empty: the helper reads the local branch for itself
+    hold_branch = ""
     metadata: dict[str, Any] = {}
     try:
         if not head_sha:
@@ -1200,6 +1202,7 @@ def request_self_review_cmd(
                 raise RuntimeError(
                     "no branch to review; check out the feature branch"
                 )
+            hold_branch = branch
             base_branch = (
                 _git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                 or ""
