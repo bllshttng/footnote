@@ -70,6 +70,16 @@ else
     wt_occupancy_print_rows() { printf '%s\n' "$1" | awk -F '\t' 'NF >= 6 { printf "    %s %s %s | %s\n", $1, $2, $5, $6 }'; }
 fi
 
+# Process start identity for the sweep lock stamp. A partial deploy without
+# the lib prints nothing, which degrades to pid-only stamps and today's
+# kill -0 behavior.
+if [[ -f "${_WT_LIFECYCLE_DIR}/events-lock.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/events-lock.sh"
+else
+    _event_process_identity() { :; }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? The manifest's `status:` field (legacy era) was once
@@ -805,6 +815,32 @@ _cargo_target_offload() {
     [[ "$diag_file" == "/dev/null" ]] || rm -f "$diag_file"
 }
 
+# The holder stamp records the pid AND its start time, so a pid recycled to a
+# long-lived process is no longer read as a live holder. The start identity is
+# pinned to UTC at the call site: ps -o lstart= answers in local time, and a
+# writer and reader with different TZ would disagree about a live holder.
+# events-lock.sh's own consumers compare local-time strings among themselves
+# and must stay untouched.
+_wt_stamp_identity() {
+    TZ=UTC0 _event_process_identity "$1"
+}
+
+# Judge a holder stamp. 0 = live holder, 1 = dead or empty, 2 = live pid that
+# did not stamp this lock (its start time moved: the pid was recycled).
+_wt_holder_live() {
+    local stamp="$1" pid started="" now
+    pid="${stamp%%$'\n'*}"
+    [[ "$stamp" == *$'\n'* ]] && started="${stamp#*$'\n'}"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+    [[ -z "$started" ]] && return 0
+    now="$(_wt_stamp_identity "$pid")"
+    # A live pid with an unreadable start time (busybox ps has no lstart)
+    # still counts as a holder: a wedged sweep is recoverable, a stolen live
+    # lock is two sweeps running as one.
+    [[ -z "$now" || "$now" == "$started" ]] && return 0
+    return 2
+}
+
 # One sweep at a time, shared by cleanup and cargo-offload. The lock lives
 # in the git common dir, resolved absolutely so the answer holds from any
 # cwd; the function leaves the trap armed on success.
@@ -838,6 +874,15 @@ _acquire_sweep_lock() {
     # be nobody's live claim.
     _WT_SWEEP_STARTED="$_GIT_COMMON_DIR/.fno-wt-sweep-started.$$"
     : > "$_WT_SWEEP_STARTED" 2>/dev/null || _WT_SWEEP_STARTED=""
+    # The full teardown trap below is armed only on acquire; until then this
+    # lighter trap keeps the exits that never reach the lock (another holder,
+    # exhausted retries) from leaking the certificate into the common dir.
+    trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true' EXIT
+    # Our own stamp: pid plus start identity, judged by _wt_holder_live. A
+    # pid-only stamp (identity unavailable) keeps the legacy kill -0 meaning.
+    _WT_SELF_STAMP="$$"
+    _wt_self_started="$(_wt_stamp_identity $$)"
+    [[ -n "$_wt_self_started" ]] && _WT_SELF_STAMP="$$"$'\n'"$_wt_self_started"
     _wt_lock_acquired=""
     for _wt_lock_attempt in 1 2 3 4 5; do
         if mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
@@ -845,52 +890,66 @@ _acquire_sweep_lock() {
             # the steal window below can take a fresh mkdir away before
             # the write lands, and a sweep that proceeded on a lost
             # directory wedged every later sweep behind a pid-less lock.
-            echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-            if [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)" == "$$" ]]; then
+            printf '%s\n' "$_WT_SELF_STAMP" > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+            if [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)" == "$_WT_SELF_STAMP" ]]; then
                 _wt_lock_acquired=1
                 break
             fi
             continue
         fi
-        _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
-        if [[ -n "$_held_pid" ]]; then
-            if kill -0 "$_held_pid" 2>/dev/null; then
-                if [[ "$_held_pid" == "$$" ]]; then
-                    # Our OWN lost claim: the verify above rejected it, so
-                    # this directory is ours to reclaim - backing off to
-                    # ourselves would read as "another sweep is running"
-                    # and strand our pid on the path until it dies.
-                    unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-                    rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
-                    continue
-                fi
+        _held_stamp="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
+        if [[ -n "$_held_stamp" ]]; then
+            _held_pid="${_held_stamp%%$'\n'*}"
+            _holder_rc=0
+            _wt_holder_live "$_held_stamp" || _holder_rc=$?
+            if [[ "$_held_pid" == "$$" ]]; then
+                # Our OWN lost claim: the verify above rejected it, so
+                # this directory is ours to reclaim - backing off to
+                # ourselves would read as "another sweep is running"
+                # and strand our pid on the path until it dies. A stamp
+                # naming our pid but stamped by a predecessor the pid
+                # number moved to is ours by the same right.
+                unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+                rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                continue
+            fi
+            if [[ "$_holder_rc" -eq 0 ]]; then
                 echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
+                # A legacy stamp has no start line, so this refusal may name
+                # a recycled pid; the operator can clear the path by hand.
+                if [[ "$_held_stamp" != *$'\n'* ]]; then
+                    echo "worktree cleanup: that lock records no start time. If pid $_held_pid is not a worktree sweep, remove $_WT_SWEEP_LOCK and retry." >&2
+                fi
                 exit 0
             fi
-            # Stamped but dead: genuinely stale, reclaim it. The steal must
-            # take the directory that was OBSERVED, and the observed
-            # directory's identity is its pid file, byte for byte. A blind
-            # removal acts on an observation that is already stale when it
-            # lands: the stale dir may have been replaced by a peer's fresh
-            # claim in between, and eating that is the ABA shape that ended
-            # with two sweeps both holding the lock. An inode match is NOT
-            # identity either: on Linux the directory created right after
-            # one is deleted can reuse the freed inode, and CI proved it -
-            # the moved FRESH claim matched and was eaten. A successor
-            # carries no pid file (fresh claim) or its own live pid, never
-            # the observed dead one; and if that pid has been recycled to
-            # a live process by the time the comparison runs, the
-            # liveness re-check keeps the steal off. The steal target is
-            # per-attempt unique and pre-cleaned, so mv always renames
-            # rather than nesting into a leftover of a killed earlier
-            # steal.
+            if [[ "$_holder_rc" -eq 2 ]]; then
+                echo "worktree cleanup: sweep lock pid $_held_pid is alive but started $(_wt_stamp_identity "$_held_pid"), not ${_held_stamp#*$'\n'}; the pid was reused, reclaiming the lock" >&2
+            fi
+            # Stamped but dead (or a recycled pid the stamp exposes):
+            # reclaim it. The steal must take the directory that was
+            # OBSERVED, and the observed directory's identity is its pid
+            # file, byte for byte. A blind removal acts on an observation
+            # that is already stale when it lands: the stale dir may have
+            # been replaced by a peer's fresh claim in between, and eating
+            # that is the ABA shape that ended with two sweeps both holding
+            # the lock. An inode match is NOT identity either: on Linux the
+            # directory created right after one is deleted can reuse the
+            # freed inode, and CI proved it - the moved FRESH claim matched
+            # and was eaten. A successor carries no pid file (fresh claim)
+            # or its own live stamp, never the observed dead one; a live
+            # stamp on the moved copy keeps the steal off, and a start-time
+            # mismatch (a recycled pid) reads as dead through the same
+            # helper the alive branch used, so the two answers cannot
+            # diverge. The steal target is per-attempt unique and
+            # pre-cleaned, so mv always renames rather than nesting into a
+            # leftover of a killed earlier steal.
             _WT_STALE="$_WT_SWEEP_LOCK.stale.$$.$RANDOM"
             rm -rf "$_WT_STALE" 2>/dev/null || true
             mv "$_WT_SWEEP_LOCK" "$_WT_STALE" 2>/dev/null || true
             if [[ -d "$_WT_STALE" ]]; then
                 _moved_stamp="$(cat "$_WT_STALE/pid" 2>/dev/null || true)"
-                if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_pid" ]] \
-                    && ! kill -0 "$_held_pid" 2>/dev/null; then
+                if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_stamp" ]] \
+                    && ! _wt_holder_live "$_moved_stamp"; then
                     rm -rf "$_WT_STALE"
                 elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
                     # Not what we observed and nobody has claimed the path
@@ -914,7 +973,7 @@ _acquire_sweep_lock() {
                     if [[ -d "$_WT_SWEEP_LOCK/${_WT_STALE##*/}" ]]; then
                         rm -rf "$_WT_SWEEP_LOCK/${_WT_STALE##*/}"
                     fi
-                elif [[ -z "$_moved_stamp" ]] || ! kill -0 "$_moved_stamp" 2>/dev/null; then
+                elif [[ -z "$_moved_stamp" ]] || ! _wt_holder_live "$_moved_stamp"; then
                     # The path was re-taken before the restore, so the
                     # moved copy is unreachable debris; reap it only when
                     # its own stamp is absent or dead - never while it
@@ -970,15 +1029,19 @@ _acquire_sweep_lock() {
     for _wt_stale in "$_GIT_COMMON_DIR"/fno-wt-sweep.lock.stale.*; do
         [[ -d "$_wt_stale" ]] || continue
         _stale_stamp="$(cat "$_wt_stale/pid" 2>/dev/null || true)"
-        if [[ -z "$_stale_stamp" ]] || ! kill -0 "$_stale_stamp" 2>/dev/null; then
+        if [[ -z "$_stale_stamp" ]] || ! _wt_holder_live "$_stale_stamp"; then
             rm -rf "$_wt_stale"
         fi
     done
-    echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+    # Birth certificates from sweeps that died between creating the file and
+    # arming a trap: the certificate is read only inside a live sweep's retry
+    # loop (about a second), so one older than five minutes has no reader.
+    find "$_GIT_COMMON_DIR" -maxdepth 1 -name '.fno-wt-sweep-started.*' -mmin +5 -exec rm -f {} + 2>/dev/null || true
+    printf '%s\n' "$_WT_SELF_STAMP" > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
     # Only tear down the lock if it still names us - a lock reclaimed
     # from a dead holder, or freshly acquired, must never be removed out
     # from under a different process that has since taken it over.
-    trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true; [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
+    trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true; [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$_WT_SELF_STAMP" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
 }
 
 case "${1:-status}" in
