@@ -79,6 +79,10 @@ def test_ac3hp_render_plist_contains_required_keys(tmp_home, plist_kwargs):
     assert "pr-watch" in rendered
     assert "tick" in rendered
     assert "<false/>" in rendered  # RunAtLoad false
+    # ProcessType Standard (x-c79d): the positive read is the control for the
+    # negative one below.
+    assert "<key>ProcessType</key>\n  <string>Standard</string>" in rendered
+    assert "<string>Background</string>" not in rendered
 
 
 def test_ac3hp_install_prints_plist_before_writing(

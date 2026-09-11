@@ -470,6 +470,10 @@ def test_install_renders_a_daily_plist_at_the_requested_hour():
     # RunAtLoad false: installing at 4pm must not fire a pass immediately.
     assert "<key>RunAtLoad</key>\n  <false/>" in xml
     assert "backlog" in xml and "groom" in xml
+    # ProcessType Standard (x-c79d): the positive read is the control for the
+    # negative one below.
+    assert "<key>ProcessType</key>\n  <string>Standard</string>" in xml
+    assert "<string>Background</string>" not in xml
 
 
 def test_install_escapes_a_binary_path_that_would_break_the_xml():
