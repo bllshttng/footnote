@@ -1,23 +1,12 @@
 """SessionStart entry point: bind the current session to its registry row.
 
-Invoked by ``hooks/register-session-start.sh`` as
-``python3 -m fno.agents.register_session --harness claude ...``. Two modes,
-selected by ``--agent-self``:
-
-- without it, REGISTER an operator-started session (it has no row yet);
-- with it, RESTAMP a footnote-spawned worker's existing row, named by
-  ``FNO_AGENT_SELF``, onto the session id its harness is actually using. The
-  id footnote passed at spawn is not durable, and registration keys its upsert
-  on that same id, so a re-minted worker routed through registration would
-  gain a second row rather than have its first corrected.
-
-Fail-soft by contract (US7 AC7-ERR): any failure emits a
-``session_register_failed`` / ``session_restamp_failed`` warning event and
-still exits 0, so the hook never blocks session start even when the registry
-is locked or unwritable. On success it emits ``session_registered`` /
-``session_id_restamped`` and prints a one-line stderr note (hook stdout is
-reserved for the session preamble).
+Two modes via ``--agent-self``: absent, register an operator-started session;
+present, restamp a spawned worker's row onto the session id its harness is
+using now. Fail-soft by contract (US7 AC7-ERR): any failure emits a warning
+event and still exits 0. Full contract:
+docs/architecture/unfinished-work-and-row-registration.md.
 """
+
 from __future__ import annotations
 
 import argparse

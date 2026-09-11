@@ -1,44 +1,11 @@
 """The unfinished-work report: the operator question the fleet watchdog answers.
 
-The verdict classifier in :mod:`fno.agents.watchdog` stays the internal
-recovery engine (wake, reroute, reap, retire). This module answers the
-outcome question the operator actually asks: was work started and never
-finished? Four dimensions, each finding naming the one verb that clears it:
-
-- ``started_free_claim``: an in_progress node whose claim is free, ranked by
-  idle age, with the branch's commits ahead of ``origin/main`` where a
-  worktree resolves. Clear: ``/fno:target <node>``.
-- ``done_ahead_of_main``: a done node whose worktree branch still carries
-  commits ahead of a freshly fetched ``origin/main``. Clear: the stranded
-  recovery verb scoped to the repository.
-- ``dirty_ownerless_worktree``: a worktree with uncommitted paths and no
-  authoritative live owner. Clear: adopt or finish it.
-- ``open_pr_ownerless``: a PR open past 24h whose node has no live owner.
-  Clear: ``/fno:pr check <number>``.
-
-Liveness is read ONLY from pid incarnation and transcript truth (the
-authorities the fleet already trusts). A stored status word, registry
-absence, or display name contributes no liveness verdict: unreadable
-evidence preserves the candidate as unmeasurable (the dimension reads
-unknown, never clean) because the cost of guessing wrong is somebody's
-uncommitted work.
-
-The commit metric is ``git rev-list --count origin/main..HEAD`` after one
-``git fetch origin main`` per repository. The upstream tracking ref is not a
-substitute on this path: a stale remote-tracking ref inflated a measured
-count to 936 against a true 8, and a report that can be wrong by two orders
-of magnitude on its first line is untrustworthy. The stranded-worktree
-module's own unpushed probe is untouched; it protects destructive cleanup
-and answers a different question.
-
-The main worktree of each repository is excluded from the dirty dimension:
-the canonical checkout is a shared surface with transient tenants (operator
-scratch files read as dirt), so the owner join cannot answer for it.
-
-``classify()`` is pure over injected observations; ``collect_observations()``
-is the IO seam; ``build_report()`` is the one producer both the manual verb
-and the scheduled tick consume.
+Four dimensions, one clearing verb each; liveness from pid and transcript
+truth only; unreadable evidence keeps the dimension unknown, never clean.
+The full contract lives in
+docs/architecture/unfinished-work-and-row-registration.md.
 """
+
 from __future__ import annotations
 
 import subprocess
