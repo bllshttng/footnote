@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check-doc-entry-scope.sh - CI gate over the AGENTS.md `## Deep-dive docs`
-# index (x-3de3). The indexed pages describe mechanisms accurately and still
+# index. The indexed pages describe mechanisms accurately and still
 # fail a reader who arrives with a symptom: none said who the page is for or
 # what the mechanism does NOT govern. Every indexed page must therefore open
 # with a scope section, `## Is this page for you?`, carrying a `Not for:` line
