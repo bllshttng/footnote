@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -351,6 +350,8 @@ def stamp_review_attestation_model(
     chokepoint below and `fno do review classify --attest` - so two rows can
     never disagree about the rule.
     """
+    import os
+
     from fno.provenance.observed import observed_model_for_session
 
     observed = observed_model_for_session(harness, session_id, os.getcwd())
@@ -509,6 +510,8 @@ def emit(
             raise typer.Exit(code=1)
         data_dict["attester_session_id"] = resolved_id
         data_dict["attester_witness"] = witness
+        import os
+
         from fno.harness_identity import harness_from_env
 
         stamp_review_attestation_model(
