@@ -261,15 +261,15 @@ class MaintainBlock(BaseModel):
 
     staleness_days: int = 30
     max_failed_attempts: int = 3
-    # Transcript-quiet hours before the abandoned-do-row leg reaps.
-    abandoned_do_row_hours: int = 24
-    # Validity sweep. No raising validators: a nonpositive/oversized
-    # value degrades to a bounded default IN THE LEG (per Failure Modes) so a bad
-    # config never breaks the whole `maintain` command.
-    validity_days: int = 60
+    abandoned_do_row_hours: int = 24  # transcript-quiet hours before the do-row leg reaps
+    # Wall-clock budget for one pass (checked between legs); a short pass exits 4.
+    budget_seconds: int = 300
+    validity_days: int = 60  # validity sweep degrades to bounded defaults in-leg
     validity_batch_size: int = 25
 
-    @field_validator("staleness_days", "max_failed_attempts", "abandoned_do_row_hours")
+    @field_validator(
+        "staleness_days", "max_failed_attempts", "abandoned_do_row_hours", "budget_seconds"
+    )
     @classmethod
     def _positive_counts(cls, v: int, info: ValidationInfo) -> int:
         """A threshold below 1 cannot bound anything."""
@@ -2264,10 +2264,13 @@ class AgentsBlock(SweepKeys):
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate scalars degrade to safe defaults.
-    # max_live caps the roster union; provider_limits caps lanes and fan-out.
+    # max_live caps the roster union as the BACKSTOP behind the RAM floor and
+    # the CPU axis (x-7783 LD1); provider_limits caps lanes and fan-out.
     # min_free_gb is the RAM floor; nonpositive disables it.
-    # max_load_per_cpu triggers fleet attribution; max_fleet_cpu_share governs it.
-    # hard_max_load_per_cpu is the absolute backstop; worker_qos is utility or off.
+    # max_fleet_cpu_share decides admission on every spawn; an attribution gap
+    # widens the share to an interval bounded above by the machine's CPU.
+    # hard_max_load_per_cpu is the absolute backstop, read on the 15-minute
+    # load; max_load_per_cpu is deprecated and ignored (x-7783 LD2).
     max_live: int = 3
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
@@ -2276,6 +2279,8 @@ class AgentsBlock(SweepKeys):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
+    # Deprecated and ignored since 2026-09-09: admission decides on the
+    # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
     max_fleet_cpu_share: float = 0.5
     hard_max_load_per_cpu: float = 40.0
@@ -2433,26 +2438,19 @@ class AgentsBlock(SweepKeys):
         return out
 
     @model_validator(mode="after")
-    def _backstop_must_sit_above_the_trigger(self) -> "AgentsBlock":
-        """The backstop must be REACHED after the trigger, never before it.
+    def _warn_max_load_per_cpu_deprecated(self) -> "AgentsBlock":
+        """The retired trigger prints one deprecation line when set (x-7783 LD2).
 
-        `max_load_per_cpu` is the load at which the gate consults fleet
-        attribution; `hard_max_load_per_cpu` refuses without consulting. Set
-        the backstop at or below the trigger and every load that would have
-        been attributed is refused blindly instead, which silently restores
-        the exact defect the governor removed. Four docstrings said so and
-        nothing enforced it, so one config line was enough to undo it.
-
-        Coerced, not raised: this block's contract is that a config typo can
-        never brick the spawn primitive. An incoherent PAIR restores the
-        default pair, because clamping only one of them cannot know which
-        number the operator meant.
-        """
-        if self.hard_max_load_per_cpu > 0 and (
-            self.hard_max_load_per_cpu <= self.max_load_per_cpu
-        ):
-            self.max_load_per_cpu = 8.0
-            self.hard_max_load_per_cpu = 40.0
+        The key parses so one release can pass, but nothing reads it: the
+        value is IGNORED, never clamped, and the line names the decider so
+        the operator learns the migration in the same breath as the news."""
+        if self.max_load_per_cpu != 8.0:
+            _warn_legacy_once(
+                "agents.max_load_per_cpu",
+                "fno config: agents.max_load_per_cpu is deprecated and "
+                "ignored: admission decides on the fleet's CPU share "
+                "(agents.max_fleet_cpu_share); delete the key",
+            )
         return self
 
     @field_validator("min_free_gb", mode="before")
@@ -2469,8 +2467,8 @@ class AgentsBlock(SweepKeys):
     @classmethod
     def _coerce_max_load_per_cpu(cls, v: object) -> object:
         """Coerce a non-numeric max_load_per_cpu to the default (8.0); never
-        raise. Same contract as :meth:`_coerce_min_free_gb`: <= 0 is a VALID
-        value (guard disabled), so only unparseable input falls back."""
+        raise. The key is deprecated and ignored (x-7783 LD2); it only needs
+        to PARSE so one release can pass, so the coercion stays minimal."""
         return _finite_or(v, 8.0)
 
     @field_validator("max_fleet_cpu_share", mode="before")
@@ -2479,9 +2477,9 @@ class AgentsBlock(SweepKeys):
         """Coerce an unparseable share to the default (0.5); never raise.
 
         Same contract as :meth:`_coerce_max_load_per_cpu`. <= 0 is VALID and
-        means the governor refuses on any fleet attribution at all, which is
-        the strictest setting rather than a disabled one; `max_load_per_cpu`
-        is the knob that turns the whole check off.
+        means the gate refuses on any fleet attribution at all, which is
+        the strictest setting rather than a disabled one; the backstop
+        (``hard_max_load_per_cpu``) is the knob that turns the load check off.
         """
         return _finite_or(v, 0.5)
 

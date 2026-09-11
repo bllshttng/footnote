@@ -27,6 +27,14 @@ from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
 from fno.decide import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
+# the external-backend verb classification: the sets live beside the data
+# they classify (the classification runner below fails the import when a
+# verb is missing from both lists)
+from fno.graph._verb_classification import (
+    _FOOTNOTE_OWNED_VERBS,
+    _NO_GRAIN_ON_EXTERNAL_BACKEND,
+    _TRACKER_OWNED_VERBS,
+)
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     _build_backlog_node,
     _session_provenance,
@@ -4120,7 +4128,7 @@ def _starvation_receipts(
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.backlog.advance import selection_guards
+    from fno.backlog.advance import first_dead_ancestor, selection_guards
     from fno.graph._intake import filter_by_project
 
     container_ids = _container_ids(entries)
@@ -4160,6 +4168,18 @@ def _starvation_receipts(
         hold_guard = selection_guards(e, by_id, now, staleness_days=staleness_days)
         if hold_guard and hold_guard.startswith("dispatch-hold"):
             reason = hold_guard
+        elif first_dead_ancestor(
+            e, by_id, is_dead=lambda anc: not _is_live(anc)
+        ) and not (
+            e.get("contained_in") or _has_unmerged_open_pr(e) or _is_batched_member(e)
+        ):
+            # Terminal-ancestor arm (x-a31a): the structural cause outranks
+            # incidental attributes - a plan-less node under a dead parent
+            # reads here, not plan-less. Superseded/deferred are a subset of
+            # terminal, so this arm owns the old selection-guards
+            # dead-ancestor classification; contained, in-review, and batched
+            # nodes fall through so their classifications stand.
+            reason = "dead-ancestor"
         elif not e.get("plan_path"):
             reason = "plan-less"
         elif nid in container_ids:
@@ -4183,9 +4203,7 @@ def _starvation_receipts(
             g = hold_guard
             if not g:
                 continue  # no known exclusion (would have been selected)
-            if g.startswith("dead-ancestor"):
-                reason = "dead-ancestor"
-            elif g.startswith("contained"):
+            if g.startswith("contained"):
                 # Not starvation either: the work IS being delivered, inside
                 # another node's PR. Left in the generic `quarantined` bucket it
                 # read as stale work needing attention, and a decomposed epic
@@ -4631,37 +4649,45 @@ def cmd_next(
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
-    if result[0] is None:
-        # Zero-silent-starvation receipts ( G1): explain to stderr why
-        # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
-        # contract `_next_node` parses, so a receipt failure never breaks
-        # dispatch. Under an external backend the receipts explain the ACTUAL
-        # joined denominator, never the local graph.
-        try:
-            from fno.backlog.advance import _guard_staleness_days
+    # Zero-silent-starvation receipts ( G1): explain to stderr why nothing
+    # was picked - and, even when a winner WAS picked, which in-scope nodes
+    # are stranded under terminal parents (x-a31a). Advisory - stdout stays
+    # exactly the node-or-"null" contract `_next_node` parses, so a receipt
+    # failure never breaks dispatch. Under an external backend the receipts
+    # explain the ACTUAL joined denominator, never the local graph.
+    try:
+        from fno.backlog.advance import _guard_staleness_days
 
-            recv_entries = (
-                pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
-            ) or []
-            scope_ids = (
-                descendants_of(recv_entries, parent_target_id)
-                if parent_target_id is not None
-                else None
-            )
-            for nid, reason in _starvation_receipts(
-                recv_entries,
-                project_filter,
-                all_,
-                scope_ids,
-                _live_claimed_node_ids(),
-                datetime.now(timezone.utc),
-                _guard_staleness_days(),
-                mission=mission,
-                roadmap_id=roadmap_id,
-            ):
+        recv_entries = (
+            pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
+        ) or []
+        scope_ids = (
+            descendants_of(recv_entries, parent_target_id)
+            if parent_target_id is not None
+            else None
+        )
+        receipts = _starvation_receipts(
+            recv_entries,
+            project_filter,
+            all_,
+            scope_ids,
+            _live_claimed_node_ids(),
+            datetime.now(timezone.utc),
+            _guard_staleness_days(),
+            mission=mission,
+            roadmap_id=roadmap_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - receipts are advisory
+        typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+    else:
+        if result[0] is None:
+            for nid, reason in receipts:
                 typer.echo(f"excluded {nid}: {reason}", err=True)
-        except Exception as exc:  # noqa: BLE001 - receipts are advisory
-            typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+        else:
+            # A winner exists: only the strand receipts fire, capped, so a
+            # healthy dispatch never drowns in exclusion noise again.
+            for line in _stranded_next_receipts(receipts):
+                typer.echo(line, err=True)
 
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
@@ -7975,100 +8001,19 @@ def _echo_freed(freed: list, owner_id: str) -> None:
     )
 
 
-def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
-
-    Called wherever a delivery unit permanently dies: remove and supersede. A
-    reversible defer keeps its folded delivery unit intact so undefer restores
-    the same one-PR scope. A permanently dead unit will never merge, so
-    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
-    its children, while ``selection_guards`` and ``fno do target init`` keep
-    refusing them: unbuildable, uncloseable, invisible to every sweep.
-
-    Un-contained, never closed: a unit dying is not a claim that its children
-    shipped.
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if isinstance(e, dict) and e.get("contained_in") == owner_id:
-            e.pop("contained_in", None)
-            nid = e.get("id")
-            if isinstance(nid, str) and nid:
-                freed.append(nid)
-    return freed
-
-
-def _is_live(entry: dict) -> bool:
-    """A child is LIVE when it is not terminal: it would strand if its owner died.
-
-    Terminal is the precedence floor in `recompute_statuses` (done > superseded
-    > deferred): a node with ``completed_at`` is done, one with
-    ``superseded_by`` is superseded, one with ``deferred_at`` is deferred.
-    Everything else (idea, ready, blocked, in_review, in_progress) is live and
-    dispatchable, so killing its owner without releasing it leaves it
-    unbuildable under the dead-ancestor guard.
-    """
-    if entry.get("completed_at") or entry.get("deferred_at"):
-        return False
-    if not entry.get("superseded_by"):
-        return True
-    supersession = entry.get("supersession")
-    return isinstance(supersession, dict) and not supersession.get("verified_at")
-
-
-def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Ids of the owner's live children that the supersede guard refuses over.
-
-    Membership children only (``parent == owner``), EXCLUDING contained
-    children (``contained_in == owner``). The two axes are released differently:
-    a contained child is folded delivery work, and superseding the unit
-    releases it routinely - that release IS the safety, so it is not a reason
-    to refuse. A parent-only child is epic membership; superseding orphans it
-    (clearing ``parent``), a structural change the guard exists to consent to.
-    This is also why the guard reads liveness, not ``type``: the epic that
-    prompted this was itself typed ``feature``.
-    """
-    if not owner_id:
-        return []
-    live: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("contained_in") == owner_id:
-            continue  # folded work - the contained release handles it, not the guard
-        if e.get("parent") != owner_id:
-            continue
-        if not _is_live(e):
-            continue
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            live.append(nid)
-    return live
-
-
-def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Clear ``parent`` on the owner's non-done children; return the ids freed.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("parent") != owner_id:
-            continue
-        if e.get("completed_at"):
-            continue  # done is truly terminal - keep parent as history
-        # Set None (key kept) rather than pop, matching the supported un-adopt
-        # path (`update --parent null`) and every other parent writer; readers
-        # use .get(), so a present-None reads identically to absent.
-        e["parent"] = None
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            freed.append(nid)
-    return freed
-
+# In graph/strand.py: the terminal-parent strand family (moved with the
+# close guards, release twins, and self-heal that share its liveness predicate).
+from fno.graph.strand import (  # noqa: E402
+    _is_live,
+    _live_child_ids,
+    _release_contained_children,
+    _release_parented_children,
+    _reparent_live_children,
+    _reparent_receipt,
+    _strandable_orphan_ids,
+    _stranded_next_receipts,
+    _sweep_reparent_stranded_orphans,
+)
 
 # In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
@@ -8722,6 +8667,9 @@ def cmd_done(
     except Exception:
         cost_rollup = {}
 
+    # Stranded children of a forced close, echoed after the lock.
+    reparented_out: list = [[]]
+
     def mutator(entries):
         n = _find_node(entries, task_id)
         if not n:
@@ -8732,6 +8680,22 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
+        # Strand guard (same shape as the supersede guard): closing over live
+        # children strands them under a terminal parent, so refuse unless
+        # forced - and a forced close re-parents them in this same mutation.
+        live_kids = _live_child_ids(entries, n["id"])
+        if live_kids and not force:
+            typer.echo(
+                f"Error: cannot close {task_id}: it still has "
+                f"{len(live_kids)} live child(ren): {', '.join(live_kids)}. "
+                "Closing would strand them under a terminal parent. Re-run "
+                "with --force --reason to close anyway (each child is "
+                "re-parented to its nearest live ancestor).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if live_kids:
+            reparented_out[0] = _reparent_live_children(entries, n["id"])
         node_after_out[0] = n
         _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. the done root)
@@ -8762,6 +8726,8 @@ def cmd_done(
         return
 
     typer.echo(f"Marked {task_id} done")
+    if reparented_out[0]:
+        typer.echo(_reparent_receipt(reparented_out[0]))
 
     # Operator-authority matrix (LD3/LD29): `fno backlog done` is an allowed
     # action during a drive window, but audit-tag it so the trail attributes
@@ -10003,6 +9969,9 @@ def _reconcile_once(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
+    # Same self-heal role on the parent axis (x-a31a): gates the dry-run preview
+    # when no other leg has candidates; the mutator's sweep re-detects.
+    strandable_orphans = _strandable_orphan_ids(entries) if _full_sweep else set()
     # A pending supersession whose successor closed outside this sweep is owed a
     # verdict nothing else will ever deliver. Gather its evidence BEFORE the
     # lock: these are `gh` round trips, and the graph lock is not the place for
@@ -10072,6 +10041,10 @@ def _reconcile_once(
 
     closed: list[dict] = []
     healed_epics: list[str] = []
+    # (child_id, new_parent) pairs written by the close-time re-parent and the
+    # full-sweep strand self-heal; reported in the summary and --json payload.
+    reparented: list = []
+    reparented_acc: list = []
     contained_closed: list[str] = []
     carried_stamped: list[str] = []
     contained_errors: list[dict] = []
@@ -10140,6 +10113,7 @@ def _reconcile_once(
             cascade_closed_acc.clear()
             supersession_unverified_acc.clear()
             blocked_by_settlement_acc.clear()
+            reparented_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
@@ -10159,6 +10133,16 @@ def _reconcile_once(
                         )
                         continue
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    # The close must not strand its live children under a
+                    # now-terminal parent: re-parent them in this same
+                    # mutation. Guarded like every non-load-bearing leg here.
+                    try:
+                        reparented_acc.extend(
+                            _reparent_live_children(entries, record.node_id)
+                        )
+                    except Exception as _rp_exc:  # noqa: BLE001 - never abort a close
+                        contained_errors_acc.append({"owner": record.node_id, "stage": "strand-reparent", "error": str(_rp_exc)[:200]})
+                        typer.echo(f"warning: re-parenting {record.node_id}'s live children failed: {_rp_exc}", err=True)
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
                             entries,
@@ -10264,6 +10248,13 @@ def _reconcile_once(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # Strand self-heal (x-a31a): re-parents live children stranded
+                # under terminal parents by closes that predate the guard.
+                try:
+                    reparented_acc.extend(_sweep_reparent_stranded_orphans(entries))
+                except Exception as _sr_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append({"owner": None, "stage": "strand-heal", "error": str(_sr_exc)[:200]})
+                    typer.echo(f"warning: the strand self-heal failed: {_sr_exc}", err=True)
                 # AFTER both close sweeps: a node closed this pass is a
                 # passenger too. Guarded like them, for the same reason.
                 try:
@@ -10493,7 +10484,10 @@ def _reconcile_once(
         contained_closed = sorted(set(contained_closed_acc))
         carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
-    elif dry_run and (closeable or strandable or strandable_contained or status_drift):
+        reparented = sorted(set(reparented_acc))
+    elif dry_run and (
+        closeable or strandable or strandable_contained or strandable_orphans or status_drift
+    ):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -10504,10 +10498,12 @@ def _reconcile_once(
         _sim = _copy.deepcopy(entries)
         _sim_acc: list = []
         _sim_contained: list = []
+        _sim_reparented: list = []
         for record in closeable:
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
+                _sim_reparented.extend(_reparent_live_children(_sim, record.node_id))
                 # Same order as the real mutator (contained children first), and
                 # guarded like it: an unguarded raise crashed the PREVIEW where
                 # a real run degrades to a warning, and left `contained_errors`
@@ -10547,8 +10543,10 @@ def _reconcile_once(
                     }
                 )
             _sim_acc.extend(_sweep_close_done_epics(_sim))
+            _sim_reparented.extend(_sweep_reparent_stranded_orphans(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        reparented = sorted(set(_sim_reparented))
         try:  # a preview that omits a leg reads "in sync" where a run writes
             carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
         except Exception:  # noqa: BLE001 - a preview never raises
@@ -10756,6 +10754,9 @@ def _reconcile_once(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Live children re-parented away from terminal parents (close-time
+            # + full-sweep strand heal). The count the summary line names.
+            "reparented": [{"node_id": cid, "parent": p} for cid, p in reparented],
             "reclaimed": [
                 {"node_id": node_id, "from": before, "to": after}
                 for node_id, (before, after) in status_drift.items()
@@ -10812,6 +10813,7 @@ def _reconcile_once(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not reparented
         and not carried_stamped
         and not reverted_stamped
         and not promise_held
@@ -10842,6 +10844,8 @@ def _reconcile_once(
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
             )
+        if reparented:
+            typer.echo(_reparent_receipt(reparented, lead="Would "))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"Would reclaim {node_id}: {before} -> {after}")
     else:
@@ -10874,6 +10878,9 @@ def _reconcile_once(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+        if reparented:
+            # Bare-lead shape: groom's _reconcile_leg_outcome parses this line.
+            typer.echo(_reparent_receipt(reparented))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"reclaimed {node_id}: {before} -> {after}")
 
@@ -10925,203 +10932,6 @@ def _reconcile_once(
 # -- maintain (recurring backlog + kanban hygiene sweep) --
 
 
-def _validity_rg_search(symbol: str) -> Optional[int]:
-    """Bounded git-grep file count for a named symbol under the repo root.
-
-    Returns the number of tracked files mentioning ``symbol`` (a validity signal:
-    0 files -> the symbol likely no longer exists), or ``None`` when the source
-    is unavailable (rg/git missing, timeout, not a repo) so the sweep records it
-    unavailable rather than reading a spurious zero. 5 s cap (Locked Decision #7).
-    """
-    import subprocess
-
-    from fno.paths import resolve_repo_root
-
-    try:
-        root = str(resolve_repo_root())
-    except Exception:
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "grep", "-l", "--fixed-strings", "-e", symbol],
-            capture_output=True,
-            text=True,
-            timeout=_maintain_source_timeout(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    # git grep exits 1 with no output when there are no matches (not an error).
-    if proc.returncode not in (0, 1):
-        return None
-    return sum(1 for line in proc.stdout.splitlines() if line.strip())
-
-
-def _maintain_source_timeout() -> float:
-    from fno.graph import maintain as _m
-
-    return _m.EVIDENCE_SOURCE_TIMEOUT_S
-
-
-# Bounds for the retro enrichment items (Discretion #1/#2): a few lines of the
-# merged file around the comment, and a truncated diff_hunk. Kept small so both
-# sit comfortably inside PACKET_MAX_BYTES alongside the base packet.
-_RETRO_REGION_WINDOW = 8
-_RETRO_REGION_MAX_BYTES = 1200
-_RETRO_HUNK_MAX_BYTES = 400
-
-
-def _fetch_retro_comment(
-    source_pr: int,
-    finding_hash: str,
-    root: str,
-    *,
-    repo: Optional[str] = None,
-) -> Optional[dict]:
-    """Fetch PR ``source_pr``'s inline comments (resolved from ``root``) and return
-    the one whose body hash-joins ``finding_hash``, or ``None`` on any failure.
-
-    The hash is the canonical ``content_hash`` ``land`` wrote (function-local import
-    so ``graph`` keeps no module-level ``fno.retro`` dependency - that edge runs
-    retro -> graph). The gh path is templated with a numeric PR slot, so an injected
-    trailer value cannot escape the current repo or the ``<int>`` slot (Pessimist B).
-    """
-    import subprocess
-
-    from fno.retro.dedup import content_hash  # function-local: no graph->retro cycle
-
-    path = (
-        f"repos/{repo}/pulls/{source_pr}/comments"
-        if repo
-        else f"repos/:owner/:repo/pulls/{source_pr}/comments"
-    )
-    try:
-        proc = subprocess.run(
-            ["gh", "api", path, "--paginate", "--slurp"],
-            capture_output=True,
-            text=True,
-            cwd=root,
-            timeout=_maintain_source_timeout(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        raw = json.loads(proc.stdout) if proc.stdout.strip() else []
-    except (json.JSONDecodeError, ValueError):
-        return None
-    # --slurp wraps paginated pages as [[page1...],[page2...]]; flatten, tolerating
-    # a non-slurped flat list too (defensive, mirrors fetch_review_comments).
-    flat: list[dict] = []
-    if isinstance(raw, list):
-        for elem in raw:
-            if isinstance(elem, list):
-                flat.extend(x for x in elem if isinstance(x, dict))
-            elif isinstance(elem, dict):
-                flat.append(elem)
-    for c in flat:
-        if content_hash(str(c.get("body", ""))) == finding_hash:
-            return c
-    return None
-
-
-def _summarize_review_comment(path: object, line: object, diff_hunk: object) -> str:
-    """One-line, bounded summary of the originating ask: cited path/line plus a
-    truncated diff_hunk (the shape of the ask, not the whole hunk - Discretion #2)."""
-    loc = f"{path}:{line}" if line else str(path)
-    hunk = str(diff_hunk or "").strip()
-    if len(hunk) > _RETRO_HUNK_MAX_BYTES:
-        hunk = hunk[:_RETRO_HUNK_MAX_BYTES] + "…[truncated]"
-    return f"reviewer asked at {loc}; diff_hunk: {hunk}" if hunk else f"reviewer asked at {loc}"
-
-
-def _read_merged_region(root: str, path: str, line: object) -> str:
-    """A bounded excerpt of ``path`` in the live merged tree around ``line``.
-
-    Reads ``git show HEAD:<path>`` (Locked Decision #3: live HEAD, not the merge
-    SHA); on git failure falls back to a path-safe filesystem read gated by
-    ``contained_path_exists`` (CWE-22). Returns "" when neither resolves. The line
-    is clamped to the file's bounds (Boundaries: a comment at/past EOF)."""
-    import subprocess
-
-    from fno.graph import maintain as _m
-
-    # Defense in depth (CWE-22): `path` originates from a GitHub comment, so reject
-    # a non-str or a parent-escaping / absolute path BEFORE any read. `git show
-    # HEAD:<path>` already cannot escape the tree object and the fs fallback is
-    # gated by contained_path_exists, but guarding up front keeps every reader safe
-    # and avoids a TypeError on a non-str root/path.
-    if not isinstance(root, str) or not isinstance(path, str):
-        return ""
-    norm = os.path.normpath(path)
-    if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
-        return ""
-
-    content: Optional[str] = None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "show", f"HEAD:{path}"],
-            capture_output=True,
-            text=True,
-            timeout=_maintain_source_timeout(),
-        )
-        if proc.returncode == 0:
-            content = proc.stdout
-    except (OSError, subprocess.SubprocessError):
-        content = None
-    if content is None:
-        if not _m.contained_path_exists(root, path):
-            return ""
-        try:
-            with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
-            return ""
-    file_lines = content.splitlines()
-    if not file_lines:
-        return ""
-    anchor = line if isinstance(line, int) and line >= 1 else 1
-    anchor = min(anchor, len(file_lines))  # clamp EOF
-    lo = max(0, anchor - 1 - _RETRO_REGION_WINDOW)
-    hi = min(len(file_lines), anchor + _RETRO_REGION_WINDOW)
-    excerpt = "\n".join(file_lines[lo:hi])
-    return excerpt[:_RETRO_REGION_MAX_BYTES]
-
-
-def _validity_retro_source(node: dict) -> dict[str, str]:
-    """Per-retro-node enrichment seam (Locked Decision #1): the originating review
-    comment (`pr:review-comment`) + the cited file's merged region
-    (`git:merged-region:<path>`), for the validity classifier. Returns allowlisted
-    `pr:`/`git:` items, or ``{}`` on any failure at any step (fail open, node kept).
-    Wired only here in the CLI edge; the hermetic core injects a stub under test."""
-    from fno.graph import maintain as _m
-
-    parsed = _m.parse_retro_trailer(node.get("details"))
-    if parsed is None:
-        return {}
-    source_pr, finding_hash = parsed
-    if source_pr is None:  # postmortem-sourced: no fetchable PR comment
-        return {}
-    root = node.get("cwd")
-    if not isinstance(root, str) or not os.path.isdir(root):
-        return {}
-    root_p = os.path.abspath(os.path.expanduser(root))
-    comment = _fetch_retro_comment(source_pr, finding_hash, root_p)
-    if comment is None:
-        return {}
-    items: dict[str, str] = {}
-    path = comment.get("path")
-    line = comment.get("line") or comment.get("original_line")  # outdated diff -> original_line
-    items["pr:review-comment"] = _summarize_review_comment(path, line, comment.get("diff_hunk"))
-    # Ordered after the comment item so a cap drops the precision add (merged
-    # region) before the higher-value ask (Discretion #4 / AC4-EDGE).
-    if isinstance(path, str) and path:
-        region = _read_merged_region(root_p, path, line)
-        if region:
-            items[f"git:merged-region:{path}"] = region
-    return items
-
-
 @cli.command("maintain", hidden=True)
 def cmd_maintain(
     apply: bool = typer.Option(
@@ -11163,575 +10973,26 @@ def cmd_maintain(
     drain-stale, cap-Now) only ever propose. Full leg list + loop form:
     docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
     apply does not abort the rest; an empty graph is a clean no-op.
+
+    The pass runs under a wall-clock budget, ``backlog.maintain.budget_seconds``
+    (default 300s), checked between legs; the validity analyzer additionally
+    inherits whatever time is left. A pass that runs out exits 4 and prints a
+    partial receipt naming the leg it stopped in, plus a health-history row
+    with ``complete: false`` - exit 4 means "partial results", never a clean
+    board.
     """
-    from fno.graph.store import read_graph, locked_mutate_graph
-    from fno.graph.statuses import recompute_statuses
-    from fno.graph._intake import _find_node
-    from fno.graph.render import make_kanban_column
-    from fno.graph.render_html import _load_wip_caps
     from fno.graph import maintain as _maintain
 
-    # Read once and derive status so the judgment legs see accurate states
-    # (read_graph applies defaults but does not run the cascade).
-    entries = recompute_statuses(read_graph(_graph_path()))
-
-    if suspect_reverts:
-        # Short-circuit (): a retro sweep, not another leg. Runs before
-        # the claim check and every other detector below - it reads and
-        # prints only, so it needs none of their machinery.
-        reverts = _maintain.detect_suspect_reverts(entries)
-        typer.echo(
-            f"reversals: {len(reverts)} of the drained pile carry evidence of a human decision"
-        )
-        for r in reverts:
-            title = r.title[:60]
-            typer.echo(f"  {r.node_id}  {r.priority}  {r.deferred_at[:10]}  {r.signal}  {title}")
-        typer.echo(
-            "(read-only: no node was changed. Rule on these yourself with `fno backlog undefer <id>...`)"
-        )
-        return
-
-    # Apply legs must never touch a node a live target session is driving.
-    claimed = (
-        _require_live_claimed_node_ids("backlog maintain --apply")
-        if apply
-        else _live_claimed_node_ids()
+    _maintain.run_pass(
+        apply=apply,
+        json_out=json_out,
+        recheck=recheck,
+        no_validity=no_validity,
+        suspect_reverts=suspect_reverts,
+        graph_path=_graph_path,
+        live_claimed=_live_claimed_node_ids,
+        require_live_claimed=_require_live_claimed_node_ids,
     )
-
-    # --- detect (all read-only) ---
-    workspaces = _maintain.load_workspaces()
-    rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
-    prune_ids = _maintain.detect_temp_leaks(entries)
-    pr_url_fixes = _maintain.detect_url_less_prs(entries)
-    twin_drops = _maintain.detect_misharnessed_twins(entries)
-    shape_fixes = _maintain.detect_harness_shape_fixes(entries)
-    pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
-    pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
-    dup_groups = _maintain.detect_dup_groups(entries)
-    plan_cost_violations = _maintain.detect_shared_plan_cost_violations(entries)
-    # Propose-only in v1 even under --apply: a bulk reparent has no human
-    # reading a receipt the way intake's one-at-a-time auto-link does.
-    try:
-        rollup_cands = _maintain.detect_rollup_candidates(entries)
-    except Exception:  # noqa: BLE001 - advisory leg; maintain must not break
-        rollup_cands = []
-
-    try:
-        from fno.config import load_settings
-        _maintain_cfg = load_settings().backlog.maintain
-        staleness_days = _maintain_cfg.staleness_days
-        max_failed_attempts = _maintain_cfg.max_failed_attempts
-    except Exception:
-        staleness_days = 30
-        max_failed_attempts = 3
-    stale = _maintain.detect_stale_ideas(entries, staleness_days)
-
-    # G1 stale-ready quarantine leg (): the propose-only mirror of the
-    # failure-defer leg over READY rows abandoned past
-    # config.backlog.staleness_days (default 21, distinct from the idea-stage
-    # staleness above). --apply defers each with the quarantine reason. Reuses
-    # the SAME blast cap so a mass-quarantine can never defer half the board.
-    try:
-        from fno.config import load_settings
-
-        ready_staleness_days = load_settings().backlog.staleness_days
-    except Exception:
-        ready_staleness_days = 21
-    stale_ready_cands = _maintain.detect_stale_ready(entries, ready_staleness_days)
-    stale_ready_truncated = 0
-    if len(stale_ready_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
-        stale_ready_cands = sorted(stale_ready_cands, key=lambda s: (-s.age_days, s.node_id))
-        stale_ready_truncated = len(stale_ready_cands) - _maintain.AUTO_DEFER_BLAST_CAP
-        stale_ready_cands = stale_ready_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
-
-    now_cap = _load_wip_caps().get("now", 20)
-    column_for = make_kanban_column(entries)
-    overflow = _maintain.now_overflow(
-        entries,
-        now_cap,
-        column_for,
-    )
-
-    # Leg 7: auto-defer failure-prone nodes (#34). Derive the streak from the
-    # walker's existing node_failed/node_closed events (Locked Decision #4).
-    from fno.graph import failure as _failure
-
-    events = _failure.read_events()
-    defer_cands = _maintain.detect_failure_defers(entries, events, max_failed_attempts)
-    # Blast-radius guard (Open Question #2): cap per-run auto-defers so a
-    # provider-outage mass-failure cannot defer half the board. Truncate the
-    # lowest-streak candidates and ALWAYS log the drop (no silent cap).
-    defer_truncated = 0
-    if len(defer_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
-        defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
-        defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
-        defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
-
-    ab_lines, ab_warn = _maintain.abandoned_leg(entries, claimed, _graph_path(), apply)
-    if ab_warn:
-        typer.echo(f"warning: {ab_warn}", err=True)
-
-    # --- apply (deterministic legs only) ---
-    applied_rescope: list[str] = []
-    applied_prune: list[str] = []
-    applied_defers: list[dict] = []
-    applied_stale_ready: list[dict] = []
-    applied_pr_urls: list[dict] = []
-    applied_twin_drops: list[dict] = []
-    applied_shape_fixes: list[dict] = []
-    skipped_claimed: list[str] = []
-
-    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable or twin_drops or shape_fixes):
-        # One locked mutation: the board renders once; one failed item never strands the rest.
-        def mutator(ents):
-            current_claimed = claimed | _require_live_claimed_node_ids("backlog maintain --apply")
-            applied_rescope.clear()
-            applied_prune.clear()
-            applied_defers.clear()
-            applied_stale_ready.clear()
-            applied_pr_urls.clear()
-            skipped_claimed.clear()
-            prune_set: set[str] = set()
-            for fix in rescope_fixes:
-                if fix.node_id in current_claimed:
-                    skipped_claimed.append(fix.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, fix.node_id)
-                    if not n:
-                        continue
-                    # Only project/cwd are ever touched - never priority/status.
-                    n["project"] = fix.new_project
-                    n["cwd"] = fix.new_cwd
-                    applied_rescope.append(fix.node_id)
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: re-scope of {fix.node_id} failed: {exc}", err=True)
-            for nid in prune_ids:
-                if nid in current_claimed:
-                    skipped_claimed.append(nid)
-                    continue
-                prune_set.add(nid)
-                applied_prune.append(nid)
-            if prune_set:
-                # Mirror `remove`: drop the node AND clean dangling blocked_by refs.
-                for e in ents:
-                    blocked = e.get("blocked_by")
-                    if blocked:
-                        e["blocked_by"] = [b for b in blocked if b not in prune_set]
-                ents = [e for e in ents if e.get("id") not in prune_set]
-            # Leg 2b: backfill a pr_url onto url-less rows, in-lock (a present url outranks).
-            for fix in pr_url_writable:
-                if fix.node_id in current_claimed:
-                    skipped_claimed.append(fix.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, fix.node_id)
-                    if not n or n.get("pr_url") or n.get("pr_number") != fix.pr_number:
-                        continue
-                    n["pr_url"] = fix.pr_url
-                    applied_pr_urls.append({"node_id": fix.node_id, "pr_url": fix.pr_url})
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: pr_url backfill of {fix.node_id} failed: {exc}", err=True)
-            # Leg 2c: drop the mis-harnessed session twin (re-checked in-lock).
-            applied_twin_drops, twin_skipped, twin_warn = _maintain.apply_twin_drops(
-                ents, twin_drops, current_claimed
-            )
-            skipped_claimed.extend(twin_skipped)
-            # Leg 2d: correct a wrong harness the twin leg left (no twin to drop).
-            applied_shape_fixes, fix_skipped, fix_warn = _maintain.apply_harness_shape_fixes(
-                ents, shape_fixes, current_claimed
-            )
-            skipped_claimed.extend(fix_skipped)
-            for _w in [*twin_warn, *fix_warn]:
-                typer.echo(f"warning: {_w}", err=True)
-            # Leg 7: auto-defer failure-prone nodes (#34). Re-checks live state
-            # and claims INSIDE the lock so a node that raced is not touched.
-            defer_claimed = current_claimed
-            for cand in defer_cands:
-                if cand.node_id in defer_claimed:
-                    skipped_claimed.append(cand.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, cand.node_id)
-                    if not n:
-                        continue
-                    if n.get("completed_at") or n.get("deferred_at"):
-                        continue  # raced to done/deferred; leave it
-                    reason = cand.reason()
-                    # Mirror cmd_defer: clear claim/completion so the cascade derives status.
-                    n["locked_by"] = None
-                    n["locked_at"] = None
-                    n["completed_at"] = None
-                    n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    n["deferred_reason"] = reason
-                    # Failure-cascade defers carry the sentinel vocabulary, not
-                    # an expired drift: no kind (pop so a re-deferral cannot inherit one).
-                    n.pop("deferred_kind", None)
-                    applied_defers.append(
-                        {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True)
-            # G1 stale-ready quarantine (): the reversible defer for a ready
-            # node abandoned past the threshold. Same in-lock re-sample as the
-            # failure leg (a node claimed/done/deferred since the read is left
-            # alone - the "quarantine racing a live claim must lose" race rule).
-            sr_claimed = current_claimed
-            for cand in stale_ready_cands:
-                if cand.node_id in sr_claimed:
-                    skipped_claimed.append(cand.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, cand.node_id)
-                    if not n:
-                        continue
-                    if n.get("completed_at") or n.get("deferred_at"):
-                        continue  # raced to done/deferred; leave it
-                    # Re-run the predicate under the lock: a candidate that
-                    # gained a movement signal since the pre-lock scan (e.g. a
-                    # PR attached -> now in-review, or a fresh plan edit) is no
-                    # longer stale, and deferring it would sink active work into
-                    # the pile (deferred outranks in-review). Re-check on `n`.
-                    if not _maintain.is_stale_ready(
-                        n, datetime.now(timezone.utc), ready_staleness_days
-                    ):
-                        continue
-                    n["locked_by"] = None
-                    n["locked_at"] = None
-                    n["completed_at"] = None
-                    n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
-                    n["deferred_kind"] = "expired"
-                    applied_stale_ready.append(
-                        {
-                            "node_id": cand.node_id,
-                            "age_days": cand.age_days,
-                            "reason": _maintain.STALE_QUARANTINE_REASON,
-                        }
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: stale-ready defer of {cand.node_id} failed: {exc}",
-                        err=True,
-                    )
-            return ents
-
-        locked_mutate_graph(_graph_path(), mutator)
-
-    # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
-    # Runs even under --apply as proposal-only; a single analyzer call reviews the
-    # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
-    # once the pile is watermarked, later runs find 0 eligible and skip the call.
-    validity_result = None
-    if not no_validity:
-        try:
-            from fno.config import load_settings
-
-            _vcfg = load_settings().backlog.maintain
-            v_days, v_batch = _vcfg.validity_days, _vcfg.validity_batch_size
-        except Exception:
-            v_days, v_batch = _maintain.VALIDITY_DAYS_DEFAULT, _maintain.VALIDITY_BATCH_DEFAULT
-
-        from fno import paths as _paths
-
-        try:
-            _deck_dir = _paths.state_dir() / "validity-decks"
-        except Exception:
-            _deck_dir = None
-
-        if _deck_dir is not None:
-
-            def _exists_factory(node):
-                root = node.get("cwd")
-                if not isinstance(root, str) or not os.path.isdir(root):
-                    return None  # repo unavailable -> path evidence recorded unavailable
-                root_p = os.path.abspath(os.path.expanduser(root))
-                # `rel` is extracted from untrusted node text; contained_path_exists
-                # rejects an absolute or `../` escape from the repo root (CWE-22).
-                return lambda rel: _maintain.contained_path_exists(root_p, rel)
-
-            # Re-read seam: the sweep calls this AFTER the analyzer returns, so a
-            # node that raced to claimed/done/deferred DURING analysis voids its
-            # recommendation (AC4-EDGE).
-            def _reread():
-                return recompute_statuses(read_graph(_graph_path()))
-
-            validity_result = _maintain.run_validity_sweep(
-                entries,
-                validity_days=v_days,
-                batch_size=v_batch,
-                out_dir=_deck_dir,
-                claimed_ids=frozenset(
-                    claimed
-                    | (
-                        _require_live_claimed_node_ids("backlog maintain --apply")
-                        if apply
-                        else _live_claimed_node_ids()
-                    )
-                ),
-                recheck=recheck,
-                exists_factory=_exists_factory,
-                search=_validity_rg_search,
-                retro_source=_validity_retro_source,
-                reread=_reread,
-            )
-            if validity_result.error and not json_out:
-                typer.echo(f"validity: {validity_result.error}", err=True)
-                raise typer.Exit(code=1)
-
-    # --- report leg: append a summary to health-history (best-effort) ---
-    report = {
-        "scope": "maintain",
-        "applied": apply,
-        "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
-        "pruned": len(applied_prune) if apply else len(prune_ids),
-        "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
-        "pr_url_unresolvable": len(pr_url_unresolvable),
-        "dedup_groups": len(dup_groups),
-        "shared_plan_cost_violations": len(plan_cost_violations),
-        "rollup_candidates": len(rollup_cands),
-        "stale_ideas": len(stale),
-        "now_overflow": list(overflow) if overflow else None,
-        "skipped_claimed": len(skipped_claimed),
-        "auto_deferred": len(applied_defers) if apply else len(defer_cands),
-        # Carry node + reason so a sweep's auto-defers are never silent (a
-        # silent auto-defer is a design bug, per UI State Machines).
-        "auto_deferred_nodes": applied_defers
-        if apply
-        else [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
-        "auto_defer_truncated": defer_truncated,
-        "stale_ready": len(applied_stale_ready) if apply else len(stale_ready_cands),
-        "stale_ready_nodes": applied_stale_ready
-        if apply
-        else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
-        "stale_ready_truncated": stale_ready_truncated,
-    }
-    try:
-        from fno.health_monitor import append_history
-
-        append_history(report, [])
-    except Exception as exc:  # noqa: BLE001 - report leg is non-fatal
-        typer.echo(f"warning: maintain health-history append failed: {exc}", err=True)
-
-    if json_out:
-        payload = {
-            "applied": apply,
-            "rescope": {
-                "applied": applied_rescope if apply else [],
-                "candidates": [
-                    {
-                        "node_id": f.node_id,
-                        "new_project": f.new_project,
-                        "new_cwd": f.new_cwd,
-                    }
-                    for f in rescope_fixes
-                ],
-            },
-            "prune": {
-                "applied": applied_prune if apply else [],
-                "candidates": prune_ids,
-            },
-            "pr_url_backfill": {
-                "applied": applied_pr_urls if apply else [],
-                "candidates": [
-                    {"node_id": f.node_id, "pr_number": f.pr_number, "pr_url": f.pr_url}
-                    for f in pr_url_writable
-                ],
-                "unresolvable": [
-                    {"node_id": f.node_id, "pr_number": f.pr_number, "cwd": f.cwd}
-                    for f in pr_url_unresolvable
-                ],
-            },
-            "dedup_groups": dup_groups,
-            "shared_plan_cost_violations": [
-                {"plan_path": v.plan_path, "nodes": v.nodes} for v in plan_cost_violations
-            ],
-            "rollup_candidates": [
-                {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
-            ],
-            "stale_ideas": [{"node_id": s.node_id, "age_days": s.age_days} for s in stale],
-            "now_overflow": list(overflow) if overflow else None,
-            "skipped_claimed": skipped_claimed,
-            "auto_defer": {
-                "applied": applied_defers if apply else [],
-                "candidates": [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
-                "truncated": defer_truncated,
-            },
-            "stale_ready": {
-                "applied": applied_stale_ready if apply else [],
-                "candidates": [
-                    {"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands
-                ],
-                "truncated": stale_ready_truncated,
-            },
-            "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
-            "session_harness_fixes": _maintain.shape_fix_payload(
-                shape_fixes, applied_shape_fixes, apply),
-        }
-        if validity_result is not None:
-            payload["validity"] = {
-                "eligible": validity_result.eligible,
-                "counts": validity_result.counts,
-                "deck": validity_result.deck_md,
-                "degraded": validity_result.degraded,
-                "stale": validity_result.stale,
-                "error": validity_result.error,
-            }
-        typer.echo(json.dumps(payload, indent=2))
-        if validity_result is not None and validity_result.error:
-            raise typer.Exit(code=1)
-        return
-
-    # --- human per-leg summary (a no-op run is visibly distinct, AC1-UI) ---
-    # AC1-UI: every category prints its count, zero included - a silent
-    # category reads as "nothing to do" when it may be "nothing resolved".
-    if apply:
-        # "written N of M", never a bare N: the in-lock loop skips a row that
-        # raced to a url or a different pr_number, so 120-of-159 would read
-        # exactly like a complete run.
-        typer.echo(
-            f"pr-url written {len(applied_pr_urls)} of {len(pr_url_writable)} | "
-            f"pr-url unresolvable {len(pr_url_unresolvable)}"
-        )
-    else:
-        typer.echo(
-            f"pr-url proposed {len(pr_url_writable)} | "
-            f"pr-url unresolvable {len(pr_url_unresolvable)}"
-        )
-    for f in pr_url_unresolvable:
-        typer.echo(f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})")
-
-    if apply:
-        typer.echo(
-            f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "
-            f"auto-deferred {len(applied_defers)} | "
-            f"stale-ready-deferred {len(applied_stale_ready)} | "
-            f"dedup-groups {len(dup_groups)} | rollup-candidates "
-            f"{len(rollup_cands)} | stale-ideas {len(stale)} | "
-            f"now-overflow {'yes' if overflow else 'no'} | "
-            f"skipped-claimed {len(skipped_claimed)}"
-        )
-    else:
-        typer.echo(
-            f"re-scope candidates {len(rescope_fixes)} | prune candidates "
-            f"{len(prune_ids)} | auto-defer candidates {len(defer_cands)} | "
-            f"stale-ready candidates {len(stale_ready_cands)} | "
-            f"dedup-groups {len(dup_groups)} | rollup-candidates "
-            f"{len(rollup_cands)} | stale-ideas "
-            f"{len(stale)} | now-overflow {'yes' if overflow else 'no'}  "
-            f"(run with --apply to apply the deterministic legs)"
-        )
-
-    for rf in rescope_fixes:
-        verb = "re-scoped" if (apply and rf.node_id in applied_rescope) else "would re-scope"
-        typer.echo(f"  {verb} {rf.node_id} -> project={rf.new_project} cwd={rf.new_cwd}")
-    for nid in prune_ids:
-        verb = "pruned" if (apply and nid in applied_prune) else "would prune (temp-cwd leak)"
-        typer.echo(f"  {verb} {nid}")
-    if apply:
-        for d in applied_defers:
-            typer.echo(
-                f"  auto-deferred {d['node_id']} ({d['streak']} consecutive "
-                f"failures): {d['reason']}"
-            )
-    else:
-        for c in defer_cands:
-            typer.echo(
-                f"  would auto-defer {c.node_id} ({c.streak} consecutive failures, "
-                f">= {max_failed_attempts}): fno backlog undefer {c.node_id} to recover"
-            )
-    if defer_truncated:
-        typer.echo(
-            f"  NOTE: auto-defer blast cap hit - {defer_truncated} further "
-            f"candidate(s) NOT deferred this run "
-            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
-        )
-    if apply:
-        for d in applied_stale_ready:
-            typer.echo(
-                f"  stale-ready deferred {d['node_id']} ({d['age_days']}d unmoved): {d['reason']}"
-            )
-    else:
-        for sc in stale_ready_cands:
-            typer.echo(
-                f"  would quarantine stale-ready {sc.node_id} ({sc.age_days}d "
-                f"unmoved, >{ready_staleness_days}d): fno backlog undefer "
-                f"{sc.node_id} to recover"
-            )
-    if stale_ready_truncated:
-        typer.echo(
-            f"  NOTE: stale-ready blast cap hit - {stale_ready_truncated} further "
-            f"candidate(s) NOT quarantined this run "
-            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
-        )
-    for group in dup_groups:
-        typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
-    for v in plan_cost_violations:
-        typer.echo(
-            f"  shared-plan cost double-count {v.plan_path}: {', '.join(v.nodes)} "
-            f"all carry cost_usd (a plan is one PR is one node; one node is the "
-            f"delivery unit, the rest are contained). Read-only: pick the unit "
-            f"and `fno backlog update <other> --plan-path null` by hand."
-        )
-    for _tl in _maintain.twin_lines(twin_drops, applied_twin_drops, apply):
-        typer.echo(_tl)
-    for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
-        typer.echo(_fl)
-    if ab_lines:
-        typer.echo("\n".join(ab_lines))
-    for nid, epic_id, score in rollup_cands:
-        typer.echo(
-            f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
-            f"fno backlog update {nid} --parent {epic_id}"
-        )
-    # Bounded stale-idea receipt: the per-candidate echo swamped the report on
-    # a mature graph. Summary + 10 oldest + one drain command instead;
-    # --no-validity skips the analyzer call that made an earlier `maintain -J` hang.
-    if stale:
-        ages = sorted(s.age_days for s in stale)
-        oldest = sorted(stale, key=lambda s: s.age_days, reverse=True)[:10]
-        typer.echo(
-            f"  stale ideas: {len(stale)} (age {ages[0]}-{ages[-1]}d) - drain in one locked write:"
-        )
-        for s in oldest:
-            typer.echo(f"    {s.node_id} ({s.age_days}d)")
-        if len(stale) > 10:
-            typer.echo(f"    (showing 10 of {len(stale)} oldest)")
-        typer.echo(
-            f"    fno backlog maintain --no-validity -J "
-            f"| jq -r '.stale_ideas[].node_id' "
-            f"| xargs fno backlog defer -R 'stale >{staleness_days}d, drained by maintain' "
-            f"--kind expired"
-        )
-    else:
-        typer.echo("  stale ideas: 0")
-    if overflow:
-        count, cap = overflow
-        typer.echo(
-            f"  Now over WIP cap ({count} > {cap}): run `fno backlog triage propose` "
-            f"to demote lower-priority work (never auto-reprioritized)"
-        )
-    if skipped_claimed:
-        typer.echo(
-            f"  skipped {len(skipped_claimed)} live-claimed node(s): {', '.join(skipped_claimed)}"
-        )
-
-    if validity_result is not None:
-        for w in validity_result.warnings:
-            typer.echo(f"  validity config: {w}", err=True)
-        if validity_result.eligible == 0:
-            typer.echo("validity: 0 eligible ideas")
-        else:
-            counts = validity_result.counts
-            tag = " (DEGRADED: analyzer unavailable)" if validity_result.degraded else ""
-            stale_note = f", {validity_result.stale} stale" if validity_result.stale else ""
-            typer.echo(
-                f"validity: reviewed {validity_result.eligible} ideas{tag} -> "
-                f"promote {counts.get('promote', 0)} | keep {counts.get('keep', 0)} | "
-                f"supersede {counts.get('supersede', 0)} | needs-human "
-                f"{counts.get('needs-human', 0)}{stale_note}"
-            )
-            typer.echo(f"  deck: {validity_result.deck_md}")
 
 
 # -- reprioritize --
@@ -13424,156 +12685,8 @@ def _exec_liveness(state: str) -> str:
     }.get(state, "")
 
 
-# -- task 4.2: the external-backend verb classification -----------------------
-# Every registered backlog verb is classified exactly ONCE, here, against the
-# LIVE registry (never a frozen count): tracker-owned verbs wrap their
-# registered callback with the shared external refusal BEFORE any graph
-# read/write, and footnote-owned verbs carry the read-side marker the
-# consumer census pins (scripts/diagnostics/tracker-consumers.py --verbs).
-# A verb missing from both lists fails the import, and a listed verb the
-# registry no longer carries fails it too (no tombstones, no renames smuggled
-# past the classification). Misclassifying a read as tracker-owned only
-# refuses it externally; misclassifying a mutation as footnote-owned is the
-# dangerous direction, so unsure verbs sit tracker-owned.
-
-_TRACKER_OWNED_VERBS = frozenset(
-    {
-        # node lifecycle + creation
-        "add",
-        "idea",
-        "new",
-        "intake",
-        "decompose",
-        "update",
-        "note",
-        # encounter appends to a node's graph record, exactly like note
-        "encounter",
-        "remove",
-        "migrate-priorities",
-        "migrate-difficulty",
-        "migrate-updated-at",
-        "reopen",
-        "supersede",
-        "unsupersede",
-        # board/rank/queue state
-        "rank",
-        "reprioritize",
-        "defer",
-        "undefer",
-        # stamps contained_in + parent under the lock
-        "contain",
-        "queue",
-        "unqueue",
-        "pick",
-        "unclaim",
-        "requeue",
-        # storage + sweep machinery
-        "archive",
-        "unarchive",
-        "archive-dedupe-ids",
-        "maintain",
-        "groom",
-        # graph-row mutation (stamps deferred_kind under the lock)
-        "backfill-deferred-kind",
-        # graph-state read: under an external backend the local graph is not
-        # the store, so the read must refuse with the rest
-        "stuck-epics",
-        # orchestration that stamps nodes
-        "advance",
-        "reconcile",
-        "reconcile-findings",
-        "lanes",
-        "lane-fill",
-        "dispatch-lanes",
-        # join spawns workers into a held worktree; the joiners, not join,
-        # write task rows ()
-        "join",
-        # footnote-owned DATA with a graph-resident write path (refused until the
-        # write moves to the sidecar seam)
-        "cost",
-        "session add",
-        "session close",
-        "session reap-open",
-        "decide",
-        "decisions",
-        "decide-retract",
-        "decide-reindex",
-        # sub-app mutations
-        "triage apply",
-        "capture promote",
-        "batch join",
-        "batch prepare",
-        "batch ship",
-        "batch ship-closeable",
-        # task rows + task claims write graph state (list materializes rows)
-        "task list",
-        "task update",
-    }
-)
-
-_FOOTNOTE_OWNED_VERBS = frozenset(
-    {
-        # seam reads / renders
-        "get",
-        "status",
-        "view",
-        "find",
-        "next",
-        "ready",
-        "worked",
-        "queued",
-        "provenance",
-        "roadmap",
-        "bases",
-        "album",
-        "project-root",
-        "board",
-        "undispatched",
-        # replays the post-publish views after a native (mux) store write;
-        # renders only, never a graph write
-        "render-views",
-        "discover",
-        # demand reads encounters and writes nothing
-        "demand",
-        # completion works on any backend by design (task 4.1)
-        "done",
-        # footnote-owned sidecar files, no graph write
-        "relatedness build",
-        "relatedness get",
-        "epic status",
-        # capture-pile file machinery (no graph writes; promote is tracker-owned)
-        "capture add",
-        "capture archive",
-        "capture capture-pass",
-        "capture dismiss",
-        "capture empty-pass",
-        "capture list",
-        "capture scan",
-        "capture tidy",
-        # triage read/propose surfaces (apply is tracker-owned)
-        "triage consistency",
-        "triage context",
-        "triage health",
-        "triage projects",
-        "triage propose",
-        "triage rank",
-        "triage trend",
-        "triage validate",
-        # batch read surfaces
-        "batch open",
-        "batch status",
-        "batch metrics",
-        # read-only operators' surface over the graph store
-        # graph-store integrity check (read-only)
-        "collisions check",
-    }
-)
-
-
-#: Tracker-owned verbs whose refusal a caller must read as "no grain here",
-#: not as a stop. Under a non-graph backend there are no task rows at all, so
-#: a wave has nothing to guard and dispatches exactly as it did before.
-_NO_GRAIN_ON_EXTERNAL_BACKEND = frozenset({"task list", "task update"})
+# -- the external-backend verb classification (the sets are imported at the
+# top of this module from _verb_classification.py, beside the data)
 
 
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:
@@ -13647,7 +12760,8 @@ def _classify_backlog_verbs() -> None:
                 raise RuntimeError(
                     f"unclassified backlog verb {label!r}: classify it in "
                     "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
-                    "(graph/cli.py) so the external-backend census holds"
+                    "(graph/_verb_classification.py) so the external-backend "
+                    "census holds"
                 )
     unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
     if unknown:

@@ -461,6 +461,10 @@ ADVISORY_WARNING_PREFIX = "roster advisory: "
 #: probe that took a while still returned every row.
 HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
 
+#: Advisory structured line for a live row with no harness session id; the
+#: payload names the node so the overlay skips the one row (x-ae54).
+UNMEASURABLE_ROW_PREFIX = "unmeasurable-row: "
+
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe (measured 3.4s on a 43-row fleet), so the
 #: shared 3.0s interactive default times out, returns zero rows, and trips
@@ -1345,7 +1349,15 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     for r in raw:
         sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
-            skipped_no_sid += 1
+            cwd = str(r.get("cwd") or "")
+            node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
+            if node:
+                warnings.append(
+                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                    f"harness=claude node={node} name={r.get('name') or 'unknown'}"
+                )
+            else:
+                skipped_no_sid += 1
             continue
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
@@ -1383,7 +1395,16 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             or getattr(entry, "short_id", None)
         )
         if not row_id:
-            skipped_nonclaude_no_id += 1
+            node = getattr(entry, "node", None)
+            name = str(getattr(entry, "name", None) or "") or "unknown"
+            if not node:
+                skipped_nonclaude_no_id += 1
+            else:
+                warnings.append(
+                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                    f"harness={getattr(entry, 'harness', None) or 'unknown'} "
+                    f"node={node} name={name}"
+                )
             continue
         if str(row_id) in seen_row_ids:
             continue

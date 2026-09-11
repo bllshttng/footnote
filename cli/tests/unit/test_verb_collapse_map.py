@@ -142,7 +142,9 @@ def test_map_covers_current_surface_once():
     # `agents gate-status`, the stop hook's read-only spawn-gate capacity
     # probe (hidden verb): 593 -> 594. This branch allocates `agents census`,
     # the running-process build-drift census (hidden verb): 594 -> 595.
-    assert len(mapped) == 595, (
+    # `backlog session open`, the blueprint session claim holder (x-95dd),
+    # allocated 594 -> 595 on main in the same window: 595 -> 596.
+    assert len(mapped) == 596, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

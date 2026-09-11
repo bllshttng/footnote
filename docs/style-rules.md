@@ -160,6 +160,7 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 - Run `fno doctor lint style --surface pr-body --stdin` to check a PR body by hand.
 - Run `fno doctor lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
 - A PR comment has no chokepoint. Run `fno doctor lint style --surface comment --stdin` yourself.
+- Add `--fix` to rewrite the mechanical set. A semicolon splits into two sentences, and a wrapped paragraph rejoins into one physical line. Any residue needs an author, and residue exits 1.
 
 The comment surface is honest about refusing nothing. A PR comment goes out through `gh pr comment`, which this repo never wraps. A surface that reads as a guard and blocks nothing is worse than no surface at all.
 

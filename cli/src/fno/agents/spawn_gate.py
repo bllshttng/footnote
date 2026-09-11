@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import contextvars
 import json
-import math
 import os
 import sys
 import time
@@ -27,6 +26,7 @@ from typing import Any, Literal, NoReturn, Optional, cast
 from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
+from fno.footprint import Admission
 from fno.harness_identity import claude_transport_short_id
 
 # Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
@@ -42,6 +42,12 @@ EXIT_REGISTRY_SCHEMA = 81
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
+#: x-7783 LD4: hold re-sample gap and admission debounce (the macOS `ps`
+#: CPU column is a decaying average; two reads 2s apart are one sample).
+CPU_HOLD_POLL_S = 15.0
+CPU_ADMIT_SAMPLES = 2
+#: x-e32e: a slow bg-socket census names its own wait instead of silence.
+SLOW_SCAN_WARN_S = 5.0
 GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
 #: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
@@ -265,25 +271,26 @@ class LiveCensus:
 
 @dataclass(frozen=True)
 class LoadSnapshot:
+    # x-7783: display/trend only; nothing gates on these.
     load_1m: float | None
-    max_load_per_cpu: float
     load_cpu_count: int
-    load_ceiling: float
-    spawn_load_status: Literal["disabled", "unavailable", "within", "exceeded"]
-    # The 5m/15m averages ride along for the court panel: a climb and a spike
-    # look identical through the 1m figure alone. Nothing gates on them.
     load_5m: float | None = None
     load_15m: float | None = None
 
 
-def census() -> LiveCensus:
+def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
     """The full union: fno registry ∪ claude roster (deduped by claude session
     short_id) + live ``worker:<name>`` slot claims. This is the display /
     RAM-ground-truth view (``fno agents top`` renders every row). The spawn
     gate's ``max_live`` decision uses :attr:`LiveCensus.slot_count`, which
     counts fno-sourced rows only — the roster is kept here for visibility but
     does NOT consume worker slots (x-bdf9). Read-only; every source failure
-    degrades to zero contribution with one warning."""
+    degrades to zero contribution with one warning.
+
+    ``socket_map`` injects the bg-socket pid join (x-e32e): the lsof scan
+    costs seconds under load, so a caller that censuses repeatedly across one
+    decision (the spawn gate's queue loop) scans ONCE and passes the map back
+    in. None (the default) scans, one read per census."""
     out = LiveCensus()
     counted_short_ids: set[str] = set()
     live_registry_names: set[str] = set()
@@ -294,10 +301,12 @@ def census() -> LiveCensus:
     # "no bg sessions" - rows then keep their recorded (host) pid.
     from fno.agents.session_procs import bg_socket_pid_map, resolve_session_pid
 
-    try:
-        sock_map = bg_socket_pid_map()
-    except Exception:  # noqa: BLE001 - a broken join must not break the census
-        sock_map = {}
+    if socket_map is None:
+        try:
+            socket_map = bg_socket_pid_map()
+        except Exception:  # noqa: BLE001 - a broken join must not break the census
+            socket_map = {}
+    sock_map = socket_map
 
     # claude roster first: display + dedup key for adopted sessions. Kept in the
     # union for `fno agents top`, but excluded from the slot cap (see slot_count).
@@ -947,12 +956,19 @@ _CURRENT_SPAWN: "contextvars.ContextVar[tuple[Optional[str], Optional[str]]]" = 
     contextvars.ContextVar("fno_spawn_gate_current", default=(None, None))
 )
 
+#: x-7783 AC13: axes read so far plus the axis being decided, stamped onto
+#: refusals that carry no explicit axis fields.
+_CURRENT_AXES_READ: "contextvars.ContextVar[dict[str, str]]" = (
+    contextvars.ContextVar("fno_spawn_gate_axes_read", default={})
+)
+_CURRENT_AXIS: "contextvars.ContextVar[Optional[str]]" = (
+    contextvars.ContextVar("fno_spawn_gate_axis", default=None)
+)
+
 
 def _refuse(
     exit_code: int,
     receipt: Optional[dict[str, object]] = None,
-    *,
-    cause_stated: bool = False,
     **event: Any,
 ) -> NoReturn:
     """The one seam every gate refusal exits through: emit, then raise.
@@ -970,15 +986,23 @@ def _refuse(
     covers) from the Rust gate's refusals, which x-ab75 owns.
 
     ``event`` is extra telemetry for
-    the refusals that deliberately carry no receipt (the load ceiling and the
-    king share), so a refusal can name its measured value against its
-    threshold in the log without changing what stdout has always printed.
+    the refusals that deliberately carry no receipt, so a refusal can name
+    its measured value against its threshold in the log without changing
+    what stdout has always printed.
 
     The emit is best-effort - ``_emit_gate_event`` swallows everything - so
     telemetry can never change a gate outcome.
     """
     spawn_name, substrate = _CURRENT_SPAWN.get()
     event_data = {**(receipt or {}), **event}
+    # x-7783 AC13: an explicit axis field wins; the contextvar is the best
+    # effort a non-CPU refusal site can supply.
+    axes_read = _CURRENT_AXES_READ.get()
+    if axes_read and "axes_read" not in event_data:
+        event_data["axes_read"] = dict(axes_read)
+    axis = _CURRENT_AXIS.get()
+    if axis and "axis" not in event_data:
+        event_data["axis"] = axis
     # The seam-owned fields win on collision: a future receipt carrying `name`
     # or `gate` must not silently rewrite the identity this journal entry is
     # attributed by.
@@ -987,8 +1011,6 @@ def _refuse(
     )
     _emit_gate_event("spawn_gate_refused", **event_data)
     refusal = GateRefused(exit_code, receipt)
-    if cause_stated:
-        refusal.cause_stated = True  # type: ignore[attr-defined]
     raise refusal
 
 
@@ -1073,7 +1095,7 @@ def _check_registry_schema() -> None:
         # guards fail OPEN on read errors).
         #
         # The skip leaves a trace, but NOT on stderr. `_check_ram_floor` and
-        # `_check_load_ceiling` warn on their equivalent skips, and this one
+        # `_cpu_axis` warn on their equivalent skips, and this one
         # cannot: the gate's own `test_under_cap_passes_silently` pins an empty
         # stderr on the pass path, and this branch fires there. A silent skip is
         # still unobservable, so it emits instead - the same aggregation argument
@@ -1133,120 +1155,92 @@ def _check_ram_floor(floor_gb: float) -> None:
         _refuse(EXIT_RAM_REFUSED, receipt)
 
 
-def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
-    """Footprint's attribution as numbers: ``(fleet_cores, capacity_cores)``.
-
-    The governor and the refusal text must read ONE instrument. Before
-    x-7c0f the numbers existed only inside the explanation string, which is
-    how a gate came to print `0.79/12.00 cores` in the same breath as a
-    refusal decided on something else.
-
-    ``None`` means unreadable, which is never headroom (see x-e040: this
-    sensor goes blind under exactly the load it exists to measure).
-    """
-    try:
-        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
-
-        reading, _error = cause_reading()
-        if reading is None:
-            return None
-        if getattr(reading, "attribution_gap", None) is not None:
-            # A gapped fleet share is an undercount: unknown, never headroom
-            # (x-e040). None routes into the same refuse-above-trigger branch
-            # as an unreadable instrument.
-            return None
-        capacity = float(_cpu_capacity_cores())
-        fleet = float(reading.fleet_cpu_cores)
-        if capacity <= 0 or not all(
-            math.isfinite(v) and v >= 0 for v in (fleet, capacity)
-        ):
-            return None
-        return fleet, capacity
-    except Exception:
-        return None
-
-
-def _spare_pool_suffix(reading: Any) -> str:
-    """Name the Claude Code pre-warm pool when it holds any CPU.
-
-    Measured 2026-09-07: 45 idle `claude bg-spare` processes held 66.5% of a
-    12-CPU machine, and every fno spawn was refused on the load they produced.
-    The refusal named only the fleet, so an hour went into the wrong cause. The
-    pool is not fno's to bound; saying it is there is.
-
-    Kept byte-identical to the Rust twin in `crates/fno-agents/src/spawn_gate.rs`
-    so the two gates cannot make different claims about the same reading.
-    """
-    count = int(getattr(reading, "spare_pool_process_count", 0) or 0)
-    cores = float(getattr(reading, "spare_pool_cpu_cores", 0.0) or 0.0)
-    if count <= 0 or not math.isfinite(cores) or cores < 0:
-        return ""
-    return (
-        f"; the claude spare pool holds {cores:.2f} cores across {count} "
-        "idle pre-warm processes, which fno does not own or bound"
-    )
-
-
-def _footprint_cause_evidence() -> Optional[str]:
-    """Read one fail-open fleet footprint for an over-load refusal."""
-    try:
-        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
-
-        reading, _error = cause_reading()
-        if reading is None:
-            return None
-        if getattr(reading, "attribution_gap", None) is not None:
-            # Same rule as _fleet_cpu_reading: an undercount is not evidence
-            # about the fleet (x-e040).
-            return None
-        capacity = float(_cpu_capacity_cores())
-        measured_share = (
-            reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
-            if reading.measured_cpu_cores > 0
-            else 0.0
-        )
-        capacity_share = reading.fleet_cpu_cores / capacity * 100
-        values = (
-            reading.fleet_cpu_cores,
-            capacity,
-            capacity_share,
-            measured_share,
-        )
-        if capacity <= 0 or any(not math.isfinite(value) or value < 0 for value in values):
-            return None
-        return (
-            "spawn-gate: footprint attributes "
-            f"{reading.fleet_cpu_cores:.2f}/{capacity:.2f} cores "
-            f"({capacity_share:.1f}% capacity, {measured_share:.1f}% of measured CPU) "
-            "to the fleet" + _spare_pool_suffix(reading)
-        )
-    except Exception:
-        return None
-
-
-def _refuse_load_cause_stated(**event: Any) -> NoReturn:
-    """A load refusal that already printed the attribution it decided on.
-
-    :func:`run_gate` appends a footprint cause line to a load refusal, taken
-    from a SECOND, independent sample. That is honest only when the refusal
-    itself could not say whose CPU this is (the backstop). Marking the two
-    attribution-aware branches keeps one refusal reading one sample.
-
-    ``event`` carries that one sample into the log, so the emitted refusal
-    reports the same numbers the operator was shown rather than a third
-    reading taken later.
-    """
-    _refuse(EXIT_LOAD_REFUSED, cause_stated=True, **event)
-
-
-#: `_check_load_ceiling` takes its own attribution reading when the caller
-#: has not already taken one. `None` is a real reading ("unreadable"), so the
-#: "not supplied" case needs a value that cannot be confused with it.
+#: `(None, "error")` is a real reading ("unreadable"), so the "not supplied"
+#: case needs a value that cannot be confused with it.
 _NOT_PREFETCHED: object = object()
 
 
+def _prefetch_fleet_reading() -> tuple[Optional[Any], Optional[str]]:
+    """Take the footprint reading OUTSIDE the gate mutex, ALWAYS.
+
+    x-7783 LD2: every spawn takes the reading. A trigger that fires on a
+    number the node proved does not track the work is not a cost
+    optimisation, it is a second decider. The read is one `ps` snapshot
+    behind a deadline, and the gate mutex serializes every spawner on the
+    machine, so it is taken before the lock exactly as before - the band
+    check that sometimes skipped it is what died.
+
+    Returns ``(reading, error)``; exactly one side is usable. A ``None``
+    reading is a REFUSAL on ``cpu_instrument``, never a skip (LD3).
+    """
+    try:
+        from fno.doctor_footprint import cause_reading
+    except Exception as exc:  # noqa: BLE001 - an import fault is an unreadable instrument
+        return None, f"footprint unavailable: {exc}"
+    try:
+        return cause_reading()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"footprint unavailable: {exc}"
+
+
+def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
+    """The CPU axis's verdict for THIS spawn: one decider, no second opinion.
+
+    Maps an unreadable instrument to ``refuse`` on ``cpu_instrument`` (LD3:
+    the sensor blinds under exactly the load it measures, and an unreadable
+    process table is itself a symptom) and otherwise hands the reading to
+    :func:`cpu_admission` with the 15-minute load as the backstop input. A
+    platform without ``getloadavg`` reads ``load_15m=None``, which the
+    backstop passes (LD3: unreadable load admits).
+
+    Shared with the ``--explain`` preview, so a dry run answers the question
+    the real spawn will.
+    """
+    reading, error = (
+        _prefetch_fleet_reading()
+        if prefetched is _NOT_PREFETCHED
+        else cast("tuple[Optional[Any], Optional[str]]", prefetched)
+    )
+    if reading is None:
+        why = (error or "the reading failed").strip()
+        return Admission(
+            verdict="refuse",
+            axis="cpu_instrument",
+            reason=(
+                f"spawn-gate: the CPU instrument is unreadable ({why}); "
+                "refusing to spawn (--force to bypass)"
+            ),
+            share_low=0.0,
+            share_high=0.0,
+            bound="exact",
+            fleet_cores=0.0,
+            machine_cores=0.0,
+            capacity_cores=0.0,
+            ceiling=0.0,
+            gap=None,
+            load_15m=None,
+            backstop=0.0,
+        )
+    from fno.doctor_footprint import _admission_config, cpu_admission
+
+    share_ceiling, hard_max = _admission_config()
+    try:
+        load_15m: Optional[float] = os.getloadavg()[2]
+    except (OSError, AttributeError):
+        load_15m = None
+    capacity = float(_load_cpus())
+    return cpu_admission(
+        reading,
+        capacity_cores=capacity,
+        share_ceiling=share_ceiling,
+        load_15m=load_15m,
+        hard_max_load_per_cpu=hard_max,
+        cpus=int(capacity) or 1,
+    )
+
+
 def _load_cpus() -> int:
-    """The CPU denominator for the trigger and the backstop.
+    """The CPU denominator for the CPU axis and the backstop.
 
     Footprint's capacity reading, which is the minimum of the affinity count,
     the host count and the cgroup quota. Two reasons it is worth the import
@@ -1274,204 +1268,20 @@ def _load_cpus() -> int:
 
 
 def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
+    """The display/trend load reading. The retired per-cpu argument stays so
+    footprint's degraded-snapshot path keeps its shape; nothing gates here."""
+    del max_load_per_cpu
     cpus = _load_cpus()
-    ceiling = max_load_per_cpu * cpus
-    if max_load_per_cpu <= 0:
-        return LoadSnapshot(
-            load_1m=None,
-            max_load_per_cpu=max_load_per_cpu,
-            load_cpu_count=cpus,
-            load_ceiling=ceiling,
-            spawn_load_status="disabled",
-        )
     try:
         load1, load5, load15 = os.getloadavg()
     except (OSError, AttributeError):
-        return LoadSnapshot(
-            load_1m=None,
-            max_load_per_cpu=max_load_per_cpu,
-            load_cpu_count=cpus,
-            load_ceiling=ceiling,
-            spawn_load_status="unavailable",
-        )
+        return LoadSnapshot(load_1m=None, load_cpu_count=cpus)
     return LoadSnapshot(
         load_1m=load1,
-        max_load_per_cpu=max_load_per_cpu,
         load_cpu_count=cpus,
-        load_ceiling=ceiling,
-        spawn_load_status="within" if load1 <= ceiling else "exceeded",
         load_5m=load5,
         load_15m=load15,
     )
-
-
-def _needs_attribution(
-    load1: float, cpus: int, max_load_per_cpu: float, hard_max_load_per_cpu: float
-) -> bool:
-    """True only in the band where the verdict depends on WHOSE CPU it is.
-
-    Below the trigger the gate admits without asking, and above the backstop
-    it refuses without asking. Only between them does attribution decide, and
-    only there is the expensive read worth taking.
-    """
-    if max_load_per_cpu <= 0:
-        return False
-    if load1 <= max_load_per_cpu * cpus:
-        return False
-    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
-        return False
-    return True
-
-
-def _prefetch_fleet_reading(
-    max_load_per_cpu: float, hard_max_load_per_cpu: float
-) -> object:
-    """Take the attribution reading OUTSIDE the gate mutex, when needed at all.
-
-    The reading is a `ps` snapshot behind a multi-second deadline, and the gate
-    mutex serializes every spawner on the machine. Taking it inside the lock
-    made a loaded box hold the mutex for seconds, which is exactly when
-    contention is worst: concurrent `--no-wait` spawners then refuse with
-    `no_wait_mutex_held` for no reason of their own. The measurement is
-    identical outside the lock, and it is a SAMPLE either way; the RAM floor
-    re-reads on dequeue for the same reason.
-
-    Returns `_NOT_PREFETCHED` when the band does not need attribution, so the
-    caller stays free to decide from load alone.
-    """
-    snapshot = _load_snapshot(max_load_per_cpu)
-    if snapshot.load_1m is None:
-        return _NOT_PREFETCHED
-    if not _needs_attribution(
-        snapshot.load_1m,
-        snapshot.load_cpu_count,
-        max_load_per_cpu,
-        hard_max_load_per_cpu,
-    ):
-        return _NOT_PREFETCHED
-    return _fleet_cpu_reading()
-
-
-_LOAD_REFUSAL_REASONS = frozenset(
-    {"load_backstop", "load_attribution_unavailable", "fleet_cpu_share"}
-)
-
-
-def load_gate_decision(
-    max_load_per_cpu: float,
-    max_fleet_cpu_share: float = 0.5,
-    hard_max_load_per_cpu: float = 40.0,
-    prefetched: object = _NOT_PREFETCHED,
-) -> Optional[tuple[str, str, dict]]:
-    """One (reason, message, event) triple answering what the load gate does.
-
-    ``None`` admits quietly; a reason in ``_LOAD_REFUSAL_REASONS`` refuses;
-    anything else admits with ``message``. Shared by ``_check_load_ceiling``
-    and the ``--explain`` preview, so a dry run answers the real spawn.
-    """
-    snapshot = _load_snapshot(max_load_per_cpu)
-    if snapshot.spawn_load_status == "disabled":
-        return None
-    if snapshot.spawn_load_status == "unavailable":
-        # OSError: unreadable. AttributeError: the platform has no getloadavg
-        # at all (the Rust gate cfg-guards the same case). Message stays
-        # byte-identical to the Rust gate's: baseline records the twin.
-        message = "spawn-gate: could not read load average; skipping the load check"
-        return ("skip_unreadable", message, {})
-    load1 = snapshot.load_1m
-    cpus = snapshot.load_cpu_count
-    trigger = snapshot.load_ceiling
-    assert load1 is not None  # "within"/"exceeded" always carry a reading
-    if load1 <= trigger:
-        return None
-
-    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
-        return ("load_backstop", (
-            f"spawn-gate: 1-min load {load1:.1f} exceeds the absolute machine "
-            f"backstop hard_max_load_per_cpu {hard_max_load_per_cpu:g} x {cpus} "
-            f"cpus = {hard_max_load_per_cpu * cpus:.1f}; refusing to spawn "
-            "whoever caused it (--force to bypass)"
-        ), {
-            "load_1m": load1, "cpus": cpus,
-            "hard_max_load_per_cpu": hard_max_load_per_cpu,
-            "threshold": hard_max_load_per_cpu * cpus,
-        })
-
-    # run_gate prefetches this outside the gate mutex; a direct caller (and
-    # every unit test) still gets the read on demand.
-    reading = (
-        _fleet_cpu_reading()
-        if prefetched is _NOT_PREFETCHED
-        else cast("Optional[tuple[float, float]]", prefetched)
-    )
-    if reading is None:
-        # The attribution read just failed, so run_gate's evidence probe would
-        # fail the same way one sample later. Nothing to add.
-        return ("load_attribution_unavailable", (
-            f"spawn-gate: 1-min load {load1:.1f} is over the max_load_per_cpu "
-            f"trigger {max_load_per_cpu:g} x {cpus} cpus = {trigger:.1f} and "
-            "fleet CPU attribution unavailable; refusing to spawn "
-            "(--force to bypass)"
-        ), {
-            "load_1m": load1, "cpus": cpus,
-            "max_load_per_cpu": max_load_per_cpu, "threshold": trigger,
-        })
-
-    fleet, capacity = reading
-    share = fleet / capacity
-    if share > max_fleet_cpu_share:
-        return ("fleet_cpu_share", (
-            f"spawn-gate: the fleet holds {fleet:.2f}/{capacity:.2f} cores "
-            f"({share * 100:.1f}% of capacity), over the max_fleet_cpu_share "
-            f"ceiling {max_fleet_cpu_share * 100:.1f}%; refusing to spawn "
-            "(--force to bypass)"
-        ), {
-            "fleet_cores": fleet, "capacity_cores": capacity,
-            "share": share, "max_fleet_cpu_share": max_fleet_cpu_share,
-        })
-
-    return ("admit_external_load", (
-        f"spawn-gate: 1-min load {load1:.1f} is high but only "
-        f"{fleet:.2f}/{capacity:.2f} cores ({share * 100:.1f}%) are attributed "
-        "to the fleet, so the load is not attributed to the fleet; admitting "
-        "the spawn"
-    ), {})
-
-
-def _check_load_ceiling(
-    max_load_per_cpu: float,
-    max_fleet_cpu_share: float = 0.5,
-    hard_max_load_per_cpu: float = 40.0,
-    prefetched: object = _NOT_PREFETCHED,
-) -> None:
-    """Refuse (never queue) when the FLEET is the reason the box is loaded.
-
-    Trigger, attribution, hard backstop - the thresholds and the x-7c0f story
-    live in docs/architecture/spawn-gate.md. Contract otherwise as
-    :func:`load_gate_decision`: disabled skips, unreadable LOAD skips (fail
-    open), unreadable ATTRIBUTION refuses (fail closed). The decision itself
-    lives there, shared with the ``--explain`` preview so the two surfaces
-    cannot drift.
-    """
-    decision = load_gate_decision(
-        max_load_per_cpu,
-        max_fleet_cpu_share,
-        hard_max_load_per_cpu,
-        prefetched,
-    )
-    if decision is None:
-        return
-    reason, message, event = decision
-    _warn(message)
-    if reason not in _LOAD_REFUSAL_REASONS:
-        return
-    if reason == "load_backstop":
-        # This refusal does not name the sample it decided on, so run_gate
-        # appends a footprint cause line taken from a second sample (the
-        # backstop); the attribution-named branches must not (x-7c0f).
-        _refuse(EXIT_LOAD_REFUSED, reason=reason, **event)
-    else:
-        _refuse_load_cause_stated(reason=reason, **event)
 
 
 def _king_share(cap: int, crowned: set[str], caller: str) -> int:
@@ -1618,10 +1428,11 @@ def _acquire_worker_slot(
 
 def gate_settings() -> tuple:
     """The gate's knobs, shared by :func:`run_gate` and :func:`probe_capacity`
-    so the two cannot disagree about a cap. Machine THRESHOLDS read through
-    getattr (a missing one has a safe default); a missing CAP or the limits
-    table is a real attribute read (falling back would silently uncap a
-    provider). The fail-safe fallback carries the built-in budget table.
+    so the two cannot disagree about a cap. A missing CAP or the limits table
+    is a real attribute read (falling back would silently uncap a provider).
+    The fail-safe fallback carries the built-in budget table. The CPU axis's
+    thresholds are NOT here: they are read per sample inside :func:`_cpu_axis`
+    (x-7783), and the retired trigger key is read nowhere.
     """
 
     try:
@@ -1630,19 +1441,15 @@ def gate_settings() -> tuple:
         agents_cfg = load_settings().agents
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
-        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
-        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
-        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
         limits = dict(agents_cfg.provider_limits)
     except Exception:
-        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
-        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
+        cap, floor_gb = 3, 4.0
         from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
 
         limits = {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
         }
-    return cap, floor_gb, max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu, limits
+    return cap, floor_gb, limits
 
 
 def run_gate(
@@ -1670,14 +1477,9 @@ def run_gate(
             _substrate=substrate,
             _admission_token=_PROVIDER_ADMISSION_TOKEN,
         )
-    (
-        cap,
-        floor_gb,
-        max_load_per_cpu,
-        max_fleet_cpu_share,
-        hard_max_load_per_cpu,
-        limits,
-    ) = gate_settings()
+    cap, floor_gb, limits = gate_settings()
+    # The retired trigger key is read nowhere (x-7783 AC7); the CPU axis
+    # re-reads its thresholds per sample inside _cpu_axis.
 
     provider_cap = (
         provider_lanes_cap(limits.get(route_provider))
@@ -1727,18 +1529,28 @@ def run_gate(
     last_progress = started
     announced = False
     slots: int = 0
+    #: x-7783 LD4: a fleet-over sample holds, and admission after a hold is
+    #: debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
+    held_on_cpu = False
+    under_streak = 0
     #: start of the current UNBROKEN run of failed acquisitions (None = holding
     #: or not yet contended). Reset on every success so a long legitimate queue
     #: never accumulates into a spurious fail-open.
     mutex_blocked_since: Optional[float] = None
+    #: x-e32e: ONE bg-socket scan per spawn; a fresh scan on every queue
+    #: poll is what hung a spawn for 12 minutes.
+    sock_map: Optional[dict[str, int]] = None
+    sock_scanned = False
+    axes_read: dict[str, str] = {}
+    _CURRENT_AXES_READ.set(axes_read)
+    _CURRENT_AXIS.set("ram")
 
     while True:
+        pause_s = QUEUE_POLL_S
         # Before the mutex, never inside it: this can cost seconds and the
         # mutex serializes every spawner on the machine. Re-taken each pass so
         # a spawn that queued does not decide on a reading from minutes ago.
-        prefetched_fleet = _prefetch_fleet_reading(
-            max_load_per_cpu, hard_max_load_per_cpu
-        )
+        prefetched_fleet = _prefetch_fleet_reading()
         try:
             acquired = (
                 _acquire_gate_mutex(holder, fail_closed=True)
@@ -1823,110 +1635,228 @@ def run_gate(
                 if substrate == "headless":
                     _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 return guard
-            c = census()
-            for w in c.warnings:
-                _warn(w)
-            slots = c.slot_count
-            if slots < cap:
-                try:
-                    # Re-checked on dequeue for the same reason the RAM floor is
-                    # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
-                    # up to QUEUE_TIMEOUT_S, and another process can raise the
-                    # shared schema inside that window. The entry check above owns
-                    # the force path; this one owns the queue window.
-                    _check_registry_schema()
-                except GateRefused:
-                    guard.release()
-                    raise
-                try:
-                    _check_ram_floor(floor_gb)
-                except GateRefused:
-                    guard.release()
-                    raise
-                try:
-                    _check_load_ceiling(
-                        max_load_per_cpu,
-                        max_fleet_cpu_share,
-                        hard_max_load_per_cpu,
-                        prefetched=prefetched_fleet,
-                    )
-                except GateRefused as refusal:
-                    # The refusal is decided; release the mutex BEFORE the
-                    # cause probe so queued spawners (and --no-wait callers)
-                    # never sit behind seconds of evidence gathering.
-                    guard.release()
-                    # Only the backstop refuses without reading attribution, so
-                    # it is the only branch this line can inform. Adding it to
-                    # a refusal that already named its own sample would print
-                    # two disagreeing measurements in one refusal.
-                    if not getattr(refusal, "cause_stated", False):
-                        _warn(
-                            _footprint_cause_evidence()
-                            or "spawn-gate: footprint cause unavailable; load refusal unchanged"
-                        )
-                    raise
-                try:
-                    _check_king_share(c, cap, caller_session=caller_session)
-                except GateRefused:
-                    guard.release()
-                    raise
-                if substrate == "headless":
-                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
-                # pane/bg: keep the mutex until dispatch returns (the row
-                # exists by then); the caller releases via guard.release().
-                return guard
-            guard.release_gate_mutex()
-
-            if no_wait:
-                _warn(
-                    f"spawn-gate: {slots} live worker slots >= max_live {cap}; "
-                    f"refusing (--no-wait). See `fno agents top`."
+            # x-7783: the CPU axis decides BEFORE the census, so a hold
+            # never pays the lsof scan (LD1).
+            _CURRENT_AXIS.set("cpu")
+            admission = _cpu_axis(prefetched_fleet)
+            verdict = admission.verdict
+            if admission.axis == "load_15m" and verdict == "refuse":
+                axes_read["load_15m"] = "over"
+                axes_read["cpu"] = "not-read"
+            else:
+                axes_read["load_15m"] = (
+                    "ok" if admission.load_15m is not None else "unavailable"
                 )
+                axes_read["cpu"] = verdict
+            receipt_fields: dict[str, object] = dict(
+                axis=admission.axis,
+                detail=admission.reason,
+                share_low=admission.share_low,
+                share_high=admission.share_high,
+                bound=admission.bound,
+                fleet_cores=admission.fleet_cores,
+                machine_cores=admission.machine_cores,
+                capacity_cores=admission.capacity_cores,
+                ceiling=admission.ceiling,
+                load_15m=admission.load_15m,
+                backstop=admission.backstop,
+            )
+            if verdict in ("refuse", "undecidable"):
+                guard.release()
+                if verdict == "undecidable":
+                    # LD3: ceiling inside the interval refuses at once.
+                    reason = "cpu_share_undecidable"
+                elif admission.axis == "load_15m":
+                    reason = "load_backstop"
+                else:
+                    reason = "cpu_instrument_unreadable"
+                _warn(admission.reason)
                 receipt = {
                     "status": "refused",
-                    "reason": "no_wait",
-                    "max_live": cap,
-                    "count": slots,
-                    "current_count": slots,
+                    "reason": reason,
+                    "axes_read": dict(axes_read),
+                    **receipt_fields,
                 }
-                _refuse(EXIT_NO_WAIT, receipt)
-            now = time.monotonic()
-            if not announced:
-                _warn(
-                    f"spawn queued: {slots} live worker slots >= max_live {cap}; "
-                    f"waiting for a free slot (--no-wait to fail fast, "
-                    f"--force to bypass)"
-                )
-                announced = True
-                last_progress = now
-            elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
-                _warn(
-                    f"still queued: {slots}/{cap} live worker slots, "
-                    f"waited {int(now - started)}s"
-                )
-                last_progress = now
+                _refuse(EXIT_LOAD_REFUSED, receipt, reason=reason, **receipt_fields)
+            if verdict == "hold":
+                # LD4: over is a HOLD - the fleet's own work drains - not a
+                # refusal. Re-sample on the slower CPU poll; --no-wait fails
+                # on the first over sample.
+                held_on_cpu = True
+                under_streak = 0
+                guard.release_gate_mutex()
+                if no_wait:
+                    _warn(admission.reason)
+                    receipt = {
+                        "status": "refused",
+                        "reason": "fleet_cpu_share",
+                        "samples": 1,
+                        "held_on": "fleet_cpu_share",
+                        "axes_read": dict(axes_read),
+                        **receipt_fields,
+                    }
+                    _refuse(
+                        EXIT_LOAD_REFUSED,
+                        receipt,
+                        reason="fleet_cpu_share",
+                        samples=1,
+                        held_on="fleet_cpu_share",
+                        **receipt_fields,
+                    )
+                now = time.monotonic()
+                if not announced:
+                    _warn(admission.reason)
+                    announced = True
+                    last_progress = now
+                elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
+                    _warn(
+                        f"still held: fleet {admission.share_low * 100:.1f}% over "
+                        f"{admission.ceiling * 100:.1f}%, waited {int(now - started)}s"
+                    )
+                    last_progress = now
+                pause_s = CPU_HOLD_POLL_S
+            else:
+                # admit. A held spawn needs CPU_ADMIT_SAMPLES consecutive
+                # under-ceiling samples before it believes the drain (LD4);
+                # a spawn that was never held admits on the first sample.
+                hold_pause = False
+                if held_on_cpu:
+                    under_streak += 1
+                    if under_streak < CPU_ADMIT_SAMPLES:
+                        guard.release_gate_mutex()
+                        pause_s = CPU_HOLD_POLL_S
+                        hold_pause = True
+                    else:
+                        _warn(
+                            f"spawn-gate: fleet share "
+                            f"{admission.share_low * 100:.1f}% under the ceiling "
+                            f"for {under_streak} consecutive samples; admitting"
+                        )
+                        # Hold served: later timeouts name the real queue.
+                        held_on_cpu = False
+                        under_streak = 0
+                if not hold_pause:
+                    if not sock_scanned:
+                        from fno.agents.session_procs import bg_socket_pid_map
+
+                        scan_started = time.monotonic()
+                        sock_map = bg_socket_pid_map()
+                        sock_scanned = True
+                        scan_waited = time.monotonic() - scan_started
+                        if scan_waited >= SLOW_SCAN_WARN_S:
+                            _warn(
+                                f"spawn-gate: the bg-socket census took "
+                                f"{scan_waited:.0f}s (lsof under load); it runs "
+                                "once per spawn"
+                            )
+                    c = census(socket_map=sock_map)
+                    for w in c.warnings:
+                        _warn(w)
+                    slots = c.slot_count
+                    if slots < cap:
+                        axes_read["slots"] = f"{slots}/{cap} ok"
+                        try:
+                            # Re-checked on dequeue for the same reason the RAM floor is
+                            # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
+                            # up to QUEUE_TIMEOUT_S, and another process can raise the
+                            # shared schema inside that window. The entry check above owns
+                            # the force path; this one owns the queue window.
+                            _CURRENT_AXIS.set(None)  # the schema is no axis
+                            _check_registry_schema()
+                        except GateRefused:
+                            guard.release()
+                            raise
+                        _CURRENT_AXIS.set("ram")
+                        try:
+                            _check_ram_floor(floor_gb)
+                        except GateRefused:
+                            guard.release()
+                            raise
+                        axes_read["ram"] = "ok"
+                        _CURRENT_AXIS.set("king_share")
+                        try:
+                            _check_king_share(c, cap, caller_session=caller_session)
+                        except GateRefused:
+                            guard.release()
+                            raise
+                        axes_read["king_share"] = "ok"
+                        _CURRENT_AXIS.set("max_live")
+                        if substrate == "headless":
+                            _take_headless_slot(guard, name, holder, route_provider, provider_cap)
+                        # pane/bg: keep the mutex until dispatch returns (the row
+                        # exists by then); the caller releases via guard.release().
+                        return guard
+                    axes_read["slots"] = f"{slots}/{cap} queued"
+                    axes_read["king_share"] = "not-read"
+                    guard.release_gate_mutex()
+
+                    if no_wait:
+                        _warn(
+                            f"spawn-gate: {slots} live worker slots >= max_live "
+                            f"{cap}; a quiet row still holds a slot "
+                            f"(fno agents list --status quiet); refusing "
+                            f"(--no-wait). See `fno agents top`."
+                        )
+                        receipt = {
+                            "status": "refused",
+                            "reason": "no_wait",
+                            "axis": "max_live",
+                            "axes_read": dict(axes_read),
+                            "held_on": "max_live",
+                            "max_live": cap,
+                            "count": slots,
+                            "current_count": slots,
+                        }
+                        _refuse(EXIT_NO_WAIT, receipt)
+                    _CURRENT_AXIS.set("max_live")
+                    now = time.monotonic()
+                    if not announced:
+                        _warn(
+                            f"spawn queued: {slots} live worker slots >= max_live "
+                            f"{cap}; a quiet row still holds a slot "
+                            f"(fno agents list --status quiet); waiting for a "
+                            f"free slot (--no-wait to fail fast, --force to "
+                            f"bypass)"
+                        )
+                        announced = True
+                        last_progress = now
+                    elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
+                        _warn(
+                            f"still queued: {slots}/{cap} live worker slots, "
+                            f"waited {int(now - started)}s"
+                        )
+                        last_progress = now
+                    pause_s = QUEUE_POLL_S
 
         if time.monotonic() - started >= QUEUE_TIMEOUT_S:
             # A timeout still blocked on the mutex names the mutex; a timeout
-            # that held and released it all along names the slot cap. The
-            # receipt carries the machine slug; the warn keeps the prose.
+            # that held and released it all along names the axis that kept it
+            # queued. The receipt carries `held_on` (x-7783 LD4) so a reader
+            # never has to infer which queue ate the budget.
             mutex_busy = mutex_blocked_since is not None
+            held_on = (
+                "gate_mutex" if mutex_busy else
+                ("fleet_cpu_share" if held_on_cpu else "max_live")
+            )
             reason = "gate_mutex_busy" if mutex_busy else "queue_timeout"
             _warn(
                 f"spawn-gate: {'gate mutex busy' if mutex_busy else 'queue timeout'} "
-                f"after {int(QUEUE_TIMEOUT_S)}s at "
-                f"max_live {cap}; inspect live workers with `fno agents top`, "
+                f"after {int(QUEUE_TIMEOUT_S)}s held on {held_on}; "
+                f"inspect live workers with `fno agents top`, "
                 f"or retry with --no-wait/--force"
             )
             receipt = {
                 "status": "refused",
                 "reason": reason,
+                "held_on": held_on,
+                "axis": "gate_mutex" if mutex_busy else held_on,
+                "axes_read": dict(axes_read),
                 "max_live": cap,
                 "count": slots,
                 "current_count": slots,
             }
             _refuse(EXIT_QUEUE_TIMEOUT, receipt)
-        time.sleep(QUEUE_POLL_S)
+        time.sleep(pause_s)
 
 
 def _probe_refused(reason: str, message: str, **fields: object) -> dict:
@@ -1942,14 +1872,7 @@ def probe_capacity() -> dict:
     :func:`run_gate`; lanes refuse only when EVERY capped lane is full. Never
     raises: an internal fault returns ``verdict: unknown``, never saturation.
     """
-    (
-        cap,
-        floor_gb,
-        max_load_per_cpu,
-        max_fleet_cpu_share,
-        hard_max_load_per_cpu,
-        limits,
-    ) = gate_settings()
+    cap, floor_gb, limits = gate_settings()
 
     from fno.agents.registry import SCHEMA_VERSION, _read_raw_registry, _registry_path
 
@@ -1992,14 +1915,31 @@ def probe_capacity() -> dict:
                     available_gb=avail,
                     min_free_gb=floor_gb,
                 )
-        decision = load_gate_decision(
-            max_load_per_cpu, max_fleet_cpu_share, hard_max_load_per_cpu
-        )
-        if decision is not None and decision[0] in _LOAD_REFUSAL_REASONS:
+        # x-7783: the same CPU-axis seam the gate and the explain rows read.
+        # A hold queues the real spawn, so the probe answers not-admitted;
+        # refuse and undecidable refuse outright.
+        admission = _cpu_axis()
+        if admission.verdict == "hold":
             return _probe_refused(
-                f"load_{decision[0]}",
-                f"fleet load over the gate ceiling: {decision[0]}",
-                **decision[2],
+                "fleet_cpu_share",
+                admission.reason,
+                axis="fleet_cpu_share",
+                share_low=admission.share_low,
+                ceiling=admission.ceiling,
+            )
+        if admission.verdict in ("refuse", "undecidable"):
+            if admission.axis == "load_15m":
+                token = "load_backstop"
+            elif admission.axis == "cpu_instrument":
+                token = "cpu_instrument_unreadable"
+            else:
+                token = "cpu_share_undecidable"
+            return _probe_refused(
+                token,
+                admission.reason,
+                axis=admission.axis,
+                share_low=admission.share_low,
+                share_high=admission.share_high,
             )
         if caller:
             reading = share_reading(c, cap, caller)

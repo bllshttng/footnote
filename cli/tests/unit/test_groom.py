@@ -324,11 +324,13 @@ def test_relatedness_builds_last_over_the_post_groom_graph():
 def test_quiet_night_legs_are_ok(monkeypatch):
     # The quiet paths all exit 0: reconcile prints "Backlog is in sync." and
     # returns, archive/maintain report nothing to do and return. The archive
-    # leg's own outcome carries a count (x-a023), everything else stays "ok".
+    # leg's own outcome carries a count (x-a023) and so does the reconcile
+    # leg's strand heal (x-a31a); everything else stays "ok".
     monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
     results = REAL_MECHANICAL(14)
     assert results["archive"] == "ok (archived 0, held back 0)"
-    assert results["reconcile"] == results["maintain"] == results["relatedness"] == "ok"
+    assert results["reconcile"] == "ok (re-parented 0)"
+    assert results["maintain"] == results["relatedness"] == "ok"
 
 
 def test_archive_leg_names_moved_and_held_counts(monkeypatch):
@@ -470,6 +472,10 @@ def test_install_renders_a_daily_plist_at_the_requested_hour():
     # RunAtLoad false: installing at 4pm must not fire a pass immediately.
     assert "<key>RunAtLoad</key>\n  <false/>" in xml
     assert "backlog" in xml and "groom" in xml
+    # ProcessType Standard (x-c79d): the positive read is the control for the
+    # negative one below.
+    assert "<key>ProcessType</key>\n  <string>Standard</string>" in xml
+    assert "<string>Background</string>" not in xml
 
 
 def test_install_escapes_a_binary_path_that_would_break_the_xml():

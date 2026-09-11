@@ -10,7 +10,8 @@ via ``fno do pr watch tick``.  ONE agent globally -- no per-repo plists.
 Design constraints (locked):
   - NO ANTHROPIC_API_KEY in EnvironmentVariables (auth via macOS keychain OAuth)
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
-  - ProcessType = Background
+  - ProcessType = Standard (Background throttled the tick 15.8x slower than
+    Standard at load 161-178: 103.38s against 6.54s on one A/B loop, x-c79d)
   - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
 """
 
@@ -106,7 +107,7 @@ _PLIST_TEMPLATE = """\
   <false/>
 
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <!-- Belt-and-suspenders: set cwd to $HOME so any code that constructs a
        relative path at least lands somewhere writable rather than in /.

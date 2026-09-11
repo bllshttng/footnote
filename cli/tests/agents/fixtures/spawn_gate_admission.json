@@ -1,0 +1,137 @@
+{
+  "comment": "Shared branch fixture for the CPU-axis decider (x-7783 AC9). Each case feeds `inputs` to cli cpu_admission and pins the exact admission; the Rust gate parses `payload` and must take the same branch the Python gate takes. Regenerate via the 1.1 generator, never by hand.",
+  "cases": [
+    {
+      "name": "complete_reading_admits",
+      "inputs": {
+        "fleet_cpu_cores": 4.927,
+        "measured_cpu_cores": 6.9,
+        "attribution_gap": null,
+        "capacity_cores": 12,
+        "share_ceiling": 0.5,
+        "load_15m": 3.0,
+        "hard_max_load_per_cpu": 40.0,
+        "cpus": 12
+      },
+      "payload": {
+        "fleet_cpu_cores": 4.927,
+        "measured_cpu_cores": 6.9,
+        "attribution_gap": null,
+        "admission": {
+          "verdict": "admit",
+          "axis": "fleet_cpu_share",
+          "reason": "fleet CPU 4.927 of 12.00 cores (41.1%) against max_fleet_cpu_share 50.0%; admitting",
+          "share_low": 0.4105833333333333,
+          "share_high": 0.4105833333333333,
+          "bound": "exact",
+          "fleet_cores": 4.927,
+          "machine_cores": 6.9,
+          "capacity_cores": 12.0,
+          "ceiling": 0.5,
+          "gap": null,
+          "load_15m": 3.0,
+          "backstop": 480.0
+        }
+      }
+    },
+    {
+      "name": "gapped_reading_admits_on_upper_bound",
+      "inputs": {
+        "fleet_cpu_cores": 2.11,
+        "measured_cpu_cores": 4.4,
+        "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+        "capacity_cores": 12,
+        "share_ceiling": 0.5,
+        "load_15m": 3.0,
+        "hard_max_load_per_cpu": 40.0,
+        "cpus": 12
+      },
+      "payload": {
+        "fleet_cpu_cores": 2.11,
+        "measured_cpu_cores": 4.4,
+        "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+        "admission": {
+          "verdict": "admit",
+          "axis": "fleet_cpu_share",
+          "reason": "fleet CPU 2.110 of 12.00 cores (17.6%, up to 36.7% with 3 rows unattributed) against max_fleet_cpu_share 50.0%; admitting",
+          "share_low": 0.1758333333333333,
+          "share_high": 0.3666666666666667,
+          "bound": "upper",
+          "fleet_cores": 2.11,
+          "machine_cores": 4.4,
+          "capacity_cores": 12.0,
+          "ceiling": 0.5,
+          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+          "load_15m": 3.0,
+          "backstop": 480.0
+        }
+      }
+    },
+    {
+      "name": "gapped_reading_undecidable",
+      "inputs": {
+        "fleet_cpu_cores": 2.1,
+        "measured_cpu_cores": 7.2,
+        "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+        "capacity_cores": 12,
+        "share_ceiling": 0.5,
+        "load_15m": 45.0,
+        "hard_max_load_per_cpu": 40.0,
+        "cpus": 12
+      },
+      "payload": {
+        "fleet_cpu_cores": 2.1,
+        "measured_cpu_cores": 7.2,
+        "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+        "admission": {
+          "verdict": "undecidable",
+          "axis": "fleet_cpu_share",
+          "reason": "spawn-gate: the fleet's CPU share cannot be decided: attributed 17.5% of capacity, up to 60.0% with rows unattributed, and max_fleet_cpu_share 50.0% falls inside that band; 3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown)); close the attribution gap or lower foreign load (--force to bypass)",
+          "share_low": 0.17500000000000002,
+          "share_high": 0.6,
+          "bound": "upper",
+          "fleet_cores": 2.1,
+          "machine_cores": 7.2,
+          "capacity_cores": 12.0,
+          "ceiling": 0.5,
+          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
+          "load_15m": 45.0,
+          "backstop": 480.0
+        }
+      }
+    },
+    {
+      "name": "fleet_over_own_share_holds",
+      "inputs": {
+        "fleet_cpu_cores": 7.0,
+        "measured_cpu_cores": 8.0,
+        "attribution_gap": null,
+        "capacity_cores": 12,
+        "share_ceiling": 0.5,
+        "load_15m": 3.0,
+        "hard_max_load_per_cpu": 40.0,
+        "cpus": 12
+      },
+      "payload": {
+        "fleet_cpu_cores": 7.0,
+        "measured_cpu_cores": 8.0,
+        "attribution_gap": null,
+        "admission": {
+          "verdict": "hold",
+          "axis": "fleet_cpu_share",
+          "reason": "spawn held: the fleet holds 7.00/12.00 cores (58.3%) over max_fleet_cpu_share 50.0%; waiting for the fleet's own work to drain (--no-wait to fail fast, --force to bypass)",
+          "share_low": 0.5833333333333334,
+          "share_high": 0.5833333333333334,
+          "bound": "exact",
+          "fleet_cores": 7.0,
+          "machine_cores": 8.0,
+          "capacity_cores": 12.0,
+          "ceiling": 0.5,
+          "gap": null,
+          "load_15m": 3.0,
+          "backstop": 480.0
+        }
+      }
+    }
+  ]
+}

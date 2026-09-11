@@ -12,6 +12,7 @@ class RosterReading(NamedTuple):
     rows_by_session: Mapping = MappingProxyType({})
     rows_unresolved: int = 0
     unresolved_rows: tuple = ()
+    unmeasurable_by_node: Mapping = MappingProxyType({})
 
     def workers_on(self, node_id: str) -> list:
         return self.workers_by_node.get(node_id, [])
@@ -20,8 +21,15 @@ class RosterReading(NamedTuple):
         return self.rows_by_session.get(session_id)
 
 
-def read_roster(timeout: float = 10.0) -> RosterReading:
-    """Read the fleet once and index it by resolved node id."""
+def read_roster(
+    timeout: float = 10.0, require_live_probe: bool = True
+) -> RosterReading:
+    """Read the fleet once and index it by resolved node id.
+
+    ``require_live_probe``: claim-status liveness refuses when the probe
+    never ran; the worked overlay passes False (the registry-only view
+    still carries attribution).
+    """
     try:
         from fno.agents.watchdog import fleet_rows
 
@@ -29,9 +37,29 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
         return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
 
-    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
+    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
 
-    blocking = [w for w in warnings if not w.startswith(ADVISORY_WARNING_PREFIX)]
+    # The harnesses' degraded-probe wording, as a literal: an import would be a layering edge.
+    registry_only_mark = "falling back to registry-only view"
+    unmeasurable: dict = {}
+    blocking = []
+    for w in warnings:
+        idx = w.find(UNMEASURABLE_ROW_PREFIX)
+        if idx == -1:
+            degraded_probe = (not require_live_probe) and (registry_only_mark in w)
+            if not w.startswith(ADVISORY_WARNING_PREFIX) and not degraded_probe:
+                blocking.append(w)
+            continue
+        fields = dict(
+            tok.split("=", 1)
+            for tok in w[idx + len(UNMEASURABLE_ROW_PREFIX):].split()
+            if "=" in tok
+        )
+        if fields.get("node"):
+            unmeasurable.setdefault(fields["node"], []).append(
+                fields.get("name") or "unknown"
+            )
+
     if blocking:
         return RosterReading(False, 0, {}, blocking[0])
 
@@ -51,7 +79,7 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
             unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved))
+    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved), unmeasurable)
 
 
 def _finished_row_states() -> frozenset:

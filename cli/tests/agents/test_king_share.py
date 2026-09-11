@@ -15,6 +15,37 @@ import pytest
 from fno.agents import spawn_gate
 from fno.agents.registry import AgentEntry
 
+
+@pytest.fixture(autouse=True)
+def _no_live_cpu_axis(monkeypatch):
+    """These tests pin the king share and the slot cap, not the CPU axis:
+    a live axis refuses first on a loaded box and shadows the refusal under
+    test."""
+    from fno import doctor_footprint
+    from fno.footprint import Admission, Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    admit = Admission(
+        verdict="admit",
+        axis="fleet_cpu_share",
+        reason="test admit",
+        share_low=0.1,
+        share_high=0.1,
+        bound="exact",
+        fleet_cores=1.2,
+        machine_cores=6.0,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap=None,
+        load_15m=1.0,
+        backstop=480.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
+
 KING_A = "aaaaaaaa-1111-2222-3333-444455556666"
 KING_B = "bbbbbbbb-1111-2222-3333-444455556666"
 KING_C = "cccccccc-1111-2222-3333-444455556666"
@@ -179,7 +210,7 @@ def test_king_at_share_refuses_under_cap(monkeypatch, capsys):
         return _S()
 
     monkeypatch.setattr("fno.config.load_settings", fake_settings)
-    monkeypatch.setattr(spawn_gate, "census", lambda: c)
+    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: c)
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
         lambda: type("I", (), {"session_id": KING_A, "harness": "claude"})(),
@@ -249,7 +280,7 @@ def test_cap_refusal_wins_over_share_verdict(monkeypatch):
     alive = os.getpid()
     rows = [_row(f"w{i}", alive, spawned_by=KING_A) for i in range(3)]
     c = _census(monkeypatch, rows)
-    monkeypatch.setattr(spawn_gate, "census", lambda: c)
+    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: c)
 
     def fake_settings():
         class _A:

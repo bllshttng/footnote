@@ -299,6 +299,35 @@ def test_live_worked_node_refuses_and_names_worker(monkeypatch):
     assert emitted[0][1]["worker"] == "bp-worker"
 
 
+def test_one_unmeasurable_row_elsewhere_does_not_block_a_free_node(monkeypatch):
+    """The p0's exact shape: a live row with no harness session id is
+    attributed to ITS node, so a different node with a free claim and no
+    unmeasurable worker still dispatches (x-ae54)."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-a238": ["bp-a238-king-brief (unmeasurable: no harness session id)"]},
+    )
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.action == "dispatch"
+    assert observation.block_reason is None
+
+
 def test_worked_authority_failure_refuses_dispatch(monkeypatch):
     from fno import target_cli
     from fno.agents import truth_status

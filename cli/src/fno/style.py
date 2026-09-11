@@ -377,6 +377,66 @@ def format_violations(violations: list[Violation]) -> str:
     return "\n\n".join(lines)
 
 
+# Rules a rewrite can clear without an author: a semicolon splits into two
+# sentences, a wrapped paragraph rejoins into one physical line. The rest
+# change meaning when applied blind, so they stay in the residue.
+FIXABLE_RULES = frozenset({2, 6})
+
+_SEMICOLON_SPACE_RE = re.compile(r";[ \t]+")
+
+
+def fix(text: str, *, surface: str = "mail") -> tuple[str, list[Violation]]:
+    """Rewrite the mechanically fixable violations. Return (text, residue).
+
+    Pure. Re-checks after every pass because a fix can expose another; a pass
+    that changes nothing ends the loop. A non-empty residue is the caller's
+    signal to exit non-zero: a partial fix never reads as a pass.
+    """
+    for _ in range(10):
+        violations = check(text, surface=surface)
+        mechanical = [v for v in violations if v.rule in FIXABLE_RULES]
+        if not mechanical:
+            return text, violations
+        fixed = _apply_fixes(text, mechanical)
+        if fixed == text:
+            return text, violations
+        text = fixed
+    return text, check(text, surface=surface)
+
+
+def _apply_fixes(text: str, violations: list[Violation]) -> str:
+    lines = text.split("\n")
+    # Joins run bottom-up so deleting a line cannot shift a pending index.
+    for i in sorted(
+        (v.sentence_index for v in violations if v.rule == 6), reverse=True
+    ):
+        if 0 < i < len(lines):
+            lines[i - 1] = lines[i - 1].rstrip() + " " + lines[i].lstrip()
+            del lines[i]
+    text = "\n".join(lines)
+    # A line whose masked form differs carries a construct (code span, fence,
+    # path) with no offset map back to raw text, so its semicolons stay in the
+    # residue rather than risk a split inside the span. The mask runs on the
+    # whole text: fence state spans lines.
+    masked_lines = _mask(text).split("\n")
+    return "\n".join(
+        line if line != masked else _split_semicolons(line)
+        for line, masked in zip(text.split("\n"), masked_lines)
+    )
+
+
+def _split_semicolons(line: str) -> str:
+    """Turn ``a; b`` into ``a. B`` and a trailing ``;`` into a period."""
+    parts = _SEMICOLON_SPACE_RE.split(line)
+    if len(parts) == 1:
+        return re.sub(r";[ \t]*$", ".", line)
+    out = parts[0]
+    for part in parts[1:]:
+        cap = part[:1].upper() + part[1:] if part[:1].islower() else part
+        out += ". " + cap
+    return out
+
+
 def _quote_safe(text: str) -> str:
     """Replace an embedded double quote so it cannot close a wrapping quote early.
 

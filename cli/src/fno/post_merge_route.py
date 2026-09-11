@@ -497,14 +497,19 @@ class ColdRitualResult:
     tail: str = ""
 
 
-def _default_run_ritual_verb(pr_number: int, cwd: str) -> ColdRitualResult:
+def _default_run_ritual_verb(
+    pr_number: int, cwd: str, timeout: float = 300.0
+) -> ColdRitualResult:
     """Run ``fno do pr ritual <n> --autonomous`` from the candidate canonical root.
 
     A bounded subprocess: the launchd tick never overlaps, so an unbounded verb
     would wedge every future tick (x-97d8). A non-zero exit is a dispatch failure
     the retry/park machinery handles. The verb owns its default-on conditional
     headless judgment leg, so this is the ONLY model-capable layer on the cold
-    path - pr-watch adds none of its own (AC1-HP)."""
+    path - pr-watch adds none of its own (AC1-HP). The timeout is the caller's
+    phase slice (x-c79d): the verb must fail as an ordinary, recorded dispatch
+    failure before the slice's alarm fires, because an alarm cut mid-subprocess
+    would skip the caller's state persist and replay the same ritual next tick."""
     try:
         from fno import _subprocess_util
 
@@ -513,7 +518,7 @@ def _default_run_ritual_verb(pr_number: int, cwd: str) -> ColdRitualResult:
             "do", "pr", "ritual", str(pr_number), "--autonomous",
         ]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=cwd, timeout=300
+            cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout
         )
     except (subprocess.SubprocessError, OSError) as exc:
         return ColdRitualResult(ok=False, tail=f"verb-error: {exc}"[:200])

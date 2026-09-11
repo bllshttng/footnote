@@ -130,9 +130,9 @@ route = "zai/glm-5.3[1m]"
             return Result(returncode=0, stdout=json.dumps([
                 {"number": 1134, "state": "open", "merged": False}
             ]), stderr="")
-        if "state=closed" in path:
-            return Result(returncode=1, stdout="", stderr="network down")
-        raise AssertionError(f"unexpected exact fallback: {cmd}")
+        # x-c79d: the stale key is absent from the open listing, which is the
+        # whole answer now - no closed read backs it up.
+        raise AssertionError(f"unexpected closed or exact read: {cmd}")
 
     events_path = tmp_path / "events.jsonl"
 
@@ -180,11 +180,12 @@ route = "zai/glm-5.3[1m]"
         graphql_remaining_fn=lambda: (4800, "2026-08-24T00:00:00Z"),
     )
 
-    assert result.sweep_failures == 1
+    assert result.sweep_failures == 0
     event = json.loads(events_path.read_text(encoding="utf-8").strip())
     assert event["type"] == "pr_watch_tick"
-    assert event["data"]["swept_count"] == 1
-    assert event["data"]["swept"] == {"owner/repo": [1134]}
+    assert event["data"]["swept_count"] == 2
+    assert event["data"]["swept"] == {"owner/repo": [889, 1134]}
+    assert event["data"]["dropped"] == {"not_open": {"owner/repo": [889]}}
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +376,10 @@ def _run_tick_command(monkeypatch, result):
     settings = MagicMock()
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm; pin the
+    # real cadence so the slices under test are seconds, not one.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -468,6 +473,9 @@ def test_master_switch_off_names_autonomy_not_pr_watch_in_the_message(monkeypatc
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = True
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.autonomy.enabled = False
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
@@ -501,6 +509,9 @@ def test_master_switch_off_also_stops_the_recovery_sweep(monkeypatch) -> None:
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = True
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.autonomy.enabled = False
     settings.recovery.enabled = True
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
@@ -537,6 +548,9 @@ def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> N
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
     settings.pr_watch.enabled = False
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -582,6 +596,9 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     settings = MagicMock()
     settings.pr_watch.max_age_days = 30
     settings.pr_watch.retries = 3
+    # x-c3f6: a MagicMock interval int()s to 1 and derives a 1s alarm.
+    settings.pr_watch.interval_seconds = 600
+    settings.pr_watch.tick_timeout_seconds = None
     settings.recovery.enabled = False
     monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -596,7 +613,7 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     assert isinstance(res.exception, SystemExit), repr(res.exception)
 
 
-def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
+def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
     monkeypatch
 ) -> None:
     import typer
@@ -654,7 +671,10 @@ def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
     result = CliRunner().invoke(app, [])
 
     assert result.exit_code == 0, result.output
-    assert order == ["supervisor", "github"]
+    # x-c79d phase order: the PR legs (sweep) run first, the supervisor's
+    # watchdog phase follows on its own slice. The load-bearing half is the
+    # non-fatal exception below, not the ordering.
+    assert order == ["github", "supervisor"]
     assert recovery_calls[0]["provider_failover"] is False
     assert order.count("github") == 1
 

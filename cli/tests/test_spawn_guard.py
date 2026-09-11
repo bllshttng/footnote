@@ -548,3 +548,20 @@ def test_a_stale_manifest_does_not_manufacture_a_worker(claims_tmp):
     obj = json.loads(res.output)
     assert obj["reason"] == "unproven-claim"
     assert obj["init_reached"] is False
+
+
+def test_a_worked_authority_outage_names_itself_not_a_running_worker(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """When the worked overlay refuses, a FREE claim must not render as
+    `already-running reason=unproven-claim`: the block_reason token is the
+    honest reason (x-ae54 - peers refused as already-running while free)."""
+    def _raise(**_kw):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _raise)
+    res = _invoke("x-9999", "--holder", "probe:1", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "already-running"
+    assert obj["reason"] == "worked-authority-unavailable"

@@ -72,10 +72,18 @@ def _fake_runner(
     return run
 
 
-def _pin_load(monkeypatch, *, status: str, load: float = 1.0, ceiling: float = 96.0):
+def _pin_load(
+    monkeypatch,
+    *,
+    status: str,
+    load: float = 1.0,
+    ceiling: float = 96.0,
+    load_15m: float | None = None,
+):
     """Pin the spawn-load snapshot so a verdict test is hermetic: the real
     snapshot reads the host's live load average, which no exit-code assertion
-    should ride on."""
+    should ride on. The 15-minute figure feeds the CPU axis's backstop; the
+    1-minute load is display-only under x-7783."""
     from types import SimpleNamespace
 
     from fno import doctor_footprint
@@ -86,8 +94,18 @@ def _pin_load(monkeypatch, *, status: str, load: float = 1.0, ceiling: float = 9
         load_ceiling=ceiling,
         load_cpu_count=int(ceiling // 8),
         spawn_load_status=status,
+        load_5m=None,
+        load_15m=load_15m,
     )
     monkeypatch.setattr(doctor_footprint, "_spawn_load_snapshot", lambda: snapshot)
+
+
+def _pin_admission(monkeypatch, share: float = 0.5, hard: float = 40.0):
+    """Pin the CPU axis's config pair so a verdict test never reads the real
+    config roots (the defaults match a stock install)."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (share, hard))
 
 
 def _pin_capacity(monkeypatch, cores: int):
@@ -1190,10 +1208,9 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
     snapshot = SimpleNamespace(
         load_1m=141.6,
-        max_load_per_cpu=8.0,
-        load_ceiling=96.0,
         load_cpu_count=12,
-        spawn_load_status="exceeded",
+        load_5m=141.0,
+        load_15m=140.0,
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
     monkeypatch.setattr(spawn_gate, "_load_snapshot", lambda _factor: snapshot)
@@ -1204,16 +1221,25 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
 
     assert payload["load_1m"] == pytest.approx(141.6)
-    assert payload["max_load_per_cpu"] == pytest.approx(8.0)
-    assert payload["load_ceiling"] == pytest.approx(96.0)
     assert payload["load_cpu_count"] == 12
-    assert payload["spawn_load_status"] == "exceeded"
+    assert "max_load_per_cpu" not in payload
+    assert "spawn_load_status" not in payload
 
     with pytest.raises(typer.Exit):
         doctor_footprint._emit_result(
             reading, process_threshold=None, json_output=False
         )
-    assert "spawn load: 141.6 against 96.0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # x-7783 AC8: one cpu admission line, one load_15m line, no spawn load.
+    assert (
+        "cpu admission: fleet 0.490 of 12.00 cores (4.1%) against "
+        "max_fleet_cpu_share 50.0% -> admit" in out
+    )
+    assert (
+        "load_15m: 140.0 against backstop 480.0 "
+        "(hard_max_load_per_cpu 40 x 12 cpus)" in out
+    )
+    assert "spawn load:" not in out
 
 
 def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
@@ -1348,6 +1374,8 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -1367,7 +1395,7 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
 
     assert result.exit_code == 0, result.output
     assert "fleet CPU: 1.200 cores" in result.stdout
-    assert "verdict: within on load_1m" in result.stdout
+    assert "verdict: admit on fleet_cpu_share (10.0% against 50.0%)" in result.stdout
 
 
 def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
@@ -1469,12 +1497,14 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
 def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     monkeypatch, no_worker_roots
 ) -> None:
-    """Capacity and leak BOTH fire; the capacity exit (3) wins as the more
-    urgent alarm and the leak still prints with its own words."""
+    """The backstop over its ceiling and a leak BOTH fire; the CPU axis keeps
+    the exit (3) as the more urgent alarm and the leak still prints with its
+    own words. The 1-minute load pinned beside it decides nothing (x-7783)."""
     from fno import doctor_footprint
 
-    _pin_load(monkeypatch, status="exceeded")
-    _pin_capacity(monkeypatch, 4)
+    _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -1493,7 +1523,7 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 3
-    assert "verdict: capacity over on load_1m" in result.stdout
+    assert "verdict: refuse on load_15m (500.0 against 480.0)" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
     assert "fno mux serve (80.0%)" in result.stdout
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
@@ -1507,6 +1537,7 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
     _pin_capacity(monkeypatch, 4)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
@@ -1526,7 +1557,7 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 5
-    assert "verdict: leak on load_1m" in result.stdout
+    assert "verdict: leak on fleet_cpu_share (5.0% against 50.0%)" in result.stdout
     assert "sustained CPU: 0.200 cores" in result.stdout
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
@@ -1601,7 +1632,8 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
     assert payload["sustained_cpu_threshold_cores"] == pytest.approx(1.0)
     assert payload["direct_process_count_threshold"] == 2
     assert payload["leak_verdict"] == "clean"
-    assert payload["capacity_verdict"] == "within"
+    assert payload["capacity_verdict"] == "admit"
+    assert payload["admission"]["verdict"] == "admit"
     assert payload["exit_code"] == 0
 
 
@@ -1795,10 +1827,11 @@ def test_no_pidless_rows_still_yields_a_clean_reading(monkeypatch):
     assert doctor_footprint._live_root_pids() == (set(), None)
 
 
-def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
-    """The acceptance: the verb prints a CPU and process-count reading WITH a
-    named degradation. Exit 4 stays (gating unavailable), but the measurement
-    is present in exactly the condition that used to print only an error."""
+def test_gap_reading_prints_the_measurement_and_admits_on_the_upper_bound(monkeypatch):
+    """x-7783 LD3: an attribution gap no longer forces exit 4. The reading
+    stands, the share becomes an interval, and a ceiling above the interval
+    admits with `bound` recording that the upper edge decided. Both gates
+    read the admission object, not the exit code."""
     from fno import doctor_footprint
 
     reading = doctor_footprint.parse_footprint(
@@ -1806,72 +1839,90 @@ def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
         excluded_root_pids=set(),
         attributed_root_pids=set(),
         threshold_excluded_root_pids=set(),
-    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
-    monkeypatch.setattr(
-        doctor_footprint, "cause_reading", lambda: (reading, None)
-    )
-    _pin_load(monkeypatch, status="within")
-    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
-    assert result.exit_code == 4, result.output
-    payload = json.loads(result.stdout)
-    assert payload["process_count"] >= 1
-    assert "fleet_cpu_cores" in payload
-    assert "codex" in payload["attribution_gap"]
-    assert payload["exit_code"] == 4
-
-
-def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
-    """x-a457's done probe: a clean cause-only reading answers the capacity
-    question (within/near/over) instead of a structural unknown, and carries
-    no attribution_gap key. Exit codes do not move: 0 clean, 4 gapped - the
-    Rust gate reads stdout only on exit 0."""
-    from fno import doctor_footprint
-
-    reading = doctor_footprint.parse_footprint(
-        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
-        excluded_root_pids=set(),
-        attributed_root_pids=set(),
-        threshold_excluded_root_pids=set(),
+    )._replace(
+        attribution_gap="1 pidless codex row(s) unresolved",
+        measured_cpu_cores=0.02,
     )
     monkeypatch.setattr(
         doctor_footprint, "cause_reading", lambda: (reading, None)
     )
-    _pin_load(monkeypatch, status="within")
+    _pin_load(monkeypatch, status="within", load_15m=2.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["capacity_verdict"] == "within"
+    assert payload["process_count"] >= 1
+    assert "codex" in payload["attribution_gap"]
+    assert payload["admission"]["verdict"] == "admit"
+    assert payload["admission"]["bound"] == "upper"
+    assert payload["exit_code"] == 0
+
+
+def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
+    """x-a457's done probe, carried onto the new axis: a clean cause-only
+    reading answers the admission question instead of a structural unknown,
+    and `capacity_verdict` aliases the admission verdict for one release."""
+    from fno import doctor_footprint
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )
+    monkeypatch.setattr(
+        doctor_footprint, "cause_reading", lambda: (reading, None)
+    )
+    _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["capacity_verdict"] == "admit"
+    assert payload["admission"]["axis"] == "fleet_cpu_share"
     assert "attribution_gap" not in payload
     assert payload["exit_code"] == 0
 
 
-def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
-    """A gapped fleet share is an undercount; None is the gate's existing
-    never-headroom answer, so the gate refuses above the trigger with the gap
-    named instead of admitting on an undercount."""
+def test_spawn_gate_carries_a_gap_reading_into_the_interval(monkeypatch):
+    """x-7783 LD3: a gap no longer voids the reading. The gate's prefetch
+    hands the gapped reading to the decider, and the share becomes an
+    interval - never a bare None, never silent headroom."""
     from fno import doctor_footprint
     from fno.agents import spawn_gate
 
     reading = doctor_footprint.parse_footprint(
-        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 30.0 1024 fno daemon\n",
         excluded_root_pids=set(),
         attributed_root_pids=set(),
         threshold_excluded_root_pids=set(),
-    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
+    )._replace(
+        attribution_gap="1 pidless codex row(s) unresolved",
+        measured_cpu_cores=0.3,
+    )
     monkeypatch.setattr(
         "fno.doctor_footprint.cause_reading", lambda: (reading, None)
     )
-    assert spawn_gate._fleet_cpu_reading() is None
-    assert spawn_gate._footprint_cause_evidence() is None
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+
+    got_reading, error = spawn_gate._prefetch_fleet_reading()
+    assert error is None and got_reading is reading
+
+    admission = spawn_gate._cpu_axis((got_reading, error))
+    assert admission.bound == "upper"
+    assert admission.verdict in ("admit", "hold", "undecidable")
+    assert admission.gap is not None
 
 
-def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
-    """AC7-HP (x-5283): load over its ceiling while sustained CPU is under
-    its threshold - the verdict names load_1m as its axis and prints the
-    numbers that decided it, and the sustained line disclaims the verdict.
-    On main neither surface said which axis produced the verdict, so the
-    footprint's headroom reading and the gate's saturation refusal looked
-    like a contradiction."""
+def test_admission_names_its_axis_and_deciding_numbers(monkeypatch):
+    """AC7's naming contract (x-5283) carried onto the new axis (x-7783):
+    the 15-minute backstop over its ceiling names load_15m as its axis and
+    prints the numbers that decided it, and the sustained line disclaims the
+    verdict. No one-minute figure appears on the deciding line."""
     from fno import doctor_footprint
 
     reading = doctor_footprint.parse_footprint(
@@ -1883,17 +1934,67 @@ def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
     monkeypatch.setattr(
         doctor_footprint, "cause_reading", lambda: (reading, None)
     )
-    _pin_load(monkeypatch, status="exceeded", load=110.4, ceiling=96.0)
+    _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     payload = json.loads(result.stdout)
-    assert payload["capacity_verdict"] == "over"
-    assert payload["capacity_verdict_axis"] == "load_1m"
+    assert payload["capacity_verdict"] == "refuse"
+    assert payload["admission"]["axis"] == "load_15m"
+    assert payload["admission"]["load_15m"] == 500.0
+    assert payload["admission"]["backstop"] == 480.0
     assert payload["load_1m"] == 110.4
-    assert payload["load_ceiling"] == 96.0
 
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
-    assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
+    assert "verdict: refuse on load_15m (500.0 against 480.0)" in shown.output
     assert "a separate axis - it did not decide the verdict" in shown.output
+
+
+def test_cpu_admission_pins_the_shared_gate_fixture():
+    """x-7783 AC9: the four payloads both gates consume. The Python decider
+    reproduces every admission from the case inputs; the Rust suite reads the
+    same file and must take the same branch per payload."""
+    from pathlib import Path
+
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    fixture_path = (
+        Path(__file__).parent.parent / "agents" / "fixtures" / "spawn_gate_admission.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert len(fixture["cases"]) == 4
+    for case in fixture["cases"]:
+        inputs = case["inputs"]
+        reading = Footprint(
+            sustained_cpu_cores=0.0,
+            descendant_cpu_cores=0.0,
+            fleet_cpu_cores=inputs["fleet_cpu_cores"],
+            descendant_process_count=0,
+            direct_process_count=0,
+            transient_call_count=0,
+            process_count=0,
+            rss_gb=0.0,
+            measured_cpu_cores=inputs["measured_cpu_cores"],
+            top=[],
+            unparsed_lines=0,
+            attribution_gap=inputs["attribution_gap"],
+        )
+        adm = doctor_footprint.cpu_admission(
+            reading,
+            capacity_cores=inputs["capacity_cores"],
+            share_ceiling=inputs["share_ceiling"],
+            load_15m=inputs["load_15m"],
+            hard_max_load_per_cpu=inputs["hard_max_load_per_cpu"],
+            cpus=inputs["cpus"],
+        )
+        expected = case["payload"]["admission"]
+        assert adm.verdict == expected["verdict"], case["name"]
+        assert adm.axis == expected["axis"], case["name"]
+        assert adm.bound == expected["bound"], case["name"]
+        assert adm.reason == expected["reason"], case["name"]
+        assert adm.share_low == pytest.approx(expected["share_low"]), case["name"]
+        assert adm.share_high == pytest.approx(expected["share_high"]), case["name"]
 
 
 # ---------------------------------------------------------------------------

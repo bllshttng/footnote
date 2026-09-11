@@ -1,7 +1,8 @@
-"""Blueprint session lifecycle verbs: stamp, close, reap.
+"""Blueprint session lifecycle verbs: stamp, open, close, reap.
 
-The close releases the handover claim it was launched under and repoints
-dispatch_verb at the launch verb, so a finished blueprint names what runs next.
+The close releases the spawn-handover claim or the blueprint-session claim it
+was opened under and repoints dispatch_verb at the launch verb, so a finished
+blueprint names what runs next.
 """
 
 import json
@@ -26,6 +27,32 @@ session_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+# A subagent planner holds node:<id> under this prefix between session open
+# and session close, mirroring target-session:<id> for the do phase.
+BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
+
+
+def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
+    """Release exactly OUR holder and stamp the receipt; a close never fails
+    on its release - the claim just waits out its TTL."""
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    try:
+        released = release_claim(
+            claim_key, holder, strict=True, root=claims_root_for(claim_key)
+        )
+        receipt["claim_released"] = bool(released)
+        if released:
+            receipt["claim_holder"] = holder
+    except Exception as exc:  # noqa: BLE001 - a close never fails on its release
+        receipt["claim_released"] = False
+        typer.echo(
+            f"session close: {claim_key} not released: "
+            f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
+            err=True,
+        )
 
 
 def _plan_claims(plan_path: str) -> "set[str]":
@@ -316,6 +343,101 @@ def cmd_session_add(
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
 
 
+@session_app.command("open")
+def cmd_session_open(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    harness: Optional[str] = typer.Option(None, "--harness"),
+    session_id: Optional[str] = typer.Option(None, "--session-id"),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the open receipt as JSON."
+    ),
+) -> None:
+    """Hold node:<id> under blueprint-session:<id> for this session's planner.
+
+    The open takes only the claim; the close writes the lifecycle row and
+    releases. A planner running between open and close is visible to every
+    dispatch gate, so a second planner on the same node is refused here.
+    """
+    from fno.claims.core import (
+        ClaimContended,
+        ClaimCorrupted,
+        ClaimGoneAway,
+        ClaimHeldByOther,
+        acquire_claim,
+        claim_status,
+    )
+    from fno.claims.io import claims_root_for
+    from fno.claims.self_identity import resolve_self_identity
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import read_graph
+
+    ident = resolve_self_identity()
+    eff_harness = (harness or ident.harness or "").strip()
+    eff_session = (session_id or ident.session_id or "").strip()
+    if not eff_harness or not eff_session:
+        typer.echo(
+            f"session open: no ambient identity for {node}; run inside a session.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    match = resolve_node(node, read_graph(_graph_path()))
+    if match.kind != "exact":
+        typer.echo(f"session open: no exact node matches {node!r}.", err=True)
+        raise typer.Exit(code=2)
+    node_id = match.candidates[0]["id"]
+    claim_key = f"node:{node_id}"
+    holder = BLUEPRINT_HOLDER_PREFIX + eff_session
+    existing = claim_status(claim_key, root=claims_root_for(claim_key))
+    if existing.get("state") != "free" and existing.get("holder") == holder:
+        typer.echo(
+            f"session open: node:{node_id} is already open for this session ({holder}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        from fno.claims.session_pid import resolve_session_pid
+
+        pid = resolve_session_pid()
+    except Exception:  # noqa: BLE001 - degrade to acquire_claim's transient-pid default
+        pid = None
+    try:
+        claim = acquire_claim(
+            claim_key,
+            holder,
+            reason=f"blueprint session for {node_id}",
+            pid=pid,
+            harness=eff_harness,
+            root=claims_root_for(claim_key),
+        )
+    except ClaimHeldByOther as exc:
+        typer.echo(
+            f"session open: node:{node_id} held by {exc.holder} (pid={exc.pid}); "
+            "no planner started.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except (ClaimCorrupted, ClaimGoneAway, ClaimContended) as exc:
+        typer.echo(
+            f"session open: node:{node_id} could not be claimed: "
+            f"{type(exc).__name__}: {exc}.",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    receipt = {
+        "node_id": node_id,
+        "status": "opened",
+        "claim_key": claim_key,
+        "holder": holder,
+        "harness": eff_harness,
+        "session_id": eff_session,
+        "acquired_at": claim.acquired_at,
+    }
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        typer.echo(f"opened {node_id} holder={holder}")
+
+
 @session_app.command("close")
 def cmd_session_close(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
@@ -361,6 +483,23 @@ def cmd_session_close(
         raise typer.Exit(code=2)
     node_id = match.candidates[0]["id"]
     ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A blueprint-session claim bounds the planning window: its acquire time
+    # is the row's started_at unless the caller pinned one. The backfilled
+    # subagent rows this closes for good carried started_at: null.
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    claim_key = f"node:{node_id}"
+    claim = claim_status(claim_key, root=claims_root_for(claim_key))
+    blueprint_holder = BLUEPRINT_HOLDER_PREFIX + eff_session
+    blueprint_held = (
+        claim.get("state") != "free" and claim.get("holder") == blueprint_holder
+    )
+    acquired_at = claim.get("acquired_at")
+    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+        started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     try:
         found, added = append_session_record(
             _graph_path(),
@@ -413,27 +552,14 @@ def cmd_session_close(
     # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and
     # this close is the only terminal that lifecycle has. Release exactly OUR
     # holder, never the key: a successor target session may already hold the
-    # claim under its own after rebinding it at init.
-    from fno.claims.core import release_claim
-    from fno.claims.io import claims_root_for
-
+    # claim under its own after rebinding it at init. A claim has one holder,
+    # so at most one branch matches.
     holder = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
     claim_key = f"node:{node_id}"
     if holder.startswith("spawn-handover:"):
-        try:
-            released = release_claim(
-                claim_key, holder, strict=True, root=claims_root_for(claim_key)
-            )
-            receipt["claim_released"] = bool(released)
-            if released:
-                receipt["claim_holder"] = holder
-        except Exception as exc:  # noqa: BLE001 - a close never fails on its release
-            receipt["claim_released"] = False
-            typer.echo(
-                f"session close: {claim_key} not released: "
-                f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
-                err=True,
-            )
+        _release_into(receipt, claim_key, holder)
+    elif blueprint_held:
+        _release_into(receipt, claim_key, blueprint_holder)
     else:
         receipt["claim_released"] = False
     if json_out:

@@ -13,7 +13,10 @@ This guard covers ONE of the three orphan classes that night: the process that
 cannot end on its own. Specimen 2 (a `grep -rn` at 64% CPU) and specimen 3
 (background tasks that outlived their session) are not refusable at creation
 time - a grep is a legitimate command, and nothing in the command text of
-specimen 3 marks it. Those are `fno agents orphans`' job, after the fact. See
+specimen 3 marks it. Those are `fno agents orphans`' job, after the fact. The
+one marked exception is the recursive cache walk: hooks/recursive-grep-guard.py
+refuses that class at the Bash boundary when the repository holds a
+CACHEDIR.TAG-confirmed Cargo cache. See
 docs/architecture/background-process-hygiene.md.
 
 Parse-only, stdlib alone. No third-party import, psutil included: a hook runs

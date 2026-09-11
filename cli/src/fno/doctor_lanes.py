@@ -31,6 +31,7 @@ are live.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -184,30 +185,35 @@ def read_memory_pressure(
     return int(match.group(1)) / 100.0, None
 
 
-def _spawn_load_arm() -> ArmReading:
-    from fno.doctor_footprint import _spawn_load_snapshot
+def _cpu_admission_arm() -> ArmReading:
+    """The CPU axis, read through the SAME seam the gate reads (one decider,
+    one sample), so the advisor can never disagree with a refusal."""
+    from fno.agents.spawn_gate import _cpu_axis
 
-    snapshot = _spawn_load_snapshot()
-    load = getattr(snapshot, "load_1m", None)
-    ceiling = getattr(snapshot, "load_ceiling", None)
-    status = getattr(snapshot, "spawn_load_status", "unavailable")
-    if load is None or ceiling is None:
-        return ArmReading("spawn load", DARK, reason="load snapshot unavailable")
-    load_5m = getattr(snapshot, "load_5m", None)
-    load_15m = getattr(snapshot, "load_15m", None)
+    admission = _cpu_axis()
+    load_1m = load_5m = None
+    try:
+        load_1m, load_5m, _ = os.getloadavg()
+    except (OSError, AttributeError):
+        pass  # trend line only; the decider carried its own load_15m
+    load_15m = admission.load_15m
     return ArmReading(
-        "spawn load",
+        "cpu admission",
         MEASURED,
         value={
-            "load_1m": round(load, 1),
-            "load_5m": round(load_5m, 1) if load_5m is not None else None,
+            "fleet_cores": round(admission.fleet_cores, 3),
+            "capacity_cores": round(admission.capacity_cores, 2),
+            "share_low": round(admission.share_low, 4),
+            "share_high": round(admission.share_high, 4),
+            "ceiling": admission.ceiling,
+            "verdict": admission.verdict,
+            "bound": admission.bound,
             "load_15m": round(load_15m, 1) if load_15m is not None else None,
-            "ceiling": round(ceiling, 1),
-            "max_load_per_cpu": round(getattr(snapshot, "max_load_per_cpu", 0.0), 1),
-            "load_cpu_count": getattr(snapshot, "load_cpu_count", None),
-            "status": status,
+            "backstop": round(admission.backstop, 1),
+            "load_1m": round(load_1m, 1) if load_1m is not None else None,
+            "load_5m": round(load_5m, 1) if load_5m is not None else None,
         },
-        source="max_load_per_cpu x ncpu",
+        source="cpu_admission",
     )
 
 
@@ -396,7 +402,7 @@ def read_lanes(
     macmon_fn = macmon_fn or read_macmon
     sample, macmon_reason = macmon_fn()
     reading = LaneReading()
-    load_arm = _spawn_load_arm()
+    load_arm = _cpu_admission_arm()
     cpu_arm = _machine_cpu_arm(sample, macmon_reason)
     mem_arm = _memory_arm(sample, macmon_reason)
     power_arm = _power_arm(sample, macmon_reason)
@@ -438,12 +444,14 @@ def read_lanes(
 
     if (
         isinstance(load_arm.value, dict)
-        and load_arm.value.get("status") == "exceeded"
+        and load_arm.value.get("verdict") in ("hold", "undecidable", "refuse")
     ):
-        # The spawn-load ceiling is already breached: no advisory headroom on
-        # top of a breached ceiling.
+        # The CPU axis is not admitting: no advisory headroom on top of a
+        # hold, an undecidable band, or a refusal (x-7783 AC12).
         answer = 0
-        cost_source += "; spawn-load ceiling already breached, answer capped at 0"
+        cost_source += (
+            f"; cpu admission {load_arm.value.get('verdict')}, answer capped at 0"
+        )
 
     reading.lane_count = answer
     reading.per_lane_cpu_cores = round(per_cpu, 3)

@@ -74,3 +74,106 @@ def test_graph_corruption_is_not_an_empty_worked_answer(monkeypatch, capsys):
     assert "worked overlay degraded: graph corrupt" in capsys.readouterr().err
     with pytest.raises(GraphCorruptError, match="graph corrupt"):
         live_worked_node_ids(strict=True)
+
+
+def test_one_unmeasurable_row_skips_itself_per_node(monkeypatch):
+    """A live row with no harness session id blocks its own node, never the
+    whole measure: the other nodes' entries stay correct (x-ae54)."""
+    entries = [_entry("x-a238"), _entry("x-6d3c")]
+    reading = RosterReading(
+        True, 0, {}, "", {}, 0, (),
+        {"x-a238": ("bp-a238-king-brief",)},
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {
+        "x-a238": ["bp-a238-king-brief (unmeasurable: no harness session id)"],
+    }
+
+
+def test_node_attributed_worker_reads_worked_without_a_session_row(monkeypatch):
+    """A registry worker whose graph session row was never written (the
+    spawn-time skip) still reads as worked through the node fold."""
+    entries = [{"id": "x-ae54", "status": "in_progress", "sessions": []}]
+    reading = RosterReading(
+        True, 1,
+        {"x-ae54": [{"name": "t-ae54-worked-granularity", "state": "working",
+                     "cwd": "/worktrees/x-ae54", "row_id": "01a08dab-7d3a"}]},
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {
+        "x-ae54": ["t-ae54-worked-granularity"],
+    }
+
+
+def test_finished_node_attributed_worker_frees_the_node(monkeypatch):
+    """The node fold respects liveness: a stopped worker is not live work."""
+    entries = [{"id": "x-ae54", "status": "in_progress", "sessions": []}]
+    reading = RosterReading(
+        True, 1,
+        {"x-ae54": [{"name": "t-ae54-worked-granularity", "state": "killed",
+                     "cwd": "/worktrees/x-ae54", "row_id": "01a08dab-7d3a"}]},
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
+def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
+    """The producer's structured advisory line lands on the reading as node
+    attribution, not as a blocking refusal."""
+    monkeypatch.setattr(
+        "fno.agents.watchdog.fleet_rows",
+        lambda **_kw: ([], [
+            "roster advisory: unmeasurable-row: "
+            "harness=codex node=x-a238 name=bp-a238-king-brief",
+        ]),
+    )
+
+    from fno.claims.roster import read_roster
+
+    reading = read_roster()
+
+    assert reading.consulted is True
+    assert reading.unmeasurable_by_node == {"x-a238": ["bp-a238-king-brief"]}
+
+
+def test_all_terminal_graph_skips_the_roster_probe(monkeypatch):
+    """No non-terminal node can be worked, so the fleet probe is wasted there
+    and display paths keep their instant answer."""
+    entries = [{"id": "done-1", "status": "done", "sessions": []}]
+
+    def _boom(**_kw):
+        raise AssertionError("roster probed on an all-terminal graph")
+
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: entries)
+    monkeypatch.setattr("fno.claims.roster.read_roster", _boom)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
+def test_a_registry_only_fallback_answers_the_overlay(monkeypatch):
+    """On a machine with no claude binary the promised registry-only fallback
+    must actually answer the worked overlay, not refuse it (CI: undispatched
+    went dark). Claim-status liveness keeps its refusal by default."""
+    fallback = (
+        "claude agents --json: claude binary not found on PATH; "
+        "live_status unavailable, falling back to registry-only view"
+    )
+    monkeypatch.setattr(
+        "fno.agents.watchdog.fleet_rows", lambda **_kw: ([], [fallback])
+    )
+
+    from fno.claims.roster import read_roster
+
+    assert read_roster().consulted is False
+
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict",
+        lambda *_a, **_kw: [_entry("x-6d3c")],
+    )
+    assert live_worked_node_ids(strict=True) == {}

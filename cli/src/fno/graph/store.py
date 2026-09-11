@@ -43,6 +43,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+from functools import lru_cache
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -580,37 +581,6 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
 
 
-def identify_spawned_keepers() -> list[dict]:
-    """Identify keepers spawned here plus the canonical seat."""
-    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
-    socks.add(store_socket_for(Path(GRAPH_JSON)))
-    rows: list[dict] = []
-    for sock in sorted(socks):
-        try:
-            rows.append(_Keeper(sock).identify())
-        except StoreUnavailable:
-            continue
-    return rows
-
-
-def restart_spawned_keepers() -> list[dict]:
-    """Restart identified keepers so a backend config flip takes effect."""
-    rows = identify_spawned_keepers()
-    for row in rows:
-        try:
-            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
-        except (KeyError, StoreUnavailable):
-            continue
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and any(
-        store_socket_for(Path(row["graph"])).exists() for row in rows
-    ):
-        time.sleep(0.05)
-    for row in rows:
-        _client_for(Path(row["graph"]))
-    return identify_spawned_keepers()
-
-
 def _raise_store_error(kind: str, message: str) -> None:
     if kind == "corrupt":
         raise GraphCorruptError(message)
@@ -719,13 +689,16 @@ def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list
 # Pure helpers (ported; served by the keeper's pure methods)
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=4096)
 def normalize_plan_path(path: str | None) -> str | None:
     """Normalize a ``plan_path`` for comparison across graph / ledger and
     across absolute-vs-relative + trailing-slash conventions.
 
     The one normalizer behind every plan-path guard (the ported Rust
     implementation answers through the keeper; one comparison vocabulary is
-    why every comparison site routes through one function).
+    why every comparison site routes through one function). The keeper side is
+    a lexical fold with no filesystem access and no state, so the answer for a
+    given input never changes and the round trip is cached per process.
     """
     result = _client_for(GRAPH_JSON).request("normalize_plan_path", {"path": path})
     return result["path"] if isinstance(result, dict) else None
