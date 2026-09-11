@@ -4376,9 +4376,9 @@ def _team_recipients(scope: str) -> list[tuple[str, str]]:
         rows = [r for r in rows if crown_scope_matches(getattr(r, "crown_scope", None), scope)]
     pairs: dict[str, str] = {}
     for row in rows:
-        if getattr(row, "status", None) in TERMINAL_STATUSES or not getattr(row, "session_id", None):
+        if row.status in TERMINAL_STATUSES or not row.session_id:
             continue
-        if scope == "kings" and getattr(row, "crown_level", None) is None:
+        if scope == "kings" and row.crown_level is None:
             continue
         pairs.setdefault(session_identity_key(row.session_id), row.name)
     return sorted((name, identity) for identity, name in pairs.items())

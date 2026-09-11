@@ -151,7 +151,11 @@ def test_map_covers_current_surface_once():
     # file, 596 -> 598. x-caf8 allocates `doctor scratch sweep` +
     # `doctor scratch report`, the scratch-shape sweep the daily eval-sweep
     # ignition runs as stage five (its Rust-runtime leaf): 598 -> 600.
-    assert len(mapped) == 600, (
+    # x-77db allocates `agents incident` +
+    # `agents fleet-incident` (the breaker adapter and its native verb) and
+    # `agents mail team` + `mail team` (the fleet announcement fan-out):
+    # counted from the merged file, 600 -> 604.
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

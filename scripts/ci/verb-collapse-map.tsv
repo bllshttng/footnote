@@ -33,10 +33,12 @@ agents distress-verdicts	T1	agents distress-verdicts	0
 agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
+agents fleet-incident	T1	agents fleet-incident	0
 agents gate	T1	agents gate	6
 agents graph-get	T1	agents graph-get	0
 agents heal-token	T1	agents heal-token	8
 agents history	T1	agents history	3
+agents incident	T1	agents incident	0
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
 agents king done	T1	agents king done	5
@@ -68,6 +70,7 @@ agents mail seed-provenance	T1	agents mail seed-provenance	0
 agents mail send	T1	agents mail send	184
 agents mail sent	T1	agents mail sent	2
 agents mail status	T1	agents mail status	9
+agents mail team	T1	agents mail team	0
 agents mail triage	T1	agents mail triage	8
 agents mail unread	T1	agents mail unread	16
 agents mail view	T1	agents mail view	2
@@ -426,6 +429,7 @@ mail seed-provenance	T1	mail seed-provenance	0
 mail send	KEEP	mail send	184	deliberate readability slack for a high-traffic distinct operation
 mail sent	T1	mail sent	2
 mail status	T1	mail status	9
+mail team	T1	mail team	0
 mail triage	T1	mail triage	8
 mail unread	T1	mail unread	16
 mail view	T1	mail view	2
