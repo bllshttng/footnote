@@ -1874,7 +1874,7 @@ def test_read_review_coverage_from_events(tmp_path):
     assert read_review_coverage(7, cwd=str(tmp_path)) == {
         "coverage": "uncovered",
         "review_state": "unreviewed",
-        "reviewed_count": 0,
+        "reviewed_count": 1,
         "passed_count": None,
         "self_attested_count": None,
         "head_sha": "a",
@@ -2076,7 +2076,9 @@ def test_status_distinguishes_current_review_from_stale_history(
     stale_only = _json.loads(capsys.readouterr().out)
     assert stale_only["ready"] is False
     assert stale_only["review_coverage"]["coverage"] == "uncovered"
-    assert stale_only["review_coverage"]["reviewed_count"] == 0
+    # The producer's count is never overwritten (d-e1f84036): the row says
+    # one review happened, and the uncovered word is the only correction.
+    assert stale_only["review_coverage"]["reviewed_count"] == 1
     assert "review_coverage_uncovered" in stale_only["ready_blockers"]
 
 
@@ -3317,3 +3319,50 @@ def test_payload_rounds_null_with_a_note_when_the_row_has_none(
     assert out["max_rounds"] is None
     assert "fno-agents review-coverage" in out["rounds_note"]
     assert "rounds_axis" not in out
+
+
+def test_spent_budget_row_with_a_stale_verdict_holds_nothing(
+    monkeypatch, capsys, tmp_path
+):
+    """d-0fa92eb9: the row says the budget is spent, so the stale-verdict
+    conjuncts (uncovered, unreviewed, stale head) hold nothing - the PR is
+    reviewed and merges on green CI."""
+    out = _rounds_status_on(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "",
+        gate_row={
+            "coverage": "uncovered",
+            "review_state": "unreviewed",
+            "head_sha": f"{9:040x}",
+            "rounds_used": 2,
+            "rounds_max": 2,
+            "rounds_exhausted": True,
+        },
+    )
+    assert out["ready"] is True
+    assert not [b for b in out["ready_blockers"] if b.startswith("review_coverage_")]
+
+
+def test_under_budget_row_with_a_stale_verdict_still_blocks(
+    monkeypatch, capsys, tmp_path
+):
+    """The twin: the same stale row one round under the budget keeps the
+    uncovered blocker, so the spent-budget pass is the cap's doing and not
+    a shaper that stopped reading staleness."""
+    out = _rounds_status_on(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "",
+        gate_row={
+            "coverage": "uncovered",
+            "review_state": "unreviewed",
+            "head_sha": f"{9:040x}",
+            "rounds_used": 1,
+            "rounds_max": 2,
+            "rounds_exhausted": False,
+        },
+    )
+    assert "review_coverage_uncovered" in out["ready_blockers"]

@@ -529,12 +529,14 @@ def _ready_blockers(
             from fno.pr._coverage_gate import covered_conjuncts
 
             ok, failed = covered_conjuncts(coverage, head, code_review_required)
-            # The configured round cap is not a conjunct here: at the cap the
-            # gate discharges the review obligation and the PR merges on
-            # green CI, so a blocker named off the budget would hold every
-            # capped PR the ruling says should land. The row conjuncts below
-            # are the whole coverage hold.
-            if not ok:
+            # At the cap (the row's own rounds_exhausted bit, d-0fa92eb9) the
+            # review obligation is discharged and the PR merges on green CI,
+            # so neither the conjuncts below nor the posture read may hold
+            # it: a blocker here would name as stuck exactly the PR the law
+            # says is reviewed. Under the cap the row conjuncts are the
+            # whole coverage hold.
+            at_cap = coverage.get("rounds_exhausted") is True
+            if not ok and not at_cap:
                 blockers.append(f"review_coverage_{failed}")
             # The Rust posture verdict, read the same way the merge gate reads
             # it (one producer, never a reclassification): a satisfied-conjunct
@@ -544,10 +546,11 @@ def _ready_blockers(
             # rather than a blocker here: this surface never recomputes, so a
             # pre-posture row would read as blocked on a machine the merge
             # gate would send to upgrade first - the verb, not the read,
-            # owns that refusal.
-            posture = coverage.get("review_posture") if ok else None
+            # owns that refusal. At the cap the posture is never read.
+            posture = coverage.get("review_posture") if ok and not at_cap else None
             if (
                 ok
+                and not at_cap
                 and isinstance(posture, dict)
                 and posture.get("posture_satisfied") is not True
             ):
