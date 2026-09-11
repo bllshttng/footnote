@@ -8,22 +8,19 @@ Three facts fix the design, all measured against the harness internals:
 
 - fno already has a better goal than the native `/goal` for kings. The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, exits `NoWork` on a clean board, and escalates every `NoProgress`. The native `/goal` evaluator reads only the transcript.
 - The king can inject native commands itself. `fno agents mail send '<command>' --to-self --raw` types the command verbatim, as from the operator. So the reign arms its own `/loop` and `/goal` at start, without waiting for a ritual.
-- `/loop 30m` fires unconditionally and keeps the process from idling out. That is what a tenured king needs. A Monitor fires only on change, which is what the six watchers need.
+- `/loop 30m` fires unconditionally and keeps the process from idling out. That is what a tenured king needs. A Monitor fires only on change, which is what the one watcher needs.
 
-## The six arms and why each exists
+## The one arm, and the demand reads
 
-Each arm is a harness-tracked Monitor running a shell until-loop. No tokens while waiting. When a condition changes, the session wakes.
+The 2026-09-10 measurement covered one 12-hour reign. The stop hook drove all four real dispatches. The six monitor arms surfaced nothing the king acted on. Court costs are charged per wake, not per hour. So the skill arms ONE monitor, a harness-tracked Monitor running a shell until-loop. No tokens while waiting. When the condition changes, the session wakes.
 
-1. **Unread mail, 60s.** Worker reports, peer facts, and operator answers all land here.
-2. **Board change, 120s.** The board read is expensive at load. The arm reads the journal with `fno doctor event find <kind> --since <window> -J`. Never a hand-rolled tail of one file. Board motion is `advance_dispatched`, `termination`, `plan_stamped` and `blocked`. A freed node is `claim_released` in `events.jsonl.ephemeral`. The trigger is the board digest over `(id, status, _kanban_column, priority)`, never a count.
-3. **Crown liveness, 300s.** A crown can be lost silently. A king cannot re-crown itself, but it can escalate the minute it is crownless. It reads `reign_state(scope)`, whose compute lives in `crates/fno-agents/src/loop_reign.rs` behind a thin Python JSON client. Unreadable instruments report `CROWN-UNKNOWN`. `split` and court `conflicts` report separately from the agree counts.
-4. **Main branch CI, 300s.** A red main blocks every merge in the fleet. The arm triggers on the verdict token (`red`, `green`, `pending`), never on a check-run count. Several of the most productive reign wakes began with "main flipped green".
-5. **Capacity band, 300s, debounced across two samples.** The load-derived verdict flaps. Measured over, within, over, within inside fifteen minutes, with no change in real work. The band must HOLD before it is believed. The arm prints `sustained_cpu_cores` beside the verdict and flags disagreement.
-6. **Arm staleness, 600s.** Any red row in `fno agents status` is the mechanical trigger for the one dispatch exception.
+1. **Fleet settled-PR wake, 600s.** The stop hook fires on an agent stop, and on nothing else. A session can stop while its PR is pending. Its CI can settle an hour later. Nothing watches for that. This arm does. The until-loop exits on one condition: a quiet or parked roster row whose node's `pr_number` reads settled. The reads are `fno agents list --json` and `fno do pr status <n>`. The wake pokes the stopped session with `fno agents resume <id>`, never a fresh dispatch. A by-hand run on 2026-09-10 covered PRs 1650, 1694 and 1649. Three pokes, zero slot cost. One query run centrally beats six timers run per king.
+
+The deleted arms are demand reads. Each is read on demand. Mail arrives as a conversation turn and cannot be missed. The board and crown liveness are check-in body reads. A red row in `fno agents status` stays the mechanical trigger for the one dispatch exception. Main CI is read as one verdict token (`red`, `green`, `pending`), never a check-run count. Several of the most productive reign wakes began with "main flipped green". Capacity is the spawn gate's job. The gate refused twice in the measured reign, correctly. The band's five readings changed no decision.
 
 Every arm emits on probe failure as well as on the watched condition. When its instrument breaks, a silent monitor reports "nothing happened" and "the reader is dead" with the same silence.
 
-Three things stay unmonitored because each has an owner. Worker transcripts belong to court-mode watching. Per-PR CI belongs to the merge arm and the heal driver. The raw load average is wrong for the reason arm 5 names.
+Two things stay unmonitored because each has an owner. Worker transcripts belong to court-mode watching. Per-PR CI belongs to the merge arm and the heal driver.
 
 ## The shape field and which hook reads it
 
