@@ -1188,7 +1188,6 @@ def inject_spawn_defaults(
                     role=grid_role,
                     protected_role=protected_name,
                     model_occupied=model_occupied,
-                    explicit_model=has_model,
                     explicit_lane=_explicit_lane,
                     work_verb=verb,
                     explicit_model_value=_flag_value(out[1:], "--model", "-m") if has_model else None,

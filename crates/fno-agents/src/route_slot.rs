@@ -2562,7 +2562,7 @@ mod tests {
             "vendor_counts": {}, "vendor_caps": {}, "vendor_count_errors": {},
             "thread_seatable": {}, "substrate": null, "permission_mode": null,
             "constrain_harness": null,
-            "explicit_lane": false, "explicit_model": false, "gate_bypassed": false,
+            "explicit_lane": false, "gate_bypassed": false,
         });
         if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
             for (k, v) in ovr {
@@ -3167,6 +3167,39 @@ mod tests {
         })));
         assert_eq!(out["status"], "none");
         assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
+    }
+
+    #[test]
+    fn strict_explicit_route_pin_outranks_the_lanes_with_no_model_or_vendor() {
+        // A bare --route (no -m, no -P) is still an operator pin: the third
+        // coordinate follows the same rule as model and vendor.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
+
+        // Same pin under grid (non-strict) routing: unconditional, same as
+        // model and vendor.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["opus-x"],
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.contains("slot=operator-pin-override")));
