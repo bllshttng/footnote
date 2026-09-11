@@ -703,6 +703,12 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
     wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    // The pid-confirmed termination needs the incumbent REAPED, not only
+    // dead: this test process is the parent, so an unwaited child lingers as
+    // a zombie and kill(pid, 0) answers alive through the whole grace. A
+    // waiter thread reaps the moment TERM lands - the shape launchd gives
+    // production orphans for free.
+    let reaper = std::thread::spawn(move || incumbent.wait());
 
     // The storm: a restart and a burst of ordinary client verbs at the same
     // moment. Every verb routes through `ensure_daemon`, which is the site that
@@ -797,10 +803,10 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "restart must replace the incumbent this test started"
     );
 
-    // Reap the incumbent before counting. It is our child, so until it is
-    // waited on it lingers as a zombie, and `kill(pid, 0)` answers ALIVE for a
-    // zombie -- the count would then report two supervisors for one live one.
-    let _ = incumbent.wait();
+    // The reaper thread joined below reaped the incumbent the moment TERM
+    // landed; without that reap it would linger as a zombie and the count
+    // would report two supervisors for one live one.
+    reaper.join().expect("incumbent reaper joins");
 
     // The successor serves. `status` stays on the async runtime, so this reads
     // the event loop's liveness rather than a handler's own work.
@@ -864,6 +870,9 @@ async fn daemon_child_env_isolated_probe() {
     let sibling_bin = daemon_env_bin(&sibling_home, "sibling", Some(&marker), &[]);
 
     let mut incumbent = start_daemon(&intended_home);
+    // Reap DURING the restart: the pid-confirmed termination cannot see an
+    // unwaited zombie child of this test process die.
+    let reaper = std::thread::spawn(move || incumbent.wait());
     let restart = {
         let home = intended_home.clone();
         let bin = intended_bin.clone();
@@ -871,7 +880,7 @@ async fn daemon_child_env_isolated_probe() {
     };
     let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
     let outcome = restart.await.unwrap().expect("probe restart succeeds");
-    let _ = incumbent.wait();
+    reaper.join().expect("incumbent reaper joins");
     terminate_untracked(outcome.new_pid);
     let sibling_pid = sibling.id();
     unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };
@@ -2359,5 +2368,33 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
     }
     let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// status --json carries the drift verdict as a field (x-f188 change 4,
+/// AC4-HP): the census reads it from JSON instead of regex-parsing the
+/// stderr sentence.
+#[tokio::test]
+async fn status_json_carries_the_drift_label() {
+    const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let _daemon = start_daemon(&home);
+    let out = Command::new(CLIENT_BIN)
+        .args(["status", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client runs");
+    assert!(
+        out.status.success(),
+        "status exits 0 against a live daemon: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
+    let label = v["drift"].as_str().unwrap_or("MISSING");
+    assert!(
+        matches!(label, "fresh" | "drifted" | "unknown"),
+        "a drift label rides status --json, got {label}"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }

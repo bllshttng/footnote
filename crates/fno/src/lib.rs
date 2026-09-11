@@ -26,6 +26,7 @@ pub mod link;
 pub mod mission_squad;
 pub mod mouse;
 pub mod mux_cli;
+pub mod mux_rows;
 pub mod needs_overlay;
 pub mod pane_cwd;
 pub mod popup;

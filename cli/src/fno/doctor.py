@@ -2319,15 +2319,21 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
-    # Running-process freshness (x-e6dd): a mux server that predates the installed
-    # binary is still speaking the old proto - it survives an upgrade by design and
-    # silently blocks agent dispatch until restarted. Advisory only.
+    # Wire-floor freshness (x-e6dd): the WIRE verdict, not the build one
+    # (x-f188); build staleness is the census below. Advisory only.
     for sess in result.get("mux_server_stale") or []:
         out(
-            f"fno doctor: mux server '{sess}' is running an older build than the installed "
-            "`fno`; run `fno agents restart` to cut it over (auto-heals pane-less servers; "
+            f"fno doctor: mux server '{sess}' is below the wire compatibility floor; "
+            "run `fno agents restart` to cut it over (auto-heals pane-less servers; "
             "add `--mux` to also end servers with live panes)."
         )
+
+    # Running-process census (x-f188): one line per stale row.
+    for row in result.get("running_components") or []:
+        if isinstance(row, dict) and row.get("verdict") == "stale":
+            pid = f" pid {row['pid']}" if row.get("pid") else ""
+            out(f"fno doctor: {row.get('component')} '{row.get('name') or 'unnamed'}'{pid} is an older "
+                f"build ({row.get('evidence')}); on restart: {row.get('on_restart')}; keeps {row.get('survives')}.")
 
     # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.
     orphans = result.get("orphan_files") or []
@@ -4079,6 +4085,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # OLD proto after an upgrade. Binary staleness is above; this is the running
     # PROCESS. Never changes status/exit.
     result["mux_server_stale"] = _update.stale_mux_servers()
+
+    # Advisory running-process census (x-f188); never changes status/exit.
+    result["running_components"] = _update.running_components() or []
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()

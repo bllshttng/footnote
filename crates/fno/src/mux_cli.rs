@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 use crate::server::lifecycle_target;
 use crate::server::lifecycle_target::pane_table_host;
 
+pub(crate) use crate::mux_rows::{pid_from_sidecar, read_wire_version};
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
     PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
@@ -247,16 +248,6 @@ impl SessionRow {
     }
 }
 
-/// Read a session socket's `.ver` sidecar (x-1a85) and parse the stamped wire
-/// version. `None` on any read/parse failure (absent sidecar = older server).
-fn read_wire_version(sock: &Path) -> Option<u32> {
-    std::fs::read_to_string(proto::version_sidecar_path(sock))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
 /// Enumerate `*.sock` stems in the mux dir, sorted. `Err` is an unreadable dir
 /// the caller must distinguish from "no sessions" (a permissions/IO error must
 /// never read as empty); `NotFound` returns an empty list (no session ever
@@ -325,6 +316,9 @@ fn session_row_json(row: &SessionRow) -> serde_json::Value {
             // spares live-pane servers. `wire_version` is null for a
             // pre-sidecar (older) server.
             "stale": stale, "wire_version": wire_version,
+            // x-f188 change 4: the census classifies the mux server's build
+            // from this pid; null when the sidecar is absent or unparseable.
+            "pid": pid_from_sidecar(name),
         }),
         Probe::Unqueryable => serde_json::json!({ "session": name, "state": "unqueryable" }),
         Probe::Wedged => {

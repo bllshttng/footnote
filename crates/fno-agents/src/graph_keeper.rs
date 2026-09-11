@@ -32,6 +32,7 @@ use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use crate::identity::{harness_of_session_id, shape_known_harness};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -292,6 +293,14 @@ struct StoreState {
     gate_metrics: Mutex<GateMetrics>,
     events: Option<PathBuf>,
     read_source: ReadSource,
+    /// The (dev, ino) of the socket path at bind time: the seat's proof.
+    /// Unlinks are guarded by it, and an idle keeper whose path was rebound
+    /// stands down (AC2-ERR).
+    sock_ino: Option<(u64, u64)>,
+    /// The build this keeper process launched from: drift is computed fresh
+    /// at every Identify, and the WouldBlock arm self-retires when the
+    /// binary under the keeper is rewritten while it idles.
+    startup_fp: Option<crate::drift::ExeFingerprint>,
 }
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
@@ -389,6 +398,93 @@ fn flush_gate_metrics(state: &StoreState) {
     );
 }
 
+/// Exit code for a keeper that found its seat owned: the Python spawner
+/// (`store.py:_client_for`) reads this number and keeps polling the
+/// incumbent instead of failing the spawn.
+pub const EXIT_SEAT_OWNED: i32 = 3;
+
+/// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
+/// holds the seat lock for microseconds, an incumbent for life, and only
+/// duration separates them.
+const SEAT_LOCK_ATTEMPTS: usize = 6;
+const SEAT_LOCK_RETRY: Duration = Duration::from_millis(25);
+
+/// How often an idle keeper re-checks that the socket path still names the
+/// inode it bound.
+const SEAT_CHECK_EVERY: Duration = Duration::from_secs(1);
+
+fn seat_lock_path(sock: &Path) -> PathBuf {
+    let mut s = sock.as_os_str().to_os_string();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+/// Take the exclusive seat flock on `<sock>.lock`, held for the process
+/// life (the returned File keeps it). `None` = the seat is owned: the
+/// daemon's bind_supervisor_socket rule, applied to the store.
+fn take_seat(sock: &Path) -> Option<std::fs::File> {
+    let lock_path = seat_lock_path(sock);
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    for attempt in 0..SEAT_LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() != std::io::ErrorKind::WouldBlock {
+                    return None;
+                }
+                if attempt + 1 < SEAT_LOCK_ATTEMPTS {
+                    std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// One Identify with a short reply bound: true only when something behind
+/// the path answers. An answering incumbent predates the seat lock (it was
+/// built before this change); a refusal or silence is a dead leftover the
+/// caller may clear.
+fn a_live_keeper_answers(sock: &Path, bound: Duration) -> bool {
+    let Ok(mut stream) = UnixStream::connect(sock) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(bound));
+    let _ = stream.set_write_timeout(Some(bound));
+    if stream.write_all(&encode(TAG_IDENTIFY, b"")).is_err() {
+        return false;
+    }
+    let mut header = [0u8; 5];
+    if stream.read_exact(&mut header).is_err() {
+        return false;
+    }
+    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len.min(1 << 20)];
+    stream.read_exact(&mut payload).is_ok()
+}
+
+/// True while the socket path still names the inode THIS keeper bound. A
+/// keeper never unlinks a socket it does not own, and an idle keeper whose
+/// path was rebound stands down instead of serving a phantom.
+fn seat_still_ours(sock: &Path, sock_ino: Option<(u64, u64)>) -> bool {
+    match sock_ino {
+        None => true,
+        Some(mine) => match std::fs::metadata(sock) {
+            Ok(md) => (md.dev(), md.ino()) == mine,
+            Err(_) => false,
+        },
+    }
+}
+
 /// Run the store keeper to completion. Returns only on a startup failure;
 /// a Shutdown frame ends the process from inside.
 pub fn run(cfg: KeeperConfig) -> Result<(), String> {
@@ -397,20 +493,57 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     unsafe {
         libc::setsid();
     }
-    // Connect-before-bind: a double keeper is a loud refusal.
-    if UnixStream::connect(&cfg.sock).is_ok() {
-        return Err(format!(
-            "store socket {} already has a live listener behind it",
+    // Seat flock BEFORE touching the socket: the loser exits 3 and the
+    // Python spawner keeps polling the incumbent rather than respawning.
+    if take_seat(&cfg.sock).is_none() {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (lock held); exiting",
             cfg.sock.display()
-        ));
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
+    }
+    // A keeper built before the seat lock can still own the path. With the
+    // flock held, one short-bound Identify decides: an answerer is a live
+    // incumbent, a refusal or silence is a dead leftover.
+    if cfg.sock.exists() && a_live_keeper_answers(&cfg.sock, Duration::from_millis(750)) {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (Identify answered); exiting",
+            cfg.sock.display()
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
+    }
+    // Connect-before-bind: a live listener IS the seat, whatever its build
+    // (a loaded incumbent can answer Identify too slowly for the probe above
+    // and still own the path), so the loser exits EXIT_SEAT_OWNED and the
+    // Python spawner keeps polling the incumbent instead of failing.
+    if UnixStream::connect(&cfg.sock).is_ok() {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (connect before bind); exiting",
+            cfg.sock.display()
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
     }
     let _ = std::fs::remove_file(&cfg.sock);
     if let Some(parent) = cfg.sock.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let listener = UnixListener::bind(&cfg.sock)
-        .map_err(|e| format!("cannot bind {}: {e}", cfg.sock.display()))?;
+    let listener = match UnixListener::bind(&cfg.sock) {
+        Ok(l) => l,
+        // A listener appeared between the probe and the bind: the seat filled.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "store keeper: {} is owned by a live keeper (bind in use); exiting",
+                cfg.sock.display()
+            );
+            std::process::exit(EXIT_SEAT_OWNED);
+        }
+        Err(e) => return Err(format!("cannot bind {}: {e}", cfg.sock.display())),
+    };
+    let sock_ino = std::fs::metadata(&cfg.sock)
+        .ok()
+        .map(|md| (md.dev(), md.ino()));
+    let startup_fp = crate::drift::ExeFingerprint::current();
 
     let state = Arc::new(StoreState {
         graph: cfg.graph.clone(),
@@ -423,6 +556,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         gate_metrics: Mutex::new(GateMetrics::new()),
         events: cfg.events.clone(),
         read_source: cfg.read_source,
+        sock_ino,
+        startup_fp,
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -486,6 +621,15 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     }
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
+    let mut last_seat_check = std::time::Instant::now();
+    let mut last_drift_check = std::time::Instant::now();
+    // x-f188 change 3: the drift tick period. 30s default, env-overridable
+    // for tests, next to its idle-exit sibling's override.
+    let drift_check_every = std::env::var("FNO_STORE_KEEPER_DRIFT_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
     // bound to that test run's lifetime, not the longer-lived idle bound
     // above: a wedged test that never sends Shutdown must not leak this
@@ -545,6 +689,37 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Seat check while idle: once a second, an idle keeper
+                // confirms the path still names the inode it bound. Lost
+                // seat -> stand down WITHOUT unlinking (the post-loop unlink
+                // is inode-guarded, so the rebinding keeper's socket stays).
+                if active_clients.load(Ordering::SeqCst) == 0
+                    && last_seat_check.elapsed() >= SEAT_CHECK_EVERY
+                {
+                    last_seat_check = std::time::Instant::now();
+                    if !seat_still_ours(&cfg.sock, sock_ino) {
+                        break;
+                    }
+                }
+                // Drift self-retire (x-f188 change 3): a keeper idling on a
+                // binary that a rebuild replaced is a stale server no
+                // restart reaches. Every drift tick with no client,
+                // re-stat the own executable; Drifted -> break so the
+                // inode-guarded unlink runs and the next caller respawns
+                // on the installed binary.
+                if active_clients.load(Ordering::SeqCst) == 0
+                    && last_drift_check.elapsed() >= drift_check_every
+                {
+                    last_drift_check = std::time::Instant::now();
+                    if let Some(fp) = &state.startup_fp {
+                        if matches!(
+                            crate::drift::self_drift(fp),
+                            crate::drift::DriftState::Drifted { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                }
                 if let Some(limit) = cfg.idle_limit {
                     if active_clients.load(Ordering::SeqCst) == 0
                         && last_activity.elapsed() >= limit
@@ -554,10 +729,20 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // A peer resetting between connect and accept surfaces here
+            // (Linux ECONNABORTED); one dropped probe must not retire a
+            // keeper that owns the seat. Interrupted accept retries too.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionAborted
+                    || e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
-    let _ = std::fs::remove_file(&cfg.sock);
+    // Unlink only what we still own: after a seat loss the path names the
+    // rebinding keeper's socket, and removing it would kill THEIR listener.
+    if seat_still_ours(&cfg.sock, sock_ino) {
+        let _ = std::fs::remove_file(&cfg.sock);
+    }
     Ok(())
 }
 
@@ -694,7 +879,26 @@ fn serve_client(
                 return;
             }
             Incoming::Identify => {
-                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, &identify));
+                // Build + drift computed LIVE at each Identify: a binary
+                // rewritten after this keeper started reads drifted in the
+                // next census, not one restart behind. New JSON keys are
+                // not a frame-shape change (PROTOCOL_VERSION stays 1).
+                let mut id: Value = serde_json::from_slice(&identify).unwrap_or(json!({}));
+                if let (Some(obj), Some(fp)) = (id.as_object_mut(), &state.startup_fp) {
+                    obj.insert(
+                        "build".to_string(),
+                        json!({
+                            "path": fp.path.display().to_string(),
+                            "mtime_nanos": fp.mtime_nanos,
+                            "size": fp.size,
+                        }),
+                    );
+                    obj.insert(
+                        "drift".to_string(),
+                        json!(crate::drift::drift_label(&crate::drift::self_drift(fp))),
+                    );
+                }
+                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, id.to_string().as_bytes()));
                 let _ = stream.flush();
             }
             Incoming::Shutdown => {
@@ -703,6 +907,31 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
+                // Wait out an in-flight mutation first (x-f188 change 3):
+                // a bounded try_write ladder; when it cannot land within
+                // lock_timeout, answer busy and KEEP SERVING instead of
+                // exiting mid-write.
+                let deadline = std::time::Instant::now() + state.lock_timeout;
+                let mut gate_guard: Option<std::sync::RwLockWriteGuard<'_, ()>> = None;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(g) = state.gate.try_write() {
+                        gate_guard = Some(g);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(gate_guard) = gate_guard else {
+                    let _ = stream.write_all(&encode(
+                        TAG_RESPONSE,
+                        json!({"id": 0, "ok": false, "error": {"kind": "busy",
+                              "message": "a mutation is in flight"}})
+                        .to_string()
+                        .as_bytes(),
+                    ));
+                    let _ = stream.flush();
+                    return;
+                };
+                drop(gate_guard);
                 let _ = stream.write_all(&encode(
                     TAG_RESPONSE,
                     json!({"id": 0, "ok": true, "result": "shutdown"})
@@ -711,7 +940,10 @@ fn serve_client(
                 ));
                 let _ = stream.flush();
                 shutdown.store(1, Ordering::SeqCst);
-                let _ = std::fs::remove_file(store_socket_for(&state.graph));
+                let sock = store_socket_for(&state.graph);
+                if seat_still_ours(&sock, state.sock_ino) {
+                    let _ = std::fs::remove_file(&sock);
+                }
                 std::process::exit(0);
             }
             Incoming::Request(payload) => {
@@ -2473,6 +2705,8 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
             read_source: ReadSource::Json,
+            sock_ino: None,
+            startup_fp: None,
         }
     }
 
@@ -2541,6 +2775,8 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
+            sock_ino: None,
+            startup_fp: None,
             read_source: ReadSource::Json,
         }
     }
@@ -2946,6 +3182,8 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
+            sock_ino: None,
+            startup_fp: None,
             read_source: ReadSource::Json,
         };
         let stale = json!({

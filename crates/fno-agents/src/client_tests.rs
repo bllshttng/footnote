@@ -741,6 +741,25 @@ fn render_restart_reports_fresh_when_down() {
 }
 
 #[test]
+fn render_restart_escalated_says_escalated() {
+    // AC1-HP: an escalation after a starved SIGTERM reads as a restart that
+    // had to kill, with the note on stderr, exit 0.
+    let note = "pid 91627 kept serving 30s after SIGTERM; escalated to SIGKILL".to_string();
+    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+        old_pid: Some(91627),
+        new_pid: 91999,
+        forced: true,
+        note: Some(note.clone()),
+    }));
+    assert_eq!(
+        out.as_deref(),
+        Some("restarted (escalated): pid 91627 -> 91999")
+    );
+    assert_eq!(err.as_deref(), Some(note.as_str()), "the note is heard");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn render_restart_failure_is_loud() {
     // AC2-FR: a SIGTERM failure carries a stderr line naming the pid + reason
     // and a nonzero exit; no false "restarted" on stdout.
@@ -754,9 +773,9 @@ fn render_restart_failure_is_loud() {
     assert!(err.contains("SIGTERM"), "names the failure");
     assert_ne!(code, 0, "failure exits nonzero");
 
-    // A did-not-exit timeout is equally loud and names the pid.
-    let (_o, err2, code2) = render_restart(&Err(RestartError::DidNotExit { pid: 5, secs: 5 }));
-    assert!(err2.unwrap().contains("did not exit"));
+    // A daemon that survives even the SIGKILL is equally loud and names the pid.
+    let (_o, err2, code2) = render_restart(&Err(RestartError::DidNotDie { pid: 5 }));
+    assert!(err2.unwrap().contains("survived SIGKILL"));
     assert_ne!(code2, 0);
 }
 

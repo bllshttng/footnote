@@ -426,6 +426,28 @@ def _live_mux_sessions(
     ]
 
 
+def running_components(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> "list[dict] | None":
+    """One row per long-lived process from ``fno-agents census --json``
+    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``None``
+    when the census itself could not run: a dark census is not an empty machine."""
+    try:
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+    except Exception:  # noqa: BLE001
+        binary = None
+    if binary is None:
+        return None
+    try:
+        proc = runner([str(binary), "census", "--json"], capture_output=True, text=True, check=False, timeout=30)
+        rows = json.loads(proc.stdout or "[]") if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
 def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:
@@ -568,6 +590,11 @@ def _wire_label(wires: list[int]) -> str:
     return "/".join(f"v{w}" for w in wires) if wires else "unknown"
 
 
+def _current_but_stale(rev_label: str, stale: int, restartable: int, pane_kept: int) -> str:
+    return (f"installed {rev_label} is current; {stale} running process(es) are older builds - restart "
+            f"cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end")
+
+
 def _build_update_guidance(
     *,
     update_ready: bool,
@@ -583,6 +610,7 @@ def _build_update_guidance(
     revivable: int,
     revivable_known: bool,
     degraded_reason: Optional[str],
+    stale_rows: "list[dict]" | None = None,
 ) -> str:
     """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
@@ -597,13 +625,20 @@ def _build_update_guidance(
     operator a restart is destructive (P2, codex on PR #881)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
+    stale_rows = stale_rows or []
+    running_stale = len(stale_rows)
+    restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in stale_rows)
+    pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in stale_rows)
 
     # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
     # known not-ready state - if both revs were read and match, there is no update
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
-    if not update_ready and revs_known:
+    # "Up to date" used to report no action while stale processes ran (x-f1f4).
+    if not update_ready and (revs_known or not degraded_reason):
+        if running_stale > 0:
+            return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if degraded_reason:
@@ -618,9 +653,6 @@ def _build_update_guidance(
             f"update check degraded ({degraded_reason}) - {wire_label}; "
             f"{shells_label} at risk, --revive respawns {revivable_label}"
         )
-
-    if not update_ready:
-        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if wire_bump:
         return (
@@ -729,6 +761,13 @@ def update_readiness(
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
+    # Census rows (x-f188); never the name `running`: python_tool owns it.
+    census_rows = running_components(runner)
+    if census_rows is None:
+        degraded.append("running-process census unavailable")
+        census_rows = []
+    running_rows = [r for r in census_rows if r.get("verdict") == "stale"]
+
     degraded_reason = "; ".join(degraded) if degraded else None
 
     guidance = _build_update_guidance(
@@ -745,6 +784,7 @@ def update_readiness(
         revivable=revivable,
         revivable_known=revivable_known,
         degraded_reason=degraded_reason,
+        stale_rows=running_rows,
     )
 
     # None (not 0) when the underlying fetch never happened - a count fno never
@@ -786,6 +826,8 @@ def update_readiness(
         "changelog": changelog,
         "guidance": guidance,
         "degraded": degraded_reason,
+        "running": running_rows,
+        "running_stale": len(running_rows),
     }
 
 

@@ -1350,6 +1350,10 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
+    /// (x-f188) A queued `fno agents restart` and its one-in-flight bound,
+    /// mirroring the sweep pair.
+    restart_agents_want: bool,
+    restart_inflight: bool,
     /// A sweep verb is in flight; one at a time, so a second tap queues
     /// nothing and is told so.
     sweep_inflight: bool,
@@ -2161,6 +2165,10 @@ pub(crate) enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
+    /// (x-f188 change 7) Queue `fno agents restart` off the UI loop. Never
+    /// `--mux`, never `--force`: the modal named what survives, and the tap
+    /// is the confirmation.
+    RestartAgents,
     /// Probe `mux workspace prune --dry-run` once and open the centered
     /// sweep-threads choice modal from its counts. Both halves of the prune
     /// (surplus pristine tabs, dead member rows) live behind this one entry.
@@ -2292,163 +2300,12 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
-/// The client's view of `fno doctor update --check`'s payload - only
-/// the fields the menu row and overlay render. `#[serde(default)]` on
-/// `changelog` tolerates an absent key rather than failing the whole parse;
-/// every other field is required, so a shape the Python resolver no longer
-/// emits degrades the probe instead of silently rendering stale/zeroed data.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct UpdateReadiness {
-    update_ready: bool,
-    installed_rev: Option<String>,
-    source_rev: Option<String>,
-    #[serde(default)]
-    changelog: Vec<String>,
-    guidance: String,
-    degraded: Option<String>,
-}
+mod update_menu;
 
-/// The result of one `fno doctor update --check` probe: parsed
-/// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
-/// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
-/// Decision 4) - the TUI computes nothing beyond folding this into rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum UpdateOutcome {
-    Ok(UpdateReadiness),
-    Degraded(String),
-}
-
-/// Well above the Connections read timeout (1.5s): `--check` shells out to
-/// `mux ls` (5s), `agents list` (15s), and `git log` (5s) SEQUENTIALLY on the
-/// Python side, so its own worst-case latency alone is ~25s. This never
-/// blocks the UI loop (the probe runs off it and the menu opens on whatever
-/// outcome is already in hand), so there is no cost to sizing it well above
-/// that worst case rather than racing it.
-const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
-
-/// Run `fno doctor update --check` off the UI loop and fold it into an
-/// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
-/// Decision 4): the event loop never blocks on this subprocess: a
-/// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
-/// or panic (AC6-EDGE).
-///
-/// `--check` already prints JSON on its own (`update` has no local `--json`
-/// option, and the global `--json` flag only applies before the verb) - do
-/// not add `--json` after `--check` here, it makes the CLI exit 2 and every
-/// probe degrade (P1, codex on PR #881).
-async fn probe_update_readiness() -> UpdateOutcome {
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    command
-        .args(["doctor", "update", "--check"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    let output = match tokio::time::timeout(UPDATE_PROBE_TIMEOUT, fut).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return UpdateOutcome::Degraded(format!("update --check: {e}")),
-        Err(_) => return UpdateOutcome::Degraded("update --check: timed out".into()),
-    };
-    if !output.status.success() {
-        return UpdateOutcome::Degraded(format!(
-            "update --check: exit {}",
-            output.status.code().unwrap_or(-1)
-        ));
-    }
-    match serde_json::from_slice::<UpdateReadiness>(&output.stdout) {
-        Ok(r) => UpdateOutcome::Ok(r),
-        Err(e) => UpdateOutcome::Degraded(format!("update --check: unparseable output ({e})")),
-    }
-}
-
-/// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
-/// an update row (only when the last probe has landed and is ready or
-/// degraded), then keybinds / settings / detach. `reload config` is
-/// intentionally absent - there is no config-reload machinery to route it to
-/// (a net-new capability, not a re-route), so the menu advertises only what
-/// actually works.
-fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
-    let mut rows = vec![PopupRow::Header("menu".into()), PopupRow::Rule];
-    let mut actions = Vec::new();
-    // A probe still in flight (or never fired yet) builds the menu
-    // WITHOUT an update row rather than waiting - the menu opens instantly.
-    match update {
-        Some(UpdateOutcome::Ok(r)) if r.update_ready => {
-            rows.push(entry("⬆", "update ready"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        // A successfully-parsed probe (Python always exits 0) can still be
-        // internally degraded (e.g. `fno mux ls` failed inside the check).
-        // Without this arm that state falls to `_ => {}` and the menu shows
-        // nothing, hiding a real check failure from the operator.
-        Some(UpdateOutcome::Ok(r)) if r.degraded.is_some() => {
-            rows.push(entry("⬆", "update check degraded"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        Some(UpdateOutcome::Degraded(_)) => {
-            rows.push(entry("⬆", "update check failed"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        _ => {}
-    }
-    rows.push(entry("♺", "sweep threads"));
-    rows.push(entry("⌨", "keybinds"));
-    rows.push(entry("⚙", "settings"));
-    rows.push(entry("⇄", "connections"));
-    rows.push(entry("⏏", "detach"));
-    actions.push(AuxAction::OpenSweep);
-    actions.push(AuxAction::OpenKeybinds);
-    actions.push(AuxAction::OpenSettings);
-    actions.push(AuxAction::OpenConnections);
-    actions.push(AuxAction::Detach);
-    AuxPopup {
-        popup: Popup::new(rows, anchor),
-        actions,
-    }
-}
-
-/// Build the update-readiness overlay from the last probe outcome:
-/// version pair, up to ten changelog subjects, a rule, then the one computed
-/// guidance line - or, for a degraded probe, the degraded reason in the
-/// guidance line's place. Never an empty body (AC5-HP/AC6-EDGE): `outcome`
-/// is only `None` if this is somehow opened before any probe ever ran, which
-/// `build_sideline_menu` never offers as a way in.
-fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
-    let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
-    match outcome {
-        Some(UpdateOutcome::Ok(r)) => {
-            let installed = r.installed_rev.as_deref().unwrap_or("unknown");
-            let source = r.source_rev.as_deref().unwrap_or("unknown");
-            rows.push(PopupRow::Header(format!("{installed} -> {source}")));
-            if !r.changelog.is_empty() {
-                rows.push(PopupRow::Rule);
-                for subject in &r.changelog {
-                    rows.push(PopupRow::Header(subject.clone()));
-                }
-            }
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Header(r.guidance.clone()));
-        }
-        Some(UpdateOutcome::Degraded(reason)) => {
-            rows.push(PopupRow::Header(format!("update check failed: {reason}")));
-        }
-        None => {
-            rows.push(PopupRow::Header("update check has not run yet".into()));
-        }
-    }
-    AuxPopup {
-        popup: Popup::new(rows, Anchor::Center)
-            .title("update")
-            .footer("esc close"),
-        actions: Vec::new(),
-    }
-}
+use update_menu::{
+    build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb, RunningRow,
+    UpdateOutcome, UpdateReadiness,
+};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -2702,6 +2559,8 @@ impl View {
             update_probe_want: false,
             update_probe_inflight: false,
             sweep_action: None,
+            restart_agents_want: false,
+            restart_inflight: false,
             sweep_inflight: false,
         }
     }
@@ -10672,6 +10531,11 @@ async fn attach_and_run(
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
+    // (x-f188) The queued `fno agents restart` runs off the UI loop and
+    // reports back its verdict line. One at a time (the View's inflight
+    // flag); the notice is the receipt.
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // The resource meter's sampler reports its one-line reading here, same
     // last-wins shape. The task itself is spawned by the toggle (and once at
     // startup when config enables the meter) and exits through the view's
@@ -10803,6 +10667,17 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let outcome = probe_update_readiness().await;
                 let _ = tx.send(outcome);
+            });
+        }
+        // (x-f188) Kick a wanted agents restart off the UI loop, at most
+        // one in flight.
+        if view.restart_agents_want && !view.restart_inflight {
+            view.restart_agents_want = false;
+            view.restart_inflight = true;
+            let tx = restart_tx.clone();
+            tokio::spawn(async move {
+                let verdict = run_restart_verb().await;
+                let _ = tx.send(verdict);
             });
         }
         // Kick a wanted sweep verb off the UI loop, at most one in flight.
@@ -11361,6 +11236,15 @@ async fn attach_and_run(
                 view.update_probe_inflight = false;
                 view.update_outcome = Some(outcome);
                 view.refresh_open_sideline_menu();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(verdict) = restart_rx.recv() => {
+                // (x-f188) The restart verdict line lands as a notice: the
+                // last stdout line the verb printed, whatever it said.
+                view.restart_inflight = false;
+                view.set_notice(verdict);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -14079,6 +13963,16 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
+        AuxAction::RestartAgents => {
+            // x-f188 change 7: the modal named every effect; the tap is the
+            // confirmation. Close the popup, queue the verb off the UI loop.
+            view.aux = None;
+            if view.restart_inflight {
+                view.set_notice("a restart is already running".into());
+            } else {
+                view.restart_agents_want = true;
+            }
+        }
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
@@ -16738,6 +16632,10 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+
+#[cfg(test)]
+#[path = "client_tests/update_modal_tests.rs"]
+mod update_modal_tests;
 
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]

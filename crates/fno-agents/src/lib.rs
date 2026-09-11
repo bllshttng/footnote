@@ -55,6 +55,7 @@ pub mod backlog_ready;
 pub mod bash_census;
 mod bounded_spawn;
 mod cancel_sentinel;
+pub mod census;
 pub mod check_supersession;
 pub mod claim_verbs;
 pub mod claims;

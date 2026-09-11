@@ -6223,15 +6223,10 @@ fn pid_confirmed_dead(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-/// Whether `pid` is PROVABLY a different incarnation than the one recorded.
-///
-/// Not the negation of `pid_is_ours`. That returns false for three different
-/// situations -- dead, recycled, and alive-but-unsignalable (EPERM) -- so using
-/// it as a recycle test folds EPERM back into "gone" and reinstates the very
-/// clean-stop-over-a-live-process bug `pid_confirmed_dead` exists to prevent.
-/// A recycle claim needs positive evidence: the pid is reachable AND its start
-/// token is readable AND it differs from the recorded one. Anything less is no
-/// verdict, which leaves the caller waiting and, ultimately, reporting failure.
+/// Whether `pid` is PROVABLY a different incarnation than the one recorded:
+/// reachable, readable start token, and different. Not the negation of
+/// `pid_is_ours` (whose false covers dead, recycled, AND unsignalable) -- less
+/// positive evidence than this leaves the caller waiting and reporting failure.
 fn pid_recycled(pid: u32, recorded_start: Option<u64>) -> bool {
     let Some(recorded) = recorded_start else {
         return false; // nothing to compare against
@@ -6249,14 +6244,14 @@ fn pid_recycled(pid: u32, recorded_start: Option<u64>) -> bool {
     }
 }
 
-/// Poll until `pid` is confirmed dead, or `budget` elapses.
-///
-/// A pid that got RECYCLED mid-wait also ends the wait: the process we signalled
-/// is gone, which is what the caller asked about, and the new occupant is not
-/// ours to keep waiting on. Both arms demand positive evidence, so an
-/// alive-but-unsignalable process satisfies neither and the wait runs out --
-/// reporting failure, which is the honest answer when we cannot see.
-async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
+/// Poll until `pid` is confirmed dead or `budget` elapses. A RECYCLED pid also
+/// ends the wait; an unsignalable-but-alive process runs the clock out (failure
+/// is the honest answer when we cannot see).
+pub(crate) async fn pid_gone_within(
+    pid: u32,
+    recorded_start: Option<u64>,
+    budget: Duration,
+) -> bool {
     let start = Instant::now();
     loop {
         if pid_confirmed_dead(pid) || pid_recycled(pid, recorded_start) {

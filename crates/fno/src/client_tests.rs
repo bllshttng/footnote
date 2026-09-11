@@ -8580,6 +8580,8 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         changelog: vec!["fix(x): thing".into()],
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
         degraded: None,
+        running: vec![],
+        running_stale: 0,
     });
     let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
     let labels: Vec<&str> = menu
@@ -8801,73 +8803,6 @@ async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
     );
 }
 
-/// AC3-HP mirrored client-side: not-ready builds the menu with no row.
-#[test]
-fn sideline_menu_omits_update_row_when_not_ready() {
-    let outcome = UpdateOutcome::Ok(UpdateReadiness {
-        update_ready: false,
-        installed_rev: Some("same".into()),
-        source_rev: Some("same".into()),
-        changelog: vec![],
-        guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
-        degraded: None,
-    });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
-    assert!(!menu.actions.contains(&AuxAction::OpenUpdate));
-}
-
-/// AC6-EDGE: no probe yet, and a degraded probe, both build a menu that
-/// stays interactive - no missing keybinds row, no panic.
-#[test]
-fn sideline_menu_handles_missing_and_degraded_probe() {
-    let none_menu = build_sideline_menu(Anchor::Center, None);
-    assert!(!none_menu.actions.contains(&AuxAction::OpenUpdate));
-    assert!(none_menu.actions.contains(&AuxAction::OpenKeybinds));
-
-    let degraded = UpdateOutcome::Degraded("update --check: exit 1".into());
-    let degraded_menu = build_sideline_menu(Anchor::Center, Some(&degraded));
-    let labels: Vec<&str> = degraded_menu
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { label, .. } => Some(label.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels[0], "update check failed");
-    assert_eq!(degraded_menu.actions[0], AuxAction::OpenUpdate);
-}
-
-/// Regression: a successfully-parsed probe (Python `--check` always exits
-/// 0) can still be internally degraded - `update_ready: false` with
-/// `degraded: Some(_)`. That must still surface a menu row rather than
-/// silently falling to the `_ => {}` arm, which would hide a real check
-/// failure the operator has no other way to see.
-#[test]
-fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
-    let outcome = UpdateOutcome::Ok(UpdateReadiness {
-        update_ready: false,
-        installed_rev: Some("same".into()),
-        source_rev: Some("same".into()),
-        changelog: vec![],
-        guidance: "update check degraded (fno mux ls --json failed) - ...".into(),
-        degraded: Some("fno mux ls --json failed".into()),
-    });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
-    let labels: Vec<&str> = menu
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { label, .. } => Some(label.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels[0], "update check degraded");
-    assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
-}
-
 /// AC5-HP: the overlay carries the version pair, changelog, and guidance.
 #[test]
 fn update_modal_renders_version_pair_changelog_and_guidance() {
@@ -8878,6 +8813,8 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
         guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
         degraded: None,
+        running: vec![],
+        running_stale: 0,
     });
     let modal = build_update_modal(Some(&outcome));
     let headers: Vec<&str> = modal

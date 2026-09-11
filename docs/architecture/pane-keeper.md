@@ -72,3 +72,8 @@ PASS: worker child 57345 outlived the killed server fk-57210, was re-adopted by 
 ```
 
 The server is killed with SIGKILL so no graceful path can spare the child. The answer step reads the whole visible grid, not `--lines`. `read_tail` reads the bottom N display rows. A fresh adopted VT holds this pane's short answer at the top rows with an empty history.
+
+## The hard limit
+
+A pane keeper cannot be refreshed on demand. It holds a live child process and its pty master. Surviving a restart is the keeper's whole purpose, so cycling it can only destroy the thing it exists to keep. Until then the running-process census reports the keeper stale and kept, and no restart surface promises otherwise. The census row names the split in three words: `stale`, `kept`, `current only when its pane ends`.
+

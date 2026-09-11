@@ -42,7 +42,7 @@ def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0
-    assert ["/cargo/bin/fno-agents", "restart"] in calls
+    assert ["/cargo/bin/fno-agents", "restart", "--json"] in calls
     assert not any("kill-server" in c for c in calls), "must NOT kill mux without --mux"
     assert "live mux session" in result.output
 
@@ -56,7 +56,7 @@ def test_agents_restart_force_preserves_the_daemon_break_glass_flag(monkeypatch)
     result = runner.invoke(app, ["agents", "restart", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert ["/cargo/bin/fno-agents", "restart", "--force"] in calls
+    assert ["/cargo/bin/fno-agents", "restart", "--json", "--force"] in calls
 
 
 def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
@@ -149,7 +149,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     """A real daemon-restart failure fails the command (scripts must see it)."""
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=3)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=3, stdout="", stderr="daemon boom"),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
@@ -161,7 +163,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
 def test_restart_json_summary(monkeypatch) -> None:
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=0)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
@@ -419,3 +423,107 @@ def test_is_revivable_predicate() -> None:
     assert restart.is_revivable({"harness": "claude", "session_id": None}) is False
     assert restart.is_revivable({"harness": "claude"}) is False
     assert restart.is_revivable({}) is False
+
+
+def _quiet_keeper_leg(monkeypatch) -> None:
+    """A daemon restart with no keeper summary line: the keeper leg is absent."""
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="restarted: pid 1 -> 2", stderr=""),
+    )
+
+
+def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> None:
+    """AC6-HP: stale store keeper cycled, no mux killed, ok verdict last."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    keeper_json = json.dumps(
+        {
+            "store_keepers": [
+                {"graph": "/tmp/graph.json", "old_pid": 11, "result": "cycled"}
+            ],
+            "pane_keepers_stale": 1,
+        }
+    )
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "restarted: pid 1 -> 2\n"
+                "fno agents restart: store keeper /tmp/graph.json pid 11 shut down "
+                "(stale build; respawns on next read).\n"
+                "fno agents restart: 1 pane keeper(s) run an older build; kept with "
+                "their panes, current when each pane ends.\n"
+                f"fno agents restart: keepers {keeper_json}"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 0, result.output
+    assert "restarted: pid 1 -> 2" in result.output, "the daemon's own receipt survives"
+    assert "store keeper /tmp/graph.json pid 11 shut down" in result.output, result.output
+    assert "1 pane keeper(s) run an older build" in result.output
+    assert "kept with their panes" in result.output
+    assert ["--json"] == calls[0][-1:], "the daemon leg asks for --json"
+    assert not any("kill-server" in c for c in calls), "no mux kill"
+    last = [ln for ln in result.output.splitlines() if ln.strip()][-1]
+    assert last.startswith("fno agents restart: ok - "), last
+
+
+def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
+    """AC6-ERR: a failed daemon ends on a FAILED verdict naming the error, exit 1."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="daemon pid 5 survived SIGKILL"
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
+    assert "survived SIGKILL" in lines[-1], "the daemon error text rides the verdict"
+
+
+def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
+    """AC6-EDGE: a busy-spared keeper is named and the verb exits 1."""
+    _fake_daemon_binary(monkeypatch)
+    keeper_json = json.dumps(
+        {
+            "store_keepers": [
+                {
+                    "graph": "/tmp/graph.json",
+                    "old_pid": 11,
+                    "result": "spared: a mutation is in flight",
+                }
+            ],
+            "pane_keepers_stale": 0,
+        }
+    )
+
+    def _run(cmd, **kwargs):
+        return types.SimpleNamespace(
+            returncode=1,
+            stdout=f"restarted: pid 1 -> 2\nfno agents restart: keepers {keeper_json}",
+            stderr="",
+        )
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1, result.output
+    assert "spared: a mutation is in flight" in result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]

@@ -555,10 +555,9 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     deadline = time.monotonic() + 10.0
     last: StoreUnavailable | None = None
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
+        if proc.poll() is not None and proc.returncode != 3:
             # Our spawned worker died before binding (a stale binary without
-            # the store lane, or the connect-before-bind refusal because a
-            # concurrent client's keeper won the socket). Probe once: a live
+            # the store lane, or an unexpected crash). Probe once: a live
             # listener means the seat is taken by a valid keeper and the
             # request can ride it; still dead means our binary is the
             # problem, and that never justifies waiting out the clock.
@@ -573,6 +572,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
                     f"({proc.args!r}); is fno-agents-worker current? "
                     "`fno doctor` names lag",
                 ) from exc
+        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
         try:
             probe = keeper._connect()
             probe.close()

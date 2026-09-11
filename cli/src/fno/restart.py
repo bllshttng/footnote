@@ -183,6 +183,15 @@ def _revive_orphans(
             )
 
 
+def _fold_keepers(keepers: dict, result: dict, failures: list) -> None:
+    """Fold the daemon child's keepers summary in; spared keepers are failures."""
+    result["store_keepers"] = keepers.get("store_keepers", [])
+    result["pane_keepers_stale"] = keepers.get("pane_keepers_stale", 0)
+    for c in result["store_keepers"]:
+        if c.get("result") != "cycled":
+            failures.append(f"store keeper: {c.get('graph')} {c.get('result')}")
+
+
 def restart_command(
     force: bool = typer.Option(
         False,
@@ -249,22 +258,43 @@ def restart_command(
         say("fno agents restart: no installed fno-agents binary; skipping daemon restart", err=True)
     else:
         try:
-            daemon_cmd = [str(binary), "restart"]
+            daemon_cmd = [str(binary), "restart", "--json"]
             if force:
                 daemon_cmd.append("--force")
-            rc = subprocess.run(daemon_cmd, timeout=120).returncode
+            daemon_proc = subprocess.run(daemon_cmd, capture_output=True, text=True, timeout=120)
+            rc = daemon_proc.returncode
         except (OSError, subprocess.SubprocessError) as exc:
             result["daemon"] = "failed"
             say(f"fno agents restart: could not run fno-agents restart ({exc})", err=True)
             failures.append(f"daemon: {exc}")
         else:
-            if rc == 0:
+            if daemon_proc.stderr:
+                typer.echo(daemon_proc.stderr, err=True)
+            keepers = None
+            for line in daemon_proc.stdout.splitlines():
+                if line.startswith("fno agents restart: keepers "):
+                    try:
+                        parsed = json.loads(line.removeprefix("fno agents restart: keepers "))
+                    except ValueError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        keepers = parsed
+                elif line.startswith("fno agents restart:") and not line.startswith("fno agents restart: FAILED"):
+                    say(line)
+                elif line.strip():
+                    say(line)  # unprefixed daemon receipts ("restarted: pid A -> B")
+            spared = keepers is not None and any(c.get("result") != "cycled" for c in keepers.get("store_keepers", []))
+            if rc == 0 or spared:  # a nonzero exit that IS the spared keeper
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")
             else:
+                detail = (daemon_proc.stderr or daemon_proc.stdout or "").strip().splitlines()
+                suffix = f": {detail[-1]}" if detail else ""
                 result["daemon"] = f"failed:{rc}"
-                say(f"fno agents restart: fno-agents restart exited {rc}", err=True)
-                failures.append(f"daemon: exit {rc}")
+                say(f"fno agents restart: fno-agents restart exited {rc}{suffix}", err=True)
+                failures.append(f"daemon: exit {rc}{suffix}")
+            if keepers is not None:
+                _fold_keepers(keepers, result, failures)
 
     # 2. Mux servers. ONLY live sessions are restart targets; stale/unqueryable
     # rows are reported, never killed (killing a non-live socket is meaningless
@@ -406,8 +436,24 @@ def restart_command(
                 "with `fno mux kill-server <name>`, or `fno agents restart --mux` for all."
             )
 
+    result["pane_keepers_stale"] = result.get("pane_keepers_stale", 0)
+    result["store_keepers"] = result.get("store_keepers", [])
     result["ok"] = not failures
+    result["verdict"] = "ok" if not failures else "FAILED"
     if json_out:
         typer.echo(json.dumps(result))
+    else:
+        # One honest verdict line, always last on stdout (x-f188).
+        if failures:
+            typer.echo(f"fno agents restart: FAILED - {'; '.join(failures)}")
+        else:
+            cycled_n = len([c for c in result["store_keepers"] if c["result"] == "cycled"])
+            kept_n = result["pane_keepers_stale"]
+            summary = f"daemon {result['daemon']}"
+            if cycled_n:
+                summary += f"; {cycled_n} stale store keeper(s) cycled"
+            if kept_n:
+                summary += f"; {kept_n} stale pane keeper(s) kept with their panes"
+            typer.echo(f"fno agents restart: ok - {summary}")
     if failures:
         raise typer.Exit(1)
