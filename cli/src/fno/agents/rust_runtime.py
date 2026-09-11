@@ -258,9 +258,8 @@ RUST_CLIENT_VERBS = frozenset(
         "authorized-merge",
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
-        # Durable fleet incident breaker (x-77db): dispatched directly in
-        # client.rs (no daemon RPC); the public surface is `fno agents incident`,
-        # the admission gates call the crate. Keeps the parity test in sync.
+        # Durable fleet incident breaker (x-77db): direct dispatch in client.rs
+        # (no daemon RPC); public surface `fno agents incident`. Parity-synced.
         "fleet-incident",
     }
 )
@@ -297,8 +296,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     "gate",
     # Messaging verbs are not direct agents actions. They live below the
     # Python-owned `fno agents mail` subgroup and therefore never auto-route as
-    # direct send, inbox, or ack Rust verbs. `incident` (x-77db) is a thin argv
-    # relay to the binary-direct `fleet-incident` verb, never auto-routed.
+    # direct send, inbox, or ack Rust verbs. `incident` (x-77db) relays argv.
     "incident",
     # Epic ab-d3a1ae3e G2 Task 4.3: the stream-json observe surface. Pure Python;
     # polls the worker's stream.read_frames directly. No Rust client port (the

@@ -13,7 +13,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Any, Optional
 
 import typer
 
@@ -969,23 +969,6 @@ def _parse_wait_seconds(raw: str) -> float:
     return float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
 
 
-CwdOpt = Annotated[Optional[str], typer.Option("--cwd", "-c", help="Working directory for the agent subprocess.")]
-FreshOpt = Annotated[
-    bool,
-    typer.Option(
-        "--fresh",
-        help="No-op alias: the worker cwd already defaults to the canonical root (x-85fe).",
-    ),
-]
-HereOpt = Annotated[
-    bool,
-    typer.Option(
-        "--here",
-        "--in-place",
-        help="Keep the worker in the caller's cwd instead of the canonical-root default.",
-    ),
-]
-
 
 @agents_app.command("spawn")
 def cmd_spawn(
@@ -1064,7 +1047,9 @@ def cmd_spawn(
             "--settings file beside the hook deny_edit list. Pane refuses."
         ),
     ),
-    cwd: CwdOpt = None,
+    cwd: str | None = typer.Option(
+        None, "--cwd", "-c", help="Working directory for the agent subprocess."
+    ),
     timeout: int | None = typer.Option(
         None,
         "--timeout",
@@ -1086,8 +1071,17 @@ def cmd_spawn(
             "--permission-mode."
         ),
     ),
-    fresh: FreshOpt = False,
-    here: HereOpt = False,
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="No-op alias: the worker cwd already defaults to the canonical root (x-85fe).",
+    ),
+    here: bool = typer.Option(
+        False,
+        "--here",
+        "--in-place",
+        help="Keep the worker in the caller's cwd instead of the canonical-root default.",
+    ),
     role: str | None = typer.Option(
         None,
         "--role",
@@ -4652,10 +4646,49 @@ def yard(
 # harness against the (config-merged) row. Four verdicts and UNKNOWN never
 # acts: a missing binary or a timeout is UNKNOWN with its reason, never a
 # disagreement, because an absent instrument is not a measurement.
-# Moved to fno.agents.capability_probe (file budget); the composition stays.
-from fno.agents.capability_probe import register_harness_commands  # noqa: E402
+harness_app = typer.Typer(
+    help="Instruments over the harness capability table.",
+    no_args_is_help=True,
+)
 
-register_harness_commands(agents_app)
+
+@harness_app.command("probe")
+def harness_probe(
+    harness: str = typer.Argument(..., help="Harness name to probe."),
+    live: bool = typer.Option(
+        False, "--live", help="Allow behavioral probes (they spawn a scratch session)."
+    ),
+    write: bool = typer.Option(
+        False, "--write", help="Emit the config stanza for each disagreement, evidence + date beside it."
+    ),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
+) -> None:
+    import json as _json
+
+    from fno.agents.capability_probe import probe_harness
+
+    report = probe_harness(harness, live=live, write=write)
+    if as_json:
+        typer.echo(_json.dumps(report, indent=2))
+    else:
+        if "error" in report:
+            typer.secho(f"probe refused: {report['error']}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"probe {harness} (map_version {report['map_version']})")
+        for field in report["fields"]:
+            typer.echo(
+                f"{field['verdict']:<11} {field['field']}: {field['detail']}"
+            )
+        for warning in report["warnings"]:
+            typer.secho(f"override warning: {warning}", fg=typer.colors.YELLOW, err=True)
+        if report["stanza"]:
+            typer.echo("")
+            typer.echo(report["stanza"])
+    if any(field["verdict"] == "DISAGREES" for field in report["fields"]):
+        raise typer.Exit(code=1)
+
+
+agents_app.add_typer(harness_app, name="harness", hidden=True)
 
 from fno.agents import (  # noqa: E402,F401
     ask_cli,
@@ -4674,8 +4707,6 @@ def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker (x-77db).
 
     stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
-    Relays the native `fno-agents fleet-incident` verb and decides nothing:
-    the file is the authority.
     """
     import subprocess
 
