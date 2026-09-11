@@ -358,6 +358,17 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
 
+      # x-3de3: every page the AGENTS.md deep-dive index links must open with
+      # a scope section (## Is this page for you? + a Not for: line), so a
+      # reader with a symptom can tell whether the mechanism on the page
+      # governs it without reading the source.
+      - name: Doc entry-page scope + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash tests/ci/test_check_doc_entry_scope.sh
+          bash scripts/ci/check-doc-entry-scope.sh
+
       # Graduated from the AGENTS.md reachable-paths pitfall entry.
       - name: Reachable-paths lint + self-test
         if: ${{ !cancelled() }}
