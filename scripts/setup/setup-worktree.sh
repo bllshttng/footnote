@@ -225,6 +225,81 @@ link_dir ".codex"
 link_dir ".codex-plugin"
 link_dir ".gemini"
 
+# Checkout-local code-intelligence indexes. These are the two generated
+# states that must never ride the symlink block above: graphify update inside
+# a worktree would write branch content into the canonical graph, and the
+# codegraph daemon watches exactly one checkout. graphify-out is seeded by a
+# copy (APFS clone where the fs supports it); .codegraph is initialized fresh
+# from the worktree's own source, never copied from the canonical database.
+# Both are optional: a missing canonical index or CLI prints a receipt and
+# leaves setup green, because most checkouts have neither.
+provision_graphify() {
+  local source="$CANONICAL/graphify-out"
+  local target="$WORKTREE/graphify-out"
+
+  if [[ ! -d "$source" ]]; then
+    echo "setup-worktree: graphify-out: canonical index missing, skipping" >&2
+    return 0
+  fi
+  if [[ -L "$target" ]]; then
+    echo "setup-worktree: graphify-out: refusing symlink target: $target" >&2
+    return 0
+  fi
+  if [[ -e "$target" ]]; then
+    echo "setup-worktree: graphify-out: already present, preserving: $target" >&2
+    return 0
+  fi
+  if cp -cR "$source" "$target" 2>/dev/null; then
+    echo "setup-worktree: graphify-out: copied (APFS clone)"
+  else
+    rm -rf "$target"
+    echo "setup-worktree: graphify-out: clone unsupported, deep copy" >&2
+    if cp -R "$source" "$target"; then
+      echo "setup-worktree: graphify-out: copied"
+    else
+      echo "setup-worktree: graphify-out: copy failed, continuing without an index" >&2
+    fi
+  fi
+}
+
+provision_codegraph() {
+  local source="$CANONICAL/.codegraph"
+  local target="$WORKTREE/.codegraph"
+
+  if [[ ! -e "$source" && ! -L "$source" ]]; then
+    echo "setup-worktree: codegraph: canonical index missing, skipping" >&2
+    return 0
+  fi
+  if [[ -L "$target" ]]; then
+    echo "setup-worktree: codegraph: refusing symlink target: $target" >&2
+    return 0
+  fi
+  if [[ -e "$target" ]]; then
+    echo "setup-worktree: codegraph: already present, preserving: $target" >&2
+    return 0
+  fi
+  if ! command -v codegraph >/dev/null 2>&1; then
+    echo "setup-worktree: codegraph: CLI missing, skipping" >&2
+    return 0
+  fi
+  # Background build: a full index costs minutes on a large repo (measured
+  # ~6 min / 227 MB here), and worktree cold-start must not pay it inline.
+  # The 2s poll still catches an instant failure so the receipt names it.
+  codegraph init -y "$WORKTREE" >"$WORKTREE/.codegraph-init.log" 2>&1 &
+  _cg_pid=$!
+  sleep 2
+  if kill -0 "$_cg_pid" 2>/dev/null; then
+    echo "setup-worktree: codegraph: index build running in background (log: $WORKTREE/.codegraph-init.log)"
+  elif wait "$_cg_pid"; then
+    echo "setup-worktree: codegraph: initialized fresh index for $WORKTREE"
+  else
+    echo "setup-worktree: codegraph: init failed, continuing without an index (log: $WORKTREE/.codegraph-init.log)" >&2
+  fi
+}
+
+provision_graphify
+provision_codegraph
+
 # Salvage-ref post-commit hook: makes every worktree's commits
 # gc-proof and enumerable at commit time, the one moment guaranteed to
 # occur before a worker is killed. Worktrees share one git-common-dir hooks

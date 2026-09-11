@@ -147,3 +147,10 @@ peer-review.diff
 # Tool-local session state (.omo runner); same accidental-commit shape as
 # the peer-review scratch diffs above.
 .omo/
+
+# Generated code-intelligence indexes. Checkout-local and rebuildable, never
+# a commit candidate. graphify-out/ is unanchored: nested runs land under
+# cli/, crates/, docs/ and skills/ too. No trailing slash on .codegraph:
+# older installs link it as a symlink, which git treats as a file.
+graphify-out/
+.codegraph
