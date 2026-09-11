@@ -1,17 +1,7 @@
-"""``fno agents king history`` - read a king's recorded reign back by crown scope.
+"""``fno agents king history`` - read one crown's recorded reign_checkin rows back.
 
-The journal is the record the king already wrote: every ``reign_checkin``
-row carrying canonical ``scope`` and ``change``. This module selects those
-rows for one crown scope and returns them newest first. It never generates,
-ranks, or rewrites a summary - the recorded payloads ARE the deliverable,
-because a generated brief would smooth over exactly the corrections and
-false claims that make the history useful.
-
-Rows written before the canonical contract (alias keys, missing canonical
-keys) stay byte-preserved evidence: they are counted and, when they name
-the requested crown, surfaced under ``rejected_legacy``. They never enter
-``events``, so an empty canonical result cannot disguise an
-instrumentation failure.
+Selection is deterministic read-back, never generated summary; the contract
+and the why live in docs/architecture/reign.md.
 """
 from __future__ import annotations
 
@@ -21,13 +11,12 @@ from typing import Any
 
 REIGN_CHECKIN = "reign_checkin"
 
-#: The synonyms pre-contract rows used for the canonical keys; a row
-#: carrying any of them is legacy evidence, never canonical history.
+#: Pre-contract key spellings; a row carrying any is legacy evidence.
 FORBIDDEN_ALIASES = ("crown", "crown_scope", "result")
 
 
 class HistoryUnreadable(Exception):
-    """The journal cannot answer: no resolvable crown, or a corrupt line."""
+    """No resolvable crown, or a corrupt journal line."""
 
 
 def canonicalize_scope(scope: str) -> str:
@@ -38,13 +27,10 @@ def canonicalize_scope(scope: str) -> str:
 
 
 def resolve_scope(explicit: str) -> str:
-    """The crown scope this history reads.
+    """Explicit ``--scope`` wins; else the caller's crown, positively resolved.
 
-    An explicit ``--scope`` wins. Without one, the caller's own crown scope
-    must resolve POSITIVELY from its registry row: an unreadable registry,
-    an unregistered identity, or an uncrowned row is a refusal, never an
-    empty history, so a king cannot mistake its own unreadable identity for
-    a reign that journalled nothing.
+    An unreadable registry, an unregistered identity, or an uncrowned row is
+    a refusal, never an empty history.
     """
     if explicit.strip():
         canonical = canonicalize_scope(explicit)
@@ -81,14 +67,18 @@ def resolve_scope(explicit: str) -> str:
     return canonicalize_scope(own)
 
 
-def read_history(events_path: Path, scope: str) -> dict[str, Any]:
-    """One journal scan; the canonical reign record for ``scope``.
+def _legacy_entry(lineno: int, aliases: list[str], data: dict) -> dict:
+    missing = sorted(k for k in ("scope", "change") if k not in data)
+    return {"line": lineno, "forbidden": aliases, "missing": missing}
 
-    Returns ``scope``, ``events_path``, ``scanned``, ``matched``, the
-    matching complete events newest first, and the legacy evidence:
-    ``rejected`` counts every non-canonical ``reign_checkin`` row in the
-    scan, ``rejected_legacy`` names (by raw line number) those that
-    attribute to this crown.
+
+def read_history(events_path: Path, scope: str) -> dict[str, Any]:
+    """One journal scan; the canonical reign record for ``scope``, newest first.
+
+    ``rejected`` counts every non-canonical ``reign_checkin`` row so a
+    journal of pre-contract check-ins never reads as an empty reign;
+    ``rejected_legacy`` names (by raw line number) those attributing to
+    this crown.
     """
     result: dict[str, Any] = {
         "scope": scope,
@@ -129,28 +119,13 @@ def read_history(events_path: Path, scope: str) -> dict[str, Any]:
                 if canonicalize_scope(row_scope) == scope:
                     result["events"].append(event)
                 continue
-            # Non-canonical: legacy evidence. Count every such row so a
-            # journal of pre-contract check-ins never reads as an empty
-            # reign, and surface the ones attributable to this crown.
             result["rejected"] += 1
-            names_this_crown = (
-                scope_ok and canonicalize_scope(row_scope) == scope
-            ) or any(
-                isinstance(data.get(k), str)
-                and canonicalize_scope(data[k]) == scope
-                for k in aliases
-            )
-            if names_this_crown:
+            spellings = ([row_scope] if scope_ok else []) + [
+                data[k] for k in aliases if isinstance(data.get(k), str)
+            ]
+            if any(isinstance(s, str) and canonicalize_scope(s) == scope for s in spellings):
                 result["rejected_legacy"].append(
-                    {
-                        "line": lineno,
-                        "forbidden": aliases,
-                        "missing": sorted(
-                            k
-                            for k in ("scope", "change")
-                            if k not in data
-                        ),
-                    }
+                    _legacy_entry(lineno, aliases, data)
                 )
 
     result["events"].reverse()
@@ -159,11 +134,7 @@ def read_history(events_path: Path, scope: str) -> dict[str, Any]:
 
 
 def render(result: dict[str, Any]) -> str:
-    """Human output: each recorded check-in verbatim, newest first.
-
-    Timestamp, literal ``change``, then the remaining evidence fields as
-    stable JSON - read back, never summarized.
-    """
+    """Human output: each recorded check-in verbatim, newest first."""
     lines: list[str] = []
     for event in result["events"]:
         data = event.get("data") or {}

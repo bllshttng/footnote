@@ -507,14 +507,11 @@ def history_cmd(
     ),
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the full JSON payload."),
 ) -> None:
-    """Read this crown's recorded reign: its check-ins, newest first.
+    """Read this crown's recorded reign: its check-ins, newest first, verbatim.
 
-    Reads back what the king already journalled - merge order, asks opened
-    and retired, corrections - verbatim from the canonical ``reign_checkin``
-    rows. It never generates a summary: ``fno agents court -n`` answers who
-    rules NOW, and this answers what happened across the reign. Legacy rows
-    using the refused aliases stay evidence: counted, and surfaced with
-    their line numbers when they name this crown.
+    Never a generated summary. ``fno agents court -n`` answers who rules
+    NOW; this answers what happened across the reign. Contract:
+    docs/architecture/reign.md.
     """
     from fno.king.history import HistoryUnreadable, read_history, render, resolve_scope
     from fno.paths import project_events_json

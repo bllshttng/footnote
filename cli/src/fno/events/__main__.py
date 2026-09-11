@@ -1,20 +1,13 @@
 """CLI entry point for `python -m fno.events`.
 
-Supports two flags:
+--emit-schema prints a JSON object describing the unified events.jsonl
+envelope schema and the list of known event type names, then exits 0.
+--validate-event TYPE reads one JSON event from stdin and validates it
+as TYPE (shell contract for scripts/lib/events-validate.sh: rc 0 valid,
+1 invalid record, 2 substrate failure; diagnostics on stderr).
 
---emit-schema
-    Prints a JSON object describing the unified events.jsonl envelope
-    schema and the list of known event type names, then exits 0.
-
---validate-event TYPE
-    Reads one JSON event from stdin and validates it as TYPE. Shell
-    contract (consumed by scripts/lib/events-validate.sh): rc 0 valid,
-    rc 1 invalid record, rc 2 substrate failure (schema unavailable or
-    stdin not one JSON object). Diagnostics go to stderr; nothing is
-    written to stdout.
-
-Both modes are read-only and side-effect-free: no files are written and
-no global state is modified.
+Both modes are read-only and side-effect-free: they write no files and
+modify no global state.
 """
 from __future__ import annotations
 
@@ -100,40 +93,35 @@ def _collect_event_types() -> list[str]:
 
 
 def _validate_event_mode(type_hint: str) -> None:
-    """Validate one JSON event read from stdin against the canonical schema.
-
-    Exits 0 valid, 1 invalid record (missing/forbidden field named), 2
-    substrate failure (schema unavailable, stdin not one JSON object).
-    """
+    """Validate one JSON event from stdin as TYPE; see module docstring for rc."""
     from fno.events import (  # noqa: PLC0415
         SchemaUnavailableError,
         ValidationError,
         validate,
     )
 
+    def fail(code: int, msg: str) -> None:
+        print(f"validate-event: {msg}", file=sys.stderr)
+        sys.exit(code)
+
     try:
         event = json.loads(sys.stdin.read())
     except json.JSONDecodeError as exc:
-        print(f"validate-event: payload is not valid JSON: {exc}", file=sys.stderr)
-        sys.exit(2)
+        fail(2, f"payload is not valid JSON: {exc}")
     if not isinstance(event, dict):
-        print("validate-event: payload must be a JSON object", file=sys.stderr)
-        sys.exit(2)
+        fail(2, "payload must be a JSON object")
     if event.get("type") != type_hint:
-        print(
-            f"validate-event: type hint {type_hint!r} does not match payload type "
+        fail(
+            1,
+            f"type hint {type_hint!r} does not match payload type "
             f"{event.get('type')!r}",
-            file=sys.stderr,
         )
-        sys.exit(1)
     try:
         validate(event)
     except SchemaUnavailableError as exc:
-        print(f"validate-event: schema unavailable: {exc}", file=sys.stderr)
-        sys.exit(2)
+        fail(2, f"schema unavailable: {exc}")
     except ValidationError as exc:
-        print(f"validate-event: {exc}", file=sys.stderr)
-        sys.exit(1)
+        fail(1, str(exc))
     sys.exit(0)
 
 
