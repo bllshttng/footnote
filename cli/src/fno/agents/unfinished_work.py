@@ -136,11 +136,10 @@ def owner_verdict(
         falsifier = "process-gone"
     else:
         falsifier = None
+    age_s = int(probe.transcript_age_s) if probe.transcript_age_s is not None else None
     reading = classify_reachability(
         truth_state="working" if probe.transcript_age_s is not None else None,
-        age_s=(
-            int(probe.transcript_age_s) if probe.transcript_age_s is not None else None
-        ),
+        age_s=age_s,
         falsifier=falsifier,
         fresh_s=live_activity_s,
         pid_alive=True if probe.pid_alive is True else None,
