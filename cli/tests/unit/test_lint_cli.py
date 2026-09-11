@@ -1445,3 +1445,39 @@ def test_state_roots_gate_fails_on_a_new_unbaselined_site(
     assert result.exit_code == 1
     assert "new violations" in result.output
     assert "fno.paths.ledger_json" in result.output
+
+
+def test_preamble_budget_check_is_dispatchable(monkeypatch) -> None:
+    """The CHECKS key resolves and the wrapper runs; exit code passes through.
+
+    The wrapper is a thin subprocess shell over the bash gate, so the dispatch
+    test fakes the function rather than running the real scan.
+    """
+    from fno import lint_cli
+
+    calls: list[str] = []
+
+    def fake() -> None:
+        calls.append("hit")
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr(lint_cli, "preamble_budget", fake)
+    result = runner.invoke(app, ["preamble-budget"])
+    assert result.exit_code == 0
+    assert calls == ["hit"]
+
+
+def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
+    """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
+    from fno import lint_cli, paths
+
+    monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
+    script = tmp_path / "scripts" / "ci" / "check-preamble-budget.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    result = runner.invoke(app, ["preamble-budget"])
+    assert result.exit_code == 1
+
+    script.unlink()
+    result = runner.invoke(app, ["preamble-budget"])
+    assert result.exit_code == 2

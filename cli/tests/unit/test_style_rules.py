@@ -673,3 +673,57 @@ def test_no_ending_punctuation_is_still_counted():
     # One run-on sentence with no terminal punctuation still gets capped.
     body = " ".join("w" for _ in range(30))
     assert 1 in rule_set(body)
+
+
+# --- fix(): the mechanical rewrite set (rules 2 and 6) ------------------------
+
+def test_fix_splits_semicolon_and_round_trips():
+    text = "a body with a semicolon; and more"
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == "a body with a semicolon. And more"
+    assert residue == []
+    assert style.check(fixed, surface="pr-body") == []
+
+
+def test_fix_joins_a_wrapped_paragraph():
+    text = "line one ends here\nand the wrapped half continues."
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == "line one ends here and the wrapped half continues."
+    assert residue == []
+
+
+def test_fix_join_reveals_the_semicolon_in_the_same_pass():
+    text = "first half here\nsecond half; then it ends."
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == "first half here second half. Then it ends."
+    assert residue == []
+
+
+def test_fix_applies_what_it_can_and_names_the_residue():
+    text = "the runner should retry; then stop"
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == "the runner should retry. Then stop"
+    assert [v.rule for v in residue] == [3]
+
+
+def test_fix_skips_lines_that_also_carry_code():
+    # The semicolon sits in prose, but the line also carries a code span, and
+    # masking gives no offset map back to the raw text. The line reports as
+    # residue instead of risking a split inside the span.
+    text = "use `fmt` here; it is faster"
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == text
+    assert [v.rule for v in residue] == [2]
+
+
+def test_fix_closes_a_trailing_semicolon():
+    fixed, residue = style.fix("it ends here;", surface="pr-body")
+    assert fixed == "it ends here."
+    assert residue == []
+
+
+def test_fix_never_touches_a_fenced_block():
+    text = "```bash\nmake; make install\n```\n"
+    fixed, residue = style.fix(text, surface="pr-body")
+    assert fixed == text
+    assert residue == []
