@@ -512,20 +512,34 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         );
         std::process::exit(EXIT_SEAT_OWNED);
     }
-    // Connect-before-bind: a double keeper is a loud refusal.
+    // Connect-before-bind: a live listener IS the seat, whatever its build
+    // (a loaded incumbent can answer Identify too slowly for the probe above
+    // and still own the path), so the loser exits EXIT_SEAT_OWNED and the
+    // Python spawner keeps polling the incumbent instead of failing.
     if UnixStream::connect(&cfg.sock).is_ok() {
-        return Err(format!(
-            "store socket {} already has a live listener behind it",
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (connect before bind); exiting",
             cfg.sock.display()
-        ));
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
     }
     let _ = std::fs::remove_file(&cfg.sock);
     if let Some(parent) = cfg.sock.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let listener = UnixListener::bind(&cfg.sock)
-        .map_err(|e| format!("cannot bind {}: {e}", cfg.sock.display()))?;
+    let listener = match UnixListener::bind(&cfg.sock) {
+        Ok(l) => l,
+        // A listener appeared between the probe and the bind: the seat filled.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "store keeper: {} is owned by a live keeper (bind in use); exiting",
+                cfg.sock.display()
+            );
+            std::process::exit(EXIT_SEAT_OWNED);
+        }
+        Err(e) => return Err(format!("cannot bind {}: {e}", cfg.sock.display())),
+    };
     let sock_ino = std::fs::metadata(&cfg.sock)
         .ok()
         .map(|md| (md.dev(), md.ino()));

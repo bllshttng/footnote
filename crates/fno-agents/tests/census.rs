@@ -57,7 +57,7 @@ async fn census_finds_a_store_keeper_by_self_report() {
     let graph = home.join("graph.json");
     std::fs::write(&graph, "{\"entries\": []}").unwrap();
     let sock = home.join("graph.json.store.sock");
-    let _keeper = Command::new(WORKER_BIN)
+    let mut keeper = Command::new(WORKER_BIN)
         .args([
             "--store-keeper",
             "--sock",
@@ -98,4 +98,8 @@ async fn census_finds_a_store_keeper_by_self_report() {
     let mut stream = UnixStream::connect(&sock).unwrap();
     let reply = rpc(&mut stream, 1, "read", json!({}));
     assert_eq!(reply["ok"], true);
+    // Reap: a dropped Child is not a killed one, and the runner's orphan
+    // cleanup fails the whole job on a surviving fno-agents-worker.
+    let _ = keeper.kill();
+    let _ = keeper.wait();
 }

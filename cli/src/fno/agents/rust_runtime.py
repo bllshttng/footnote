@@ -310,8 +310,7 @@ RUST_CLIENT_VERBS = frozenset(
         # queue arm all ask it, so no two merge paths can answer "may this head
         # merge?" differently. Python calls it via fno.rust_binary.verb_call.
         "authorized-merge",
-        # Running-process census (x-f188): one JSON row per long-lived process;
-        # the walker lives in crates/fno-agents/src/census.rs.
+        # Running-process census (x-f188); the walker lives in census.rs.
         "census",
     }
 )
@@ -530,6 +529,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
+    "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
