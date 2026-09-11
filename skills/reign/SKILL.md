@@ -76,6 +76,12 @@ Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` abo
 
 What the loop prompt runs every interval and what you run by hand at any time.
 
+Refresh the canon doc first, then read its user block, before the board reads below.
+
+Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact.
+
+Then surface what the user wrote there. Run `fno config paths handoff --scope <scope>` for the doc path. Source `$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh` and run `canon_doc_extract_marker <doc-path> user`. When the result holds anything beyond the seed placeholder, print it verbatim under the line `User notes:`. Never summarize or paraphrase it. Print nothing when the block is empty or placeholder-only.
+
 Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
 
 - open PR count

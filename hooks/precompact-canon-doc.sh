@@ -29,6 +29,8 @@ FNO_DIR=".fno"
 # The session-id fallback chain lives in the shared postcompact lib so a marker
 # change lands once. Unreadable lib: keep the local chain quiet, never fail.
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
+MARKER_LIB="$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh"
+[[ -r "$MARKER_LIB" ]] && source "$MARKER_LIB"
 
 # ---------------------------------------------------------------------------
 # Read the hook event from stdin (non-fatal if absent).
@@ -367,6 +369,21 @@ if [[ -f "$DOC_PATH" ]]; then
   PRIOR="$(awk '/^# Canon doc: /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
 fi
 
+# The fno:user block is the one section the machine NEVER writes and ALWAYS
+# reads: whatever the user typed between its markers round-trips byte-for-byte,
+# and the closing marker is re-added below when a partial edit dropped it
+# (capture runs to the next heading or EOF, so nothing is lost either way).
+# Captured before the truncate like the session blocks. Seeded only when no
+# open marker exists yet; from then on the placeholder is ordinary content.
+USER_BLOCK=""
+USER_SEED=1
+if [[ -f "$DOC_PATH" ]] && command -v canon_doc_extract_marker >/dev/null 2>&1; then
+  USER_BLOCK="$(canon_doc_extract_marker "$DOC_PATH" user)" && USER_SEED=0
+fi
+if [[ "$USER_SEED" == "1" ]]; then
+  USER_BLOCK="$(canon_doc_user_placeholder)"
+fi
+
 # ---------------------------------------------------------------------------
 # Assemble the doc. Auto block fully regenerated; the two session blocks are
 # preserved-or-defaulted. Ensure the parent dir exists (handoffs_dir may resolve
@@ -419,6 +436,10 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
     echo "<!-- /fno:session -->"
     echo ""
   fi
+  echo "## User notes (you write here; the machine only ever reads this)"
+  echo "<!-- fno:user -->"
+  printf '%s\n' "$USER_BLOCK"
+  echo "<!-- /fno:user -->"
 } > "$DOC_PATH" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------

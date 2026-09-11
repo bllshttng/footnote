@@ -28,11 +28,15 @@ else
     PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$SOURCE_ROOT}}"
 fi
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
+MARKER_LIB="$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh"
 BRIEF="$PLUGIN_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
 
 [[ -r "$CARRIER_LIB" ]] || exit 0
 # shellcheck source=../scripts/lib/postcompact-carrier.sh
 source "$CARRIER_LIB"
+# The user-block reader degrades to silence when its lib is unreadable; the
+# brief above still rides. Never a failed hook.
+[[ -r "$MARKER_LIB" ]] && source "$MARKER_LIB"
 
 # Read the hook event through the shared lib (TTY-guarded; one python pass).
 EVENT="$(postcompact_read_event)"
@@ -158,6 +162,30 @@ _(truncated at ${CANON_MAX_BYTES}B; \`${CANON_PATH}\` has the rest)_"
 $CANON_SECTIONS
 
 Full canon doc: \`${CANON_PATH}\`."
+        fi
+
+        # The fno:user block rides back too: the machine never writes it, so
+        # anything beyond the seed placeholder is the user's own words and is
+        # surfaced verbatim - never paraphrased, never summarized. Byte-capped
+        # like the canon sections; silent when empty or placeholder-only.
+        if command -v canon_doc_extract_marker >/dev/null 2>&1; then
+            USER_NOTES="$(canon_doc_extract_marker "$CANON_PATH" user 2>/dev/null)" || USER_NOTES=""
+            if [[ -n "$USER_NOTES" ]] && ! canon_doc_is_placeholder "$USER_NOTES"; then
+                USER_BYTES="$(printf '%s' "$USER_NOTES" | wc -c | tr -d ' ')"
+                if [[ "$USER_BYTES" -gt "$CANON_MAX_BYTES" ]]; then
+                    USER_NOTES="$(printf '%s' "$USER_NOTES" | python3 -c "
+import sys
+sys.stdout.write(sys.stdin.buffer.read(${CANON_MAX_BYTES}).decode('utf-8', errors='ignore'))
+")
+
+_(truncated at ${CANON_MAX_BYTES}B; \`${CANON_PATH}\` has the rest)_"
+                fi
+                CONTEXT="$CONTEXT
+
+## User notes (from your canon doc)
+
+$USER_NOTES"
+            fi
         fi
     fi
 fi

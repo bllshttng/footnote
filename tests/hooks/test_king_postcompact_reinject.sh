@@ -213,6 +213,70 @@ RC=$?
   && pass "no canon doc: no handoff section, brief intact" \
   || fail "no-canon-doc rc=$RC payload=${OUT:0:300}"
 
+# 7g. The fno:user block: the user's own words ride back verbatim under their
+#     own heading, alongside the session-filled judgment blocks.
+cat > "$CANON_DOC" <<'DOC'
+# Canon doc: crown fno
+
+Session id (authoritative): `sess-king`  |  refreshed by precompact-canon-doc.sh.
+
+## Merge order and why (session)
+<!-- fno:session -->
+Ship the sibling's PR before the read-back wave.
+SENTINEL_CANON_MERGE
+<!-- /fno:session -->
+
+## User notes (you write here; the machine only ever reads this)
+<!-- fno:user -->
+SENTINEL_USER_REPLY_TO_ME directly, not through the board.
+<!-- /fno:user -->
+DOC
+printf '%s\n' "$CANON_DOC" > "$KING_HANDOFF_PATH_FIXTURE"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] \
+  && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+      | contains("User notes (from your canon doc)") and contains("SENTINEL_USER_REPLY_TO_ME directly, not through the board.")' >/dev/null 2>&1 \
+  && pass "user block surfaced verbatim under its own heading" \
+  || fail "user-block surfacing rc=$RC payload=${OUT:0:300}"
+
+# 7h. Placeholder-only user block: no section, base brief intact. A drifted
+#     placeholder copy would surface the seed line as if the user typed it.
+python3 - "$CANON_DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?<!-- /fno:user -->",
+           "<!-- fno:user -->\n_(write here; the machine reads this every refresh and never edits it)_\n<!-- /fno:user -->",
+           s, count=1)
+open(p, "w").write(s)
+PY
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | grep -q "level 1 over fno" \
+  && ! echo "$OUT" | grep -q "User notes (from your canon doc)" \
+  && pass "placeholder-only user block: silent, brief intact" \
+  || fail "placeholder-only rc=$RC payload=${OUT:0:300}"
+
+# 7i. An oversized user block is truncated to the byte budget, never
+#     reinjected whole.
+python3 - "$CANON_DOC" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+import re
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?<!-- /fno:user -->",
+           "<!-- fno:user -->\n" + ("y" * 6000) + "\n<!-- /fno:user -->",
+           s, count=1)
+open(p, "w").write(s)
+PY
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | grep -q "truncated at" \
+  && pass "oversized user block truncated to the byte budget" \
+  || fail "oversized-user rc=$RC payload=${OUT:0:200}"
+: > "$KING_HANDOFF_PATH_FIXTURE"
+
 # 7. Byte budget: the brief is paid on every compaction of every king.
 
 echo ""
