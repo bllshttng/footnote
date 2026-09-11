@@ -77,12 +77,45 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
     out
 }
 
+/// Human clock for a hold line: `2h00m`, `3m48s`, `41s`. The shape the
+/// escalation suffix and the release refusals both print (x-e3cc).
+pub(crate) fn human_duration(secs: i64) -> String {
+    let s = secs.max(0) as u64;
+    if s >= 3600 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Render a sweep outcome. Pure, so the one property that matters here is
 /// testable without a registry: every bucket appears at every pass, zero
 /// counts included. A row the pass judged lands in exactly one bucket, and a
 /// bucket nothing prints is not a count - the verb would report zero
 /// retirements while rows were being removed.
 pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String {
+    // The hold clock (x-e3cc): the age suffix on a hold line. Reads the
+    // summary's own `holds` projection, so a bucket line and its hold entry
+    // can never disagree; a row with no hold entry renders bare, exactly as
+    // before this change.
+    let hold_line = |summary: &GcSummary, id: &str| -> String {
+        let Some(h) = summary.holds.iter().find(|h| h.id == id) else {
+            return String::new();
+        };
+        let Some(age) = h.age_s else {
+            return " [held unmeasured]".to_string();
+        };
+        let mut s = format!(" [held {}, {}]", human_duration(age), h.age_basis);
+        if h.escalated {
+            s.push_str(&format!(
+                "; past {}: fno agents reap --release {id}",
+                human_duration(summary.hold_escalate_after_s.unwrap_or(0) as i64)
+            ));
+        }
+        s
+    };
     if json_out {
         let retired: Vec<Value> = summary
             .retired
@@ -143,6 +176,20 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 json!({"node": node, "harness": harness, "session_id": session_id})
             })
             .collect();
+        let holds: Vec<Value> = summary
+            .holds
+            .iter()
+            .map(|h| {
+                json!({
+                    "id": h.id,
+                    "reason": h.reason,
+                    "detail": h.detail,
+                    "age_s": h.age_s,
+                    "age_basis": h.age_basis,
+                    "escalated": h.escalated,
+                })
+            })
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -173,6 +220,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
                 "kept_receipts": pair(&summary.kept_receipts),
+                "holds": holds,
+                "hold_escalate_after_s": summary.hold_escalate_after_s,
                 "dry_run": dry_run,
             })
         );
@@ -230,7 +279,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         ));
     }
     for (id, a, b) in &summary.kept_node_conflict {
-        out.push_str(&format!("  kept {id} (sources disagree: {a} vs {b})\n"));
+        out.push_str(&format!(
+            "  kept {id} (sources disagree: {a} vs {b}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, node, detail) in &summary.kept_pr_contradicts {
         out.push_str(&format!(
@@ -243,7 +295,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         ));
     }
     for (id, node) in &summary.kept_open_do_row {
-        out.push_str(&format!("  kept {id} (open do row on done node: {node})\n"));
+        let detail = summary
+            .holds
+            .iter()
+            .find(|h| h.id == *id)
+            .map(|h| h.detail.as_str())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "  kept {id} (open do row on done node: {node}: {detail}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, node) in &summary.kept_planning_unclosed {
         out.push_str(&format!(
@@ -263,6 +324,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         } else {
             String::new()
         };
+        // Main's x-1b90 line carries the clock and the 6h rm ask; the hold
+        // projection renders no second age here, so one line reads one
+        // clock. The escalated hold still asks for its release through the
+        // [reap-hold] question lane.
         out.push_str(&format!(
             "  kept {} (transcript unresolved for {}: absence is not quiet{suffix})\n",
             hold.id, age
@@ -295,10 +360,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (live descendant: {child})\n"));
     }
     for (id, reason) in &summary.stop_refused {
-        out.push_str(&format!("  kept {id} (stop refused: {reason})\n"));
+        out.push_str(&format!(
+            "  kept {id} (stop refused: {reason}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, reason) in &summary.needs_live_stop {
-        out.push_str(&format!("  held {id} (needs live stop: {reason})\n"));
+        out.push_str(&format!(
+            "  held {id} (needs live stop: {reason}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, reason) in &summary.kept_no_receipt {
         out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));

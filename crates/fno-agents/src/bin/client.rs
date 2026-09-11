@@ -2417,7 +2417,7 @@ fn run_reap(rest: &[String]) -> i32 {
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-    let summary = if dry_run {
+    let mut summary = if dry_run {
         fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
         // Source "daemon" matches the event schema's declared source for
@@ -2430,6 +2430,7 @@ fn run_reap(rest: &[String]) -> i32 {
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
         )
     };
+    summary.mark_escalated(fno_agents::agents_config::hold_escalate_after(&cwd));
 
     // The dry-run JSON read also carries the census (x-70e1 task 4): the
     // complete per-session identity, observed surfaces and source coverage,

@@ -574,6 +574,10 @@ pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
 /// `do pr wait --timeout 30m`, the longest detached child that is allowed to be
 /// running. Matches the Pydantic default.
 pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
+/// Default age at which a reaper hold escalates into a question a king or
+/// the operator can rule on (x-e3cc): the same derivation as the orphan
+/// clock, three times the longest detached wait.
+pub const DEFAULT_HOLD_ESCALATE_AFTER_S: u64 = 5400;
 
 /// Resolve `agents.max_live`. Values < 1 (or unparseable) coerce to
 /// [`DEFAULT_MAX_LIVE`] — never 0, which would block all spawns.
@@ -635,6 +639,12 @@ pub fn orphan_reap_after(cwd: &Path) -> Duration {
         "orphan_reap_after_seconds",
         DEFAULT_ORPHAN_REAP_AFTER_S,
     )
+}
+
+/// Resolve `agents.hold_escalate_after_s`: the age at which a reaper hold
+/// escalates into a question a king or the operator can rule on (x-e3cc).
+pub fn hold_escalate_after(cwd: &Path) -> Duration {
+    positive_seconds(cwd, "hold_escalate_after_s", DEFAULT_HOLD_ESCALATE_AFTER_S)
 }
 
 /// Seconds knobs coerce fail-safe: only a POSITIVE value is honored, because

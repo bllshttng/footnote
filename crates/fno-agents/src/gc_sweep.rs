@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -150,6 +151,37 @@ pub struct GcSummary {
     /// The registry file could not be read this pass. Never a retirement on
     /// a failed read; the tick names this instead of a quiet no_rows.
     pub registry_unreadable: bool,
+    /// One per held row (x-e3cc): its clock. The text buckets above stay
+    /// exactly as they were; `holds` is the read-side projection that gives
+    /// a keep an age, a basis, and an escalation flag. It is a projection
+    /// OVER the kept_* buckets, never a bucket itself: kept_total must not
+    /// count it.
+    pub holds: Vec<Hold>,
+    /// The escalation threshold `mark_escalated` stamped with, so the
+    /// renderer prints the same number the verb enforced. `None` until
+    /// stamped; an unstamped summary renders no escalation.
+    pub hold_escalate_after_s: Option<u64>,
+}
+
+/// One held row with its clock (x-e3cc): a correct hold with no age is
+/// indistinguishable from a reader that never ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Hold {
+    /// The row handle (`row_handle`).
+    pub id: String,
+    /// `KeepReason::as_str`, or "needs live stop" / "stop refused" for the
+    /// two buckets KeepReason has no variant for.
+    pub reason: &'static str,
+    /// The bucket's own detail; an open do row adds its settle blocker.
+    pub detail: String,
+    /// Transcript-quiet seconds when the age seam answered, else seconds
+    /// since the row's `created_at`, else `None`.
+    pub age_s: Option<i64>,
+    /// "transcript quiet" | "row created" | "unmeasured"
+    pub age_basis: &'static str,
+    /// Set by `mark_escalated`: age_s past the configured threshold. An
+    /// unmeasured hold never escalates.
+    pub escalated: bool,
 }
 
 impl GcSummary {
@@ -176,6 +208,20 @@ impl GcSummary {
             + self.kept_unprobed.len()
             + self.kept_no_receipt.len()
             + self.kept_receipts.len()
+    }
+
+    /// Stamp every hold's escalation flag against the configured threshold
+    /// (x-e3cc). Called once per verb run, after the sweep filled the
+    /// buckets; the sweep itself stays clock-free so a dry run and a real
+    /// run carry the same hold rows.
+    pub fn mark_escalated(&mut self, after: Duration) {
+        self.hold_escalate_after_s = Some(after.as_secs());
+        let after = after.as_secs() as i64;
+        for h in &mut self.holds {
+            h.escalated = h.age_s.is_some_and(|a| a >= after);
+        }
+    }
+}
     }
 }
 
@@ -908,8 +954,14 @@ pub fn provenance_verdict(
         .conflict
         .clone()
         .map(|(src, node)| KeepReason::NodeConflict {
-            a: src.as_str().to_string(),
-            b: node,
+            // Both witnesses ride the hold (x-e3cc): "sources disagree" naming
+            // only the dissenting node made a reader re-derive the first half.
+            a: format!(
+                "{} {}",
+                route.source.map(|s| s.as_str()).unwrap_or("sessions"),
+                route.node.clone().unwrap_or_default()
+            ),
+            b: format!("{} {}", src.as_str(), node),
         });
     let mut merge_note: Vec<String> = Vec::new();
     let mut merged_but_open: Option<String> = None;
@@ -958,6 +1010,34 @@ pub fn provenance_verdict(
         hold,
         merge_note,
         merged_but_open,
+    }
+}
+
+/// The hold clock (x-e3cc): the staged transcript age when the seam
+/// answered, else seconds since the row's `created_at`, else unmeasured -
+/// and an unmeasured hold never escalates, because a wrong number is not a
+/// clock.
+fn hold_clock(age: Option<i64>, created_at: &str, now: i64) -> (Option<i64>, &'static str) {
+    match age {
+        Some(a) => (Some(a), "transcript quiet"),
+        None => match crate::tick_ledger::parse_rfc3339_unix(created_at) {
+            Some(created) => (Some((now - created as i64).max(0)), "row created"),
+            None => (None, "unmeasured"),
+        },
+    }
+}
+
+/// The settle blocker an open-do-row hold names (x-e3cc): the same pr_state
+/// read the confirm step makes, so the hold line carries the why the settle
+/// refused, not only the node.
+fn settle_blocker_detail(graph: &GraphRead, node: &str) -> String {
+    let (merge_status, total, open) = graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+    if open > 0 {
+        format!("additional_prs: {open} of {total} not recorded merged")
+    } else if let Some(status) = merge_status.filter(|m| m != "merged") {
+        format!("merge_status: {status}")
+    } else {
+        "merge_status: unrecorded".to_string()
     }
 }
 
@@ -1133,13 +1213,24 @@ pub(crate) fn run(
         // condition under which an old unresolved hold may ask for a
         // decision. Computed before `work` moves into the GcRow.
         let nodes_done = matches!(work, WorkState::AllDone { .. });
+        // The hold clock (x-e3cc): computed once per row, read by every hold
+        // push below. A keep without an age is a reader that never ran.
+        let (hold_age_s, hold_age_basis) = hold_clock(*age, &e.created_at, now);
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
         if matches!(work, WorkState::AllDone { .. }) {
             if let Some(nodes) = graph.open_do.get(&sid.to_ascii_lowercase()) {
                 let node = nodes.first().cloned().unwrap_or_default();
-                summary.kept_open_do_row.push((id, node));
+                summary.kept_open_do_row.push((id.clone(), node.clone()));
+                summary.holds.push(Hold {
+                    id: id.clone(),
+                    reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
+                    detail: settle_blocker_detail(graph, &node),
+                    age_s: hold_age_s,
+                    age_basis: hold_age_basis,
+                    escalated: false,
+                });
                 continue;
             }
         }
@@ -1246,14 +1337,40 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
+                    // Main's x-1b90 bucket carries the clock the TU line
+                    // renders; the holds projection stays the one answer for
+                    // every hold kind the question lane and the release verb
+                    // read.
                     summary.kept_transcript_unresolved.push(UnresolvedHold {
-                        id,
+                        id: id.clone(),
                         held_s: unresolved_hold_secs(e, now),
                         nodes_done,
-                    })
+                    });
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::TranscriptUnresolved.as_str(),
+                        detail: "absence is not quiet".into(),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
                 Some(KeepReason::NodeConflict { a, b }) => {
-                    summary.kept_node_conflict.push((id, a, b))
+                    summary
+                        .kept_node_conflict
+                        .push((id.clone(), a.clone(), b.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::NodeConflict {
+                            a: a.clone(),
+                            b: b.clone(),
+                        }
+                        .as_str(),
+                        detail: format!("{a} vs {b}"),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
@@ -1326,12 +1443,18 @@ pub(crate) fn run(
         // The 2026-09-08 shape (dry promised nine, real retired zero): a dry
         // run never promises a claude stop it holds no evidence for.
         if dry_run && death.is_none() && e.harness_name() == "claude" {
-            summary.needs_live_stop.push((
-                id,
-                "no terminal roster state and no dead pid; a dry run does not \
+            let detail = "no terminal roster state and no dead pid; a dry run does not \
                  promise a stop it cannot prove"
-                    .into(),
-            ));
+                .to_string();
+            summary.needs_live_stop.push((id.clone(), detail.clone()));
+            summary.holds.push(Hold {
+                id,
+                reason: "needs live stop",
+                detail,
+                age_s: hold_age_s,
+                age_basis: hold_age_basis,
+                escalated: false,
+            });
             continue;
         }
         // Death evidence satisfies the stop. It wraps the callee's seam here,
@@ -1363,11 +1486,39 @@ pub(crate) fn run(
                     } else {
                         reason
                     };
-                    summary.stop_refused.push((id, reason));
+                    summary.stop_refused.push((id.clone(), reason.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "stop refused",
+                        detail: reason,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
-                RetireRefusal::NativeRemoval(reason) => summary.stop_refused.push((id, reason)),
+                RetireRefusal::NativeRemoval(reason) => {
+                    summary.stop_refused.push((id.clone(), reason.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "stop refused",
+                        detail: reason,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
                 RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
-                RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
+                RetireRefusal::GraphObligation(node) => {
+                    summary.kept_open_do_row.push((id.clone(), node.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
+                        detail: settle_blocker_detail(graph, &node),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
             }
             continue;
         }

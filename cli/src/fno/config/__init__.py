@@ -2258,6 +2258,10 @@ class AgentsBlock(SweepKeys):
     # Retirement-sweep cadence in SECONDS (x-d354); the Rust resolver clamps
     # it under a third of the grace, never a multiple. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
+    # Reaper-hold escalation in SECONDS (x-e3cc); a hold older than this is
+    # named with its release verb and asked about on the stale-escalate arm.
+    # Full contract: FIELD_META.
+    hold_escalate_after_s: int = Field(default=5400, ge=0)
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)
     state_reap: StateReapBlock = Field(default_factory=StateReapBlock)
