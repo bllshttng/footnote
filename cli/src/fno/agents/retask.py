@@ -293,6 +293,7 @@ def _resolve_node_verb(node: str) -> str:
         verb=rec.get("dispatch_verb") if rec else None,
         difficulty=rec.get("difficulty") if rec else None,
         plan_rung=node_plan_rung(rec).value,
+        node_id=node,
     )
     # The table answers canonical "/blueprint"; probe and rename take the bare word.
     return (verb or "target").lstrip("/") or "target"
