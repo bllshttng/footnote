@@ -791,12 +791,10 @@ class TestRunGate:
         assert "proceeding unserialized" not in capsys.readouterr().err
 
     def test_capped_arm_steals_a_dead_gate_and_reacquires(self, monkeypatch, capsys):
-        """AC: a capped provider facing a CORPSE steals it and re-acquires.
-
-        The capped arm used to refuse on the first contended read
-        (reason: provider_cap) while the uncapped arm queued - so every
-        target spawn was refused and every blueprint spawn succeeded, same
-        machine, same minute. Contention is a peer or a corpse, never a cap.
+        """AC3-HP: a capped provider facing a PROVABLY-DEAD holder steals it
+        and re-acquires. The takeover asks the sweep's own decision
+        (sweep_verdict), and the override reason and warning name the native
+        basis - no second state table beside the sweep (x-9c91 change 3).
         """
         _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
         acquire_calls: list[bool] = []
@@ -806,9 +804,24 @@ class TestRunGate:
             return len(acquire_calls) > 1  # contended once, then the steal lands
 
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        from fno.claims.core import acquire_claim
+
+        # A real gate claim file; the pid value is inert because the native
+        # door is stubbed below.
+        acquire_claim(
+            spawn_gate.GATE_CLAIM_KEY, "target-session:dead", pid=999_999_999, root=None
+        )
         monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "stale"},
+            "fno.claims.verdict.claim_verdicts",
+            lambda keys=None, **_kw: {
+                spawn_gate.GATE_CLAIM_KEY: {
+                    "key": spawn_gate.GATE_CLAIM_KEY,
+                    "state": "stale",
+                    "bucket": "",
+                    "provably_dead": True,
+                    "basis": "ttl-expired-dead-pid",
+                }
+            },
         )
         steals: list[tuple[str, str]] = []
         monkeypatch.setattr(
@@ -828,12 +841,14 @@ class TestRunGate:
         assert steals == [
             (
                 spawn_gate.GATE_CLAIM_KEY,
-                "spawn-gate held past the wait budget by a dead holder",
+                "spawn-gate held past the wait budget; native basis "
+                "ttl-expired-dead-pid",
             )
         ]
         assert acquire_calls == [True, True], "capped arm stays fail_closed"
         err = capsys.readouterr().err
         assert "provider_cap" not in err
+        assert "native basis ttl-expired-dead-pid" in err
         guard.release()
 
     def test_capped_arm_steals_a_corrupted_gate_claim(
@@ -849,10 +864,9 @@ class TestRunGate:
             return len(calls) > 1  # contended once, then the steal lands
 
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
-        monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "corrupted"},
-        )
+        gate_dir = Path(os.environ["FNO_CLAIMS_ROOT"]) / ".fno" / "claims"
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        (gate_dir / "gate%3Aspawn.lock").write_text("{ not: [valid")
         steals: list[str] = []
         monkeypatch.setattr(
             "fno.claims.core.force_release_claim",
@@ -1178,17 +1192,34 @@ class TestRunGate:
     def test_capped_arm_queues_behind_a_live_holder_and_never_says_provider_cap(
         self, monkeypatch, capsys
     ):
-        """AC: a LIVE holder is a live peer; queue to the timeout, and the
-        refusal must never name the cap the gate never read. The old
-        behavior refused on the FIRST contended read with
-        reason: provider_cap, count: null - a cause it never measured."""
+        """AC3-ERR: a LIVE holder is a live peer; queue to the timeout, and
+        the refusal must never name the cap the gate never read. The takeover
+        releases nothing and its warning names the bucket and holder pid."""
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr(
             spawn_gate, "_acquire_gate_mutex", lambda _h, **_k: False
         )
+        from fno.claims.core import acquire_claim
+
+        acquire_claim(
+            spawn_gate.GATE_CLAIM_KEY, "target-session:peer", pid=424_242, root=None
+        )
         monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "live"},
+            "fno.claims.verdict.claim_verdicts",
+            lambda keys=None, **_kw: {
+                spawn_gate.GATE_CLAIM_KEY: {
+                    "key": spawn_gate.GATE_CLAIM_KEY,
+                    "state": "live",
+                    "bucket": "live",
+                    "provably_dead": False,
+                    "basis": "pid",
+                }
+            },
+        )
+        steals: list[str] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append(key),
         )
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
@@ -1200,6 +1231,9 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
         assert exc.value.receipt is not None
         assert exc.value.receipt["reason"] == "gate_mutex_busy"
+        assert steals == [], "a live holder is never force-released"
+        err = capsys.readouterr().err
+        assert "gate claim kept (live), holder pid 424242" in err
 
     def test_provider_count_requires_positive_liveness_and_skips_exited(
         self, monkeypatch
