@@ -28,6 +28,7 @@ fn main() {
     sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
+    sync_naming_codes();
 
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     let dirty = git_dirty();
@@ -275,6 +276,24 @@ fn sync_events_limits() {
         &generated,
         render_events_limits(max_data_bytes, encoding).as_bytes(),
     );
+}
+
+/// Vendor the x-84b2 vocabulary tables into the crate: naming.rs
+/// include_str!s the local copy, and a crates.io publish packages only crate
+/// files, so the cross-tree read must live here. The generated-copies
+/// dirty-tree step in rust-ci trips when the copy drifts.
+fn sync_naming_codes() {
+    let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/naming-codes.yaml");
+    let Some(root) = repo_root() else { return };
+    let source = root.join("cli/src/fno/agents/naming-codes.yaml");
+    if !source.is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", source.display());
+    let Ok(bytes) = std::fs::read(&source) else {
+        return;
+    };
+    write_if_different(&generated, &bytes);
 }
 
 /// Generate the shared latest-attempt selector for both runtime languages.

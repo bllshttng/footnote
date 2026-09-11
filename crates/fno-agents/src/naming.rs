@@ -16,7 +16,7 @@ pub const MAX_LEN: usize = 64;
 /// Per-component cap for human-readable text.
 pub const SLUG_CAP: usize = 30;
 
-const CODES_YAML: &str = include_str!("../../../cli/src/fno/agents/naming-codes.yaml");
+const CODES_YAML: &str = include_str!("naming-codes.yaml");
 
 #[derive(Deserialize)]
 struct RawCodes {
