@@ -271,7 +271,9 @@ crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/finalize.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
+crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
+crates/fno-agents/src/reclaim.rs
 crates/fno-agents/src/receipt.rs
 crates/fno-agents/src/scratch.rs
 crates/fno-agents/src/session_start_bytes.rs
