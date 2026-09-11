@@ -226,6 +226,7 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
     entries = _two_ready_entries()
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
+    locked = None
     if command[0] == "ready":
         # The ready leg enforces claim liveness inside the keeper, so the
         # refusal is driven through the env the spawned keeper inherits:
@@ -242,11 +243,17 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
 
         monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
 
-    result = _invoke("backlog", *command)
+    try:
+        result = _invoke("backlog", *command)
 
-    assert result.exit_code == 1
-    assert "live claim state is unavailable" in result.output
-    assert json.loads(tmp_graph.read_text())["entries"] == entries
+        assert result.exit_code == 1
+        assert "live claim state is unavailable" in result.output
+        assert json.loads(tmp_graph.read_text())["entries"] == entries
+    finally:
+        # A mode-000 dir left behind makes the next run's rm_rf of this tree
+        # fail with Errno 66 ("Directory not empty") - no process needed.
+        if locked is not None:
+            locked.chmod(0o700)
 
 
 def test_expired_claim_does_not_block(tmp_graph, tmp_path):

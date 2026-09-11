@@ -31,6 +31,8 @@ from types import SimpleNamespace
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.agents.mux_spawn import MuxSpawnResult
+from tests.agents._fake_claude import stub_codex_sandbox_probe
 
 AGY_HARNESS = "agy"
 CODEX_HARNESS = "codex"
@@ -2123,7 +2125,6 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     captured: dict = {}
 
@@ -2161,6 +2162,7 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     import fno.agents.mux_spawn as mux_spawn
 
     use_tmpdir(monkeypatch, tmp_path)
+    stub_codex_sandbox_probe(monkeypatch)
     fake_runner = FakeRunner(run_stdout="9\n")
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
@@ -2223,7 +2225,6 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     use_tmpdir(monkeypatch, tmp_path)
     session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
@@ -2553,7 +2554,6 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     captured = {}
 
@@ -2583,8 +2583,8 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     import fno.agents.mux_spawn as mux_spawn
     import fno.adapters.providers.dispatch as provider_dispatch
     import fno.adapters.providers.loader as provider_loader
-    from fno.agents.mux_spawn import MuxSpawnResult
-    from types import SimpleNamespace
+
+    stub_codex_sandbox_probe(monkeypatch)
 
     captured = {}
 
@@ -2631,7 +2631,6 @@ def test_cmd_spawn_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     captured = {}
 
@@ -2662,7 +2661,6 @@ def test_cmd_spawn_explicit_split_still_uses_global_placement_lease(monkeypatch)
     from typer.testing import CliRunner
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     captured = {}
     monkeypatch.setattr(
@@ -2982,7 +2980,6 @@ def test_cmd_spawn_pane_threads_placement_to_dispatch(
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     captured: dict = {}
 
@@ -4804,7 +4801,6 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
 
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.mux_spawn import MuxSpawnResult
 
     use_tmpdir(monkeypatch, tmp_path)
     captured: dict = {}

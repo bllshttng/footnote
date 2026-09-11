@@ -1604,6 +1604,13 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
     monkeypatch.setattr(doctor_footprint.subprocess, "run", ps_only)
     monkeypatch.setattr("fno.agents.registry.load_registry", unreadable_registry)
+    # ps is the only subprocess this report may spend. The roster is not the
+    # only enrichment anymore: repo-root and worktree attribution also shell
+    # out when their declarations are cold, so pin both seams hermetic.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(os.getcwd()))
+    import fno.paths as _paths
+
+    monkeypatch.setattr(_paths, "resolve_canonical_worktree", lambda *a, **k: None)
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 4)
 

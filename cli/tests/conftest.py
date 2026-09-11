@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -247,24 +248,57 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         os.environ.pop("FNO_PYTEST_SHARD", None)
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _reap_store_keepers():
-    """Every spawned graph-store keeper dies with the test session.
+def _pytest_of_ancestor(basetemp) -> Path | None:
+    """The ``pytest-of-<user>`` directory above a basetemp, or None.
 
-    The store client spawns a detached ``fno-agents-worker --store-keeper``
-    per fixture graph on demand, and the keeper is immortal by design. A
-    session that touches many graphs therefore leaks one live worker per
-    graph unless the spawner reaps them (measured 2026-09-03: 6,855 live
-    keepers after one pytest pass, load 117, every fno call paying 4x
-    startup). Two layers here:
+    An explicit ``--basetemp`` sits wherever the caller pointed it and has no
+    such ancestor; the start-of-session garbage sweep then has no sane root
+    and must skip.
+    """
+    current = Path(basetemp)
+    for candidate in (current, *current.parents):
+        if candidate.name.startswith("pytest-of-"):
+            return candidate
+    return None
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _reap_session_processes(tmp_path_factory):
+    """Every process this session rooted in its tmp tree dies with it.
+
+    Two populations, one fixture, because both answer "what does this session
+    leave alive?".
+
+    Store keepers: the store client spawns a detached
+    ``fno-agents-worker --store-keeper`` per fixture graph on demand, and the
+    keeper is immortal by design. A session that touches many graphs leaks
+    one live worker per graph unless the spawner reaps them (measured
+    2026-09-03: 6,855 live keepers after one pytest pass, load 117, every
+    fno call paying 4x startup).
+
+    Rooted trees: a test that starts a real provider binary can leave a
+    ``claude daemon run`` behind - the daemon calls setsid, detaches to
+    ppid 1, and outlives every group cleanup (x-ec81 measured three, each
+    rooted in a deleted pytest garbage dir, each carrying its own bg-spare
+    pool, one pinning a merged worktree against cleanup). Ownership is the
+    path: a basetemp belongs to this one session, and pytest renames a
+    numbered dir to ``garbage-<uuid>`` only after its lock proved stale, so
+    no live session roots there. A live ``pytest-N`` dir from another
+    worktree is never touched.
+
+    Layers:
 
     - ``FNO_STORE_KEEPER_IDLE_SECS`` bounds every keeper this session spawns
       to a short self-exit, so even a keeper the reaper never hears about
       cannot outlive the run by long.
-    - The teardown SIGTERMs every keeper the client recorded and ASSERTS the
-      alive count returns to zero. The assert is the point: a teardown that
-      merely runs is decoration, and the positive signal is the count, not
-      the pass.
+    - Setup reaps trees under ``pytest-of-*/garbage-*`` - leaks of EARLIER
+      runs - and warns per hit; it does not fail, because this session did
+      not make them.
+    - Teardown drains the keeper ledger, then reaps trees under this
+      session's own basetemp, then ASSERTS both lists are empty. The assert
+      is the point: a teardown that merely runs is decoration, and the
+      positive signal is the count, not the pass. The cwd in the message
+      names the leaking test dir.
 
     Two measurement traps this assertion survived, recorded so the next
     counter does not re-learn them: a sandboxed shell sees a process jail,
@@ -275,13 +309,42 @@ def _reap_store_keepers():
     form ``-o pid=,args=`` and prove any filter with one live pid).
     """
     os.environ.setdefault("FNO_STORE_KEEPER_IDLE_SECS", "5")
+
+    from tests._leak_census import reap_rooted
+
+    basetemp = tmp_path_factory.getbasetemp()
+    ancestor = _pytest_of_ancestor(basetemp)
+    if ancestor is not None:
+        stale = reap_rooted([str(ancestor)], match_component="garbage-")
+        for hit in stale:
+            warnings.warn(
+                pytest.PytestWarning(
+                    f"reaped a process leaked by an EARLIER pytest run: "
+                    f"pid {hit['pid']} rooted at {hit['cwd']} "
+                    f"({(hit.get('cmdline') or [''])[0]!r})"
+                ),
+                stacklevel=1,
+            )
+
     yield
+
     from fno.graph.store import reap_spawned_keepers
 
     survivors = reap_spawned_keepers(timeout=15.0)
-    assert not survivors, (
+    # This session's own pid, not the default: a leak still parented by THIS
+    # worker has a readable cwd only when the worker is the named reaper, and
+    # a worker-parented child is exactly the leak that never reaches ppid 1.
+    rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
+    assert not survivors and not rooted, (
         f"{len(survivors)} store keeper(s) outlived the test session "
-        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to zero"
+        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "
+        f"zero. {len(rooted)} process tree(s) stayed rooted in this "
+        f"session's tmp tree: "
+        + "; ".join(
+            f"pid {r['pid']} at {r['cwd']} "
+            f"({' '.join(r.get('cmdline') or [])[:120]!r})"
+            for r in rooted[:10]
+        )
     )
 
 
@@ -303,6 +366,105 @@ def _drain_exited_keepers():
     drain_exited_keepers()
     yield
     drain_exited_keepers()
+
+@pytest.fixture(autouse=True)
+def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
+    """Guard every provider subprocess seam so no cli test execs a *real*
+    provider binary (e.g. an immortal ``claude --bg``).
+
+    The agents suite repeatedly leaked live sessions when a test drove a
+    dispatch path without isolating PATH: the ambient real ``claude`` got
+    exec'd and left a resident bg session (ab-c1bf3552, generalizing PR #415,
+    which fixed two such tests one at a time). The old guard lived in
+    ``cli/tests/agents/conftest.py``, and a conftest guards only its own
+    directory - x-ec81 measured three live ``claude daemon run`` processes
+    leaked by ``cli/tests/test_spawn_guard.py`` at the ``cli/tests/`` root,
+    where nothing guarded at all. This root copy covers every cli test; the
+    agents copy is gone, never kept beside it.
+
+    Two layers, because seams differ. One guarded ``Popen`` subclass is set
+    on the ``subprocess`` module: ``subprocess.run`` and ``check_output``
+    read ``Popen`` from that module global at call time, so one patch covers
+    them plus every direct ``Popen(...)`` call (the bare calls in ``agy``,
+    ``pi`` and ``_acp`` included). The three harness aliases that captured
+    the original class at import time (``claude``, ``codex``,
+    ``cursor_agent``) are repointed to the guarded class. A subclass keeps
+    ``isinstance`` checks and ``Popen[bytes]`` working.
+
+    The discriminator is *which* binary runs, not whether a subprocess runs
+    at all: the safe pattern installs a fake provider on a tmp-isolated PATH
+    (``install_fake_claude`` + ``monkeypatch.setenv("PATH", bin_dir)``) and
+    the fake runs. The check resolves the executable and raises only when it
+    points OUTSIDE the pytest tmp tree (i.e. a real install). Tests that
+    stub a seam with a Python callable replace this outright (monkeypatch
+    order: test wins); out-of-process e2e/parity tests spawn a fresh
+    interpreter and never reach this in-process patch.
+    """
+    # Real-provider smoke tests (@pytest.mark.smoke, run nightly by
+    # provider-smoke.yml) intentionally exec the real binary; never guard
+    # those (codex P2 review). Per-PR CI excludes `-m smoke`. Same for the
+    # real-codex boundary job, whose FNO_REAL_CODEX_PLUGIN_TEST=1 env is the
+    # test file's own explicit real-provider opt-in.
+    if (
+        request.node.get_closest_marker("smoke")
+        or os.environ.get("FNO_REAL_CODEX_PLUGIN_TEST") == "1"
+    ):
+        return
+
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from fno.agents.harnesses import agy as _agy
+    from fno.agents.harnesses import claude as _claude
+    from fno.agents.harnesses import codex as _codex
+    from fno.agents.harnesses import cursor_agent as _cursor
+
+    # Use pytest's session basetemp (which honors a custom --basetemp) rather
+    # than tempfile.gettempdir(), so the "is this a tmp-isolated fake?" check
+    # stays correct under a non-default temp root.
+    tmp_root = str(tmp_path_factory.getbasetemp().resolve())
+    # claude + codex are the historical leakers; the rest are the launched
+    # name of every other harness module: agy.AGY_BINARY, and argv[0] of
+    # cursor_agent (module constant) / pi.rpc_argv / grok.acp_argv / kimi
+    # (inline argv, no constant to import).
+    provider_bins = {
+        "claude", "codex", "pi", "grok", "kimi",
+        _agy.AGY_BINARY, _cursor.CURSOR_AGENT_BINARY,
+    }
+
+    def _is_real_provider_exec(cmd) -> bool:
+        argv0 = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
+        argv0 = str(argv0)
+        if Path(argv0).name not in provider_bins:
+            return False
+        resolved = argv0 if Path(argv0).is_absolute() else (shutil.which(argv0) or "")
+        if not resolved:
+            # bare provider name with no fake on PATH: would resolve to the
+            # ambient real binary (or fail), never an isolated fake -> block.
+            return True
+        return not str(Path(resolved).resolve()).startswith(tmp_root)
+
+    class _GuardedPopen(subprocess.Popen):
+        def __init__(self, args, *popenargs, **kwargs):
+            if _is_real_provider_exec(args):
+                name = args[0] if isinstance(args, (list, tuple)) and args else args
+                raise AssertionError(
+                    f"live provider exec blocked under pytest in "
+                    f"{request.node.nodeid}: a test reached a real provider "
+                    f"binary ({name!r}). Install a fake on a tmp-isolated PATH "
+                    "(install_fake_claude/codex + monkeypatch.setenv PATH), "
+                    "stub the seam (_subprocess_run/_subprocess_popen), or "
+                    "assert routing without executing dispatch."
+                )
+            super().__init__(args, *popenargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    # Module aliases hold the ORIGINAL class from import time; repoint them.
+    monkeypatch.setattr(_claude, "_subprocess_popen", _GuardedPopen)
+    monkeypatch.setattr(_codex, "_subprocess_popen", _GuardedPopen)
+    monkeypatch.setattr(_cursor, "_subprocess_popen", _GuardedPopen)
+
 
 @pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):

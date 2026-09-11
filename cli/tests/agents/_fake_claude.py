@@ -91,3 +91,19 @@ def configure_fake(
         monkeypatch.setenv("FAKE_CLAUDE_STDIN_DUMP", stdin_dump)  # type: ignore[attr-defined]
     else:
         monkeypatch.delenv("FAKE_CLAUDE_STDIN_DUMP", raising=False)  # type: ignore[attr-defined]
+
+
+def stub_codex_sandbox_probe(monkeypatch: object) -> None:
+    """Pass the codex sandbox probe through without exec'ing the real binary.
+
+    ``probe_codex_sandbox`` runs the real ``codex sandbox`` as an incidental
+    gate inside bounded codex spawn paths. Tests whose subject is the spawn
+    receipt or the routing, not the probe, stub it to the unknown verdict:
+    the pass-through arm.
+    """
+    from fno.agents.sandbox_probe import SandboxProbe
+
+    monkeypatch.setattr(
+        "fno.agents.sandbox_probe.probe_codex_sandbox",
+        lambda cwd: SandboxProbe("unknown", note="stubbed in test"),
+    )
