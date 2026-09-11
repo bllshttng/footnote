@@ -7,9 +7,9 @@ status: accepted
 
 ## Is this page for you?
 
-You ask why one card sits above another, why a card landed in its column, or why the HTML and Kanban boards disagree with your terminal. This page owns the ordering function every board and the work selector share. Misreading it costs a wasted edit: you straighten the rendered board file and the next mutation renders your change away.
+You ask why one card sits above another, or why the HTML and Kanban boards disagree with your terminal. This page owns the ordering function every board and the work selector share. Misreading it costs a wasted edit: you straighten the rendered board file and the next mutation renders your change away.
 
-Not for: the verbs that create, update, rank, or close a node. That is [../backlog-usage.md](../backlog-usage.md). It also does not answer why `advance` did not dispatch a card; dispatch ordering is the loop's, not the board's.
+Not for: the verbs that create, update, rank, or close a node. That is [../backlog-usage.md](../backlog-usage.md). It also does not answer why `advance` did not dispatch a card. Dispatch ordering is the loop's, not the board's.
 
 ## Overview
 
