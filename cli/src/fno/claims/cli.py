@@ -1,21 +1,12 @@
 """fno agents claim - Typer surface for the work-claim verbs.
 
-Exit codes:
-    0  success
-    1  ClaimHeldByOther, or acquire/refresh's own contention-retry
-       exhaustion (both mean "transient, caller should retry later"); also
-       `reap`'s own distinct overload of 1 - a reapable file's archive move
-       could not be confirmed on re-read (see `reap`'s own docstring, not a
-       retry signal)
-    2  validation / input error
-    3  ClaimCorrupted or ClaimGoneAway (race during operation)
-    4  HolderMismatch (release/refresh wrong holder)
-
-The structured output uses --json on each verb. Without --json, output is a
-human-friendly summary on stdout; errors always go to stderr.
-
-The claim verbs also write the node's `do` provenance rows; that contract
-lives in docs/architecture/claim-verbs-do-provenance.md.
+Exit codes: 0 success; 1 held/contention retry exhaustion (also reap's own
+archive-confirm failure, a distinct overload of 1, not a retry signal); 2
+validation or input error; 3 corruption or race; 4 holder mismatch. The full
+table lives in docs/architecture/claim-verbs-do-provenance.md. Structured
+output uses --json on each verb; without it, output is a human-friendly
+summary on stdout and errors always go to stderr. The claim verbs also write
+the node's `do` provenance rows; that contract lives in the same doc.
 """
 
 from __future__ import annotations
