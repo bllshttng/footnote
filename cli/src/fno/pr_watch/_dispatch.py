@@ -677,9 +677,9 @@ def _run_tick(
     # Load once up-front; resets to {} on corruption (baseline discipline)
     state = store.load()
 
-    # x-d211: least-recently-polled first (missing cursor, then oldest stamp;
-    # discovery order breaks ties) so a budget break resumes where the last
-    # tick stopped; corrupt stamps sort as missing.
+    # x-d211: least-recently-polled first (missing cursor, then oldest stamp,
+    # discovery order breaking ties; corrupt stamps sort as missing) so a
+    # budget break resumes where the last tick stopped.
     def _poll_order(indexed):
         idx, cand = indexed
         try:
@@ -841,8 +841,7 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
-        # x-d211: after the cheap disposals; only a candidate owing the rich
-        # read is a legal break point.
+        # x-d211: only a candidate owing the rich read may break the tick.
         if (
             dispatch_deadline is not None
             and dispatch_deadline - time.monotonic()

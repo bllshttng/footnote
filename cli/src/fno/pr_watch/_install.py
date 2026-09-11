@@ -583,8 +583,7 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-#: x-d211: which timeout mechanism fired, for the readout. The self-kill is
-#: not a budget outcome, so none of these reads as a budget example.
+#: x-d211: which timeout mechanism fired; the self-kill is not a budget outcome.
 _WHY_PHRASES = {
     "deadline_exceeded": "deadline exceeded",
     "slice_starved": "phase slice starved",
