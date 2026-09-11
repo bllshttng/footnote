@@ -2950,8 +2950,8 @@ def cmd_note(
 
     # A citation the repo contradicts refuses BEFORE the append, quiet or not
     # (a silent annotation is still a fact on the node). An unmeasured claim
-    # only warns: this verb advises, never refuses a body - but a read whose
-    # own run failed refuses, and so does a gate that cannot run at all.
+    # only warns: this verb advises, never refuses a body - a failed read,
+    # or a gate that cannot run at all, refuses.
     try:
         read_rows, claims = note_evidence(text, list(read))
     except (UnresolvableCitationError, UnmeasuredClaimError, VerbUnavailable) as exc:

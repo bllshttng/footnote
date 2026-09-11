@@ -366,9 +366,8 @@ def require_marked_caller() -> str:
 # body asserting a code fact must carry `--read`: the command that produced
 # it, RUN at record time, exit code and output head stored on the row. The
 # checker and the bounded read runner live in the Rust runtime
-# (`fno-agents evidence-gate`, crates/fno-agents/src/evidence.rs); these are
-# the transport bridge and the flag/error surface the two ruling lanes use.
-# Full contract: docs/architecture/decision-record.md.
+# (`fno-agents evidence-gate`, crates/fno-agents/src/evidence.rs). Full
+# contract: docs/architecture/decision-record.md.
 READ_HELP = (
     "The command that produced a code fact in this ruling. It is RUN at "
     "record time and its output stored on the row. Repeatable; pair a zero "
