@@ -219,6 +219,7 @@ def _record(
         UnmeasuredClaimError,
         UnresolvableCitationError,
     )
+    from fno.rust_binary import VerbUnavailable
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
 
     # Validated here, on the write path, and deliberately NOT in schema.yaml:
@@ -257,6 +258,11 @@ def _record(
     except (UnmeasuredClaimError, UnresolvableCitationError) as exc:
         # Same ladder as the law door: the ruling was refused before any
         # write, so the caller must not re-run it expecting a different id.
+        typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
+        raise typer.Exit(3)
+    except VerbUnavailable as exc:
+        # The evidence gate cannot run, so the ruling is refused before any
+        # write, on the same ladder.
         typer.echo(f"decide: refused. {exc} Nothing was recorded.", err=True)
         raise typer.Exit(3)
     except UnknownOriginError as exc:

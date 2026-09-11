@@ -2933,6 +2933,7 @@ def cmd_note(
     fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.decide import (
+        UnmeasuredClaimError,
         UnresolvableCitationError,
         note_evidence,
         unmeasured_note_warning,
@@ -2940,6 +2941,7 @@ def cmd_note(
     )
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
+    from fno.rust_binary import VerbUnavailable
 
     text = text.strip()
     if not text:
@@ -2948,10 +2950,11 @@ def cmd_note(
 
     # A citation the repo contradicts refuses BEFORE the append, quiet or not
     # (a silent annotation is still a fact on the node). An unmeasured claim
-    # only warns: this verb advises, never refuses a body.
+    # only warns: this verb advises, never refuses a body - but a read whose
+    # own run failed refuses, and so does a gate that cannot run at all.
     try:
         read_rows, claims = note_evidence(text, list(read))
-    except UnresolvableCitationError as exc:
+    except (UnresolvableCitationError, UnmeasuredClaimError, VerbUnavailable) as exc:
         typer.echo(f"Error: note refused: {exc}", err=True)
         raise typer.Exit(code=1)
 

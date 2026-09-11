@@ -279,6 +279,7 @@ pub fn run_reads(
     }
     let mut rows: Vec<Value> = Vec::new();
     let mut zero_flags: Vec<bool> = Vec::new();
+    let sha = head_sha(root);
     for cmd in commands {
         let outcome = runner(cmd, root).map_err(|why| {
             refusal(
@@ -317,7 +318,7 @@ pub fn run_reads(
             "exit": outcome.exit,
             "out_head": truncate_chars(&head, OUT_HEAD_CHARS),
             "ts": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "head_sha": head_sha(root),
+            "head_sha": sha,
         }));
     }
     if !rows.is_empty() && zero_flags.iter().all(|z| *z) {

@@ -2070,6 +2070,30 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
     assert note["reads"][0]["exit"] == 0
 
 
+def test_note_whose_read_failed_refuses_cleanly(tmp_graph, monkeypatch):
+    """A read that cannot run is not evidence: the note refuses on the same
+    ladder as a contradicted citation, never a traceback."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "unmeasured",
+            "message": "read 'nosuchcmd arg' did not run (exit 127) and stored no row.",
+        },
+    )
+
+    r = _invoke(
+        "backlog", "note", node_id, "advance.py is 200 lines",
+        "--read", "nosuchcmd arg",
+    )
+
+    assert r.exit_code == 1, r.output
+    assert "note refused" in r.stderr, r.stderr
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
 def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
     """AC21-EDGE: a silent annotation is still a fact on the node."""
     node_id = _note_node()

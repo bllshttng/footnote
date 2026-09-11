@@ -99,6 +99,7 @@ def record_command(
         require_marked_caller,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
+    from fno.rust_binary import VerbUnavailable
 
     try:
         validate_durable_law(
@@ -124,6 +125,11 @@ def record_command(
             graduation=graduation_data,
             reads=list(read) or None,
         )
+    except VerbUnavailable as exc:
+        # The evidence gate cannot run, so the ruling is refused before any
+        # write: a read nobody can run is not evidence either.
+        typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
+        raise typer.Exit(3) from exc
     except (InvalidGraduationError, ValueError) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no
         # recoverable decision. It must land on 3 with the rest: exit 1 is the
