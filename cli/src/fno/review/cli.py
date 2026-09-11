@@ -328,6 +328,13 @@ def _attest_from_record(
         if record.get(key) is not None:
             data[key] = record[key]
 
+    # The model is stamped by the ONE implementation the emit chokepoint uses,
+    # from this process's transcript - classify is a second writer of the same
+    # row type and inherits the rule by calling it, never by re-reading env.
+    from fno.events.cli import stamp_review_attestation_model
+
+    stamp_review_attestation_model(data)
+
     repo_root = resolve_repo_root()
     events_path = project_log("events.jsonl", project_root=repo_root)
     try:

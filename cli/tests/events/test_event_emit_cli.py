@@ -735,6 +735,51 @@ def test_review_attestation_refuses_a_supplied_model_that_disagrees(
 
 
 # ---------------------------------------------------------------------------
+# the shared model stamp: one implementation both review_attestation writers
+# call (the emit chokepoint and classify --attest), tested directly
+# ---------------------------------------------------------------------------
+
+
+def test_model_stamp_helper_stamps_observed_over_no_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fno.agents.self_stamp as self_stamp
+    from fno.events.cli import stamp_review_attestation_model
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    data: dict = {"verdict": "pass"}
+    stamp_review_attestation_model(data)
+    assert data["model"] == "claude-opus-5"
+
+
+def test_model_stamp_helper_drops_claim_when_unobservable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fno.agents.self_stamp as self_stamp
+    from fno.events.cli import stamp_review_attestation_model
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "unknown")
+    data: dict = {"verdict": "pass", "model": "glm-5.2[1m]"}
+    stamp_review_attestation_model(data)
+    assert "model" not in data
+
+
+def test_model_stamp_helper_refuses_a_disagreeing_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import typer
+
+    import fno.agents.self_stamp as self_stamp
+    from fno.events.cli import stamp_review_attestation_model
+
+    monkeypatch.setattr(self_stamp, "resolve_self_model", lambda: "claude-opus-5")
+    data: dict = {"verdict": "pass", "model": "glm-5.2[1m]"}
+    with pytest.raises(typer.Exit) as excinfo:
+        stamp_review_attestation_model(data)
+    assert excinfo.value.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
 # review_coverage rides the global mirror: a hand emit reaches every reader
 # ---------------------------------------------------------------------------
 
