@@ -189,10 +189,7 @@ def ask(
     question_file: Path | None = typer.Option(
         None,
         "--question-file",
-        help=(
-            "Read the question from a file ('-' = stdin). The QUESTION_CAP "
-            "truncation applies to a file-fed body too."
-        ),
+        help="Read the question from a file ('-' = stdin); QUESTION_CAP truncation still applies.",
     ),
     ask: str = typer.Option(None, "--ask", help="One action that closes the question."),
     option: List[str] = typer.Option(

@@ -1223,9 +1223,8 @@ def peek(
         return EXIT_UNSUPPORTED
 
     if grep is not None:
-        # A search reports its own count: a zero on stderr with exit 0 is a
-        # measured absence, never a silent one (AGENTS.md, assert a positive
-        # marker).
+        # A search reports its count: a zero with exit 0 is a measured
+        # absence, never a silent one.
         records = [r for r in records if grep in r.text or grep in r.role]
         err.write(
             f"grep {grep!r}: {len(records)} matching record(s) in {agent} {session_id}\n"

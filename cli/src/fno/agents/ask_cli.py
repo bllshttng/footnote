@@ -67,19 +67,13 @@ def cmd_ask(
     fresh: bool = typer.Option(
         False,
         "--fresh",
-        help=(
-            "Accepted no-op alias: the worker cwd already defaults to the "
-            "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
-        ),
+        help="Accepted no-op alias: ask never launches in a workdir. Dispatcher compat.",
     ),
     here: bool = typer.Option(
         False,
         "--here",
         "--in-place",
-        help=(
-            "Keep the worker in the caller's cwd instead of the canonical-root "
-            "default (WIP-scoped ask). The explicit opt-in."
-        ),
+        help="Keep ask in the caller's cwd (the default); the explicit opt-in.",
     ),
     prompt_file: str | None = typer.Option(
         None,

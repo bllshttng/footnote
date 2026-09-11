@@ -284,6 +284,13 @@ def _record_mail_origin(
         pass
 
 
+def _vet_body(body: str, *, allow_reason: str | None = None) -> None:
+    """The three checks every outgoing body runs, in reader order."""
+    _refuse_forged_envelope(body)
+    _enforce_body_cap(body)
+    _enforce_style(body, allow_reason=allow_reason)
+
+
 def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
@@ -1069,31 +1076,20 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    The id is resolved against the durable bus FIRST. A directed message (to_kind
-    is name, session, or node) goes back to its original sender without you
-    re-typing the handle, correlated via in_reply_to. A ``node``-addressed job
-    message is answered at its sender too (the job address is the routing key on
-    the way IN; the reply goes back to who sent it). Any other target falls
-    through to the thread-store reply.
+    The id is resolved against the durable bus FIRST: a directed message
+    (to_kind name/session/node) answers at its original sender, correlated
+    via in_reply_to. An id absent from the bus is then searched in THIS
+    session's transcript - the common path, not a fallback: a
+    live-confirmed delivery writes no durable thread, and
+    resolve_live_sender recovers the sender from the injected envelope.
+    Only an id absent from BOTH is a hard error.
 
-    If the id is not on the bus, this session's own TRANSCRIPT is searched next.
-    That path is the common one, not a fallback for odd cases: a live-confirmed
-    delivery writes no durable thread, so an id that arrived live is absent from
-    the bus by design, and resolve_live_sender recovers the sender from the
-    injected <fno_mail id=...> envelope instead.
-
-    Only an id absent from BOTH is a hard error. This text used to describe the
-    bus step alone, and two agents read that as proof the verb could not answer
-    live mail at all.
-
-    The body is positional, or --body, or --body-file. Exactly one of the three;
-    giving two is refused rather than resolved by precedence.
+    The body is positional, or --body, or --body-file. Exactly one of the
+    three; giving two is refused rather than resolved by precedence.
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
-    _refuse_forged_envelope(body_text)
-    _enforce_body_cap(body_text)
-    _enforce_style(body_text, allow_reason=style_exception)
+    _vet_body(body_text, allow_reason=style_exception)
     classified_origin = classify_origin()
     _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
     mail_origin: str | None = (
@@ -3589,10 +3585,7 @@ def cmd_send(
     ruling: str | None = typer.Option(
         None,
         "--ruling",
-        help=(
-            "Append this authored message to the governed node's details as a "
-            "dated ruling block before named-worker transport."
-        ),
+        help="Append the message to the governed node's details as a dated ruling block.",
     ),
     from_self: bool = typer.Option(
         False, "--from-self",
@@ -3612,9 +3605,9 @@ def cmd_send(
     to_king: str | None = typer.Option(
         None, "--to-king",
         help=(
-            "Anycast over the crown: deliver to whoever holds this crown scope "
-            "RIGHT NOW, resolved at send time. Refuses and queues nothing when no "
-            "live row holds it. Use instead of <name> for the role."
+            "Anycast over the crown: deliver to whoever holds this scope RIGHT "
+            "NOW, resolved at send time; no live holder queues nothing. Use "
+            "instead of <name> for the role."
         ),
     ),
     any_live: bool = typer.Option(
@@ -3672,10 +3665,9 @@ def cmd_send(
         False, "--check",
         help=(
             "With --raw: report whether an injection path EXISTS and inject "
-            "nothing. 'injectable: <lane>' (exit 0), 'not-injectable: <reason>' "
-            "(exit 1), 'unmeasurable: <reason>' (exit 3), malformed payload "
-            "stays exit 2. It reports a PATH, never a landing; it resolves "
-            "through the same path the real send uses."
+            "nothing: 'injectable: <lane>' (exit 0), 'not-injectable' (exit 1), "
+            "'unmeasurable' (exit 3), malformed payload exit 2. It reports a "
+            "PATH, never a landing."
         ),
     ),
     to_self: bool = typer.Option(
@@ -3974,9 +3966,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        _refuse_forged_envelope(content)
-        _enforce_body_cap(content)
-        _enforce_style(content, allow_reason=style_exception)
+        _vet_body(content, allow_reason=style_exception)
 
         # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
         # (question -> wake-signal, fyi -> memory). Addressed to an agent they
@@ -4163,9 +4153,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        _refuse_forged_envelope(content)
-        _enforce_body_cap(content)
-        _enforce_style(content, allow_reason=style_exception)
+        _vet_body(content, allow_reason=style_exception)
         try:
             result = dispatch_send_to_project(
                 to_project,
@@ -4236,9 +4224,7 @@ def cmd_send(
             if payload is None:
                 print(f"usage: fno agents mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
-            _refuse_forged_envelope(payload)
-            _enforce_body_cap(payload)
-            _enforce_style(payload, allow_reason=style_exception)
+            _vet_body(payload, allow_reason=style_exception)
             from fno.mail.job_lane import job_lane_send
 
             job_lane_send(
@@ -4261,9 +4247,7 @@ def cmd_send(
     if body_text is not None:
         message = body_text
 
-    _refuse_forged_envelope(message)
-    _enforce_body_cap(message)
-    _enforce_style(message, allow_reason=style_exception)
+    _vet_body(message, allow_reason=style_exception)
 
     if ruling is not None:
         ruling_graph = _ruling_graph_path(workdir) if cwd else paths.graph_json()

@@ -20,15 +20,10 @@ def read_text_arg(
     *,
     what: str = "text",
 ) -> Optional[str]:
-    """The text, from whichever of the two forms was given; None when neither.
-
-    Refuses both at once, treats ``-`` as stdin, and refuses an unreadable
-    file rather than tracebacking. ``what`` names the argument in refusals.
-    """
+    """The text from whichever form was given; None when neither. Refuses both
+    at once, reads ``-`` as stdin, refuses an unreadable file."""
     if inline is not None and path is not None:
-        typer.echo(
-            f"error: provide {what} once - inline or as a file, not both", err=True
-        )
+        typer.echo(f"error: provide {what} once - inline or as a file, not both", err=True)
         raise typer.Exit(code=1)
     if path is None:
         return inline
