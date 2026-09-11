@@ -1,5 +1,5 @@
 //! The operator lane parser and the thirteen-queue board build (pure; no I/O).
-use super::classify::{claim_is_dead, node_driver, node_has_pr};
+use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
@@ -335,6 +335,10 @@ pub(crate) struct BoardInputs {
     pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
+    /// The truth batch's failure receipt: `Some` when the batch timed out or
+    /// its reader panicked. The claim-dependent queues read unreadable
+    /// rather than rendering an absent measurement as a verdict (x-db9c).
+    pub(crate) holder_activity_error: Option<String>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     pub(crate) outstanding: SourceRead,
@@ -361,7 +365,7 @@ pub(crate) struct BoardInputs {
 /// Build the board payload. Pure; does no I/O. Queue names, order, and row
 /// shapes match board.py's `build_board` exactly.
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
-    let warnings = inputs.warnings.clone();
+    let mut warnings = inputs.warnings.clone();
     let mut out_of_scope: Vec<Value> = Vec::new();
     let scope_ids = inputs.scope_ids.as_ref();
 
@@ -393,6 +397,52 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 claim_by_node.insert(node_id.to_string(), row.clone());
             }
         }
+    }
+
+    // x-db9c: a holder the probe batch never answered for is a hole in the
+    // board's evidence, not a worker verdict. Name every hole in one warning
+    // line so a partially-answered batch is visible in the payload, not only
+    // through the rows its absence silently removed. The expected set mirrors
+    // the probe feed exactly (king-priority claimed nodes + dead-state
+    // claims): a live claim on a lower-priority node is never fed to the
+    // probe, so counting it here would warn forever about a holder nobody
+    // promised to measure.
+    let mut unmeasured_holders: Vec<String> = Vec::new();
+    if inputs.holder_activity_error.is_none() {
+        let probed_ids: HashSet<String> = inputs
+            .claimed_nodes
+            .rows()
+            .iter()
+            .filter(|n| KING_PRIORITIES.contains(&s_str(n, "priority").unwrap_or("")))
+            .filter_map(|n| s_str(n, "id").map(str::to_string))
+            .collect();
+        let mut expected: HashSet<String> = HashSet::new();
+        for row in &claim_rows {
+            let token = holder_token(row);
+            if token.is_empty() {
+                continue;
+            }
+            let dead_state = DEAD_CLAIM_STATES.contains(&s_str(row, "state").unwrap_or(""));
+            let node_id = s_str(row, "key")
+                .and_then(|k| k.strip_prefix("node:"))
+                .unwrap_or("");
+            if dead_state || probed_ids.contains(node_id) {
+                expected.insert(token);
+            }
+        }
+        for token in &expected {
+            if !inputs.holder_activity.contains_key(token) {
+                unmeasured_holders.push(token.clone());
+            }
+        }
+        unmeasured_holders.sort();
+    }
+    if !unmeasured_holders.is_empty() {
+        warnings.push(format!(
+            "holder_activity: {} holder(s) unmeasured: {}",
+            unmeasured_holders.len(),
+            unmeasured_holders.join(", ")
+        ));
     }
 
     // Undispatched: planned work with no claim, king priorities only.
@@ -434,11 +484,18 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .unwrap_or(true)
         })
         .filter(|node| {
-            let dead = claim_by_node
-                .get(s_str(node, "id").unwrap_or(""))
-                .map(|c| claim_is_dead(c, &inputs.holder_activity))
-                .unwrap_or(false);
-            !dead
+            // x-db9c: the ready feed drops claimed nodes it cannot see
+            // (non-stale claims are excluded there, worked ids too), so the
+            // driver join is the only read left. A node under ANY driver -
+            // active, stalled, unmeasured, or a dead claim that belongs to
+            // stale_claim - is not unplanned.
+            let (state, claim) = node_driver(
+                node,
+                &claim_by_node,
+                &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
+            );
+            state == "none" && claim.is_none()
         })
         .filter(|node| {
             in_scope(
@@ -493,6 +550,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             "priority": node.get("priority"),
             "title": node.get("title"),
             "holder": claim.get("holder"),
+            "worker": holder_token(claim),
             "claim_state": claim.get("state"),
         }));
     }
@@ -861,8 +919,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
-            &if inputs.ready.is_ok() && inputs.claims.is_ok() && inputs.worked.is_ok() {
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED} + holder_activity"),
+            &if inputs.ready.is_ok()
+                && inputs.claims.is_ok()
+                && inputs.worked.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -872,6 +934,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
                         .or_else(|| inputs.worked.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -883,8 +946,11 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "stalled_holder",
-            format!("{SRC_CLAIMS} + fno backlog get <id> + fno agents peek <holder>"),
-            &if inputs.claims.is_ok() && inputs.claimed_nodes.is_ok() {
+            format!("{SRC_CLAIMS} + fno backlog get <id> + fno agents peek <worker>"),
+            &if inputs.claims.is_ok()
+                && inputs.claimed_nodes.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -893,6 +959,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claimed_nodes.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -904,14 +971,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unheld_progress",
-            format!("graph entries + {SRC_CLAIMS}"),
-            &if inputs.entries.is_some() && inputs.claims.is_ok() {
+            format!("graph entries + {SRC_CLAIMS} + holder_activity"),
+            &if inputs.entries.is_some()
+                && inputs.claims.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(if inputs.entries.is_none() {
                     "graph unreadable".to_string()
                 } else {
-                    inputs.claims.error.clone().unwrap_or_default()
+                    inputs
+                        .claims
+                        .error
+                        .clone()
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default()
                 })
             },
             unheld_rows,
@@ -932,8 +1007,11 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "undriven_pr",
-            SRC_PR_NODES.to_string(),
-            &if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
+            format!("{SRC_PR_NODES} + {SRC_CLAIMS} + holder_activity"),
+            &if inputs.pr_nodes.is_ok()
+                && inputs.claims.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -942,6 +1020,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -967,8 +1046,19 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "stale_claim",
-            SRC_CLAIMS.to_string(),
-            &inputs.claims,
+            format!("{SRC_CLAIMS} + holder_activity"),
+            &if inputs.claims.is_ok() && inputs.holder_activity_error.is_none() {
+                SourceRead::ok(Value::Null)
+            } else {
+                SourceRead::err(
+                    inputs
+                        .claims
+                        .error
+                        .clone()
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default(),
+                )
+            },
             stale_claim_rows,
             true,
             String::new(),

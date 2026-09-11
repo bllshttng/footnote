@@ -631,6 +631,19 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
+    family1_truth_probe_many_checked(handles).unwrap_or_default()
+}
+
+/// [`family1_truth_probe_many`] with the batch's failure made honest: a run
+/// that outlived its bound is `Err` naming the timeout, not an empty map a
+/// caller could misread as "every handle answered nothing". Every other
+/// outcome is `Ok` - a batch that answered (even empty), a Cache/Join flight
+/// that decoded shared bytes, and the one-probe-per-handle fallback after a
+/// double crash (that fallback measured each handle itself, so it is a real
+/// answer by construction).
+pub fn family1_truth_probe_many_checked(
+    handles: &[String],
+) -> Result<std::collections::HashMap<String, TruthProbe>, String> {
     // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
     // put on the wire: the reader would split it into two handles that match
     // no row, and that row would go unanswered on every list, silently and
@@ -641,20 +654,29 @@ pub fn family1_truth_probe_many(
     // actually lives.
     let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
         handles.iter().cloned().partition(|h| !h.contains(','));
-    let mut probes = family1_truth_probe_batchable(&batchable);
+    let (mut probes, timed_out) = family1_truth_probe_batchable(&batchable);
     for handle in unrepresentable {
         if let Some(probe) = family1_truth_probe(&handle) {
             probes.insert(handle, probe);
         }
     }
-    probes
+    if timed_out {
+        return Err(format!(
+            "truth probe: batch of {} handles timed out",
+            batchable.len()
+        ));
+    }
+    Ok(probes)
 }
 
+/// The batchable leg's answer plus whether its run timed out (`false` when the
+/// batch answered, or when the double-crash fallback probed each handle
+/// itself - that fallback is a real measurement, never a timeout).
 fn family1_truth_probe_batchable(
     handles: &[String],
-) -> std::collections::HashMap<String, TruthProbe> {
+) -> (std::collections::HashMap<String, TruthProbe>, bool) {
     match family1_truth_batch_latched(handles) {
-        Some(probes) => probes,
+        Some((probes, timed_out)) => (probes, timed_out),
         None => {
             eprintln!(
                 "WARN: family-1 truth batch of {} handles failed twice; \
@@ -663,10 +685,11 @@ fn family1_truth_probe_batchable(
                  PATH right now (a `uv tool install --reinstall` window).",
                 handles.len()
             );
-            handles
+            let probes = handles
                 .iter()
                 .filter_map(|handle| Some((handle.clone(), family1_truth_probe(handle)?)))
-                .collect()
+                .collect();
+            (probes, false)
         }
     }
 }
@@ -680,9 +703,9 @@ fn family1_truth_probe_batchable(
 /// answer rather than starting a second batch.
 fn family1_truth_batch_latched(
     handles: &[String],
-) -> Option<std::collections::HashMap<String, TruthProbe>> {
+) -> Option<(std::collections::HashMap<String, TruthProbe>, bool)> {
     if handles.is_empty() {
-        return Some(std::collections::HashMap::new());
+        return Some((std::collections::HashMap::new(), false));
     }
     let timeout = family1_truth_batch_timeout(handles.len());
     let key = single_flight::flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
@@ -698,8 +721,11 @@ fn family1_truth_batch_latched(
         shared
     });
     match flight.kind {
-        FlightKind::Spawn | FlightKind::Timeout => own.flatten().map(|a| a.probes),
-        FlightKind::Cache | FlightKind::Join => flight.stdout.as_deref().map(decode_truth_batch),
+        FlightKind::Spawn | FlightKind::Timeout => own.flatten().map(|a| (a.probes, a.timed_out)),
+        FlightKind::Cache | FlightKind::Join => flight
+            .stdout
+            .as_deref()
+            .map(|s| (decode_truth_batch(s), false)),
     }
 }
 
@@ -749,6 +775,7 @@ fn family1_truth_batch_answer(
             probes: std::collections::HashMap::new(),
             stdout: Vec::new(),
             crashed: false,
+            timed_out: false,
         });
     }
     // Warnings name the batch, not a row: no single handle owns the failure.
@@ -772,6 +799,9 @@ struct TruthBatchAttempt {
     /// The child's stdout, kept so a joiner is handed the SAME bytes.
     stdout: Vec<u8>,
     crashed: bool,
+    /// The run outlived its bound and was killed: an empty `probes` here is
+    /// "we never measured", not "they all answered nothing".
+    timed_out: bool,
 }
 
 /// Decode a `--handles` body into per-handle probes.
@@ -807,6 +837,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: true,
+                timed_out: false,
             }
         }
         // A timeout is an ANSWER, not a crash, so it buys no retry - the same
@@ -829,6 +860,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: false,
+                timed_out: true,
             }
         }
         BoundedRun::Output(output) => output,
@@ -842,6 +874,7 @@ fn family1_truth_batch_attempt(
             probes: decode_truth_batch(&output.stdout),
             stdout: output.stdout.clone(),
             crashed: false,
+            timed_out: false,
         },
         // No keyed object and a non-zero exit: the process died before writing
         // one, or this `fno` predates `--handles` and refused the usage. Both
@@ -861,6 +894,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: true,
+                timed_out: false,
             }
         }
         // Exited clean and wrote something that is not a keyed object. A real
@@ -871,6 +905,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: false,
+                timed_out: false,
             }
         }
     }
@@ -1520,6 +1555,44 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn family1_truth_batch_timeout_reads_as_timed_out_not_empty() {
+        // A run that outlives its bound sets `timed_out`, so the checked
+        // caller can return Err instead of printing an empty map as a verdict.
+        // This is the x-db9c defect: the batch timed out, the map was empty,
+        // and every live holder rendered stalled.
+        let attempt = family1_truth_batch_answer(
+            &["h1".to_string()],
+            |_| sh("sleep 5"),
+            Duration::from_millis(100),
+        )
+        .expect("the timeout arm returns an attempt, not a crash");
+        assert!(attempt.timed_out, "a fired bound sets the timed_out flag");
+        assert!(
+            !attempt.crashed,
+            "a timeout is not a crash: it buys no retry"
+        );
+        assert!(attempt.probes.is_empty(), "no per-handle answer exists");
+    }
+
+    #[test]
+    fn family1_truth_batch_keyed_object_reads_as_answered_not_timed_out() {
+        // A batch that wrote a keyed object for every handle is a real
+        // answer: timed_out stays false and every handle gets a probe.
+        let attempt = family1_truth_batch_answer(
+            &["h1".to_string(), "h2".to_string()],
+            |_| {
+                sh(
+                    r#"printf '{"h1":{"state":"working","last_activity_age_s":30},"h2":{"state":"watching","last_activity_age_s":80}}'"#,
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .expect("a keyed object is an attempt");
+        assert!(!attempt.timed_out, "an answered batch is not a timeout");
+        assert_eq!(attempt.probes.len(), 2, "one probe per handle");
     }
 
     #[test]

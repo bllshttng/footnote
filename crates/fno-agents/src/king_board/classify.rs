@@ -165,6 +165,10 @@ pub(crate) fn holder_token(claim: &Value) -> String {
 /// answer. The clock alone is a timer: a 15 minute handover lease expires
 /// under a worker that runs for hours, and the holder probe is the honest
 /// reading. Every board site that asks "is this lock dead?" asks here.
+///
+/// A holder the probe never answered for reads NOT dead: absence of a
+/// measurement is not a measurement of absence, and requeueing on the missing
+/// entry is how a live worker loses its lock to a second dispatch.
 pub(crate) fn claim_is_dead(
     claim: &Value,
     activity: &HashMap<String, crate::truth_probe::TruthProbe>,
@@ -172,7 +176,10 @@ pub(crate) fn claim_is_dead(
     if !DEAD_CLAIM_STATES.contains(&s_str(claim, "state").unwrap_or("")) {
         return false;
     }
-    !holder_is_active(activity.get(&holder_token(claim)))
+    let Some(probe) = activity.get(&holder_token(claim)) else {
+        return false;
+    };
+    !holder_is_active(Some(probe))
 }
 
 /// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
@@ -189,9 +196,10 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
             .unwrap_or(false)
 }
 
-/// Who is driving this node: active, stalled, crowned, or none. One answer,
-/// three queues: stalled_holder selects stalled, undriven_pr and
-/// unheld_progress select none. `crowned` is a live crown driving the epic it
+/// Who is driving this node: active, stalled, crowned, none, or unmeasured.
+/// One answer, three queues: stalled_holder selects stalled, undriven_pr and
+/// unheld_progress select none, and an unmeasured holder belongs to no queue
+/// row. `crowned` is a live crown driving the epic it
 /// reigns over: scope ids reach the build only through a king manifest, and
 /// the session holding that manifest is the one building, so a scope hit is a
 /// live crown. The epic carries no claim of its own (a crown is not a claim),
@@ -208,6 +216,14 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
 /// `expires_at`) it cannot. This ruling is pinned by the three
 /// `*_asks_for_progress_*` tests below; x-caf7 is the failure the obvious
 /// lease-keyed fix would have silenced.
+///
+/// The UNMEASURED arm is the probe's own absence, which is a different thing
+/// from a probe that answered and found nothing: a holder the batch never
+/// measured is neither active nor stalled nor dead, and printing any of those
+/// three words is the timed-out-batch defect x-db9c exists to close. The
+/// board-level answer (the queue reads unreadable when the whole batch fails)
+/// lives in queues.rs; this arm covers the partial answer, where the batch
+/// answered for every holder but this one.
 pub(crate) fn node_driver<'a>(
     node: &Value,
     claim_by_node: &'a HashMap<String, Value>,
@@ -225,13 +241,18 @@ pub(crate) fn node_driver<'a>(
         }
         return ("none", None);
     };
+    // Before the dead check: an unprobed holder is neither dead nor active,
+    // so the dead-state clock must not eat the missing measurement.
+    let Some(probe) = activity.get(&holder_token(claim)) else {
+        return ("unmeasured", Some(claim));
+    };
     if claim_is_dead(claim, activity) {
         if crowned {
             return ("crowned", None);
         }
         return ("none", Some(claim));
     }
-    if holder_is_active(activity.get(&holder_token(claim))) {
+    if holder_is_active(Some(probe)) {
         return ("active", Some(claim));
     }
     ("stalled", Some(claim))
@@ -297,14 +318,18 @@ mod tests {
             node_driver(&leaf, &claims, &activity, Some(&crown)).0,
             "none"
         );
-        // a live claim outranks the crown
+        // a live claim outranks the crown; the probe ANSWERED for its holder
+        // (`unknown`/not-found is the batch's per-handle nothing-shape), so
+        // this is the stalled verdict, never unmeasured
         let mut held = claims.clone();
         held.insert(
             "x-epic".to_string(),
             json!({"key": "node:x-epic", "state": "live", "holder": "claude:h"}),
         );
+        let mut answered = HashMap::new();
+        answered.insert("h".to_string(), probe("unknown", 30.0));
         assert_eq!(
-            node_driver(&epic, &held, &activity, Some(&crown)).0,
+            node_driver(&epic, &held, &answered, Some(&crown)).0,
             "stalled"
         );
     }
@@ -346,15 +371,49 @@ mod tests {
     #[test]
     fn an_expired_lease_with_no_live_holder_is_still_none() {
         // AC2-HP: a genuinely abandoned lock keeps reading dead, so requeue
-        // and reap keep working. Positive marker: the literal string.
+        // and reap keep working. Positive marker: the literal string. The
+        // probe ANSWERED here - state `unknown` with reason `not-found` is the
+        // batch's per-handle shape for a handle that resolves to nothing.
         let node = json!({"id": "x-gone", "priority": "p1"});
         let mut claims = HashMap::new();
         claims.insert(
             "x-gone".to_string(),
             json!({"key": "node:x-gone", "state": "stale", "holder": "spawn-handover:reaped-worker"}),
         );
-        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let mut activity = HashMap::new();
+        activity.insert(
+            "reaped-worker".to_string(),
+            probe("unknown", STALLED_AFTER_S + 1.0),
+        );
         assert_eq!(node_driver(&node, &claims, &activity, None).0, "none");
+    }
+
+    #[test]
+    fn an_unprobed_dead_state_claim_is_not_dead() {
+        // The probe never answered for this holder (batch timed out around
+        // it, or it joined after the flight): the clock alone must not kill
+        // the claim. Absence of a measurement is not a measurement of absence.
+        let claim = json!({
+            "key": "node:x-stale",
+            "state": "stale",
+            "holder": "spawn-handover:t-stale-worker",
+        });
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        assert!(!claim_is_dead(&claim, &activity));
+    }
+
+    #[test]
+    fn a_holder_the_probe_never_answered_reads_unmeasured() {
+        // A claim whose holder has NO probe entry reads unmeasured - neither
+        // active, stalled, nor none - so no queue renders a verdict about a
+        // worker nobody measured.
+        let node = json!({"id": "x-silent", "priority": "p1"});
+        let mut claims = HashMap::new();
+        claims.insert("x-silent".to_string(), handover_claim("x-silent"));
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let (state, claim) = node_driver(&node, &claims, &activity, None);
+        assert_eq!(state, "unmeasured");
+        assert!(claim.is_some());
     }
 
     #[test]
@@ -450,11 +509,14 @@ mod tests {
     fn a_holder_without_progress_evidence_reads_stalled() {
         // Test B: no agent row, no progress evidence. The queued-spawn window
         // has nothing to probe yet, and the rule stays honest about that:
-        // stalled is the answer until transcript evidence exists.
+        // stalled is the answer until transcript evidence exists. The probe
+        // ANSWERED here - `unknown`/`not-found` - so this is the answered-no
+        // shape, not the unmeasured shape the test below pins.
         let node = json!({"id": "x-quiet", "priority": "p1"});
         let mut claims = HashMap::new();
         claims.insert("x-quiet".to_string(), handover_claim("x-quiet"));
-        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let mut activity = HashMap::new();
+        activity.insert("t-x-quiet-worker".to_string(), probe("unknown", 30.0));
         assert_eq!(node_driver(&node, &claims, &activity, None).0, "stalled");
     }
 
