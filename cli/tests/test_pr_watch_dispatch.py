@@ -2458,6 +2458,57 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["outcome"] == "timeout"
         assert ends[0]["phase"] == "sweep"
         assert ends[0]["duration_s"] >= 1.0
+        # x-d211: the env ceiling (1s) is below the sweep cap (150s), so the
+        # wall fired - the why says deadline, never "phase slice spent".
+        assert ends[0]["why"] == "deadline_exceeded"
+
+    def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
+        """x-d211: the bootout's SIGTERM cannot unwind the tick, so the
+        handler writes the end record itself. The why is self_killed exactly
+        when the active-tick marker is set: that marker proves an update was
+        running under this tick, and its bounce is what delivered the signal.
+        The process still dies BY the signal."""
+        import signal as signal_mod
+
+        from fno.pr_watch import cli as prcli
+
+        installed: dict[int, object] = {}
+
+        def _record_signal(sig, handler):
+            installed[sig] = handler
+            return None
+
+        monkeypatch.setattr(prcli.signal, "signal", _record_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(prcli.os, "kill", lambda pid, sig: killed.append(sig))
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: None
+        )
+        handler = installed.get(signal_mod.SIGTERM)
+        assert handler is not None, "tick installed no SIGTERM handler"
+
+        # Marker set: the tick's own sync child did the bounce.
+        monkeypatch.setenv("FNO_PR_WATCH_ACTIVE_TICK", "tick:4242")
+        handler(signal_mod.SIGTERM, None)
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        death = ends[-1]
+        assert death["outcome"] == "error"
+        assert death["why"] == "self_killed"
+        assert death["phase"]
+        rows = [d for t, d in events if t == "control_plane_tick"
+                and d.get("arm") == "pr_watch_merge"]
+        assert rows and "self-killed" in rows[-1]["detail"]
+        assert "started and did not complete" in rows[-1]["detail"]
+        assert rows[-1]["detail"].count("phase=") == 1
+        assert killed == [signal_mod.SIGTERM]
+        assert installed[signal_mod.SIGTERM] == signal_mod.SIG_DFL
+
+        # No marker: an external kill (operator bootout), not a self-kill.
+        monkeypatch.delenv("FNO_PR_WATCH_ACTIVE_TICK", raising=False)
+        handler(signal_mod.SIGTERM, None)
+        death = [d for t, d in events if t == "pr_watch_tick_end"][-1]
+        assert death["why"] == "killed"
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
         """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
@@ -2503,6 +2554,9 @@ class TestTickRecordsAndDeadline:
         assert merge_rows and merge_rows[-1].get("skip_reason") == "timeout"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
+        # x-d211: the 1s cap is below the 30s wall, so this cut is slice
+        # starvation - one arm lost its turn, the tick carried on.
+        assert ends[-1].get("why") == "slice_starved"
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
 

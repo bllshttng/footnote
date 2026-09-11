@@ -97,6 +97,28 @@ def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
 _PR_WATCH_SCHEDULER = "launchd:sh.fno.pr-watcher"
 
 
+def _emit_tick_death(*, why: str, phase: str, duration_s: float, interval_s: int) -> None:
+    """Death record for a tick killed by a signal it cannot unwind from.
+
+    The SIGTERM handler's whole body: the bootout that bounces this job gives
+    the tick no finally, so this is the only record it ever writes. The end
+    record carries the machine-readable `why`; the arm row names the mechanism
+    so the readout says "started and did not complete" instead of blaming a
+    scheduler that was healthy throughout.
+    """
+    if why == "self_killed":
+        reason = ("self-killed: its own post-merge sync ran an update that bounced "
+                  "this job mid-tick")
+    else:
+        reason = "killed by a signal mid-tick"
+    _emit_event("pr_watch_tick_end", {
+        "outcome": "error", "why": why, "duration_s": duration_s,
+        "phase": phase, "pid": os.getpid(),
+    })
+    _emit_tick_row("pr_watch_merge", interval_s=interval_s, skip_reason="error",
+                   detail=f"{reason}; started and did not complete, phase={phase}")
+
+
 def _emit_tick_row(arm: str, *, interval_s: int, acted: int = 0,
                    skip_reason: Optional[str] = None, detail: Optional[str] = None) -> None:
     """One arm row per phase outcome (never raises); rides ``_emit_event`` so
@@ -446,6 +468,8 @@ def tick() -> None:
     sweep_started = False
     alarm_ok = True
     cut: list[str] = []
+    cut_whys: dict[str, str] = {}
+    backstop_fired = False
     phase_s: dict[str, float] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
@@ -458,6 +482,28 @@ def tick() -> None:
             # available, run unbounded like before.
             alarm_ok = False
             log.debug("pr-watch: SIGALRM unavailable outside main thread")
+
+        # x-d211: a bootout kills this process by signal, so without a handler
+        # the tick dies with no record and the readout blames a silent
+        # scheduler. Name what happened: the phase it died in and, when the
+        # active-tick marker is set, that its own sync child's update bounced
+        # the job. Then die BY the signal so launchd still sees a kill.
+        def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
+            signal.signal(signum, signal.SIG_IGN)
+            marker = os.environ.get(_ENV_ACTIVE_TICK)
+            _emit_tick_death(
+                why="self_killed" if marker else "killed",
+                phase=current_tick_phase(),
+                duration_s=round(time.monotonic() - started, 3),
+                interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
+            )
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+        except ValueError:
+            pass
 
         # One alarm per phase (x-c79d): every body runs under its own slice, so
         # a slow phase loses its turn instead of aborting the phases after it.
@@ -474,10 +520,13 @@ def tick() -> None:
                 left = ceiling_box["v"] - (time.monotonic() - started)
             if left is not None and left <= 0:
                 cut.append(name)
+                cut_whys[name] = "deadline_exceeded"
                 phase_s[name] = 0.0
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout", detail="no tick time left")
+                                   skip_reason="timeout",
+                                   detail=f"deadline exceeded before phase {name} "
+                                          f"(no tick time left)")
                 if on_end is not None:
                     on_end(True, 0.0)
                 return False
@@ -491,6 +540,18 @@ def tick() -> None:
             else:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
+            # Which budget fired if the alarm does (x-d211): a cap BELOW the
+            # remaining wall starves one phase while the tick carries on; the
+            # wall itself (uncapped tail phases, or a cap past what's left)
+            # is the tick deadline. Measured classes: deadline 480-487s,
+            # slice 30s/100s. A tick killed by a mid-tick binary rewrite
+            # (183.1s and 440.7s observed) is neither - it never reaches this
+            # runner's except at all; the SIGTERM handler names that one.
+            wall_limited = (
+                ceiling_box["v"] is None
+                or name not in _PHASE_CAP_S
+                or _PHASE_CAP_S[name] >= left
+            )
             slice_s = max(1.0, slice_s)
             body_cut = False
             phase_start = time.monotonic()
@@ -503,10 +564,16 @@ def tick() -> None:
             except TickDeadlineExceeded:
                 body_cut = True
                 cut.append(name)
+                cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
-                                   detail=f"phase slice {int(slice_s)}s spent")
+                                   detail=(
+                                       f"deadline exceeded in phase {name} "
+                                       f"at {int(slice_s)}s"
+                                       if wall_limited else
+                                       f"phase slice {int(slice_s)}s spent"
+                                   ))
             finally:
                 if alarm_ok:
                     try:
@@ -1239,6 +1306,7 @@ def tick() -> None:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.
         timed_out = True
+        backstop_fired = True
         typer.echo(
             f"pr-watch tick: deadline exceeded in phase {current_tick_phase()} - aborted",
             err=True,
@@ -1259,6 +1327,16 @@ def tick() -> None:
             "phase": cut[0] if cut else current_tick_phase(),
             "pid": os.getpid(),
         }
+        # Name which timeout mechanism fired (x-d211): the wall deadline
+        # outranks a spent slice - it is what ended the tick. A pure
+        # slice-starvation tick carries on; its why says which arms lost.
+        if timed_out:
+            if backstop_fired or any(
+                w == "deadline_exceeded" for w in cut_whys.values()
+            ):
+                end_data["why"] = "deadline_exceeded"
+            elif cut:
+                end_data["why"] = "slice_starved"
         if cut:
             end_data["cut"] = list(cut)
         if phase_s:
