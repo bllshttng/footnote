@@ -1,8 +1,10 @@
 # Control Plane Loop: Post-Wedge Architecture
 
-## Scope
+## Is this page for you?
 
-This document covers the stop-hook decision verb (`fno-agents loop-check`) that runs INSIDE a session. For the driver loop that dispatches sessions from outside, see [unified-loop.md](unified-loop.md) (step 5). The target driver is live today. The megawalk and megatron arms were removed.
+You run or debug the stop-hook decision verb (`fno-agents loop-check`): why a session refused to stop, or stopped too early. This document covers the verb that runs INSIDE a session. Misreading it sends you patching session state files that nothing reads. The hook reads the world and holds no state.
+
+Not for: the driver loop that dispatches sessions from outside. See [unified-loop.md](unified-loop.md) (step 5). The target driver is live today. The megawalk and megatron arms were removed.
 
 ## Principle
 

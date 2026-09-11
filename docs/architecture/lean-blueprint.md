@@ -1,5 +1,11 @@
 # Lean Blueprint: Single-Doc Architecture
 
+## Is this page for you?
+
+You design or review the plan format, or you wonder why `/blueprint` edited your design doc instead of creating a plan folder. This page owns the single-doc architecture and its measured redundancy case. Misreading it makes you look for a folder plan that new plans never write.
+
+Not for: how a plan gets executed wave by wave, or how the stop gate reads the world. Execution lives in the execute skill; completion is [control-plane-loop.md](control-plane-loop.md).
+
 ## What it is
 
 `/blueprint` now mutates the upstream design doc in place rather than creating a separate folder plan (a `00-INDEX.md` + N phase files). When a developer runs `/think` and then `/blueprint <doc-path>`, the same markdown file gains execution metadata - waves, file bindings, kill_criteria - appended as new sections without restating the content that already exists. That single file is the canonical artifact for the feature from design through ship. The old folder-plan output is still supported for plans already in flight, but new plans use the single-doc format.
