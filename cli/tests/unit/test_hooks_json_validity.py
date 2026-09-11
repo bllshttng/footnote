@@ -500,17 +500,21 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
 
 
 def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> None:
-    """The unbounded-generator refusal must fire on BOTH Bash lanes.
+    """The complete shared Bash guard chain must fire on BOTH lanes.
 
-    A concurrent branch rewriting either manifest can drop this registration
-    and still merge clean, so the assertion names both commands rather than
+    A concurrent branch rewriting either manifest can drop a registration
+    and still merge clean, so the assertion names every command rather than
     counting hooks. Order matters too: git-protection.py runs first, so a
     refusal it already owns is never re-decided here.
     """
-    guard = "hooks/bg-process-guard.py"
-    truncation_guard = "hooks/truncation-guard.py"
-    assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
-    assert (REPO_ROOT / truncation_guard).is_file(), f"guard missing at {truncation_guard}"
+    guards = [
+        "hooks/git-protection.py",
+        "hooks/bg-process-guard.py",
+        "hooks/truncation-guard.py",
+        "hooks/recursive-grep-guard.py",
+    ]
+    for guard in guards:
+        assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
 
     for path, root_var, matcher in (
         (HOOKS_JSON, "CLAUDE_PLUGIN_ROOT", "Bash"),
@@ -530,11 +534,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        expected = [
-            f"python3 ${{{root_var}}}/hooks/git-protection.py",
-            f"python3 ${{{root_var}}}/{guard}",
-            f"python3 ${{{root_var}}}/{truncation_guard}",
-        ]
+        expected = [f"python3 ${{{root_var}}}/{guard}" for guard in guards]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )
