@@ -86,6 +86,24 @@ def _sandbox() -> Path:
     return _SANDBOX
 
 
+_RUN_TMPDIR: Optional[Path] = None
+
+
+def _run_tmpdir() -> Path:
+    """One short throwaway TMPDIR per `fno doctor test` process, reaped at exit.
+
+    Test scratch (pytest basetemp, mktemp -d, config fixtures) lands here
+    instead of leaking into the shared temp dir. The path stays short because
+    macOS caps unix socket paths near 104 bytes and long roots under a deep
+    TMPDIR break the mux tests.
+    """
+    global _RUN_TMPDIR
+    if _RUN_TMPDIR is None:
+        _RUN_TMPDIR = Path(tempfile.mkdtemp(prefix="fno-t-"))
+        atexit.register(shutil.rmtree, str(_RUN_TMPDIR), True)
+    return _RUN_TMPDIR
+
+
 def _poison_fixtures(root: Path) -> Path:
     return root / "cli" / "tests" / "fixtures" / "ambient-poison"
 
@@ -336,6 +354,14 @@ def _child_env(root: Path) -> dict:
     # target/ (final binaries still land there). Set AFTER neutralise, which
     # scrubs a developer's own value as ambient state.
     env["CARGO_BUILD_BUILD_DIR"] = cargo_build_dir_value()
+    # Per-run TMPDIR, reaped at exit. The dir also joins the config-search
+    # ceiling for the same reason the inherited TMPDIR was there: a fixture a
+    # test wrote under TMPDIR has to stay findable.
+    tmpdir = _run_tmpdir()
+    env["TMPDIR"] = str(tmpdir)
+    env["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(
+        [env["FNO_CONFIG_SEARCH_ROOT"], str(tmpdir)]
+    )
     return env
 
 
