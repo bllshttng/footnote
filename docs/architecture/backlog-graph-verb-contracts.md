@@ -279,7 +279,7 @@ Refuses to guess: 0 moved, or a warning that the node is already in the working 
 
 Reverse a supersede on ``node_id``. Idempotent in the safe direction.
 
-Clears ``superseded_by`` and removes ``node_id`` from the replacer's ``supersedes`` list; any ``deferred_at`` park the node carried before the supersession survives, so the status recomputes back to ``deferred`` after the reversal. The plan doc is forced off terminal ``superseded`` (the forward-only projector will not leave a terminal on its own).
+Clears ``superseded_by`` and removes ``node_id`` from the replacer's ``supersedes`` list; any ``deferred_at`` park the node carried before the supersession survives, so the status recomputes back to ``deferred`` after the reversal. The plan doc is forced off terminal ``superseded`` (the forward-only projector will not leave a terminal on its own). The verb prints the reason it clears and any plan ruling against the node.
 
 A node that is merely deferred (no ``superseded_by``) is left untouched: reactivating parked work is ``undefer``'s job, and clearing a deferral here would silently make deferred work dispatchable.
 

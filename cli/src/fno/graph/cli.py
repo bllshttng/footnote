@@ -7466,20 +7466,29 @@ def cmd_undefer(
     Atomic across the batch: if any ID is unknown, none are cleared.
     Reports each ID's prior state; warns (non-fatally) for IDs that were
     not actually deferred. Each node that WAS deferred gets its own
-    streak-reset event.
+    streak-reset event. The verb prints the reason it clears and any plan
+    ruling against the node.
     """
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
     ids = _expand_valid_ids(task_ids)
 
-    was_deferred: list[tuple[str, bool]] = []
+    was_deferred: list[tuple[str, bool, str | None, str | None, str | None]] = []
 
     def mutator(entries):
         _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
-            was_deferred.append((tid, bool(node.get("deferred_at"))))
+            was_deferred.append(
+                (
+                    tid,
+                    bool(node.get("deferred_at")),
+                    node.get("deferred_kind"),
+                    node.get("deferred_reason"),
+                    node.get("cwd"),
+                )
+            )
             node["deferred_at"] = None
             node["deferred_reason"] = None
             node.pop("deferred_kind", None)
@@ -7487,7 +7496,10 @@ def cmd_undefer(
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    for tid, did in was_deferred:
+    from fno.paths import plans_content_dir
+    from fno.plan.rulings import plan_rulings, ruling_lines
+
+    for tid, did, kind, reason, cwd in was_deferred:
         if did:
             # Mark a streak-reset boundary so the failed-node cascade (#34) gives a
             # human-recovered node a clean slate: it needs N FRESH consecutive
@@ -7499,6 +7511,20 @@ def cmd_undefer(
             from fno.graph.failure import emit_undefer_boundary
 
             emit_undefer_boundary(tid)
+            if reason:
+                typer.echo(
+                    f"undefer: cleared the deferral of {tid} ({kind or 'no kind'}): {reason}",
+                    err=True,
+                )
+            # A plan ruling against this node is the judgment the park enforced.
+            # Whoever lifts the park reads it here, before the node dispatches.
+            # plans_content_dir resolves per node cwd, so a foreign project's
+            # .claude plansDirectory override holds.
+            rulings = plan_rulings(
+                tid, plans_content_dir(Path(cwd)) if cwd else plans_content_dir()
+            )
+            for line in ruling_lines(rulings, "undefer", tid):
+                typer.echo(line, err=True)
         else:
             typer.echo(f"warning: {tid} was not deferred", err=True)
         typer.echo(f"Undeferred {tid}")
@@ -12498,6 +12524,8 @@ def cmd_unsupersede(
 
     was_superseded_holder: list[bool] = [False]
     canonical_id_box: list[str] = [node_id]
+    supersession_box: list[dict | None] = [None]
+    replacer_box: list[str | None] = [None]
 
     def mutator(entries):
         node = _find_node(entries, node_id)
@@ -12507,6 +12535,11 @@ def cmd_unsupersede(
         replacer = node.get("superseded_by")
         was_superseded_holder[0] = bool(replacer)
         canonical_id_box[0] = node.get("id", node_id)
+        # Captured before the clear: the cause and replacer are exactly what
+        # this verb erases, so they are what it prints.
+        raw_supersession = node.get("supersession")
+        supersession_box[0] = dict(raw_supersession) if isinstance(raw_supersession, dict) else None
+        replacer_box[0] = str(replacer) if replacer else None
         if not replacer:
             # Not superseded: nothing to reverse. Return WITHOUT touching
             # deferred_at, so a node that is merely deferred (not superseded)
@@ -12538,6 +12571,18 @@ def cmd_unsupersede(
         from fno.graph.failure import emit_undefer_boundary
 
         emit_undefer_boundary(canonical_id_box[0])
+        session = supersession_box[0] or {}
+        typer.echo(
+            f"unsupersede: cleared the supersession of {canonical_id_box[0]} "
+            f"by {replacer_box[0]}: {session.get('cause') or ''}",
+            err=True,
+        )
+        from fno.paths import plans_content_dir
+        from fno.plan.rulings import plan_rulings, ruling_lines
+
+        rulings = plan_rulings(canonical_id_box[0], plans_content_dir())
+        for line in ruling_lines(rulings, "unsupersede", canonical_id_box[0]):
+            typer.echo(line, err=True)
     typer.echo(f"Unsuperseded {node_id}")
     # Force the revived node's plan status off terminal `superseded` (the
     # forward-only projector refuses to leave a terminal): without this the
