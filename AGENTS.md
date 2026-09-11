@@ -200,7 +200,7 @@ Query `graphify-out/graph.json` before source reads. `/graphify` loads the skill
 
 ## Deep-dive docs
 
-Everything the body already links is reachable from the paragraph that explains it. These are the docs nothing above points at:
+The docs nothing above already points at:
 
 Backlog: [usage](docs/backlog-usage.md), [board ordering](docs/architecture/backlog-board-ordering.md), [triage](docs/backlog-triage.md)
 
@@ -210,4 +210,4 @@ Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan co
 
 Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
 
-Platform & ops: [fleet FAQ](docs/fleet-faq.md), [reaping FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md)
+Platform & ops: [fleet FAQ](docs/fleet-faq.md), [reaping FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md), [graph search](docs/graph-search.md)
