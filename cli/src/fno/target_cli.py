@@ -20,6 +20,7 @@ init script owns the owner_cwd worktree binding and all state.
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import io
 import json
 import os
@@ -34,9 +35,22 @@ from typing import Any, Callable, Optional, Tuple
 
 import typer
 
-from fno._subprocess_util import propagate_returncode
+from fno._subprocess_util import propagate_returncode, run_bounded
 from fno.paths import resolve_plugin_script
 from fno.tombstones import tombstone_group_cls
+
+# The Claude Bash tool caps a single call at 600s, so a worker running `start`
+# always gets the verb's own exit rather than a harness timeout underneath it.
+# 540s also sits well below the 10+ minute stalls this bound exists to catch,
+# and about 100x the ~4.5s measured pre-ensure graph read.
+_START_DEADLINE_S = 540
+# A stage's own process group must die before the watchdog would _exit over a
+# live child, so each stage gets the remaining budget minus this grace.
+_STAGE_GRACE_S = 15
+
+
+def _stage_timeout(deadline: float) -> float:
+    return max(1.0, deadline - time.monotonic() - _STAGE_GRACE_S)
 
 
 target_app = typer.Typer(
@@ -3349,7 +3363,45 @@ def start(
     HEAD) -> link shared non-fno state -> ``fno do target init`` (writes the
     manifest into the worktree's space slice, claims the node exactly once) -> receipt.
     Run from INSIDE a valid worktree it is a no-op.
+
+    Bounded end-to-end at ``_START_DEADLINE_S``: a ``faulthandler`` watchdog
+    arms around the whole body and dumps the in-process stack (naming the
+    stalled frame) if nothing returns in time; each subprocess stage is
+    separately bounded by ``run_bounded`` so a stalled stage cannot itself
+    outlive that same deadline.
     """
+    deadline = time.monotonic() + _START_DEADLINE_S
+    faulthandler.dump_traceback_later(_START_DEADLINE_S, exit=True, file=sys.__stderr__)
+    try:
+        _start_body(
+            node,
+            plan_path=plan_path,
+            size=size,
+            model=model,
+            harness=harness,
+            _provider_tombstone=_provider_tombstone,
+            beastmode=beastmode,
+            no_merge=no_merge,
+            deliverables=deliverables,
+            deadline=deadline,
+        )
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _start_body(
+    node: str,
+    *,
+    plan_path: Optional[str],
+    size: Optional[str],
+    model: Optional[str],
+    harness: Optional[str],
+    _provider_tombstone: Optional[str],
+    beastmode: bool,
+    no_merge: bool,
+    deliverables: Optional[int],
+    deadline: float,
+) -> None:
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
@@ -3473,7 +3525,17 @@ def start(
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:
         ensure_cmd += ["--harness", ambient_harness]
-    ens = subprocess.run(ensure_cmd, capture_output=True, text=True)
+    _ensure_started = time.monotonic()
+    try:
+        ens = run_bounded(ensure_cmd, timeout=_stage_timeout(deadline), capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            f"fno do target start: step: ensure exceeded the {_START_DEADLINE_S}s "
+            f"start bound after {time.monotonic() - _ensure_started:.0f}s; its "
+            f"process group was killed. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=124)
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
@@ -3651,7 +3713,19 @@ def start(
         init_cmd += ["--beastmode"]
     if deliverables is not None:
         init_cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(init_cmd, cwd=str(wt_path))
+    _init_started = time.monotonic()
+    try:
+        init = run_bounded(init_cmd, timeout=_stage_timeout(deadline), cwd=str(wt_path))
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            f"fno do target start: step: init exceeded the {_START_DEADLINE_S}s "
+            f"start bound after {time.monotonic() - _init_started:.0f}s; its "
+            f"process group was killed. Claim state is unknown: check "
+            f"fno agents claim status node:{node}. A rerun of "
+            f"fno do target start {node} resumes idempotently.",
+            err=True,
+        )
+        raise typer.Exit(code=124)
     if init.returncode != 0:
         if created_this_run and not in_place:
             # One receipt line the run currently lacks: the refused init
