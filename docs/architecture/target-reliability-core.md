@@ -85,6 +85,8 @@ The LLM cannot author BLOCKED directly; the stop hook reverts any forged
 attempt. Touching `.target-cancelled` is the supported way to request a
 BLOCKED transition.
 
+A cancelled run also settles its own claim: `finalize` releases the run's `node:<id>` claim with `--stamp-do` at the `Interrupted` terminal. The release fills `ended_at` on the `do` row the session opened. The node then returns to `ready`. A worker that died without reaching any terminal has a different repair. `fno backlog requeue` returns the node to the queue and settles the open rows.
+
 ### Override
 
 `--skip-preflight` bypasses the check chain for the rare case where the
