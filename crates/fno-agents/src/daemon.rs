@@ -9231,6 +9231,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_cascades_claude_before_removing_the_registry_row() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmclaude");
         let row = claude_rm_row(
             "stopped-worker",
@@ -9268,6 +9271,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmcrownstate");
         let project = home.root().join("project");
         let manifest = project.join(".fno/kings/alpha.md");
@@ -9308,6 +9314,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_never_deletes_a_successors_re_armed_manifest() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // The vacated row is removed with a manifest on disk naming a
         // DIFFERENT session: a successor crowned over the scope after this
         // row went terminal re-armed it. Deleting that file would disarm the
@@ -9554,6 +9563,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_removes_a_row_the_registry_actually_holds() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AC1-HP: a plain removal reports removed:true and a re-read shows
         // zero rows for the name.
         let home = short_home("rmhappy");
@@ -9799,6 +9811,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmeventoversize");
         let row = claude_rm_row(
             "stopped-worker",
@@ -9835,6 +9850,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_falls_back_to_the_session_uuid_prefix() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmfallback");
         let row = claude_rm_row("stopped-worker", "", "cccc3333-1111-2222-3333-444444444444");
         state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
@@ -9864,6 +9882,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_accepts_terminal_claude_rows_that_remain_in_the_roster() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for (index, state) in ["done", "stopped", "failed"].into_iter().enumerate() {
             let home = short_home(&format!("rmterminal{state}"));
             let short_id = format!("dead{index:04}");
@@ -9944,6 +9965,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_unknown_claude_list_cascades_but_reports_unverified() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmunverified");
         let row = claude_rm_row(
             "stopped-worker",
@@ -9980,6 +10004,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_removes_a_stored_live_row_provably_gone_from_the_roster() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // AC2-HP (false-refusal mode): a row torn down by hand with `claude
         // stop`/`claude rm` never gets AgentStatus::Live written back. The
         // live gate must reconcile with the roster, not the stored enum.
@@ -10227,6 +10254,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_kills_a_mux_pane_before_removing_its_registry_row() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmpane");
         let mut row = ask_row("pane-worker", Some("2020-01-01T00:00:00Z"));
         row.harness = Some("gemini".into());
@@ -10264,6 +10294,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_clears_a_stale_registry_row_after_the_mux_pane_is_already_absent() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = short_home("rmmissingpane");
         let mut row = ask_row("stale-pane-worker", Some("2020-01-01T00:00:00Z"));
         row.harness = Some("gemini".into());
@@ -10300,6 +10333,9 @@ mod tests {
 
     #[tokio::test]
     async fn rm_clears_a_stored_live_pane_row_whose_pane_is_provably_absent() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // The fleet-reap deadlock: the row still reads live while the pane it
         // names is gone. The gate must test the referent, so the probe's
         // Absent verdict clears the row without --force.

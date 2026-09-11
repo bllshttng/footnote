@@ -80,6 +80,9 @@ async fn rm_absence_is_not_proof_on_a_warning_carrying_list() {
 /// it, and the refused cleanup tombstones its request.
 #[tokio::test]
 async fn rm_accepts_a_dead_pid_as_provably_gone() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let home = short_home("rmdeadpid");
     let mut row = claude_rm_row(
         "finished-worker",
@@ -177,6 +180,9 @@ async fn rm_refuses_a_blocked_claude_row_through_the_live_gate() {
 /// for input forever, and force is the documented way out.
 #[tokio::test]
 async fn rm_force_removes_a_blocked_claude_row() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let home = short_home("rmblockedforce");
     let mut row = claude_rm_row(
         "blocked-worker",
