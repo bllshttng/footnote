@@ -210,6 +210,55 @@ else
   fail "acquire: head not recorded ($(cat "$RECORDED"))"
 fi
 
+echo "-- x-b5f6: a PR-number target keys the PR, never the cwd branch --"
+run_hook acquire "$(skill_call "fno:review" "" "high --comment 1713")"
+if grep -q -- "review-hold acquire 1713" "$RECORDED" \
+  && grep -q -- "--holder review-session:sess-1" "$RECORDED"; then
+  pass "PR target: acquire named the PR"
+else
+  fail "PR target: wrong acquire ($(cat "$RECORDED"))"
+fi
+if grep -q -- "--branch" "$RECORDED"; then
+  fail "PR target: a --branch was guessed ($(cat "$RECORDED"))"
+else
+  pass "PR target: no --branch to guess from"
+fi
+if grep -q 'review_invocation' "$EVENTS" && ! grep -q 'head_sha' "$EVENTS" \
+  && ! grep -q '"branch"' "$EVENTS"; then
+  pass "PR target: started row omits the unresolved head and branch"
+else
+  fail "PR target: started row carried cwd fields ($(cat "$EVENTS"))"
+fi
+
+echo "-- a PR target from the protected branch still holds its PR --"
+git -C "$WORK" checkout -q main 2>/dev/null || git -C "$WORK" checkout -q master
+run_hook acquire "$(skill_call "fno:review" "" "high --comment 1713")"
+if grep -q -- "review-hold acquire 1713" "$RECORDED"; then
+  pass "PR target from main: still acquires"
+else
+  fail "PR target from main: no acquire ($(cat "$RECORDED"))"
+fi
+git -C "$WORK" checkout -q feature/x-a089
+
+echo "-- a branch target keys the named branch at that ref's sha --"
+git -C "$WORK" branch -q feature/other feature/x-a089 2>/dev/null
+run_hook acquire "$(skill_call "fno:review" "" "high feature/other")"
+other_sha="$(git -C "$WORK" rev-parse feature/other)"
+if grep -q -- "--branch feature/other" "$RECORDED" \
+  && grep -q -- "--head $other_sha" "$RECORDED"; then
+  pass "branch target: keyed feature/other at its sha"
+else
+  fail "branch target: wrong key ($(cat "$RECORDED"))"
+fi
+
+echo "-- no target keeps today's cwd shape --"
+run_hook acquire "$(skill_call "code-review")"
+if grep -q -- "--branch feature/x-a089" "$RECORDED"; then
+  pass "no target: keys the cwd branch as before"
+else
+  fail "no target: cwd branch not keyed ($(cat "$RECORDED"))"
+fi
+
 echo "-- an unknown action does nothing --"
 run_hook frobnicate "$(skill_call "code-review")"
 expect_silent "action=frobnicate"
