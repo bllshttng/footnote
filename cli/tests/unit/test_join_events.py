@@ -70,7 +70,7 @@ def test_join_emits_one_dispatched_event_carrying_the_brief_inputs(
     assert row["requested"] == 3
     assert row["spawned"] == receipt["spawned"]
     assert len(row["spawned"]) == 2
-    assert row["lead"] == receipt["lead"] == "j-x-8d1d-1"
+    assert row["lead"] == receipt["lead"] == "jn-t-x-8d1d-1"
     assert row["bands"] == {name: "" for name in row["spawned"]}
 
 

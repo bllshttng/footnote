@@ -19,6 +19,7 @@ _NON_STATE_CACHE_REASONS = {
     ("fno.agents.mux_spawn", "_codex_cli_version"): "cache key is tool version discovery, not fno state",
     ("fno.agents.harness_map", "_shipped_verbs"): "cache key is the shipped plugin surface, not fno state",
     ("fno.agents.harness_map", "_carrier_vocab"): "cache key is the shipped package-data table, not fno state",
+    ("fno.agents.naming", "_codes"): "cache key is the shipped package-data table (naming-codes.yaml), not fno state",
     ("fno.config._loader", "_load_settings_at"): "cache key is the full declaration plus a stat fingerprint of the settings candidates (_settings_key), which carries the state root and the file contents",
 }
 

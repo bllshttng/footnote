@@ -90,6 +90,7 @@ cli.add_typer(_capture_cli, name="capture", hidden=True)
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
 from fno.backlog.batch import cli as _batch_cli  # noqa: E402
+from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source  # noqa: E402
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
@@ -8792,17 +8793,6 @@ def cmd_reopen(
     for nid in [canonical_id_box[0], *cascade_out]:
         _project_plans_from_graph([nid], force_status_off_terminal_for=nid)
     locked_mutate_graph(_graph_path(), lambda entries: entries)
-
-
-def _refuse_unknown_source(verb_name: str, source: Optional[str]) -> None:
-    """x-84b2: an unknown --source refuses at the door (exit 2), never
-    defaults - fabricating provenance is what the vocabulary stops."""
-    from fno.agents.naming import dispatch_sources
-
-    if source is not None and source not in dispatch_sources():
-        known = ", ".join(sorted(dispatch_sources()))
-        typer.echo(f"{verb_name}: unknown --source {source!r}; known: {known}", err=True)
-        raise typer.Exit(code=2)
 
 
 @cli.command("advance", hidden=True)

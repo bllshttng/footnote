@@ -423,7 +423,7 @@ def pr_node_ids(pr: int, slug: Optional[str]) -> list[str]:
     return scan_pr_nodes(rows, pr, slug)
 
 
-def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
+def rows_for_cleanup(worktree: Optional[str], node_ids, *, runner=None) -> list[str]:
     """Row names whose cwd IS the merged worktree or whose name targets one
     of the closed nodes (``target-<node>-*``). Best-effort: any failure
     reads as no candidates (the daemon's registry scan is the second net).

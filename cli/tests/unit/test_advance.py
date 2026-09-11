@@ -132,6 +132,20 @@ NODE = {
 # ---------------------------------------------------------------------------
 
 
+def test_refuse_unknown_source_lives_in_advance():
+    """The --source door check sits beside the mint (one naming importer
+    edge); graph/cli delegates instead of importing the runtime itself."""
+    from typer import Exit
+
+    from fno.backlog.advance import refuse_unknown_source
+
+    refuse_unknown_source("advance", None)  # unset passes
+    refuse_unknown_source("advance", "ab")  # a known code passes
+    with pytest.raises(Exit) as exc:
+        refuse_unknown_source("advance", "zz")
+    assert exc.value.exit_code == 2
+
+
 def test_disabled_dispatches_nothing(iso, monkeypatch):
     """AC2-HP: disabled -> advance_skipped{disabled}, no spawn."""
     monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")

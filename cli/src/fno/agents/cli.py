@@ -2647,8 +2647,8 @@ NAME_REFUSED_EXIT = 3
 
 @agents_app.command("name", hidden=True)
 def cmd_name(
-    prefix: str = typer.Argument("", help="Legacy operation prefix (target|think|...); omit with --verb."),
-    node_id: str = typer.Argument(..., help="Full backlog node id; never abbreviated."),
+    prefix: Optional[str] = typer.Argument(None, help="Legacy operation prefix (target|think|...); omit with --verb."),
+    node_id: Optional[str] = typer.Argument(None, help="Full backlog node id; never abbreviated."),
     slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
     qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
     discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
@@ -2663,9 +2663,18 @@ def cmd_name(
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
+    # One positional binds to PREFIX by Click's left-to-right rule, which would
+    # force every dispatch-form caller to pass an explicit empty string. Accept
+    # the one-positional form as the node instead: the bridge is mechanical, so
+    # the shape a scripter naturally writes is the shape that must work.
+    if node_id is None:
+        prefix, node_id = None, prefix
+    if not node_id:
+        typer.echo("error: a node id is required: fno agents name [prefix] <node-id>", err=True)
+        raise typer.Exit(2)
     try:
         name = bridge_name(
-            prefix,
+            prefix or "",
             node_id,
             slug=slug or None,
             qualifier=qualifier or None,

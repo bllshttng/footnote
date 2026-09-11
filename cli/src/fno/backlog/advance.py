@@ -1141,6 +1141,19 @@ def _node_effective_verb(node: dict) -> Optional[str]:
     return verb
 
 
+def refuse_unknown_source(verb_name: str, source):
+    """x-84b2: an unknown --source refuses at the door (exit 2), never
+    defaults - fabricating provenance is what the vocabulary stops. Lives
+    beside the mint so the source table has one importer edge."""
+    import typer
+    from fno.agents.naming import dispatch_sources
+
+    if source is not None and source not in dispatch_sources():
+        known = ", ".join(sorted(dispatch_sources()))
+        typer.echo(f"{verb_name}: unknown --source {source!r}; known: {known}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _worker_agent_name(
     node_id: str,
     node_slug: Optional[str],

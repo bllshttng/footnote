@@ -232,6 +232,16 @@ def test_bridge_dispatch_form_prints_the_canonical_name():
     assert manual.stdout.strip() == "t-x-84b2"
 
 
+def test_bridge_single_positional_binds_the_node():
+    """One positional is the node: Click would bind it to the legacy prefix
+    slot and strand every natural dispatch-form caller on a usage error."""
+    res = _run_name("x-84b2", "--source", "kl", "--verb", "th", "--slug", "walk")
+    assert res.exit_code == 0
+    assert res.stdout.strip() == "kl-th-x-84b2-walk"
+    bare = _run_name("x-84b2")
+    assert bare.exit_code == 2  # a node alone is a usage error: no default verb
+
+
 def test_bridge_dispatch_form_refusals():
     assert _run_name("", "x-1", "--source", "ab").exit_code == 2  # --source needs --verb
     assert _run_name("legacy", "x-1", "--verb", "t").exit_code == 2  # not both forms
