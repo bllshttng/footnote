@@ -1981,7 +1981,27 @@ def probe_capacity() -> dict:
             "every dispatch lane at cap: " + ", ".join(full),
             lanes=lanes,
         )
-    return {"verdict": "accepted", "lanes": lanes}
+    # The same readings the refusal paths name, so an accepted verdict carries
+    # the headroom that admitted it: a trigger value is only actionable beside
+    # its reading.
+    accepted: dict[str, object] = {
+        "verdict": "accepted",
+        "lanes": lanes,
+        "live_workers": c.slot_count,
+        "max_live": cap,
+        "share_low": admission.share_low,
+        "ceiling": admission.ceiling,
+        "load_15m": admission.load_15m,
+    }
+    if floor_gb > 0:
+        accepted["min_free_gb"] = floor_gb
+        avail = available_ram_gb()
+        if avail is not None:
+            accepted["available_ram_gb"] = avail
+    from fno.doctor_footprint import _admission_config
+
+    accepted["hard_max_load_per_cpu"] = _admission_config()[1]
+    return accepted
 
 
 # ---------------------------------------------------------------------------

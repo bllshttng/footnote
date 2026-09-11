@@ -11,7 +11,9 @@ from __future__ import annotations
 import enum
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -964,6 +966,18 @@ from fno.agents.spawn_lineage import (  # noqa: E402
     _stamp_spawned_session_row,
 )
 
+_WAIT_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smh]?)$", re.IGNORECASE)
+
+
+def _parse_wait_seconds(raw: str) -> float:
+    """``--wait`` duration: seconds by default, s/m/h suffixes. Raises ValueError."""
+    match = _WAIT_DURATION_RE.fullmatch(raw.strip())
+    if not match:
+        raise ValueError(raw)
+    return float(match.group(1)) * {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}[
+        match.group(2).lower()
+    ]
+
 
 @agents_app.command("spawn")
 def cmd_spawn(
@@ -1376,6 +1390,18 @@ def cmd_spawn(
         False,
         "--no-wait",
         help=("Fail immediately when max_live is reached instead of queueing for a free slot."),
+    ),
+    wait: str | None = typer.Option(
+        None,
+        "--wait",
+        help=(
+            "Retry a REFUSED gate axis for up to this long (5m, 90s, 1h): "
+            "load_backstop, ram_floor, cpu_instrument_unreadable, "
+            "cpu_share_undecidable, fleet_cpu_share, provider_cap, max_live. "
+            "Any other reason still exits at once with its receipt; the retry "
+            "keys on the receipt's reason field, never on its text. Mutually "
+            "exclusive with --no-wait."
+        ),
     ),
     prompt_file: str | None = typer.Option(
         None,
@@ -2130,24 +2156,77 @@ def cmd_spawn(
     # so those normally gate in Rust; the Rust pane arm re-execs back here) —
     # exactly one gate evaluation per spawn (LD1). `--once` is the
     # pre-substrate spelling of a headless one-shot, so it gates as headless.
+    # --wait loops HERE, in the CLI, not in the gate: the gate core has a Rust
+    # twin under a parity harness, and a retry wrapper touches neither.
+    if wait is not None and no_wait:
+        print("error: --wait and --no-wait are mutually exclusive", file=sys.stderr)
+        raise typer.Exit(code=2)
+    wait_seconds = 0.0
+    if wait is not None:
+        try:
+            wait_seconds = _parse_wait_seconds(wait)
+        except ValueError:
+            print(
+                f"error: --wait wants a positive duration like 5m, 90s or 1h (got {wait!r})",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if wait_seconds <= 0:
+            print(
+                f"error: --wait wants a positive duration (got {wait!r})", file=sys.stderr
+            )
+            raise typer.Exit(code=2)
+
     from fno.agents.spawn_gate import GateRefused, run_gate
 
-    try:
-        gate = run_gate(
-            name,
-            "headless" if (once or substrate == "headless") else substrate,
-            force=force,
-            no_wait=no_wait,
-            route_provider=route_provider,
-        )
-    except GateRefused as exc:
-        _release_dispatch_claims(node_reservation, node_claim)
-        if exc.receipt is not None:
-            print(json.dumps(exc.receipt))
-        raise
-    except BaseException:
-        _release_dispatch_claims(node_reservation, node_claim)
-        raise
+    # The reasons a --wait may outlast. Anything else (a policy or config
+    # refusal) exits at once: waiting out a verdict the gate will not revisit
+    # is a hang wearing a retry's clothes.
+    waitable_reasons = frozenset(
+        {
+            "load_backstop",
+            "ram_floor",
+            "cpu_instrument_unreadable",
+            "cpu_share_undecidable",
+            "fleet_cpu_share",
+            "provider_cap",
+            "max_live",
+        }
+    )
+    wait_deadline = time.monotonic() + wait_seconds if wait is not None else None
+    last_wait_note = 0.0
+    while True:
+        try:
+            gate = run_gate(
+                name,
+                "headless" if (once or substrate == "headless") else substrate,
+                force=force,
+                no_wait=no_wait,
+                route_provider=route_provider,
+            )
+            break
+        except GateRefused as exc:
+            reason = (
+                exc.receipt.get("reason")
+                if isinstance(exc.receipt, dict)
+                else None
+            )
+            now = time.monotonic()
+            if wait_deadline is None or reason not in waitable_reasons or now >= wait_deadline:
+                _release_dispatch_claims(node_reservation, node_claim)
+                if exc.receipt is not None:
+                    print(json.dumps(exc.receipt))
+                raise
+            if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
+                sys.stderr.write(
+                    f"spawn-gate: {reason}; --wait retries for "
+                    f"{int(wait_deadline - now)}s more\n"
+                )
+                last_wait_note = now
+            time.sleep(min(10.0, wait_deadline - now))
+        except BaseException:
+            _release_dispatch_claims(node_reservation, node_claim)
+            raise
 
     # Prior values of the provenance keys the bg/headless arm exports below, so
     # the finally can put the process env back.

@@ -6,7 +6,7 @@ import json
 from fno.agents.cli import agents_app
 
 
-@agents_app.command("gate-status", hidden=True)
+@agents_app.command("gate-status")
 def cmd_gate_status() -> None:
     """Print the spawn gate's read-only capacity verdict as JSON."""
     from fno.agents.spawn_gate import probe_capacity
