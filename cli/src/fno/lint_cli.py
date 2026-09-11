@@ -1083,14 +1083,17 @@ def style(
         "in place. Residue exits 1.",
     ),
 ) -> None:
-    """Check text against the seven style rules in docs/style-rules.md.
+    """Check text against the eight style rules in docs/style-rules.md.
 
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
     sentence. A paragraph is one physical line, so a newline starts the next
-    block. Code, paths, flags, and quoted output do not count.
-    Mail prose is capped at 80 masked words. Other surfaces do not use this cap.
+    block. No filler or pleasantries: "please", "thanks", "basically", and the
+    phrases "thank you", "of course", "happy to", "feel free". Code, paths,
+    flags, and quoted output do not count.
+    Mail and encounter prose also carry an 80 masked-word cap. Other surfaces
+    do not use this cap.
 
     With --fix the mechanical rules are rewritten through the same path the
     check reads; unfixable residue exits 1.
