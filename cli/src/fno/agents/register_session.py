@@ -583,30 +583,17 @@ def _report_observation(
 
 
 def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
-    """x-dead task 0.1: the worker stamps the cwd it actually runs in.
-
-    Fail-soft by contract: any failure emits ``session_cwd_heal_failed`` and
-    never blocks session start.
-    """
+    """x-dead task 0.1: the worker stamps the cwd it actually runs in."""
     from fno.agents.registry import heal_own_cwd
 
     try:
         moved = heal_own_cwd(name=agent_self, harness=harness, cwd=cwd)
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
-        events.emit(
-            "session_cwd_heal_failed",
-            provider=harness,
-            name=agent_self,
-            error=str(exc),
-        )
+        events.emit("session_cwd_heal_failed", provider=harness, name=agent_self, error=str(exc))
         return
     if moved is not None:
         events.emit(
-            "session_cwd_healed",
-            provider=harness,
-            name=agent_self,
-            old=moved[0],
-            new=moved[1],
+            "session_cwd_healed", provider=harness, name=agent_self, old=moved[0], new=moved[1]
         )
 
 

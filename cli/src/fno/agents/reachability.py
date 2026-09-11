@@ -1,92 +1,12 @@
 """One reachability derivation with a declared basis, behind every agents surface.
 
-Six surfaces used to answer "is this agent live" and they answered four
-different questions, all rendering into the same word:
-
-    list / truth   has it produced output recently          (transcript)
-    status         what lifecycle state did we last WRITE   (stored enum)
-    top            is there an OS process                   (process census)
-    mail-inject    can I put text in front of it right now  (control socket)
-    peek           nothing about liveness; it reads a file  (transcript CONTENT)
-
-They disagreed because they measure different things, so collapsing them into
-one word destroyed information rather than adding it. This module keeps the one
-question a supervisor actually asks -- is the agent REACHABLE -- and makes every
-surface report the BASIS it answered from, so a reader can tell which question
-was answered.
-
-Four rules, all load-bearing:
-
-1. Positive evidence comes ONLY from transcript activity age. No other signal
-   may raise a verdict toward ``reachable``. (The registry's own PID SEMANTICS
-   rule, generalized from pid to every signal: a live process may still be
-   unreachable, so process liveness can falsify and can never establish.)
-2. Falsifiers are MONOTONE toward ``unreachable``. A falsifier may lower a
-   verdict and may never raise one.
-3. ``unknown`` is TERMINAL. No consumer may coerce it to either pole. Absence of
-   evidence stays absence of evidence.
-4. Basis and age are part of the VALUE. A bare ``live`` is unprintable.
-5. Positive evidence EXPIRES. Transcript activity certifies liveness only
-   inside ``TRANSCRIPT_EVIDENCE_S``; past it an active tail demotes to
-   ``unknown`` (basis ``stale-transcript``), never ``unreachable`` -- an old
-   transcript is absence of evidence exactly as silence is (x-c1a3).
-
-Why silence is never ``unreachable``
-------------------------------------
-This registry lists REACHABLE agents; it is not a process table. "Orphaned"
-means unreachable, not dead, so a row is never condemned for being quiet. A
-transcript can only ever supply POSITIVE evidence of activity; its absence is
-absence of evidence, not evidence of absence. So a silent row with no falsifier
-available -- and 89 percent of rows carry no pid at all -- resolves ``unknown``
-with its age attached, never ``unreachable``. Only an affirmative falsifier
-condemns a row.
-
-This is what makes the destructive rule un-rederivable rather than merely
-remembered: absence of a pane, absence of a pid, and absence of recent output
-all contribute exactly NOTHING here, so "no pane means safe to reap" cannot be
-reconstructed by editing a threshold.
-
-Note the asymmetry that keeps this honest. A row with no pane recorded, or a mux
-that cannot answer, is an ABSENCE and condemns nothing. A mux affirmatively
-reporting that a pane exited is EVIDENCE, and does condemn -- the retired rule
-falsified on the first and this one falsifies only on the second. Which is also
-why suppressing a falsifier is never the fix for a wrong falsifier: the answer
-is to consult the right authority, not to stop asking.
-
-Progress is a second axis, never a fourth reachability value
--------------------------------------------------------------
-A worker taking its turn, a worker that parked after finishing, and a worker
-alive but unable to think (handed a model its endpoint cannot serve) all
-classify ``reachable`` here -- correctly, because all three ARE reachable.
-:func:`classify_progress` answers the orthogonal question "is it advancing,
-awaiting the operator, parked, or refused" in its own ``progress`` /
-``progress_basis`` fields, mirroring this module's own verdict-plus-basis
-shape rather than widening ``WIRE_STATUS`` to a fourth word.
-
-A reading about one artifact is not a verdict about the agent
------------------------------------------------------------------
-A missing transcript file proves that a file is missing at that path.
-Nothing else. Every probe in this module follows that rule for reachability
-(:func:`pid_falsifier`, :func:`pane_falsifier` each return ``None`` -- not a
-death verdict -- when their own evidence is absent or unreadable), and
-:func:`classify_progress` follows it for progress: an unresolved or missing
-transcript classifies ``unknown`` on both axes, never ``refused`` and never
-``parked``. Only the classifiers in this module may answer either axis; a
-reader that derives liveness from bare file existence elsewhere is rebuilding
-the same mistake one layer over.
-
-Why transcript age is necessary but never sufficient
-----------------------------------------------------
-It is the only surface that never lied (argv, pid, the daemon record, and
-state.json were each caught lying about a live session in one evening; see
-:mod:`fno.agents.session_truth`). But it has two limits, and both are why it is
-the sole POSITIVE term rather than the whole answer:
-
-* Resolution. The liveness axis is a low-pass filter with a two-hour window, so
-  it cannot separate "dead 43 minutes" from "thinking for 43 seconds". Every
-  false-live lives in that gap, which is why the age always rides along.
-* It measures FILE WRITES, not conversation. A transcript can be touched by a
-  stub write, a resume attempt, or a tool result with no live session behind it.
+The full contract (one question per word, the four load-bearing rules, why
+silence is never unreachable, why progress is a second axis, and why
+transcript age is necessary but never sufficient) lives in
+docs/architecture/reachability-contract.md. The rules this file's code must
+not break: positive evidence comes only from transcript activity; falsifiers
+are monotone toward unreachable; unknown is terminal and never coerced; the
+basis and age travel with the verdict.
 """
 
 from __future__ import annotations
