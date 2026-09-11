@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{spawn_server, FakeClient, Scratch};
+use common::{screen_has_line, spawn_server, strip_prompts, FakeClient, Scratch};
 use fno::proto::Command;
 
 use std::path::Path;
@@ -70,16 +70,6 @@ fn attach_cd_and_force_persist(sock: &Path, origin: &str, dir: &Path) -> u64 {
     // kernel cwd moved; retry the pair until it lands, bounded, so a dead
     // pane still fails loud.
     let dir_line = dir.to_string_lossy().to_string();
-    // pwd's output renders on its own line (bash-as-sh) or inline after the
-    // prompt (`$ /path`, dash): strip up to the last `$` when one is present.
-    // The `cd /path` echo never qualifies either way - stripping its prompt
-    // leaves `cd /path`, not the path.
-    fn after_prompt(l: &str) -> &str {
-        match l.rsplit_once('$') {
-            Some((_, rest)) => rest.trim(),
-            None => l.trim(),
-        }
-    }
     let mut cd_landed = false;
     for _ in 0..10 {
         client.input(format!("cd {}\r", dir.display()).as_bytes());
@@ -89,7 +79,7 @@ fn attach_cd_and_force_persist(sock: &Path, origin: &str, dir: &Path) -> u64 {
             if client
                 .pane_text(pane)
                 .lines()
-                .any(|l| after_prompt(l) == dir_line)
+                .any(|l| strip_prompts(l) == dir_line)
             {
                 cd_landed = true;
                 break;
@@ -183,9 +173,8 @@ fn restored_shell_tab_lands_in_its_captured_cwd() {
     let pane2 = focus_restored_marker_tab(&mut client2);
 
     client2.input(b"pwd\r");
-    client2.wait_pane_text(15, pane2, |t| {
-        t.lines().any(|l| l.trim() == marker_dir.to_string_lossy())
-    });
+    let marker_str = marker_dir.to_string_lossy().to_string();
+    client2.wait_pane_text(15, pane2, |t| screen_has_line(t, &marker_str));
 }
 
 #[test]
@@ -224,9 +213,8 @@ fn restored_shell_tab_falls_back_and_notices_a_vanished_cwd() {
     let pane2 = focus_restored_marker_tab(&mut client2);
 
     client2.input(b"pwd\r");
-    client2.wait_pane_text(15, pane2, |t| {
-        t.lines().any(|l| l.trim() == origin.to_string_lossy())
-    });
+    let origin_str = origin.to_string_lossy().to_string();
+    client2.wait_pane_text(15, pane2, |t| screen_has_line(t, &origin_str));
     let marker_str = marker_dir.to_string_lossy().to_string();
     client2.wait(15, "the vanished-path notice", |c| {
         c.notices

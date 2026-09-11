@@ -8,7 +8,9 @@ mod common;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use common::{connect_with_retry, spawn_server, ClientHarness, FakeClient, Scratch};
+use common::{
+    connect_with_retry, screen_has_line, spawn_server, ClientHarness, FakeClient, Scratch,
+};
 use fno::proto::{
     read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ProtoError, ServerMsg,
     BUILD_VERSION, PROTO_VERSION,
@@ -97,7 +99,7 @@ fn persistence_reattach_restores_the_exact_screen() {
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_prompt(15);
     h.type_bytes(b"echo marker-one; echo marker-two\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
+    h.wait_screen(15, |s| screen_has_line(s, "marker-two"));
     // Snapshot only once the screen has been STABLE for two consecutive
     // polls, so a late-rendering prompt can never make the byte-exact
     // comparison below unreachable on a loaded runner.
@@ -157,7 +159,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     h2.type_bytes(&[0x03]);
     h2.wait_prompt(15);
     h2.type_bytes(b"printf '\\033[?1049l'; echo back-on-main\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "back-on-main"));
+    h2.wait_screen(15, |s| screen_has_line(s, "back-on-main"));
 }
 
 #[test]
@@ -209,7 +211,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     // The echo marker proves the assignment traversed client -> server ->
     // PTY -> shell BEFORE the kill; a bare sleep could race a loaded runner.
     h.type_bytes(b"SURVIVED=kill9; echo set-ok\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "set-ok"));
+    h.wait_screen(15, |s| screen_has_line(s, "set-ok"));
     let pid = h.child.process_id().expect("client pid") as i32;
     unsafe {
         libc::kill(pid, libc::SIGKILL);
@@ -220,7 +222,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     let mut h2 = ClientHarness::spawn(&scratch);
     h2.wait_prompt(15);
     h2.type_bytes(b"echo var=$SURVIVED\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "var=kill9"));
+    h2.wait_screen(15, |s| screen_has_line(s, "var=kill9"));
 }
 
 #[test]
@@ -283,8 +285,8 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     a.type_bytes(b"echo shared-pane-proof\r");
-    a.wait_screen(15, |s| s.lines().any(|l| l.trim() == "shared-pane-proof"));
-    b.wait_screen(15, |s| s.lines().any(|l| l.trim() == "shared-pane-proof"));
+    a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
+    b.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
 
     assert_eq!(
         server_count(&scratch),
@@ -401,9 +403,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
         .focus;
     c.wait_prompt(pane);
     c.input(b"echo survives-detach#\r");
-    c.wait_pane_text(15, pane, |t| {
-        t.lines().any(|l| l.trim() == "survives-detach#")
-    });
+    c.wait_pane_text(15, pane, |t| screen_has_line(t, "survives-detach#"));
     c.detach();
     drop(c);
     std::thread::sleep(Duration::from_millis(800));
@@ -444,7 +444,7 @@ fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
     // then detach. A control send releases the read after the client is gone,
     // so the pane child exits while the registered client count is zero.
     c.input(b"echo armed#; read _; exit\r");
-    c.wait_pane_text(15, pane, |t| t.lines().any(|l| l.trim() == "armed#"));
+    c.wait_pane_text(15, pane, |t| screen_has_line(t, "armed#"));
     c.detach();
     drop(c);
     pane_send(&scratch, pane, b"\r");
