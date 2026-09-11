@@ -1,9 +1,6 @@
 # graph/cli.py rationale register
 
-<!-- style-exception: verbatim relocation of code-comment essays under the
-file-budget ratchet (law d-4b39ad4c steering). Rewriting the prose would
-break the provenance contract between these paragraphs and the review
-threads that produced them. -->
+<!-- style-exception: verbatim relocation of code-comment essays under the file-budget ratchet; rewriting the prose would break the provenance contract between these paragraphs and the review threads that produced them. -->
 
 Long-form rationale moved out of `cli/src/fno/graph/cli.py` so the code
 keeps a one-line pointer and the tree stays under the Python allowance.
