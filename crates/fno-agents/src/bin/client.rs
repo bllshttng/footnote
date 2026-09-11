@@ -186,6 +186,21 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
 
+    // `name-mint`/`name-parse`/`name-codes` are the INTERNAL machine verbs
+    // behind the x-84b2 delegation flip: Python's naming.py shells them so the
+    // vocabulary tables, mint, and parse own exactly one implementation.
+    // Matched with `matches!` like `reentry-plan` - they are not `fno agents`
+    // verbs, so the routable-verb parity sets never see them.
+    if matches!(verb, "name-mint") {
+        return fno_agents::naming::run_name_mint(&args[1..]);
+    }
+    if matches!(verb, "name-parse") {
+        return fno_agents::naming::run_name_parse();
+    }
+    if matches!(verb, "name-codes") {
+        return fno_agents::naming::run_name_codes();
+    }
+
     // `review-summary` is the display-line author for a pre-push reviewed PR:
     // the /pr create worker runs it against the local ledger and appends its
     // stdout to the body. Same `matches!` treatment as `claim`/`detect` so the

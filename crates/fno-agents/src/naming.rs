@@ -382,6 +382,131 @@ pub fn legacy_verb_code(name: Option<&str>) -> Option<String> {
     }
 }
 
+// ── internal machine verbs (binary-direct, not `fno agents` surface) ─────────
+//
+// The delegation flip: Python's naming.py keeps its public signatures and
+// shells THESE verbs, so the tables, mint, and parse own exactly one
+// implementation. Matched with `matches!` in client.rs like `reentry-plan`,
+// they stay out of the routable-verb parity sets by design.
+
+fn value_of(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or_else(|| {
+            let prefix = format!("{}=", flag);
+            args.iter()
+                .find_map(|a| a.strip_prefix(&prefix).map(str::to_string))
+        })
+}
+
+fn positionals(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with("--") {
+            if a.contains('=') {
+                i += 1;
+            } else {
+                i += 2;
+            }
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out
+}
+
+/// `fno-agents name-mint [prefix] <node> [--slug S] [--qualifier Q]
+/// [--discriminator D] [--source S] [--verb V]`: the bridge, byte-compatible
+/// with `fno agents name`. Prints the name; exit 2 usage, 3 refusal.
+pub fn run_name_mint(args: &[String]) -> i32 {
+    let pos = positionals(args);
+    // One positional binds the node (the CLI contract: Click would bind it to
+    // the legacy prefix slot; the bridge reads it as the node instead).
+    let (prefix, node) = match pos.len() {
+        0 => (None, String::new()),
+        1 => (None, pos[0].clone()),
+        _ => (Some(pos[0].as_str()), pos[1].clone()),
+    };
+    if node.is_empty() {
+        eprintln!("error: a node id is required: fno agents name [prefix] <node-id>");
+        return 2;
+    }
+    match bridge_name(
+        prefix,
+        &node,
+        value_of(args, "--slug").as_deref(),
+        value_of(args, "--qualifier").as_deref(),
+        value_of(args, "--discriminator").as_deref(),
+        value_of(args, "--source").as_deref(),
+        value_of(args, "--verb").as_deref(),
+    ) {
+        Ok(name) => {
+            println!("{name}");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.exit
+        }
+    }
+}
+
+/// `fno-agents name-parse` reads one name per line on stdin and prints one
+/// JSON object per line: {name, source, verb, node, tail} or {name, null}.
+pub fn run_name_parse() -> i32 {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let parsed = parse_dispatch_agent_name(Some(line.trim_end_matches('\n')));
+        let json = match parsed {
+            Some(p) => format!(
+                "{{\"name\":{},\"source\":{},\"verb\":{},\"node\":{},\"tail\":{}}}",
+                serde_json::to_string(&p.name).unwrap_or_else(|_| "null".into()),
+                p.source
+                    .as_ref()
+                    .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".into()))
+                    .unwrap_or_else(|| "null".into()),
+                serde_json::to_string(&p.verb).unwrap_or_else(|_| "null".into()),
+                p.node
+                    .as_ref()
+                    .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".into()))
+                    .unwrap_or_else(|| "null".into()),
+                serde_json::to_string(&p.tail).unwrap_or_else(|_| "null".into()),
+            ),
+            None => format!(
+                "{{\"name\":{},\"parsed\":null}}",
+                serde_json::to_string(&line).unwrap_or_else(|_| "\"\"".into())
+            ),
+        };
+        let _ = writeln!(out, "{json}");
+    }
+    0
+}
+
+/// `fno-agents name-codes --json`: the vocabulary tables for thin readers.
+pub fn run_name_codes() -> i32 {
+    let c = codes();
+    let json = serde_json::json!({
+        "sources": c.sources.iter().collect::<Vec<_>>(),
+        "verbs": c.verbs.iter().collect::<Vec<_>>(),
+        "word_codes": c.word_codes,
+        "provenance": c
+            .provenance
+            .iter()
+            .map(|(s, v, x)| serde_json::json!({"site": s, "source": v, "verb": x}))
+            .collect::<Vec<_>>(),
+    });
+    println!("{json}");
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
