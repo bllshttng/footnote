@@ -333,6 +333,12 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
+    # Schema-declared aliases refuse even beside canonical keys, so a retired
+    # key name cannot keep validating under the new contract.
+    for field in type_spec.get("data", {}).get("forbidden", []):
+        if field in data:
+            raise ValidationError(f"event type {type_name} forbids data field: {field}")
+
     # Claim records have two truthful PID shapes. A null PID must carry the
     # positive marker and a TTL expiry, while an integer PID must not carry the
     # marker. Without this cross-field check, a missing instrument and a
