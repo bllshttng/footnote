@@ -583,10 +583,9 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-#: x-d211: which timeout mechanism fired, for the readout. The measured
-#: classes: deadline 480-487s, slice 30s/100s, self-kill 183.1s/440.7s after a
-#: mid-tick binary rewrite. The self-kill is NOT a budget outcome, so no
-#: number here doubles as a budget example.
+#: x-d211: which timeout mechanism fired, for the readout. The self-kill
+#: (183.1s/440.7s observed, after a mid-tick binary rewrite) is not a budget
+#: outcome, so none of these numbers doubles as a budget example.
 _WHY_PHRASES = {
     "deadline_exceeded": "deadline exceeded",
     "slice_starved": "phase slice starved",
@@ -599,8 +598,7 @@ def tick_end_bits(end: dict) -> list[str]:
     """The parenthesised detail bits after a tick outcome: duration, sweep
     failures, the timeout mechanism when known, and the phase name only when
     the tick broke (timeout or error). Shared by `fno do pr watch status` and
-    the pr_watch_merge arm row, so the arm row names the phase only when the
-    tick broke."""
+    the pr_watch_merge arm row."""
     bits: list[str] = []
     if end.get("duration_s") is not None:
         bits.append(f"{end['duration_s']:.1f}s")

@@ -677,10 +677,10 @@ def _run_tick(
     # Load once up-front; resets to {} on corruption (baseline discipline)
     state = store.load()
 
-    # x-d211: order the rich scan least-recently-polled first, so a budget
-    # break resumes where the last tick stopped instead of starving the tail.
-    # Missing cursor first (never-polled), then oldest stamp; discovery order
-    # breaks ties. Corrupt or non-string stamps sort as missing.
+    # x-d211: the rich scan orders least-recently-polled first (missing
+    # cursor, then oldest stamp; discovery order breaks ties; corrupt or
+    # non-string stamps sort as missing) so a budget break resumes where the
+    # last tick stopped instead of starving the tail.
     def _poll_order(indexed):
         idx, cand = indexed
         try:

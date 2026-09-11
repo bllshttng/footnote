@@ -98,14 +98,8 @@ _PR_WATCH_SCHEDULER = "launchd:sh.fno.pr-watcher"
 
 
 def _emit_tick_death(*, why: str, phase: str, duration_s: float, interval_s: int) -> None:
-    """Death record for a tick killed by a signal it cannot unwind from.
-
-    The SIGTERM handler's whole body: the bootout that bounces this job gives
-    the tick no finally, so this is the only record it ever writes. The end
-    record carries the machine-readable `why`; the arm row names the mechanism
-    so the readout says "started and did not complete" instead of blaming a
-    scheduler that was healthy throughout.
-    """
+    """Death record for a tick killed by a signal: the bootout that bounces
+    this job gives the tick no finally, so this is the only record it writes."""
     if why == "self_killed":
         reason = ("self-killed: its own post-merge sync ran an update that bounced "
                   "this job mid-tick")
@@ -312,9 +306,8 @@ _TICK_TIMEOUT_EXIT = 75
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
 #: Set by the tick around its catch-up leg (x-d211). A child `fno update`
-#: that sees it skips the trailing `do pr watch refresh`: that refresh
-#: bootouts the LaunchAgent that owns the running tick, killing it before
-#: the sync marker or tick_end can be written.
+#: that sees it skips the trailing `do pr watch refresh`, which bootouts the
+#: LaunchAgent owning the running tick.
 _ENV_ACTIVE_TICK = "FNO_PR_WATCH_ACTIVE_TICK"
 
 #: A roster probe needs at least this much budget to be worth starting. The
@@ -485,14 +478,11 @@ def tick() -> None:
 
         # x-d211: a bootout kills this process by signal, so without a handler
         # the tick dies with no record and the readout blames a silent
-        # scheduler. Name what happened: the phase it died in and, when the
-        # active-tick marker is set, that its own sync child's update bounced
-        # the job. Then die BY the signal so launchd still sees a kill.
+        # scheduler. Die BY the signal after writing the death record.
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
-            marker = os.environ.get(_ENV_ACTIVE_TICK)
             _emit_tick_death(
-                why="self_killed" if marker else "killed",
+                why="self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed",
                 phase=current_tick_phase(),
                 duration_s=round(time.monotonic() - started, 3),
                 interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
@@ -540,13 +530,10 @@ def tick() -> None:
             else:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
-            # Which budget fired if the alarm does (x-d211): a cap BELOW the
+            # Which budget fired if the alarm does (x-d211): a cap below the
             # remaining wall starves one phase while the tick carries on; the
-            # wall itself (uncapped tail phases, or a cap past what's left)
-            # is the tick deadline. Measured classes: deadline 480-487s,
-            # slice 30s/100s. A tick killed by a mid-tick binary rewrite
-            # (183.1s and 440.7s observed) is neither - it never reaches this
-            # runner's except at all; the SIGTERM handler names that one.
+            # wall itself is the tick deadline. A mid-tick self-kill is
+            # neither: the SIGTERM handler names that one.
             wall_limited = (
                 ceiling_box["v"] is None
                 or name not in _PHASE_CAP_S
@@ -1249,17 +1236,17 @@ def tick() -> None:
             set_tick_phase("catchup")
             quota_skipped = result is not None and bool(getattr(result, "quota_skip", False))
             if not quota_skipped:
+                # Scoped to this leg (x-d211): the sync shell a tick spawns
+                # inherits the marker, and the child `fno update` it runs skips
+                # its trailing `do pr watch refresh` - that refresh bootouts
+                # THIS job mid-tick. Restored on every exit so a later
+                # interactive update stays ordinary.
+                prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
+                os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
                 try:
-                    from fno.pr._sync_canonical import run_sync_catchup
-
-                    # Scoped to this leg (x-d211): the sync shell a tick spawns
-                    # inherits the marker, and the child `fno update` it runs
-                    # skips its trailing `do pr watch refresh` - that refresh
-                    # bootouts THIS job mid-tick. Restored on every exit so a
-                    # later interactive update stays ordinary.
-                    prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
-                    os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
                     try:
+                        from fno.pr._sync_canonical import run_sync_catchup
+
                         for root in _catchup_roots():
                             try:
                                 res = run_sync_catchup(
@@ -1286,13 +1273,13 @@ def tick() -> None:
                                     err=True,
                                 )
                                 _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
-                    finally:
-                        if prior_marker is None:
-                            os.environ.pop(_ENV_ACTIVE_TICK, None)
-                        else:
-                            os.environ[_ENV_ACTIVE_TICK] = prior_marker
-                except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
-                    log.warning("pr-watch: sync catch-up failed: %s", exc)
+                    except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
+                        log.warning("pr-watch: sync catch-up failed: %s", exc)
+                finally:
+                    if prior_marker is None:
+                        os.environ.pop(_ENV_ACTIVE_TICK, None)
+                    else:
+                        os.environ[_ENV_ACTIVE_TICK] = prior_marker
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
@@ -1328,8 +1315,7 @@ def tick() -> None:
             "pid": os.getpid(),
         }
         # Name which timeout mechanism fired (x-d211): the wall deadline
-        # outranks a spent slice - it is what ended the tick. A pure
-        # slice-starvation tick carries on; its why says which arms lost.
+        # outranks a spent slice, because it is what ended the tick.
         if timed_out:
             if backstop_fired or any(
                 w == "deadline_exceeded" for w in cut_whys.values()
