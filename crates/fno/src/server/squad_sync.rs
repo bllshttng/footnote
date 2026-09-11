@@ -15,6 +15,9 @@ impl Core {
     /// carries reads as empty.
     pub(super) fn reload_members_from_store(&mut self) -> SquadReloadReceipt {
         let loaded = crate::squad_store::load();
+        // (x-ea5b) The member list now agrees with the file as of this epoch,
+        // so the next member write is guarded against exactly this read.
+        self.squad_epoch = loaded.epoch;
         let identities: HashMap<(String, String), Vec<_>> = loaded
             .squads
             .into_iter()

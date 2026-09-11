@@ -2210,6 +2210,113 @@ mod tests {
         }
     }
 
+    /// (x-ea5b) The epoch counts writes, whatever they wrote. A guard that
+    /// bumped only on member writes would miss a store another process moved
+    /// some other way, and a missed bump is the one direction that corrupts.
+    #[test]
+    fn every_write_bumps_the_epoch() {
+        let _s = Scratch::new("epoch-bumps");
+        assert_eq!(load().epoch, 0, "a store with no file is epoch 0");
+        upsert("one", "", &["/repo".into()], &[m("aaaaaaaa")]).unwrap();
+        assert_eq!(load().epoch, 1);
+        // A write that carries no member at all still counts.
+        reserve_next_pane_id(1).unwrap();
+        assert_eq!(load().epoch, 2);
+        remove("one", "").unwrap();
+        assert_eq!(load().epoch, 3);
+    }
+
+    /// A member write made against the epoch the caller read at lands, and
+    /// reports the epoch the store now carries.
+    #[test]
+    fn upsert_at_the_read_epoch_writes() {
+        let _s = Scratch::new("epoch-fresh");
+        upsert("one", "", &["/repo".into()], &[m("aaaaaaaa"), m("bbbbbbbb")]).unwrap();
+        let read = load();
+        let outcome = upsert_at_epoch(
+            "one",
+            "",
+            &["/repo".into()],
+            &[m("aaaaaaaa")],
+            Some(read.epoch),
+        )
+        .unwrap();
+        assert_eq!(outcome, UpsertOutcome::Wrote { epoch: read.epoch + 1 });
+        assert_eq!(load().squads[0].members, vec![m("aaaaaaaa")]);
+    }
+
+    /// The guard itself: a write derived from an epoch the store has moved past
+    /// is refused, and the file it would have clobbered is untouched - the
+    /// prune's reap survives. The refusal reports the epoch the store actually
+    /// carries, so the caller can re-read against it.
+    #[test]
+    fn upsert_at_a_stale_epoch_refuses_and_leaves_the_file_alone() {
+        let _s = Scratch::new("epoch-stale");
+        let both = vec![m("aaaaaaaa"), m("bbbbbbbb")];
+        upsert("one", "", &["/repo".into()], &both).unwrap();
+        let stale_read = load();
+        // Somebody else reaps a member: the store moves past the read above.
+        upsert("one", "", &["/repo".into()], &[m("bbbbbbbb")]).unwrap();
+        let before = std::fs::read_to_string(_s.file()).unwrap();
+        let outcome = upsert_at_epoch(
+            "one",
+            "",
+            &["/repo".into()],
+            &both,
+            Some(stale_read.epoch),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            UpsertOutcome::Stale {
+                epoch: stale_read.epoch + 1
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(_s.file()).unwrap(),
+            before,
+            "a refused write leaves the store byte-for-byte untouched"
+        );
+        assert_eq!(load().squads[0].members, vec![m("bbbbbbbb")]);
+    }
+
+    /// `None` is the unguarded entry: no read to be stale against, so it writes
+    /// whatever the caller holds. This is what [`upsert`] still does.
+    #[test]
+    fn upsert_without_an_expected_epoch_is_unguarded() {
+        let _s = Scratch::new("epoch-unguarded");
+        upsert("one", "", &["/repo".into()], &[m("aaaaaaaa"), m("bbbbbbbb")]).unwrap();
+        upsert("one", "", &["/repo".into()], &[m("bbbbbbbb")]).unwrap();
+        let outcome = upsert_at_epoch(
+            "one",
+            "",
+            &["/repo".into()],
+            &[m("aaaaaaaa"), m("bbbbbbbb")],
+            None,
+        )
+        .unwrap();
+        assert!(matches!(outcome, UpsertOutcome::Wrote { .. }));
+        assert_eq!(load().squads[0].members.len(), 2);
+    }
+
+    /// Wire tolerance: a store written by a build that predates the epoch reads
+    /// as 0 (the serde default) and its squads survive, so the guard cannot
+    /// quarantine an existing store on upgrade.
+    #[test]
+    fn a_store_without_an_epoch_field_reads_as_zero_and_keeps_its_squads() {
+        let s = Scratch::new("epoch-absent");
+        std::fs::write(
+            s.file(),
+            r#"{"version":1,"next_pane_id":0,"squads":[{"name":"one","key":"","origins":["/repo"],"members":[{"attach_id":"aaaaaaaa","tombstone":false}],"created_at":"2026-07-23T00:00:00Z"}]}"#,
+        )
+        .unwrap();
+        let loaded = load();
+        assert_eq!(loaded.epoch, 0);
+        assert_eq!(loaded.squads.len(), 1, "the pre-epoch store still loads");
+        upsert("one", "", &["/repo".into()], &[m("aaaaaaaa")]).unwrap();
+        assert_eq!(load().epoch, 1, "the next write starts counting");
+    }
+
     #[test]
     fn stored_member_roundtrips_detached_marker() {
         let raw = r#"{
@@ -3421,6 +3528,7 @@ mod tests {
         let file = StoreFile {
             version: STORE_VERSION,
             next_pane_id: 0,
+            epoch: 0,
             squads: vec![
                 StoredSquad {
                     name: "f[no]".into(),
@@ -3476,6 +3584,7 @@ mod tests {
         let file = StoreFile {
             version: STORE_VERSION,
             next_pane_id: 0,
+            epoch: 0,
             squads: vec![
                 StoredSquad {
                     name: "one".into(),

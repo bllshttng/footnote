@@ -68,10 +68,14 @@ fn prune_reload_survives_the_next_persist() {
     );
 }
 
-/// The same sequence WITHOUT the reload: the next persist writes the reaped
-/// member back. This is the bug; it is why "the file shrank" proves nothing.
+/// (x-ea5b) The same sequence WITHOUT any explicit reload. The store's epoch
+/// moved under the server when the CLI wrote the file, so the guarded member
+/// write refuses, re-reads, and persists the reconciled list: the reaped member
+/// stays reaped with no `SquadReload` verb in the sequence at all. Before the
+/// guard this same body asserted the opposite (two members), which is what
+/// made the explicit reload load-bearing.
 #[test]
-fn prune_without_reload_is_undone_by_the_next_persist() {
+fn prune_without_an_explicit_reload_survives_the_next_persist() {
     let _s = StoreScratch::new("squad-sync-control");
     let mut core = empty_core();
     core.session.add_squad(
@@ -99,13 +103,57 @@ fn prune_without_reload_is_undone_by_the_next_persist() {
     );
     crate::squad_store::prune_with_evidence(|_| crate::squad_store::PruneDecision::Keep, &evidence)
         .unwrap();
-    // No reload: memory still holds both members, and the next pane event
-    // persists that list over the pruned file.
+    // No reload call: the epoch guard inside the next pane event's persist is
+    // what re-reads the file the server did not write.
     core.persist_squad(7);
+    let expected = vec![stored_member("feed0002", false)];
+    assert_eq!(
+        crate::squad_store::load().squads[0].members,
+        expected,
+        "the guarded persist did not resurrect the reaped member"
+    );
+    assert_eq!(
+        core.squad_members[&7], expected,
+        "and the server reconciled its own list to the store"
+    );
+}
+
+/// The control that keeps the two tests above honest: the SAME sequence with
+/// the guard opted out (`upsert`, the unguarded entry) resurrects the reaped
+/// member. Without this, a green marker test could be green because the prune
+/// never ran, not because the guard fired.
+#[test]
+fn an_unguarded_upsert_still_resurrects_a_reaped_member() {
+    let _s = StoreScratch::new("squad-sync-unguarded");
+    let mut core = empty_core();
+    core.session.add_squad(
+        7,
+        vec!["/repo".into()],
+        Some("harden".into()),
+        Tab {
+            name: None,
+            id: 5,
+            root: Node::Leaf(1),
+            focus: 1,
+        },
+    );
+    let both = vec![
+        stored_member("deadbee1", true),
+        stored_member("feed0002", false),
+    ];
+    core.squad_members.insert(7, both.clone());
+    core.persist_squad(7);
+    let evidence = crate::squad_store::MemberEvidence::from_sets(
+        std::collections::HashSet::new(),
+        ["deadbee1".to_string()].into_iter().collect(),
+    );
+    crate::squad_store::prune_with_evidence(|_| crate::squad_store::PruneDecision::Keep, &evidence)
+        .unwrap();
+    crate::squad_store::upsert("harden", "", &["/repo".to_string()], &both).unwrap();
     assert_eq!(
         crate::squad_store::load().squads[0].members.len(),
         2,
-        "the reaped member is back - the control that shows the marker test can fail"
+        "the unguarded write is what the guard exists to stop"
     );
 }
 

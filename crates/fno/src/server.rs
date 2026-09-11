@@ -2374,6 +2374,13 @@ pub(crate) struct Core {
     /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
     /// map entry per closed workspace per session, bounded by session length).
     squad_members: HashMap<u64, Vec<crate::squad_store::StoredMember>>,
+    /// (x-ea5b) The store epoch `squad_members` was last known to agree with.
+    /// Every member write hands it to `upsert_at_epoch`; a mismatch means an
+    /// external writer (the CLI prune, another server) moved the store since,
+    /// so the in-memory list is stale and writing it would resurrect what they
+    /// reaped. Non-member writes bump the epoch too, so a mismatch is only a
+    /// hint that a re-read is owed - never a claim that the store disagrees.
+    squad_epoch: u64,
     /// (x-c4d4) The live layout spec of each template-managed tab: tab id ->
     /// the spec last applied. A template tab is agent-managed by contract, so
     /// this is the authority for the reconcile diff and the source captured into
@@ -7236,10 +7243,60 @@ impl Core {
             }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
-        if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
-            self.persist_degraded(&e);
-        }
+        self.upsert_guarded(sid, &name, &key, &origins, members);
         self.persist_tab_trees(sid, &name, &key, &origins);
+    }
+
+    /// (x-ea5b) Write squad `sid`'s member list under the store's epoch guard.
+    /// A refusal means the store moved since this server last read it, so the
+    /// list in hand predates somebody else's write: re-project the file into
+    /// memory (the store wins, exactly as the `SquadReload` verb decides it),
+    /// then write the reconciled list once. A second refusal leaves the store
+    /// alone - the file is newer than anything this call can offer, and the
+    /// next pane event persists again. A squad the reload cannot re-project
+    /// (its session row is already gone, so it has no store identity to read
+    /// back) keeps the list in hand: no worse than the unguarded write, and
+    /// the common case still reconciles.
+    fn upsert_guarded(
+        &mut self,
+        sid: u64,
+        name: &str,
+        key: &str,
+        origins: &[String],
+        members: Vec<crate::squad_store::StoredMember>,
+    ) {
+        use crate::squad_store::UpsertOutcome;
+        let guarded = crate::squad_store::upsert_at_epoch(
+            name,
+            key,
+            origins,
+            &members,
+            Some(self.squad_epoch),
+        );
+        match guarded {
+            Ok(UpsertOutcome::Wrote { epoch }) => {
+                self.squad_epoch = epoch;
+                return;
+            }
+            Ok(UpsertOutcome::Stale { .. }) => {}
+            Err(e) => {
+                self.persist_degraded(&e);
+                return;
+            }
+        }
+        self.reload_members_from_store();
+        let reconciled = self.squad_members.get(&sid).cloned().unwrap_or_default();
+        match crate::squad_store::upsert_at_epoch(
+            name,
+            key,
+            origins,
+            &reconciled,
+            Some(self.squad_epoch),
+        ) {
+            Ok(UpsertOutcome::Wrote { epoch }) => self.squad_epoch = epoch,
+            Ok(UpsertOutcome::Stale { epoch }) => self.squad_epoch = epoch,
+            Err(e) => self.persist_degraded(&e),
+        }
     }
 
     /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -
@@ -7710,17 +7767,18 @@ impl Core {
 
     /// Write-through a raw upsert from captured fields (used when the in-session
     /// squad is already gone - a churned member's last pane). Identity is `name`
-    /// when named, else the durable `key`.
+    /// when named, else the durable `key`. `members` comes from the same
+    /// long-lived `squad_members` list `persist_squad` writes, so it takes the
+    /// same epoch guard (x-ea5b).
     fn persist_stored(
         &mut self,
+        sid: u64,
         name: &str,
         key: &str,
         origins: &[String],
         members: &[crate::squad_store::StoredMember],
     ) {
-        if let Err(e) = crate::squad_store::upsert(name, key, origins, members) {
-            self.persist_degraded(&e);
-        }
+        self.upsert_guarded(sid, name, key, origins, members.to_vec());
     }
 
     /// The store identity of a live squad: `(name, key)`, `name` empty for an
@@ -8155,6 +8213,9 @@ impl Core {
             self.notice_all(format!("squad collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
+        // (x-ea5b) Restore is the other place `squad_members` is filled from
+        // the file, so it pins the epoch the same way a reload does.
+        self.squad_epoch = loaded.epoch;
         if let Some(n) = loaded.notice {
             self.notice_all(n);
         }
@@ -8980,7 +9041,7 @@ impl Core {
                 mm.tombstone = true;
             }
             let members = members.clone();
-            self.persist_stored(&name, &key, &origins, &members);
+            self.persist_stored(sid, &name, &key, &origins, &members);
             // (x-9052) A death never writes a tab-tree removal, so the
             // graceful paths must: a churned worker's collapsed tab leaves
             // the store now, not at the next restart. The persist_stored half
@@ -14726,6 +14787,7 @@ async fn serve(
         portals: BTreeMap::new(),
         portal_noticed: false,
         squad_members: HashMap::new(),
+        squad_epoch: 0,
         template_specs: HashMap::new(),
         pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
@@ -25282,6 +25344,7 @@ mod tests {
             portals: BTreeMap::new(),
             portal_noticed: false,
             squad_members: HashMap::new(),
+            squad_epoch: 0,
             template_specs: HashMap::new(),
             pending_template_restores: Vec::new(),
             external_lifecycle: Vec::new(),
