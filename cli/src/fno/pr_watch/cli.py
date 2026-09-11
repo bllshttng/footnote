@@ -483,6 +483,7 @@ def tick() -> None:
                 if env.isdigit() and int(env) > 0:
                     slice_s = min(slice_s, float(env))
             else:
+                assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
             slice_s = max(1.0, slice_s)
             body_cut = False
@@ -525,6 +526,7 @@ def tick() -> None:
         # Phase order (x-c79d): PR legs first (sweep, king_wake, notify_watch, heal,
         # stranded), then the fleet-health tail (recovery, watchdog, catchup) - per-phase slices removed the shared deadline that gave recovery a head-of-line pass.
         def _phase_recovery(_slice_s: float) -> None:
+            assert settings is not None and cfg is not None
             set_tick_phase("recovery")
             _fleet_candidates = 0
             _fleet_refused = 0
@@ -596,6 +598,7 @@ def tick() -> None:
                         log.warning("pr-watch: fleet heartbeat write failed: %s", exc)
 
         def _phase_watchdog(_slice_s: float) -> None:
+            assert settings is not None and cfg is not None
             set_tick_phase("watchdog")
             # Imported here, not at module scope: the watchdog package pulls the
             # harness layer and this module is on the launchd hot path.
@@ -951,6 +954,7 @@ def tick() -> None:
 
         def _phase_sweep(slice_s: float) -> None:
             nonlocal result, tick_failed
+            assert settings is not None and cfg is not None
             set_tick_phase("sweep")
             # A dead tick must not kill the legs below. The receipt contract makes
             # _tick raise on a failed emission even though state is already persisted,
