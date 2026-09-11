@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -473,6 +473,20 @@ pub fn explain_with_trace(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: &
 }
 
 fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&TickTrace>) {
+    // The cross-arm flip runs before anything reads `row.stale`, so
+    // `pm_stale` below sees the tier's true state instead of a pr_watch_merge
+    // row still reading fresh inside its own doubled grace.
+    let down = down_schedulers(rows);
+    let mut cross_arm = vec![false; rows.len()];
+    for (i, row) in rows.iter_mut().enumerate() {
+        if !row.stale
+            && row.interval_s > 0
+            && row.scheduler.as_deref().is_some_and(|s| down.contains(s))
+        {
+            row.stale = true;
+            cross_arm[i] = true;
+        }
+    }
     let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
     let pm_fresh_failure = pm.is_some_and(|r| {
         !r.stale
@@ -482,13 +496,19 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     });
     let pm_stale = pm.is_some_and(|r| r.stale);
     let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
-    for row in rows.iter_mut() {
+    for (i, row) in rows.iter_mut().enumerate() {
         if row.stale {
             let (cause, hint) = if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
                 tick_overdue_cause(pm_last_ts.as_deref(), trace)
             } else {
-                let cause = stale_cause(row, daemon, pm_fresh_failure)
-                    .unwrap_or_else(|| "unexplained".to_string());
+                let cause = stale_cause(row, daemon, pm_fresh_failure).unwrap_or_else(|| {
+                    if cross_arm[i] {
+                        "scheduler_down"
+                    } else {
+                        "unexplained"
+                    }
+                    .to_string()
+                });
                 let hint = cause_hint(&cause, daemon);
                 (cause, hint)
             };
@@ -503,6 +523,31 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
             row.line = render_row(row);
         }
     }
+}
+
+/// Schedulers whose every interval-bearing arm has gone silent together. One
+/// arm silent is an arm problem. All of them silent is a job problem, and the
+/// row already names the job. A scheduler hosting one interval-bearing arm is
+/// skipped: the verdict there would be the per-arm rule under a second name.
+fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
+    let mut by_sched: HashMap<&str, Vec<&ArmStatus>> = HashMap::new();
+    for row in rows.iter().filter(|r| r.interval_s > 0) {
+        if let Some(sched) = row.scheduler.as_deref() {
+            by_sched.entry(sched).or_default().push(row);
+        }
+    }
+    by_sched
+        .into_iter()
+        .filter(|(_, arms)| arms.len() >= 2)
+        .filter(|(_, arms)| {
+            let floor = arms.iter().map(|a| a.interval_s).min().unwrap_or(0) * 2;
+            arms.iter().all(|a| match a.age_s {
+                None => true,
+                Some(age) => age > a.interval_s && age > floor,
+            })
+        })
+        .map(|(sched, _)| sched.to_string())
+        .collect()
 }
 
 /// The first cause that holds for a stale row, in table order; `None` leaves
@@ -544,6 +589,10 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
         "daemon_down" => "daemon not running".to_string(),
         "tick_timeout" => {
             "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
+        }
+        "scheduler_down" => {
+            "every arm on this scheduler is silent; the job is not running, the arm is fine"
+                .to_string()
         }
         _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
     }
@@ -1092,6 +1141,370 @@ mod tests {
         // The CAUSE blames no tier: no "silent" wording survives. The row's
         // own `via=` scheduler label is fact, not blame, and stays.
         assert!(!kw.line.contains("silent"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The measured 2026-09-11 outage: the pr-watcher job unloaded at
+    /// 10:41Z and at 10:59Z the four launchd arms read 1114s, 1084s, 1123s
+    /// and 1113s against intervals 900, 600, 600 and 300. Three of the four
+    /// pass the per-arm rule; the cross-arm verdict must still red them all.
+    #[test]
+    fn cross_arm_flip_reds_the_whole_launchd_tier_in_the_measured_outage() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T10:40:26Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:40:56Z",
+                    "watchdog",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:40:17Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:40:27Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    300,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+        );
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(row.stale, "{arm} must read STALE, line: {}", row.line);
+            assert!(row.line.contains("STALE"), "line: {}", row.line);
+            assert!(
+                row.cause.as_deref().is_some_and(|c| !c.is_empty()),
+                "{arm} has no cause"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_silent_arm_stays_an_arm_problem() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T09:52:20Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:57:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:57:20Z",
+                    "watchdog",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:57:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
+        assert!(nw.stale, "notify_watch 4000s against 300 is stale");
+        for arm in ["king_wake", "watchdog", "pr_watch_merge"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(!row.stale, "{arm} ticked 100s ago and reads ok");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn single_arm_scheduler_is_not_a_second_name_for_the_per_arm_rule() {
+        // auto_continue is the only interval-bearing arm on the `session`
+        // scheduler. Its silence is judged by its own rule alone.
+        let (guard, journal) = empty_journal();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.stale, "never-ticked auto_continue reads stale");
+        assert_ne!(ac.cause.as_deref(), Some("scheduler_down"));
+        drop(guard);
+    }
+
+    #[test]
+    fn interval_zero_arm_is_neither_counted_nor_flipped() {
+        let (guard, journal) = empty_journal();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let sh = rows.iter().find(|r| r.arm == "stop_hook").unwrap();
+        assert!(!sh.stale, "event-driven arm never reads red from quiet");
+        assert_eq!(sh.cause, None, "stop_hook is never explained");
+        drop(guard);
+    }
+
+    #[test]
+    fn flipped_rows_that_reach_no_specific_cause_read_scheduler_down() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // Daemon tier: reap is stale by its own rule (500s > 2x60);
+        // active_backlog and retire are fresh-but-silent (400s: past their
+        // own 300s run, inside 2x). All three silent together = the daemon
+        // job stopped, so the two fresh rows flip and take the new cause.
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T11:51:40Z",
+                    "reap",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    60,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:53:20Z",
+                    "active_backlog",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:53:20Z",
+                    "retire",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:58:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:58:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+        );
+        for arm in ["active_backlog", "retire"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert_eq!(
+                row.cause.as_deref(),
+                Some("scheduler_down"),
+                "line: {}",
+                row.line
+            );
+            assert!(
+                row.line.contains("the job is not running, the arm is fine"),
+                "line: {}",
+                row.line
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cross_arm_flip_never_outranks_the_tick_trace_evidence() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T10:40:26Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:40:17Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                json!({
+                    "ts": "2026-09-11T10:58:00Z",
+                    "type": "pr_watch_tick_attempt",
+                    "source": "daemon",
+                    "data": {"pid": 32078, "phase": "entry"},
+                }),
+                json!({
+                    "ts": "2026-09-11T10:58:30Z",
+                    "type": "pr_watch_tick_end",
+                    "source": "daemon",
+                    "data": {"outcome": "error", "why": "self_killed",
+                             "phase": "catchup", "duration_s": 30.0, "pid": 32078},
+                }),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        let trace = read_tick_trace(&[dir.join("global.jsonl")], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
+        assert!(
+            kw.line.contains("the tick started and did not complete"),
+            "line: {}",
+            kw.line
+        );
+        assert_ne!(kw.cause.as_deref(), Some("scheduler_down"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_young_daemon_un_flips_its_arms_not_scheduler_down() {
+        // All three daemon arms silent, but the daemon is up 100s - inside
+        // reap's first window (2x60). daemon_young un-flips them, and the
+        // cross-arm verdict must not survive it.
+        let (guard, journal) = empty_journal();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 100,
+                drifted: false,
+            },
+        );
+        for arm in ["active_backlog", "reap", "retire"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(!row.stale, "{arm} pends inside the young window");
+            assert_eq!(row.cause.as_deref(), Some("daemon_young"));
+            assert_ne!(row.cause.as_deref(), Some("scheduler_down"));
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn the_healthy_machine_reading_flips_nothing() {
+        // Measured live at 2026-09-11T11:37Z: the positive control for a
+        // false red.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T10:49:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:52:52Z",
+                    "watchdog",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:47:40Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:49:51Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    300,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(
+            &mut rows,
+            &DaemonFacts::Up {
+                uptime_s: 40_000,
+                drifted: false,
+            },
+        );
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(!row.stale, "{arm} must read ok, line: {}", row.line);
+            assert_eq!(row.cause, None);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
