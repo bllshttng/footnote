@@ -214,7 +214,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `recovery.provider_outage_529_span_seconds` | int | `120` | never | Minimum span in seconds for one persistent 529 session; minimum and default 120. |
 | `recovery.provider_outage_529_cross_session_window_seconds` | int | `600` | never | Cross-session window in seconds for persistent 529 quorum; minimum and default 600. |
 | `recovery.provider_outage_pane_freshness_seconds` | int | `120` | never | Maximum age in seconds for a persisted pane snapshot to vote; minimum and default 120. |
-| `recovery.provider_outage_evidence_freshness_seconds` | int | `600` | never | Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable. |
+| `recovery.provider_outage_evidence_freshness_seconds` | int | `600` | never | Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable. Evidence naming a reset epoch still in the future stays admissible past this age, by name, so a multi-hour cap cannot age out of view. |
 | `recovery.provider_outage_reset_grace_seconds` | int | `120` | never | Grace after a reset-bearing limit before the breaker may close; minimum and default 120. |
 | `recovery.provider_health_marker_ttl_seconds` | int | `120` | never | Maximum age in seconds for a persisted destination canary marker; minimum and default 120. |
 | `health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |

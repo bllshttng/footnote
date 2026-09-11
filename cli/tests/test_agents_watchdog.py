@@ -4689,3 +4689,83 @@ def test_a_claude_no_sid_row_in_a_linked_worktree_is_attributed(monkeypatch):
     advisory = [w for w in warnings if "unmeasurable-row: " in w]
     assert len(advisory) == 1
     assert "harness=claude node=x-ae54 name=t-ae54-worker" in advisory[0]
+
+
+def test_aa31_default_report_carries_provider_outages(monkeypatch, capsys):
+    """x-aa31: the default -J surface carries the outage instrument - open
+    breakers and every refusal reason with a count - without reaching for
+    --only. A failed measurement lands as a named unknown, never a missing
+    key, and the human lines carry the same numbers."""
+    import json as _json
+    from collections import defaultdict
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    from fno.agents import cli as agents_cli
+    from fno.agents import keeper_lane as keeper_lane_mod
+    from fno.agents import unfinished_work as uw_mod
+
+    measured = {
+        "instrument": "measured",
+        "breakers": [{
+            "provider": "zai", "account": "zai", "kind": "fair_usage_policy",
+            "outage_epoch": 1.0, "reset_at": 2.0,
+        }],
+        "counts": {"accepted": 2},
+        "refusals": [{"reason": "evidence_stale", "age_s": 900, "count": 1}] * 7,
+    }
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+    monkeypatch.setattr(
+        watchdog, "measure_provider_outages",
+        lambda rows, *, now_s, **kw: measured,
+    )
+    monkeypatch.setattr(uw_mod, "report_roots", lambda: [_Path("/w")])
+    monkeypatch.setattr(
+        uw_mod, "build_report",
+        lambda roots, *, now_s, **kw: SimpleNamespace(
+            findings=[],
+            dimensions=defaultdict(
+                lambda: SimpleNamespace(state="unreadable", count=None, warning=None)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        uw_mod, "publish_report",
+        lambda snapshot, *, source, now_s, mail_to, log=None: {
+            "warnings": [], "counts": {},
+        },
+    )
+
+    class _Lane:
+        broken = False
+
+        def render(self):
+            return "keeper lane: ok"
+
+        def to_json(self):
+            return {}
+
+    monkeypatch.setattr(keeper_lane_mod, "discover", lambda: _Lane())
+
+    agents_cli._run_unfinished_report(now=0.0, json_out=True, mail_to="")
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["provider_outages"] == measured
+
+    agents_cli._run_unfinished_report(now=0.0, json_out=False, mail_to="")
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "provider outage open: zai/zai kind=fair_usage_policy reset_at=2.0" in text
+    assert "provider-outage refusals (evidence_stale=7)" in text
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no registry")
+
+    monkeypatch.setattr(watchdog, "measure_provider_outages", _boom)
+    agents_cli._run_unfinished_report(now=0.0, json_out=True, mail_to="")
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["provider_outages"]["instrument"] == "unknown"
+    assert (
+        payload["provider_outages"]["refusals"][0]["reason"]
+        == "provider_outage_measure_failed"
+    )
+    assert "no registry" in payload["provider_outages"]["refusals"][0]["detail"]

@@ -1693,12 +1693,15 @@ def measure_provider_outages(
         policy = OutagePolicy.from_settings(settings)
     except Exception:  # noqa: BLE001 - use the schema floor on a config miss
         policy = OutagePolicy()
+    from fno.adapters.providers.runtime_state import record_reset_timezone
+
     records, refusals = collect_transcript_evidence(
         identities,
         now_s=now_s,
         transcript_path_for=transcript_path_for,
         evidence_freshness_s=policy.evidence_freshness_s,
         entries_for=entries_for,
+        reset_timezone_for=record_reset_timezone,
     )
     # Rows whose transcript cannot be read fall back to the pane buffer: both
     # a MISSING transcript and an UNSUPPORTED transcript SHAPE leave the pane
@@ -1726,6 +1729,7 @@ def measure_provider_outages(
             now_s=now_s,
             snapshot_dir=Path(snapshot_root),
             pane_read_fn=pane_read_fn,
+            reset_timezone_for=record_reset_timezone,
         )
         successful_rows = {record.row_id for record in pane_records}
         refusals = [
@@ -1754,6 +1758,38 @@ def measure_provider_outages(
         for reason, count in counts.items():
             report.setdefault("counts", {})[reason] = count
     return report
+
+
+def measure_provider_outages_safe(now_s: float) -> dict[str, Any]:
+    """The default report's outage measure: a crash lands as a named unknown
+    report, never a missing key (x-aa31)."""
+    try:
+        rows, _warnings = fleet_rows()
+        return measure_provider_outages(rows, now_s=now_s)
+    except Exception as exc:  # noqa: BLE001 - the report outlives one lane's crash
+        report = _unknown_provider_report("provider_outage_measure_failed")
+        report["refusals"][0]["detail"] = repr(exc)
+        return report
+
+
+def provider_outage_lines(report: Optional[dict[str, Any]]) -> list[str]:
+    """Human lines for one report: every open breaker, every refusal reason
+    with its count. A clean zero means measured and clear, never dropped
+    evidence (x-aa31)."""
+    lines = []
+    for breaker in (report or {}).get("breakers") or []:
+        lines.append(
+            f"provider outage open: {breaker.get('provider')}/{breaker.get('account')}"
+            f" kind={breaker.get('kind')} reset_at={breaker.get('reset_at')}"
+        )
+    counts: dict[str, int] = {}
+    for item in (report or {}).get("refusals") or []:
+        reason = str(item.get("reason"))
+        counts[reason] = counts.get(reason, 0) + 1
+    if counts:
+        named = " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        lines.append(f"provider-outage refusals ({named})")
+    return lines
 
 
 def supervise_provider_handoffs(

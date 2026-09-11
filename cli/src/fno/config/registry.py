@@ -511,7 +511,7 @@ FIELD_META: dict[str, Meta] = {
     "recovery.provider_outage_529_span_seconds": Meta("never", "Minimum span in seconds for one persistent 529 session; minimum and default 120."),
     "recovery.provider_outage_529_cross_session_window_seconds": Meta("never", "Cross-session window in seconds for persistent 529 quorum; minimum and default 600."),
     "recovery.provider_outage_pane_freshness_seconds": Meta("never", "Maximum age in seconds for a persisted pane snapshot to vote; minimum and default 120."),
-    "recovery.provider_outage_evidence_freshness_seconds": Meta("never", "Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable."),
+    "recovery.provider_outage_evidence_freshness_seconds": Meta("never", "Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable. Evidence naming a reset epoch still in the future stays admissible past this age, by name, so a multi-hour cap cannot age out of view."),
     "recovery.provider_outage_reset_grace_seconds": Meta("never", "Grace after a reset-bearing limit before the breaker may close; minimum and default 120."),
     "recovery.provider_health_marker_ttl_seconds": Meta("never", "Maximum age in seconds for a persisted destination canary marker; minimum and default 120."),
     # --- config.health_monitor.* ---

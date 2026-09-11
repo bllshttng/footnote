@@ -26,16 +26,19 @@ FUP = (
     "does not comply with the Fair Usage Policy, and your request frequency has been "
     "limited. To restore access, please submit a request.]"
 )
+# NOW + 2h, offset-bearing so the stamp resolves without a timezone.
+FUP_LIVE_RESET = FUP + " Window resets at 2026-08-18T20:00:00+00:00."
+FUP_PAST_RESET = FUP + " Window resets at 2026-08-18T10:00:00+00:00."
 
 
 def _record(row_id, at, content, *, status, kind="api_error", role="assistant",
             provider="zai", account="acct-a", source="transcript", pane_id=None,
-            persisted=True, snapshot_at=None):
+            persisted=True, snapshot_at=None, reset_at=None):
     return OutageEvidence(
         source=source, observed_at=at, row_id=row_id, harness="claude",
         provider=provider, account=account, role=role, raw_status=status,
         raw_kind=kind, content=content, pane_id=pane_id, persisted=persisted,
-        snapshot_at=snapshot_at,
+        snapshot_at=snapshot_at, reset_at=reset_at,
     )
 
 
@@ -640,3 +643,157 @@ def test_ac5_hlth_canary_refuses_failed_stop_new_claim_or_node_worktree(tmp_path
         now_s=NOW, spawn=spawn, collect_proof=lambda _spawned: fresh,
         stop=lambda _spawned: True, claim_snapshot=lambda: set(),
     ) is None
+
+
+def _fup_transcript(tmp_path, name, content, *, age_s):
+    stamp = datetime.fromtimestamp(NOW - age_s, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    path = tmp_path / name
+    path.write_text(json.dumps({
+        "type": "assistant", "timestamp": stamp,
+        "isApiErrorMessage": True, "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": content}]},
+    }) + "\n", encoding="utf-8")
+    return path
+
+
+def test_aa31_stale_evidence_is_a_named_refusal_not_a_silent_zero(tmp_path):
+    """x-aa31: a record past the freshness window must reach the caller as a
+    counted ``evidence_stale`` refusal. The positive control proves the
+    classifier live first: the same record inside the window is accepted."""
+    fresh = _fup_transcript(tmp_path, "fresh.jsonl", FUP, age_s=60)
+    stale = _fup_transcript(tmp_path, "stale.jsonl", FUP, age_s=1200)
+    identity = EvidenceIdentity(
+        row_id="row-1", harness="claude", provider="zai",
+        account="acct-a", session_id="s1", cwd=str(tmp_path),
+    )
+
+    records, _ = collect_transcript_evidence(
+        [identity], now_s=NOW, transcript_path_for=lambda _i: fresh,
+    )
+    assert len(records) == 1 and records[0].raw_status == 429
+
+    records, refusals = collect_transcript_evidence(
+        [identity], now_s=NOW, transcript_path_for=lambda _i: stale,
+    )
+    assert records == []
+    assert len(refusals) == 1
+    assert refusals[0]["reason"] == "evidence_stale"
+    assert refusals[0]["row_id"] == "row-1"
+    assert refusals[0]["age_s"] == 1200
+    assert refusals[0]["count"] == 1
+
+
+def test_aa31_stale_evidence_with_live_reset_is_still_current(tmp_path):
+    """x-aa31: the freshness expired, not the fact. A record whose body names
+    a reset epoch still in the future is accepted however old the line is;
+    the same shape with an expired reset is refused by name."""
+    live = _fup_transcript(tmp_path, "live.jsonl", FUP_LIVE_RESET, age_s=1200)
+    dead = _fup_transcript(tmp_path, "dead.jsonl", FUP_PAST_RESET, age_s=1200)
+    identity = EvidenceIdentity(
+        row_id="row-1", harness="claude", provider="zai",
+        account="acct-a", session_id="s1", cwd=str(tmp_path),
+    )
+
+    records, refusals = collect_transcript_evidence(
+        [identity], now_s=NOW, transcript_path_for=lambda _i: live,
+    )
+    assert len(records) == 1
+    assert records[0].reset_at == NOW + 2 * 3600
+
+    records, refusals = collect_transcript_evidence(
+        [identity], now_s=NOW, transcript_path_for=lambda _i: dead,
+    )
+    assert records == []
+    assert refusals[0]["reason"] == "evidence_stale"
+    assert refusals[0]["reset_at"] == NOW - 8 * 3600
+
+
+def test_aa31_naive_reset_stamp_resolves_through_account_timezone(tmp_path):
+    """A naive stamp resolves only against the account's reset_timezone; with
+    it the stale record is current evidence, without it the refusal names why."""
+    naive = _fup_transcript(
+        tmp_path, "naive.jsonl",
+        FUP + " Window resets at 2026-08-19 03:00:00.", age_s=1200,
+    )
+    identity = EvidenceIdentity(
+        row_id="row-1", harness="claude", provider="zai",
+        account="acct-a", session_id="s1", cwd=str(tmp_path),
+    )
+    from zoneinfo import ZoneInfo
+
+    expected = datetime(
+        2026, 8, 19, 3, 0, tzinfo=ZoneInfo("Asia/Singapore"),
+    ).timestamp()  # 03:00 Singapore is 19:00Z the day before
+
+    records, _ = collect_transcript_evidence(
+        [identity], now_s=NOW,
+        transcript_path_for=lambda _i: naive,
+        reset_timezone_for=lambda _account: "Asia/Singapore",
+    )
+    assert len(records) == 1
+    assert records[0].reset_at == expected
+
+    records, refusals = collect_transcript_evidence(
+        [identity], now_s=NOW, transcript_path_for=lambda _i: naive,
+    )
+    assert records == []
+    assert refusals[0]["reason"] == "evidence_stale"
+    assert refusals[0]["reset_at"] is None
+
+
+def test_aa31_breaker_opens_on_stale_live_evidence_past_the_cross_row_window():
+    """The measured event, replayed: rows noticed the cap 466s apart, both
+    lines older than the 600s freshness window, both bodies naming a reset
+    still ~2h out. Quorum 2 must open the breaker even though the vote span
+    exceeds fup_window_s - the shared live reset IS the event boundary."""
+    records = [
+        _record("row-1", NOW - 900, FUP_LIVE_RESET, status=429, reset_at=NOW + 2 * 3600),
+        _record("row-2", NOW - 434, FUP_LIVE_RESET, status=429, reset_at=NOW + 2 * 3600),
+    ]
+    report, _ = _fold(records)
+    assert len(report["breakers"]) == 1
+    breaker = report["breakers"][0]
+    assert breaker["row_ids"] == ["row-1", "row-2"]
+    assert breaker["reset_at"] == NOW + 2 * 3600
+    assert breaker["manual_restoration"] is False
+    assert breaker["outage_epoch"] == NOW - 900
+
+    # Without a resolvable reset the same stale lines refuse by name and
+    # nothing opens: the epoch, not the age, is what admits them.
+    bare = [
+        _record("row-1", NOW - 900, FUP, status=429),
+        _record("row-2", NOW - 434, FUP, status=429),
+    ]
+    report, _ = _fold(bare)
+    assert report["breakers"] == []
+    assert {item["reason"] for item in report["refusals"]} == {"evidence_stale"}
+
+
+def test_aa31_stale_admitted_evidence_expires_at_its_reset_epoch():
+    reset_at = NOW + 2 * 3600
+    records = [
+        _record("row-1", NOW - 900, FUP_LIVE_RESET, status=429, reset_at=reset_at),
+        _record("row-2", NOW - 434, FUP_LIVE_RESET, status=429, reset_at=reset_at),
+    ]
+    _report, state = _fold(records)
+    after_reset, _ = fold_provider_outages(
+        records, prior_state=state, now_s=reset_at + 121 + 1,
+    )
+    assert after_reset["breakers"] == []
+    assert {item["reason"] for item in after_reset["refusals"]} == {"evidence_stale"}
+
+
+def test_aa31_fresh_vote_carries_the_resolved_reset_epoch():
+    """A fresh FUP terminal votes with the epoch resolved at collect time, so
+    the breaker carries a real reset_at where the fold's tz-less parse of a
+    naive stamp read None."""
+    fresh_reset = NOW + 2 * 3600
+    records = [
+        _record("row-1", NOW - 60, FUP_LIVE_RESET, status=429, reset_at=fresh_reset),
+        _record("row-2", NOW - 30, FUP_LIVE_RESET, status=429, reset_at=fresh_reset),
+    ]
+    report, _ = _fold(records)
+    assert report["breakers"][0]["reset_at"] == fresh_reset
+    assert report["breakers"][0]["manual_restoration"] is False
