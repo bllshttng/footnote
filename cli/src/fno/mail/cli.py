@@ -174,12 +174,10 @@ def _read_body(
 ) -> str:
     """The reply body, from whichever of the three forms was used.
 
-    ``positional`` exists so ``reply`` accepts a bare body like ``send`` does.
-    Without it the two verbs disagreed about their own call shape, and the
-    failure was quiet in the worst way: click rejected the stray argument with
-    exit 2 and echoed the body back, which reads like a delivery receipt rather
-    than a refusal. File reads (and ``-`` for stdin) live in
-    ``fno.text_or_file.read_text_arg``.
+    ``positional`` exists so ``reply`` accepts a bare body like ``send``
+    does: without it click rejected the stray argument with exit 2 and
+    echoed the body back, which reads like a delivery receipt. File reads
+    (and ``-`` for stdin) live in ``fno.text_or_file.read_text_arg``.
     """
     from fno.text_or_file import read_text_arg
 

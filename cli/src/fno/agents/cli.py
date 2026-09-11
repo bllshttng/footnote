@@ -2113,11 +2113,7 @@ def cmd_spawn(
             )
             break
         except GateRefused as exc:
-            reason = (
-                exc.receipt.get("reason")
-                if isinstance(exc.receipt, dict)
-                else None
-            )
+            reason = exc.receipt.get("reason") if isinstance(exc.receipt, dict) else None
             now = time.monotonic()
             if wait_deadline is None or reason not in waitable_reasons or now >= wait_deadline:
                 _release_dispatch_claims(node_reservation, node_claim)

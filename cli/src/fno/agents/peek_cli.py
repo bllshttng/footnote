@@ -25,9 +25,9 @@ def cmd_peek(
         None,
         "--grep",
         help=(
-            "Only records whose text carries this token, within the --lines "
-            "window (raise -n to search deeper). The stderr count line is the "
-            "positive control: a zero is reported, never bare."
+            "Only records carrying this token, within the --lines window "
+            "(raise -n to search deeper); the stderr count line reports a "
+            "zero, never bare."
         ),
     ),
     all_sessions: bool = typer.Option(

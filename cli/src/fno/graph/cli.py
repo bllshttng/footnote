@@ -1754,25 +1754,19 @@ def cmd_decompose(
         "--groups",
         help=(
             "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]"
-            "[,adopt]} group specs. Optional per-group project/cwd route a child "
-            "into a different repo (multi-repo decomposition): project resolves "
-            "its cwd from the settings work-map; an explicit cwd overrides; "
-            "absent -> inherit the epic's repo. "
-            "Optional `adopt: [<node-id>...]` re-parents EXISTING nodes under the "
-            "group child instead of minting new ones - use it to package an epic "
-            "already populated by `fno backlog idea --parent` rather than "
-            "doubling it. Epic children no group adopts are named on stderr. "
-            "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
+            "[,adopt]} specs; '@file' or '-' reads stdin. Per-group project/cwd "
+            "route a child into another repo; `adopt` re-parents existing nodes "
+            "instead of minting. Full schema: "
+            "skills/blueprint/references/epic-decomposition.md."
         ),
     ),
     max_prs: Optional[int] = typer.Option(
         None,
         "--max-prs",
         help=(
-            "Ceiling on group/PR count. Rejects when groups exceed it (N is a "
-            "ceiling, not a quota). Defaults to config.blueprint.max_prs_per_epic. "
-            "An epic doc's `max_children:` frontmatter overrides that default; "
-            "--max-prs may then only tighten it (never loosen the author's cap)."
+            "Ceiling on group/PR count; rejects when exceeded. Default: "
+            "config.blueprint.max_prs_per_epic, tightened by the epic doc's "
+            "`max_children:` frontmatter."
         ),
     ),
     force: bool = typer.Option(
@@ -1785,12 +1779,9 @@ def cmd_decompose(
         "separate",
         "--plans",
         help=(
-            "Per-child plan packaging. Only 'separate' is supported: scaffold a "
-            "self-contained quick-plan stub per child and repoint its plan_path "
-            "to that file (one plan == one PR == one node). The former 'fragment' "
-            "packaging (a <epic-doc>#group-<slug> section of a shared doc) was "
-            "removed - it is still recognized on existing children for idempotent "
-            "re-decompose, but never authored."
+            "Only 'separate': a self-contained quick-plan per child (one plan "
+            "== one PR == one node). The removed 'fragment' form is still "
+            "recognized on existing children for idempotent re-decompose."
         ),
     ),
 ) -> None:
