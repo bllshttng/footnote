@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Shared pricing and cost calculation for fno token tools.
 
-Single source of truth for Anthropic model pricing.
-
-Pricing sources:
-- https://platform.claude.com/docs/en/about-claude/pricing (canonical)
-- LiteLLM's model_prices_and_context_window.json (machine-readable
-  reference, the same one community cost tools use):
-  https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+Single source of truth for Anthropic model pricing; the table and its
+sources live in pricing.yaml beside this module.
 
 Usage:
     from fno.cost.cost_tracker import model_tier, calculate_cost, estimate_cache_miss_cost

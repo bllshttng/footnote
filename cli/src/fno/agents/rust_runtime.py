@@ -1,37 +1,23 @@
 """Rust runtime routing for ``fno agents`` (Phase 6 W6 / cv-d28b266a).
 
 The Rust daemon is the **default** runtime for the daemon-native verbs: by
-default ``fno agents <verb> [args]`` execs the compiled ``fno-agents`` client
-binary for the verbs that exist only on the Rust side (``spawn``, ``status``,
-``drive``, the ``*-channel`` verbs) whenever an *installed* binary is present.
-Following the full thin-wrapper rewire (ab-d82655d7) and the client-side
-``ask`` ports (claude ab-cc926b4e, codex ab-0429c6e1, gemini ab-73da4ac2),
-Every Rust-backed verb auto-routes to the binary — including ``ask`` for all
-providers. ``crown`` is Python-owned because it mutates the shared registry
-without a daemon RPC; ``AUTO_ROUTE_VERBS`` is therefore ``RUST_CLIENT_VERBS``
-minus ``PYTHON_AGENT_VERBS``. Python implementations of Rust-backed verbs stay
-registered as the ``FNO_AGENTS_RUNTIME=python`` fallback (and serve when no
-installed binary is present). See :data:`AUTO_ROUTE_VERBS`.
+default ``fno agents <verb> [args]`` execs the installed ``fno-agents`` client
+binary for every Rust-backed verb (``AUTO_ROUTE_VERBS`` = the client verbs
+minus ``PYTHON_AGENT_VERBS``). Python implementations stay registered as the
+``FNO_AGENTS_RUNTIME=python`` fallback and serve when no installed binary is
+present; ``crown`` is Python-owned (it mutates the shared registry without a
+daemon RPC).
 
-``FNO_AGENTS_RUNTIME`` selects the runtime explicitly (see :func:`runtime_mode`):
+``FNO_AGENTS_RUNTIME``: ``rust`` forces the binary (missing = hard 127);
+``python`` forces Python dispatch; unset or anything else = ``auto``. In
+``auto`` only *installed* binaries resolve (never the cargo dev target), so
+a dev checkout opts into the local build with ``FNO_AGENTS_RUNTIME=rust``.
+The retired twins ``ask`` and ``rm`` have NO Python leg: they run on the
+binary or refuse through :func:`refuse_without_binary`, never a silent
+fallback.
 
-- ``rust``   -- force the binary for every verb; a missing binary is a hard 127.
-- ``python`` -- force the Python dispatch; never touch the binary.
-- unset / anything else -- ``auto`` (the default described above).
-
-Retired twins: ``ask`` and ``rm`` have NO Python implementation. In ``auto``
-they run on the binary (a missing binary refuses through
-:func:`refuse_without_binary`, never a silent Python leg); ``=python`` cannot
-force them and refuses by name; ``=rust`` is unchanged.
-
-To keep the default from surprising a *development* checkout, ``auto`` resolves
-only *installed* binaries (bundled wheel dir / launcher sibling / ``PATH``) and
-ignores the cargo dev target; a dev opts into the local build with
-``FNO_AGENTS_RUNTIME=rust``. This makes the change reversible per-invocation.
-
-Design: ``internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md``
-(line 136 — "Python ``fno agents <verb>`` is a thin Typer wrapper that execs
-``fno-agents <verb>``"). Plan: ``plans/2026-05-25-phase6-w6-distribution.md``.
+Design: internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md
+(line 136); plan: plans/2026-05-25-phase6-w6-distribution.md.
 """
 from __future__ import annotations
 
@@ -88,7 +74,7 @@ def refuse_without_binary(verb: str) -> NoReturn:
     raise SystemExit(BIN_NOT_FOUND_EXIT)
 
 FOLDED_AGENT_SUBCOMMANDS: dict = {
-    name: (entry[0], entry[1], entry[2])
+    name: tuple(entry)
     for name, entry in yaml.safe_load(
         (Path(__file__).resolve().parent / "folded_subcommands.yaml").read_text(
             encoding="utf-8"

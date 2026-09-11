@@ -161,10 +161,8 @@ def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
 
 def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
     """One `fno agents claim reap --apply` run completed, including a run that
-    reaped nothing - a silent sweep and a dead sweep must not look the
-    same. Callers must not invoke this for a dry-run (reap_dead_claims
-    itself gates on `apply`): a dry-run promises no writes, and this event
-    is one.
+    reaped nothing - a silent sweep and a dead sweep must not look the same.
+    Never call this for a dry-run: a dry-run promises no writes; this is one.
     """
     known_keys = {
         "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
@@ -186,28 +184,24 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         # KeyError below would fire mid-build with a confusing traceback;
         # fail loud here instead, naming the actual missing key(s).
         raise KeyError(f"emit_claim_reap_swept: summary missing expected key(s) {sorted(missing_keys)}")
-    data = {
-        "scanned": int(summary["scanned"]),
-        "reaped": int(summary["reaped"]),
-        "would_reap": int(summary["would_reap"]),
-        "kept_live": int(summary["kept_live"]),
-        "kept_suspect": int(summary["kept_suspect"]),
-        "kept_suspect_alive": int(summary["kept_suspect_alive"]),
-        "kept_suspect_unprobed": int(summary["kept_suspect_unprobed"]),
-        "kept_unclassified": int(summary["kept_unclassified"]),
-        "unclassified_dirs": {str(k): int(v) for k, v in (summary["unclassified_dirs"] or {}).items()},
-        "kept_suspect_unprobed_by": {
-            str(k): int(v) for k, v in (summary["kept_suspect_unprobed_by"] or {}).items()
-        },
-        "kept_offhost": int(summary["kept_offhost"]),
-        "corrupted": int(summary["corrupted"]),
-        "vanished": int(summary["vanished"]),
-        "contended": int(summary["contended"]),
-        "reap_failed": len(summary["reap_failed"]),
-        "apply": bool(summary["apply"]),
-        "lock_mirror_cleared": int(summary["lock_mirror_cleared"]),
-        "roots": [str(r) for r in summary["roots"]],
+    data: dict[str, Any] = {
+        key: int(summary[key])
+        for key in (
+            "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
+            "kept_suspect_alive", "kept_suspect_unprobed", "kept_unclassified",
+            "kept_offhost", "corrupted", "vanished", "contended",
+        )
     }
+    data["unclassified_dirs"] = {
+        str(k): int(v) for k, v in (summary["unclassified_dirs"] or {}).items()
+    }
+    data["kept_suspect_unprobed_by"] = {
+        str(k): int(v) for k, v in (summary["kept_suspect_unprobed_by"] or {}).items()
+    }
+    data["reap_failed"] = len(summary["reap_failed"])
+    data["apply"] = bool(summary["apply"])
+    data["lock_mirror_cleared"] = int(summary["lock_mirror_cleared"])
+    data["roots"] = [str(r) for r in summary["roots"]]
     _emit(_build("claim_reap_swept", data))
 
 

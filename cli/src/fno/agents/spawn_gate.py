@@ -1583,10 +1583,9 @@ def run_gate(
                 _refuse(EXIT_NO_WAIT, receipt)
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
                 if provider_cap is not None:
-                    # Contention is a peer or a corpse, never a full cap: the
-                    # cap read is the thing the mutex protects. Takeover asks
-                    # THE single reap decision (x-9c91): force only a
-                    # provably-dead holder, keep queueing past anything else.
+                    # Contention is a peer or a corpse, never a full cap. The
+                    # takeover asks THE single reap decision (x-9c91): force
+                    # only a provably-dead holder, queue past anything else.
                     from fno.claims.core import (
                         ClaimGoneAway,
                         ClaimVerdictError,

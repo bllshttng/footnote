@@ -4726,8 +4726,8 @@ mod tests {
 #[path = "claims_release_stopped.rs"]
 mod release_stopped;
 pub use release_stopped::{
-    release_for_stopped_session, StopKeptClaim, StopReleaseReceipt, StopReleasedClaim,
-    StoppedHolder,
+    release_for_stopped_session, session_for_name, StopKeptClaim, StopReleaseReceipt,
+    StopReleasedClaim, StoppedHolder,
 };
 
 #[path = "claims_long_holds.rs"]

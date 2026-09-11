@@ -2167,7 +2167,7 @@ def test_stop_python_leg_releases_claims(tmp_path: Path, monkeypatch, capsys) ->
         )
 
     monkeypatch.setattr("fno.claims.verdict.resolve_binary", lambda: tmp_path / "fake-fno-agents")
-    monkeypatch.setattr(dispatch.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.claims.verdict.run_subprocess", fake_run)
 
     dispatch.stop_agent("worker-claude")
 

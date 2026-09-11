@@ -291,8 +291,13 @@ fn run_release_stopped(args: &[String]) -> i32 {
         return 2;
     }
     let target = crate::claims::StoppedHolder {
+        harness_session_id: session.or_else(|| {
+            crate::claims::session_for_name(
+                &crate::paths::AgentsHome::from_env().registry_json(),
+                &name,
+            )
+        }),
         name,
-        harness_session_id: session,
     };
     match crate::claims::release_for_stopped_session(&target, &dirs, events_dir.as_deref()) {
         Ok(receipt) => {

@@ -114,6 +114,21 @@ fn release_stopped_at(
     Ok(path)
 }
 
+/// The stopped worker's harness session id, read from the registry row a
+/// stop leaves behind. `None` when no row names the worker or the row
+/// carries no session; the release then matches holder shapes only.
+pub fn session_for_name(registry_path: &Path, name: &str) -> Option<String> {
+    let rows = crate::client_verbs::read_registry_entries(registry_path).ok()?;
+    rows.iter()
+        .filter(|row| row.get("name").and_then(Value::as_str) == Some(name))
+        .find_map(|row| {
+            row.get("harness_session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
 /// Release every claim the stopped holder keeps, across VERBATIM claims
 /// directories (the global dir and the worker's own space dir). One
 /// implementation serves both the daemon (direct call) and the Python leg
@@ -342,5 +357,28 @@ mod tests {
 
     fn lockfile_of(dir: &Path, key: &str) -> PathBuf {
         dir.join(format!("{}.lock", encode_key(key)))
+    }
+
+    #[test]
+    fn session_for_name_reads_the_stopped_row() {
+        let td = TempDir::new().unwrap();
+        let home = crate::paths::AgentsHome::at(td.path());
+        std::fs::write(
+            home.registry_json(),
+            r#"{"schema_version": 1, "agents": [
+                {"name": "w1", "harness": "claude", "status": "idle",
+                 "cwd": "/tmp", "log_path": "/tmp/l",
+                 "harness_session_id": "sess-9c91", "pid": 1},
+                {"name": "w2", "harness": "codex", "status": "idle",
+                 "cwd": "/tmp", "log_path": "/tmp/m", "pid": 2}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            session_for_name(&home.registry_json(), "w1").as_deref(),
+            Some("sess-9c91")
+        );
+        assert_eq!(session_for_name(&home.registry_json(), "w2"), None);
+        assert_eq!(session_for_name(&home.registry_json(), "nobody"), None);
     }
 }

@@ -1,5 +1,7 @@
 # Prices per million tokens, one tier per key. Loaded by cost_tracker.PRICING.
-# Prices per million tokens.
+# Sources: https://platform.claude.com/docs/en/about-claude/pricing (canonical)
+# and LiteLLM's model_prices_and_context_window.json (the machine-readable
+# reference community cost tools use).
 opus-5.0:
   # Opus 5 held the 4.5 -> 4.8 sticker price. Fast mode ($10/$50) is a
   # separate tier that this table does not yet carry; see model_tier.

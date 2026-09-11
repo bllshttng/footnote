@@ -599,31 +599,16 @@ LONG_HOLD_S = 12 * 60
 
 
 def long_hold_rows() -> dict:
-    """Single-flight holds older than LONG_HOLD_S across both claims roots;
-    returns ``{"error": ...}`` instead of raising (a top render never dies
-    on a claims read). The computation is the Rust runtime's ``claim
-    long-holds`` op; this wrapper is its client."""
-    import subprocess
-
+    """Single-flight holds over LONG_HOLD_S from the Rust ``long-holds`` op;
+    ``{"error": ...}`` instead of raising: a top render never dies on a read."""
     from fno.claims.io import claims_dir, global_claims_dir
-    from fno.claims.verdict import resolve_binary
+    from fno.claims.verdict import run_op
 
-    binary = resolve_binary()
-    if binary is None:
-        return {"error": "fno-agents binary not found"}
-    command = [str(binary), "claim", "long-holds", "--min-hold-s", str(LONG_HOLD_S)]
-    command.extend(("--claims-dir", str(global_claims_dir())))
-    command.extend(("--claims-dir", str(claims_dir(None))))
-    try:
-        proc = subprocess.run(command, capture_output=True, text=True, check=False)
-    except OSError as exc:
-        return {"error": f"OSError: {exc}"}
-    if proc.returncode != 0:
-        return {"error": proc.stderr.strip() or f"exit {proc.returncode}"}
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        return {"error": f"JSONDecodeError: {exc}"}
+    payload, error = run_op(
+        ["long-holds", "--min-hold-s", str(LONG_HOLD_S)],
+        [global_claims_dir(), claims_dir(None)],
+    )
+    return {"error": error} if error else payload
 
 
 

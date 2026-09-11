@@ -40,6 +40,30 @@ def process_create_time_ms(pid: int | None) -> int | None:
         return None
 
 
+def run_op(
+    op_args: Sequence[str], claims_dirs: Sequence[Path]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run one ``fno-agents claim <op>`` that takes repeatable
+    ``--claims-dir``; answers ``(payload, None)`` or ``(None, error)`` — a
+    reporting caller never dies on an op failure."""
+    binary = resolve_binary()
+    if binary is None:
+        return None, "fno-agents binary not found"
+    command = [str(binary), "claim", *op_args]
+    for cdir in claims_dirs:
+        command.extend(("--claims-dir", str(cdir)))
+    try:
+        result = run_subprocess(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return None, f"OSError: {exc}"
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f"exit {result.returncode}"
+    try:
+        return json.loads(result.stdout), None
+    except json.JSONDecodeError as exc:
+        return None, f"JSONDecodeError: {exc}"
+
+
 def claim_verdicts(
     keys: Sequence[str] | None = None,
     *,

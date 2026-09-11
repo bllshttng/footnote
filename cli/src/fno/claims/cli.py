@@ -1806,9 +1806,8 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
-    naming the path read and, when it exists in the other default root, that
-    path (the x-cff2 specimen released nothing while printing success).
-    """
+    naming the path read and any other default root that holds the file
+    (the x-cff2 specimen released nothing while printing success)."""
     try:
         outcome = _claims_core.force_release_claim(
             key=key, reason=reason, root=_node_aware_root(key)
@@ -1817,19 +1816,10 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    receipt = {"key": key, "reason": reason, "path": str(outcome.path)}
     if outcome.archived:
         if json_output:
-            typer.echo(
-                json.dumps(
-                    {
-                        "key": key,
-                        "force_released": True,
-                        "reason": reason,
-                        "archived": True,
-                        "path": str(outcome.path),
-                    }
-                )
-            )
+            typer.echo(json.dumps({**receipt, "archived": True, "force_released": True}))
         else:
             typer.echo(f"force-released: {key} (archived {outcome.path})")
         return
@@ -1847,11 +1837,9 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
         typer.echo(
             json.dumps(
                 {
-                    "key": key,
-                    "force_released": False,
-                    "reason": reason,
+                    **receipt,
                     "archived": False,
-                    "path": str(outcome.path),
+                    "force_released": False,
                     "other_roots": [
                         {"path": str(path), "root": "default" if raw is None else str(raw)}
                         for raw, path in others
