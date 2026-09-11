@@ -1530,17 +1530,18 @@ pub(crate) fn run_with_release(
         // parked or never-started node, and a recorded merge the status lags
         // all answer the same question - is THIS session's own story over -
         // and each falls through to the grace gate in gc_decide.
-        let session_terminal =
-            if matches!(work, WorkState::Open { .. }) && e.harness_name() == "claude" {
-                let mut memo = agents_memo.borrow_mut();
-                let snapshot = memo.get_or_insert_with(&agents_read);
-                crate::daemon::claude_row_id(e)
-                    .and_then(|rid| snapshot.find(&rid).cloned())
-                    .and_then(|row| row.state)
-                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
-            } else {
-                None
-            };
+        // x-b7f8: EVERY claude row carries its terminal state, not only
+        // Open-work rows - recency and lineage must be able to yield to it.
+        let session_terminal = if e.harness_name() == "claude" {
+            let mut memo = agents_memo.borrow_mut();
+            let snapshot = memo.get_or_insert_with(&agents_read);
+            crate::daemon::claude_row_id(e)
+                .and_then(|rid| snapshot.find(&rid).cloned())
+                .and_then(|row| row.state)
+                .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
+        } else {
+            None
+        };
         let superseded_by_live_peer = match &work {
             WorkState::Open { node, .. } => live_peer
                 .get(node)
@@ -1947,6 +1948,20 @@ pub(crate) fn run_with_release(
             } else {
                 basis
             };
+        // x-b7f8: name the early fire for a terminal state the way the pid
+        // evidence names its own. An AllDone row retiring INSIDE the grace
+        // window went because the harness says the session finished, not
+        // because the transcript aged out; the Open basis already names the
+        // state in its own arm.
+        if matches!(probed.work, WorkState::AllDone { .. })
+            && probed.session_terminal.is_some()
+            && probed.transcript_age_s.is_some_and(|age| age <= grace_secs)
+        {
+            basis = format!(
+                "{basis}; session terminal: harness state {}",
+                probed.session_terminal.clone().unwrap_or_default()
+            );
+        }
         // The release rides the audit line (x-e3cc): what was ruled, how old
         // the hold was, and an unconfirmed stop named as such.
         if let Some(note) = &release_note {
