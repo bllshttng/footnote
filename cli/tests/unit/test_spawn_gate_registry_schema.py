@@ -35,6 +35,37 @@ def shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return target
 
 
+@pytest.fixture(autouse=True)
+def _no_live_cpu_axis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the schema recheck, not the CPU axis: an unpinned axis
+    would refuse or hold on whatever the CI runner happens to be doing, and a
+    hold never even reaches the dequeue path under test."""
+    from fno import doctor_footprint
+    from fno.footprint import Admission, Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    admit = Admission(
+        verdict="admit",
+        axis="fleet_cpu_share",
+        reason="test admit",
+        share_low=0.1,
+        share_high=0.1,
+        bound="exact",
+        fleet_cores=1.2,
+        machine_cores=6.0,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap=None,
+        load_15m=1.0,
+        backstop=480.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
+
+
 def _write(path: Path, version: int) -> None:
     path.write_text(
         json.dumps({"schema_version": version, "agents": []}, indent=2),
@@ -97,7 +128,9 @@ def test_force_does_not_bypass_the_schema_check(
     # so it re-arms the gate the way test_spawn_gate.py's own fixture does.
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(
-        spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        spawn_gate,
+        "census",
+        lambda socket_map=None: spawn_gate.LiveCensus(workers=[]),
     )
 
     with pytest.raises(spawn_gate.GateRefused) as excinfo:
@@ -116,7 +149,9 @@ def test_the_dequeue_path_rechecks_the_schema(
     _write(shared, reg.SCHEMA_VERSION)
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(
-        spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        spawn_gate,
+        "census",
+        lambda socket_map=None: spawn_gate.LiveCensus(workers=[]),
     )
     # Entry sees a healthy registry; the file moves ahead before the dequeue
     # check reads it again.
