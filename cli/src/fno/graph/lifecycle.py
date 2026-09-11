@@ -20,7 +20,7 @@ def register_lifecycle_commands(
     expand_valid_ids: Callable[[List[str]], List[str]],
     require_nodes: Callable[[list, List[str]], None],
     graph_path: Callable[[], Path],
-    project_plans_from_graph: Callable[[List[str]], None],
+    project_plans_from_graph: Callable[..., None],
 ) -> None:
     from fno.graph._intake import _find_node
     from fno.graph.store import locked_mutate_graph
