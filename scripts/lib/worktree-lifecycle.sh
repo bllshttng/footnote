@@ -801,6 +801,32 @@ _cargo_target_cleanup() {
     [[ "$status" == "ok" ]]
 }
 
+# The holder stamp records the pid AND its start time, so a pid recycled to a
+# long-lived process is no longer read as a live holder. The start identity is
+# pinned to UTC at the call site: ps -o lstart= answers in local time, and a
+# writer and reader with different TZ would disagree about a live holder.
+# events-lock.sh's own consumers compare local-time strings among themselves
+# and must stay untouched.
+_wt_stamp_identity() {
+    TZ=UTC0 _event_process_identity "$1"
+}
+
+# Judge a holder stamp. 0 = live holder, 1 = dead or empty, 2 = live pid that
+# did not stamp this lock (its start time moved: the pid was recycled).
+_wt_holder_live() {
+    local stamp="$1" pid started="" now
+    pid="${stamp%%$'\n'*}"
+    [[ "$stamp" == *$'\n'* ]] && started="${stamp#*$'\n'}"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+    [[ -z "$started" ]] && return 0
+    now="$(_wt_stamp_identity "$pid")"
+    # A live pid with an unreadable start time (busybox ps has no lstart)
+    # still counts as a holder: a wedged sweep is recoverable, a stolen live
+    # lock is two sweeps running as one.
+    [[ -z "$now" || "$now" == "$started" ]] && return 0
+    return 2
+}
+
 # One sweep at a time, shared by cleanup callers. The lock lives in the
 # git common dir, resolved absolutely so the answer holds from any cwd;
 # the function leaves the trap armed on success.
