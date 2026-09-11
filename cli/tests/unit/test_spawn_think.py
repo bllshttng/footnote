@@ -739,6 +739,17 @@ def test_parse_short_id_absent():
 # ---------------------------------------------------------------------------
 
 
+# The mint is a real pre-spawn subprocess (x-84b2); fakes serve the spawn and
+# route the naming verbs to the real binary.
+_REAL_SUBPROCESS_RUN = st.subprocess.run
+
+_NAMING_VERBS = {"name-mint", "name-codes", "name-parse"}
+
+
+def _is_naming_verb(cmd) -> bool:
+    return bool(_NAMING_VERBS & {str(part) for part in cmd})
+
+
 def _capture_spawn_cmd(monkeypatch) -> list:
     """Patch subprocess.run inside _spawn_think_worker; return the captured cmd."""
     captured: dict = {}
@@ -749,6 +760,8 @@ def _capture_spawn_cmd(monkeypatch) -> list:
         stderr = ""
 
     def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
         captured["cmd"] = cmd
         return _Proc()
 
@@ -779,6 +792,8 @@ def test_spawn_worker_tags_the_spawn_subprocess_with_its_cause(monkeypatch):
         stderr = ""
 
     def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
         captured["cmd"] = cmd
         captured["env"] = kw.get("env")
         return _Proc()
@@ -812,6 +827,8 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
         stderr = ""
 
     def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
         seen["cmd"] = cmd
         return _Proc()
 
@@ -1662,6 +1679,8 @@ def _capture_with_stdout(monkeypatch, stdout: str) -> dict:
         stderr = ""
 
     def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
         captured["cmd"] = cmd
         p = _Proc()
         p.stdout = stdout
@@ -1750,7 +1769,13 @@ def test_a_nonzero_exit_still_raises_on_every_substrate(monkeypatch, tmp_path):
         stdout = ""
         stderr = "substrate unavailable"
 
-    monkeypatch.setattr(st.subprocess, "run", lambda cmd, **kw: _Proc())
+    monkeypatch.setattr(
+        st.subprocess,
+        "run",
+        lambda cmd, **kw: _REAL_SUBPROCESS_RUN(cmd, **kw)
+        if _is_naming_verb(cmd)
+        else _Proc(),
+    )
     with pytest.raises(st.SpawnError):
         st._spawn_think_worker(
             "x-1", "prompt", str(tmp_path), "slug", provider="codex"
