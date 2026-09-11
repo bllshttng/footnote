@@ -163,6 +163,80 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3c. The fno:user block: seeded around the placeholder on first write,
+# round-tripped verbatim on re-fire, emptied stays emptied, and a partial
+# edit (missing closing marker) heals without dropping a byte. The machine
+# never writes this block; only the seed on a doc that has no block yet.
+# ---------------------------------------------------------------------------
+if grep -q "## User notes (you write here; the machine only ever reads this)" "$DOC" \
+  && grep -q "<!-- fno:user -->" "$DOC" && grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "user block section fenced and headed"
+else
+  fail "user block section missing or unfenced"
+fi
+if grep -q "_(write here; the machine reads this every refresh and never edits it)_" "$DOC"; then
+  pass "user block seeded with the placeholder line"
+else
+  fail "user block placeholder missing on first write"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+PLACEHOLDER_COUNT="$(grep -c "write here; the machine reads this every refresh" "$DOC")"
+if [[ "$PLACEHOLDER_COUNT" == "1" ]]; then
+  pass "re-fire round-trips the placeholder exactly once (no re-seed)"
+else
+  fail "re-fire placeholder count=$PLACEHOLDER_COUNT (expected 1)"
+fi
+
+# A partial user edit: text after the open marker, closing marker gone. The
+# next fire must carry the text through byte-for-byte and repair the fence.
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?(?=<!-- /fno:user -->)",
+           "<!-- fno:user -->\nSENTINEL_USER_11 partial edit body\n",
+           s, count=1)
+s = s.replace("<!-- /fno:user -->", "", 1)
+open(p, "w").write(s)
+PY
+if grep -q "SENTINEL_USER_11" "$DOC" && ! grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "partial-edit fixture planted (closing marker gone)"
+else
+  fail "partial-edit fixture not planted"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+if grep -q "SENTINEL_USER_11 partial edit body" "$DOC" && grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "partial edit: text preserved verbatim, closing marker repaired"
+else
+  fail "partial edit: text lost or fence not repaired"
+fi
+
+# A block the user emptied stays emptied: no placeholder re-seed into a block
+# whose markers exist (the machine never writes user content).
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?<!-- /fno:user -->",
+           "<!-- fno:user -->\n<!-- /fno:user -->", s, count=1)
+open(p, "w").write(s)
+PY
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+m = re.search(r"(?s)<!-- fno:user -->\n(.*?)<!-- /fno:user -->", s)
+body = m.group(1) if m else "MARKERS-GONE"
+sys.exit(0 if body.strip() == "" else 1)
+PY
+if [[ $? == 0 ]]; then
+  pass "emptied user block stays empty on re-fire (never re-seeded)"
+else
+  fail "emptied user block was re-seeded or lost"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PR section omitted when gh is absent (degrade, never a failed hook).
 # ---------------------------------------------------------------------------
 rm -f "$DOC"

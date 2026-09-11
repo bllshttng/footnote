@@ -39,7 +39,7 @@ chmod +x "$STUB"
 # (so drain's _git_root() / cwd resolves against $WORK/.fno/).
 FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py agents mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind heads-up \
-  --body "please file as a graph node"
+  --body "file this as a graph node"
 FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py agents mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind question \
   --body "do we proceed with the rollback"

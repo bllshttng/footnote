@@ -50,6 +50,7 @@ def test_ac2_err_malformed_graph_is_unknown_not_empty():
         {"batch": "batch-code"},
         {"blocked_by": ["x-blocker"]},
         {"type": "epic"},
+        {"contained_in": "x-owner"},
     ],
 )
 def test_ac5_started_or_unsafe_rows_stay_out(overrides):
@@ -57,6 +58,20 @@ def test_ac5_started_or_unsafe_rows_stay_out(overrides):
     receipt = classify_planned_unclaimed(entries, [])
 
     assert [row["id"] for row in receipt["rows"]] == ["x-known-undispatched"]
+
+
+def test_contained_node_with_free_claim_stays_out():
+    """Containment, not the claim list, decides offerability: a contained
+    subtask carries no claim of its own (the owner holds node:<owner>), so
+    the claim leg read it free and the queue offered it beside genuinely
+    undispatched work - with a note telling a king to dispatch it. It ships
+    inside its owner's PR and never dispatches alone."""
+    receipt = classify_planned_unclaimed(
+        [_node("x-open"), _node("x-subtask", contained_in="x-owner", parent="x-owner")],
+        [{"key": "node:x-owner", "state": "live"}],
+    )
+
+    assert [row["id"] for row in receipt["rows"]] == ["x-open"]
 
 
 @pytest.mark.parametrize("state", ["live", "suspect", "stale", "corrupted"])

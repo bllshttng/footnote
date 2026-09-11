@@ -1,6 +1,6 @@
 # House style for agent-authored text
 
-Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on PR bodies, comments, and changed markdown. Mail enforces the relay compression contract only: rule 7, the 80-word cap. The same cap runs on the evidence of a backlog encounter, its number config-driven per surface.
+Agent text is re-read by every recipient on every turn. It must read once. A machine checks eight rules at the tool boundary, on every surface. Mail and encounter evidence carry rule 7 as well, the 80-word cap, its number config-driven per surface.
 
 ## The house style
 
@@ -29,7 +29,7 @@ A worker who reads both rules without this section picks one and drops the other
 
 ## What the checker enforces
 
-The house style above is the standard a person writes to. The list below is the part a machine can decide, so the two lists are different things and both count seven. The checker is the floor, never the whole style. A draft that passes it can still bury the point, and no gate catches that.
+The house style above is the standard a person writes to. The list below is the part a machine can decide. The two lists are different things, and one counts six while the other counts eight. The checker is the floor, never the whole style. A draft that passes it can still bury the point, and no gate catches that.
 
 1. A list-item sentence is 20 words or fewer. Every other sentence is 25 words or fewer.
 2. No semicolon. Write two sentences.
@@ -38,6 +38,9 @@ The house style above is the standard a person writes to. The list below is the 
 5. If a sentence carries "if" or "when", that word starts the sentence.
 6. A paragraph is one physical line. A newline starts the next block.
 7. Mail prose and encounter evidence are 80 masked words or fewer, or whatever `config.style.word_cap.<surface>` sets. This rule does not run on PR bodies, comments, changed markdown, or progress notes.
+8. No filler or pleasantries: "please", "thanks", "basically", and the phrases "thank you", "of course", "happy to", "feel free". This rule runs on every surface, and its list is closed.
+
+Until 2026-09-11 mail ran the word cap only, and rules 1 to 6 never saw a mail body. That was a decision, recorded in this file and in the checker's docstring. The premise aged: agent mail is read by a human in the transcript, and every mail is re-read by a model whose context it spends. Mail now runs the full rule set. Measured on 2026-09-11 against 6,964 authored bodies from the bus corpus, rules 1 to 6 refuse 18.6 percent, and rule 8 adds about 3 percent. The 80-word cap refuses as before. The gate cannot wedge the bus: the `control:` lane, a `style-exception:` line, and `FNO_STYLE_ENFORCE=0` all bypass.
 
 ## Rule 7 caps what a reader meets mid-turn
 
@@ -62,6 +65,20 @@ The surface set lives in `fno.style.CAPPED_SURFACES` and is not configurable. Co
 Footnote injects a relay compression contract at SessionStart and after context compaction. It covers agent-authored mail, replies, and mux pane sends. Agents think fully, then transmit only outcome, reason, and next action. Findings move to a node or doc and the relay carries its link.
 
 The mechanism adapts [Caveman](https://github.com/JuliusBrussee/caveman)'s MIT-licensed system-prompt pattern. Caveman's own measurements identify prompt programming as the output-shrinking mechanism. It does not compress model reasoning. Footnote keeps the portable core small because every user pays SessionStart context cost.
+
+## Why Caveman is not ported whole
+
+The 2026-09-11 operator ask was to bake Caveman into the mail gate. One part of it shipped, and three parts deliberately did not. This section is the record, so the next person does not re-propose the whole.
+
+Shipped: the filler and pleasantry wordlist, as rule 8, cut down to what a real corpus supports. See "Rule 8 uses a closed list" below.
+
+Not shipped: dropping the articles "a", "an", and "the". ASD-STE100 REQUIRES the article. It is a controlled language that mandates it for unambiguous parsing, and adherence is the operator ruling of 2026-08-13. Caveman and the house style contradict each other directly here, and the ruling wins.
+
+Not shipped: abbreviating ("DB", "auth", "config"). The same ruling's line "give each word one meaning" refuses it. An abbreviation gives one concept two spellings.
+
+Not shipped: a mode named `/simple-english`. Simplified Technical English is the house style itself. A second surface with that name teaches every reader there are two standards where there is one.
+
+Also worth naming: `/caveman` and `/simple-english` live in one operator's personal skills directory and ship to nobody who installs this plugin. Forcing a skill by name is a no-op for every stranger, or a hard failure of their mail. Whatever the gate enforces has to be in the checker that ships. That is why the ask landed as checker rules and not as a skill dependency.
 
 ## Rule 6 reverses the sentence-per-line convention
 
@@ -116,6 +133,23 @@ Do not fix this with a part-of-speech tagger. The tagger trades a cheap cap for 
 ## Rule 4 uses a closed list
 
 The checker matches a fixed set of about 40 contractions. It never matches a possessive. A pattern flags "the agent's body", which is correct English. A missed contraction is a cheaper error than a refused correct sentence.
+
+## Rule 8 uses a closed list, and the list is short on purpose
+
+Rule 8 bans three words ("please", "thanks", "basically") and four phrases ("thank you", "of course", "happy to", "feel free"). Every one was measured against every occurrence in the 6,964-message mail corpus before it entered. A word stays out unless the corpus shows it is filler THERE. A false positive in a gate that refuses mail is expensive, so the rejected candidates carry their own record:
+
+- "just" (250 uses): temporal or restrictive every time. "I just resumed a worker", "measured just now".
+- "actually" (94): contrastive, a claim checked against reality. "confirm CI actually ran green".
+- "sure" (11): every use was "make sure". A ban refuses a correct imperative.
+- "certainly" (6): every use was "almost certainly", a hedge with real content.
+- "really" (5): contrastive. "here the code really is fixed".
+- "clearly" (3): an adverb of manner.
+- "I think" (8): separates inference from measurement, which this repo requires. Banning it pushes agents to state guesses as facts.
+- "simply" (14): restrictive, the role of "merely".
+
+A word that reads as filler in other houses can carry load here. To add one to the list, meet its corpus occurrences first and show they carry no task content.
+
+Name the cost honestly: "please" and "thanks" are the only social register agents have with each other, and this rule removes them. That is what the requested compression costs, and it was accepted knowingly.
 
 ## Rule 5 has a sharp edge
 

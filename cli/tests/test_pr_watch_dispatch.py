@@ -2458,6 +2458,58 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["outcome"] == "timeout"
         assert ends[0]["phase"] == "sweep"
         assert ends[0]["duration_s"] >= 1.0
+        # x-d211: the env ceiling (1s) is below the sweep cap (150s), so the
+        # wall fired - the why says deadline, never "phase slice spent".
+        assert ends[0]["why"] == "deadline_exceeded"
+
+    def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
+        """x-d211: the bootout's SIGTERM cannot unwind the tick, so the
+        handler writes the end record itself. The why is self_killed exactly
+        when the active-tick marker is set: that marker proves an update was
+        running under this tick, and its bounce is what delivered the signal.
+        The process still dies BY the signal."""
+        import signal as signal_mod
+
+        from fno.pr_watch import cli as prcli
+
+        installed: dict[int, object] = {}
+
+        def _record_signal(sig, handler):
+            installed[sig] = handler
+            return None
+
+        monkeypatch.setattr(prcli.signal, "signal", _record_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(prcli.os, "kill", lambda pid, sig: killed.append(sig))
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: None
+        )
+        handler = installed.get(signal_mod.SIGTERM)
+        assert handler is not None, "tick installed no SIGTERM handler"
+
+        # Marker set: the tick's own sync child did the bounce.
+        monkeypatch.setenv("FNO_PR_WATCH_ACTIVE_TICK", "tick:4242")
+        handler(signal_mod.SIGTERM, None)
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        death = ends[-1]
+        assert death["outcome"] == "error"
+        assert death["why"] == "self_killed"
+        assert death["phase"]
+        rows = [d for t, d in events if t == "control_plane_tick"
+                and d.get("arm") == "pr_watch_merge"]
+        assert rows and "mid-sync" in rows[-1]["detail"]
+        assert "probable" in rows[-1]["detail"]
+        assert "started and did not complete" in rows[-1]["detail"]
+        assert rows[-1]["detail"].count("phase=") == 1
+        assert killed == [signal_mod.SIGTERM]
+        assert installed[signal_mod.SIGTERM] == signal_mod.SIG_DFL
+
+        # No marker: an external kill (operator bootout), not a self-kill.
+        monkeypatch.delenv("FNO_PR_WATCH_ACTIVE_TICK", raising=False)
+        handler(signal_mod.SIGTERM, None)
+        death = [d for t, d in events if t == "pr_watch_tick_end"][-1]
+        assert death["why"] == "killed"
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
         """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
@@ -2503,6 +2555,9 @@ class TestTickRecordsAndDeadline:
         assert merge_rows and merge_rows[-1].get("skip_reason") == "timeout"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
+        # x-d211: the 1s cap is below the 30s wall, so this cut is slice
+        # starvation - one arm lost its turn, the tick carried on.
+        assert ends[-1].get("why") == "slice_starved"
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
 
@@ -3748,3 +3803,146 @@ class TestDurableGrantExecution:
         assert receipt["merge_scan"]["completed"] is True
         assert receipt["merge_scan"]["eligible"] == 0
         assert receipt["merge_scan"]["attempted"] == 0
+
+
+class TestScanResumesLeastRecentlyPolled:
+    """x-b083 absorbed into x-d211: the rich scan resumes where the last
+    budget break left off instead of restarting at graph order, and cheap
+    disposals (parked, terminal, baselined, unresolvable) cost no rich read."""
+
+    @staticmethod
+    def _seed(tmp_path: Path, prs, *, parked_prs=()):
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        for pr in prs:
+            store.set(f"owner/repo#{pr}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": "retries-exhausted" if pr in parked_prs else None,
+            })
+        return store_path
+
+    @staticmethod
+    def _counting_reads(deps, clock):
+        base_read = deps["read_pr_state"]
+        reads: list[int] = []
+
+        def counting_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            return base_read(candidate, **kw)
+
+        deps["read_pr_state"] = counting_read
+        return reads
+
+    def _tick(self, tmp_path, deps, monkeypatch, store_path, *, deadline=None):
+        from fno.pr_watch._dispatch import tick
+
+        return tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({k: "OPEN" for k in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            max_retries=2,
+            graphql_remaining_fn=lambda: (4800, None),
+            dispatch_deadline=deadline,
+            dispatch_budget_seconds=0,
+        )
+
+    def test_five_ticks_reach_pr_45_and_stamp_each_window(self, tmp_path, monkeypatch):
+        """AC3-HP: 50 graph-ordered candidates, 10 rich reads per tick, one
+        store. LRU order carries every window forward; the granted PR at
+        position 45 executes by tick five."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        prs = list(range(1, 51))
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in prs
+        ]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs)
+
+        import fno.config as config_mod
+        from fno.config import AutoMergeBlock
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads = self._counting_reads(deps, clock)
+
+        g = tmp_path / "grant-graph.json"
+        receipt = {
+            "approved": True, "source": "config",
+            "recorded_by": "spawner-session", "recorded_at": "2026-08-24T12:00:00Z",
+        }
+        g.write_text(json.dumps({"entries": [{
+            "id": "x-45abc001", "title": "t", "pr_number": 45,
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "w1",
+                          "merge_grant": receipt}],
+        }]}))
+        monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+        monkeypatch.setattr("fno.pr._coverage_gate._repo_slug", lambda repo: None)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, **kw: {"key": key, "state": "stale", "holder": "w1"},
+        )
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo",
+            lambda path: config_mod.load_settings().model_copy(
+                update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+            ),
+        )
+        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+
+        for _ in range(5):
+            deadline = clock["t"] + 10.0
+            res = self._tick(tmp_path, deps, monkeypatch, store_path, deadline=deadline)
+            assert not res.quota_skip
+
+        # Every PR observed exactly once, in ten-PR windows, no repeats.
+        assert reads == prs
+        executed = [
+            e for e in deps["events"]
+            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
+        ]
+        assert [e["data"]["pr"] for e in executed] == [45]
+
+        from fno.pr_watch._state import WatermarkStore
+
+        state = WatermarkStore(path=store_path).load()
+        assert state["owner/repo#45"].get("merge_dispatched") is True
+        stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
+        assert len(stamped) == 50, "every rich read stamped its cursor"
+
+    def test_parked_prefix_costs_no_rich_read(self, tmp_path, monkeypatch):
+        """AC3-EDGE: parked PRs 1300 and 1597 precede an actionable candidate
+        at the budget boundary. Neither invokes read_pr_state_fn; the later
+        actionable PR is observed; no tick-budget fires on a cheap row."""
+        prs = [1300, 1597, 42]
+        candidates = [_make_candidate(pr_number=n, repo_dir=tmp_path) for n in prs]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs, parked_prs={1300, 1597})
+
+        reads = self._counting_reads(deps, {"t": 0.0})
+        self._tick(tmp_path, deps, monkeypatch, store_path)
+
+        assert reads == [42], f"parked rows must not cost a rich read: {reads}"
+        budget_events = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "tick-budget"
+        ]
+        assert budget_events == [], "no tick-budget may fire on cheap disposals"

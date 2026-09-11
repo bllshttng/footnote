@@ -373,15 +373,70 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
 }
 
 #[test]
+fn keeper_holds_its_seat_lock() {
+    // The flock is the single-flight gate and the open file description is
+    // what holds it: a SERVING keeper must still hold <sock>.lock. A lock
+    // this process can take while the keeper answers is the dropped-guard
+    // fault (the take_seat File was never bound, so the flock closed at the
+    // end of the if condition, before the guarded body ran).
+    let home = short_home("seatlock");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let _keeper = spawn_keeper("seatlock-test", &graph, &sock);
+    wait_for_socket(&sock); // positive control: the keeper bound and serves
+    let lock_path = PathBuf::from(format!("{}.lock", sock.display()));
+    let probe = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    match probe.try_lock() {
+        Ok(()) => panic!(
+            "a serving keeper does not hold its seat lock: this process acquired {}",
+            lock_path.display()
+        ),
+        Err(e) => {
+            let io_err: std::io::Error = e.into();
+            assert_eq!(
+                io_err.kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the seat lock must be held by the serving keeper ({}): {io_err}",
+                lock_path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket() {
     // AC2-ERR: when the path no longer names the inode this keeper bound,
-    // an idle keeper exits WITHOUT unlinking - the rebound socket (the new
-    // keeper's) stays in place.
+    // an idle keeper exits EXIT_SEAT_OWNED=3 - the same verdict the
+    // pre-bind ladder spells - WITHOUT unlinking: the rebound socket (the
+    // new listener's) stays in place.
     let home = short_home("rebound");
     let graph = home.join("graph.json");
     std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
     let sock = home.join("graph.json.store.sock");
-    let mut a = spawn_keeper("rebound-a", &graph, &sock);
+    let a_stderr = home.join("rebound-a.stderr");
+    let mut a = Keeper {
+        child: Command::new(WORKER_BIN)
+            .args([
+                "--store-keeper",
+                "--sock",
+                sock.to_str().unwrap(),
+                "--graph",
+                graph.to_str().unwrap(),
+                "--session",
+                "rebound-a",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(std::fs::File::create(&a_stderr).unwrap()))
+            .spawn()
+            .expect("spawn keeper A"),
+        sock: sock.to_path_buf(),
+    };
     wait_for_socket(&sock);
     use std::os::unix::fs::MetadataExt;
     let old_ino = std::fs::metadata(&sock).unwrap().ino();
@@ -400,9 +455,15 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
         assert!(Instant::now() < deadline, "stale keeper never exited");
         std::thread::sleep(Duration::from_millis(50));
     };
+    let stderr = std::fs::read_to_string(&a_stderr).unwrap_or_default();
+    assert_eq!(
+        exited.code(),
+        Some(3),
+        "seat loss exits EXIT_SEAT_OWNED=3, got {exited}: {stderr}"
+    );
     assert!(
-        exited.code().is_none() || exited.code() == Some(0),
-        "seat loss is a clean exit, got {exited}"
+        stderr.contains(&sock.display().to_string()),
+        "the seat-loss line names the socket: {stderr}"
     );
     // The rebound socket still has a live listener behind it: A never
     // unlinked what it does not own.

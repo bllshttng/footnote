@@ -1,24 +1,17 @@
-"""JSON/SQLite graph parity compare. Runs in-process: no subprocess, no script lookup."""
+"""JSON/relational graph parity: the thin client. The compare itself lives
+in the Rust store (backlog::parity, the only implementation) and is served
+by the keeper's `parity` op; this module resolves the graph, asks the
+keeper, and reports. --negative-control copies the live pair, changes one
+copied row's title, and requires the compare to exit 1 naming that id
+(AC2-HP). Runs in-process: no subprocess, no script lookup."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import sqlite3
+import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
-
-def _canonical(row: dict[str, Any]) -> str:
-    return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-
-def _rows(items: "list[tuple[str, dict]]", label: str) -> dict[str, str]:
-    """Refuse a duplicate id rather than silently keeping the last one."""
-    ids = [node_id for node_id, _ in items]
-    if len(ids) != len(set(ids)):
-        raise ValueError(f"duplicate id in {label}")
-    return {node_id: _canonical(row) for node_id, row in items}
 
 def _resolve(graph: "Path | None", db: "Path | None") -> tuple[Path, Path]:
     if graph is None:
@@ -27,64 +20,58 @@ def _resolve(graph: "Path | None", db: "Path | None") -> tuple[Path, Path]:
     graph = Path(graph)
     return graph, Path(db or graph.with_suffix(".db"))
 
-def _stable_bytes(graph: Path, db: Path, retries: int) -> "bytes | None":
-    """Retry until graph.json's sha256 matches the shadow write's exported_version stamp."""
-    for _ in range(retries):
-        data = graph.read_bytes()
-        with sqlite3.connect(db) as c:
-            row = c.execute("SELECT value FROM graph_meta WHERE key = 'exported_version'").fetchone()
-        exported = row[0] if row else None
-        if exported is None or exported == f"sha256:{hashlib.sha256(data).hexdigest()}":
-            return data
-    return None
+def _op_result(graph: Path) -> dict:
+    """The keeper's parity reply for `graph`, spawning the keeper when its
+    socket is positively dead. Every failure mode (dead socket, spawn
+    failure, error reply) raises."""
+    from fno.graph.store import _client_for
 
-def compare(*, graph: "Path | None" = None, db: "Path | None" = None, retries: int = 3) -> int:
+    client = _client_for(graph)
+    return client.request("parity", {})
+
+def compare(*, graph: "Path | None" = None, db: "Path | None" = None) -> int:
     graph, db = _resolve(graph, db)
     try:
-        graph_bytes = _stable_bytes(graph, db, retries)
-        if graph_bytes is None:
-            print(f"graph-parity: UNMEASURED: exported_version race after {retries} attempts")
-            return 2
-        json_rows = _rows([(r["id"], r) for r in json.loads(graph_bytes)["entries"]], "graph.json")
-        with sqlite3.connect(db) as c:
-            stored = c.execute("SELECT id, row FROM entries ORDER BY ordinal, id").fetchall()
-        sqlite_rows = _rows([(k, json.loads(b)) for k, b in stored], "SQLite entries")
-    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        result = _op_result(graph)
+    except Exception as exc:  # noqa: BLE001 - any store failure reads UNMEASURED
         print(f"graph-parity: UNMEASURED: {exc}")
         return 2
-    failures = [f"missing from SQLite: {k}" for k in sorted(json_rows.keys() - sqlite_rows.keys())]
-    failures += [f"extra in SQLite: {k}" for k in sorted(sqlite_rows.keys() - json_rows.keys())]
-    failures += [f"content diverged: {k}" for k in sorted(json_rows.keys() & sqlite_rows.keys())
-                 if json_rows[k] != sqlite_rows[k]]
-    if failures:
-        for failure in failures:
-            print(f"graph-parity: {failure}")
+    divergent = int(result.get("divergent", 0))
+    if divergent:
+        for node_id in result.get("divergent_ids", []) or []:
+            print(f"graph-parity: content diverged: {node_id}")
+        print(f"graph-parity: FAIL: {divergent} divergent row(s)")
         return 1
-    print(f"graph-parity: PASS: compared {len(json_rows)} rows")
+    print(f"graph-parity: PASS: compared {result.get('rows', 0)} rows")
     return 0
 
 def negative_control(*, graph: "Path | None" = None, db: "Path | None" = None) -> int:
-    """Copy, require a clean compare, mutate one copied SQLite row, require exit 1 naming it."""
+    """Copy the live pair, require a clean compare on the copies, change one
+    copied row's title on the JSON side, require exit 1 naming that id."""
     graph, db = _resolve(graph, db)
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         copy_graph, copy_db = root / "graph.json", root / "graph.db"
         copy_graph.write_bytes(graph.read_bytes())
-        with sqlite3.connect(db) as source, sqlite3.connect(copy_db) as target:
-            source.backup(target)
-        if compare(graph=copy_graph, db=copy_db) != 0:
+        if db.exists():
+            shutil.copy2(db, copy_db)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(db) + suffix)
+                if sidecar.exists():
+                    shutil.copy2(sidecar, str(copy_db) + suffix)
+        if compare(graph=copy_graph) != 0:
             print("negative control: FAIL: clean copies did not compare clean")
             return 1
-        with sqlite3.connect(copy_db) as c:
-            row = c.execute("SELECT id, row FROM entries ORDER BY ordinal, id LIMIT 1").fetchone()
-            if row is None:
-                print("negative control: FAIL: no entries to mutate")
-                return 1
-            target_id, body = row
-            mutated = json.loads(body)
-            mutated["title"] = f"{mutated.get('title', '')} (negative control mutation)"
-            c.execute("UPDATE entries SET row = ? WHERE id = ?", (_canonical(mutated), target_id))
-        if compare(graph=copy_graph, db=copy_db) != 1:
+        doc = json.loads(copy_graph.read_bytes())
+        entries = doc.get("entries")
+        if not entries:
+            print("negative control: FAIL: no entries to mutate")
+            return 1
+        victim = entries[0]
+        target_id = victim.get("id")
+        victim["title"] = f"{victim.get('title', '')} (negative control mutation)"
+        copy_graph.write_text(json.dumps(doc))
+        if compare(graph=copy_graph) != 1:
             print("negative control: FAIL: mutated copy did not diverge")
             return 1
         print(f"negative control: PASS {target_id}")

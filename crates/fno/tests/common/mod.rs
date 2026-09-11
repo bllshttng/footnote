@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use fno::proto::{
-    write_msg_sync, AgentRow, BlockDir, ClientMsg, Command, Frame, MouseEvent, ServerMsg,
-    SquadMeta, BUILD_VERSION, MAX_MSG_BYTES, PROTO_VERSION,
+    write_msg_sync, AgentRow, BacklogCard, BlockDir, ClientMsg, Command, Frame, MouseEvent,
+    ServerMsg, SquadMeta, BUILD_VERSION, MAX_MSG_BYTES, PROTO_VERSION,
 };
 use fno::tree::Rect;
 use fno::vt::{frame_text, Pane};
@@ -655,6 +655,9 @@ pub struct LayoutSnap {
     pub area: (u16, u16),
     pub agents: Vec<AgentRow>,
     pub focus_node: Option<String>,
+    /// (x-926c) The backlog cards from the latest `Layout`, so the idle-CPU
+    /// budget test can prove the backlog reader ran before it measures.
+    pub backlog: Vec<BacklogCard>,
 }
 
 /// One absorbed message kind, in arrival order - the seam for asserting the
@@ -835,7 +838,8 @@ impl FakeClient {
                 area,
                 agents,
                 focus_node,
-                .. // backlog (x-6f77): the e2e harness asserts nothing on it
+                backlog,
+                .. // the rest of the v36 backlog fields: the harness asserts the card list only
             } => {
                 self.layout = Some(LayoutSnap {
                     squads,
@@ -845,6 +849,7 @@ impl FakeClient {
                     area,
                     agents,
                     focus_node,
+                    backlog,
                 });
             }
             ServerMsg::ModeSync { bytes } => self.modesyncs.push(bytes),
@@ -1058,4 +1063,55 @@ impl FakeClient {
     pub fn focus(&self) -> u64 {
         self.layout.as_ref().expect("no Layout yet").focus
     }
+}
+
+/// Whole-process CPU seconds (user + sys) for `pid` - the x-926c budget seam.
+/// Linux reads `/proc/<pid>/stat` (utime + stime over `CLK_TCK`); macOS parses
+/// `ps -o time=`. Callers sample twice and assert on the DELTA, so a
+/// platform-shaped parse error fails loud here rather than flaking the bound.
+#[allow(dead_code)]
+pub fn process_cpu_secs(pid: u32) -> f64 {
+    if cfg!(target_os = "linux") {
+        let stat =
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("procfs stat exists");
+        // comm can hold spaces, so field counting starts after the last ')'.
+        let after = &stat[stat.rfind(')').map(|i| i + 2).unwrap_or(0)..];
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        let utime: u64 = fields[11].parse().expect("utime is an integer");
+        let stime: u64 = fields[12].parse().expect("stime is an integer");
+        let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+        (utime + stime) as f64 / tck
+    } else {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "time=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps runs");
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        parse_ps_cputime(&raw).unwrap_or_else(|| panic!("ps time= output unreadable: {raw:?}"))
+    }
+}
+
+/// macOS `ps -o time=` shape: `[[dd-]hh:]mm:ss.cc`. Every field parses in
+/// base 10 - Rust's `str::parse` has no octal mode, which is exactly the trap
+/// the shell twin of this parser fell into (`08` read as 0 in `$(( 08 ))`;
+/// tests/ci/test_preflight.sh pins that contract).
+fn parse_ps_cputime(raw: &str) -> Option<f64> {
+    let mut rest: &str = raw;
+    let mut days: u64 = 0;
+    if let Some((d, r)) = raw.split_once('-') {
+        days = d.parse::<u64>().ok()?;
+        rest = r;
+    }
+    let mut frac_secs: f64 = 0.0;
+    if let Some((w, f)) = rest.split_once('.') {
+        frac_secs = f.parse::<u64>().ok()? as f64 / 100.0;
+        rest = w;
+    }
+    // `[[dd-]hh:]mm:ss.cc` folds positionally: each field is worth 60x the
+    // field to its right.
+    let mut secs: u64 = 0;
+    for part in rest.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some((secs + days * 86_400) as f64 + frac_secs)
 }

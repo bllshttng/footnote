@@ -91,6 +91,21 @@ event_types:
         error: { type: string }
     consumers: [operator]
 
+  - name: graph_parity_sample
+    retention: durable
+    description: "One 5-minute parity sample: the relational export compared against authoritative JSON while JSON is still the backend. The first sample starts the 7-day soak clock."
+    sources: [daemon]
+    data:
+      required: [rows, divergent, backend]
+      properties:
+        rows: { type: integer }
+        divergent: { type: integer }
+        divergent_ids:
+          type: array
+          description: "The first ten divergent node ids."
+        backend: { type: string }
+    consumers: [operator]
+
   - name: event_migration_landed
     retention: durable
     description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."
@@ -282,7 +297,7 @@ event_types:
           description: "Human-readable provenance on a settle row: why the row exists (the invocation died unanswered) and that no review ran. Present only on output_contract lost."
         model:
           type: string
-          description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. The producer now REFUSES to record a claim it can prove false: a non-`claude*` model name with an empty or anthropic.com base URL cannot be the model that answered (the request silently falls back to the primary Anthropic model), so that case records empty rather than a value a reader would take as fact. A live specimen produced exactly that wrong record on 2026-08-12. The residue is a claim that is merely unverified rather than known-false, and no environment-side check closes that one. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
+          description: "The model that ANSWERED, read from the attesting session's own transcript at emit via observed_model_for_session (cli/src/fno/provenance/observed.py, the platform provenance leaf) - claude's assistant message.model rows with synthetic notices skipped, codex's turn_context.payload.model. Stamped by the emit chokepoint (fno doctor event emit) and by classify --attest through the same helper, never supplied by the caller: a --data value disagreeing with the transcript is refused, the same rule attester_session_id follows and for the same reason. Empty means NOT OBSERVABLE (no ambient harness, unreadable transcript, no model row yet), never proof of the primary model. This field used to record ANTHROPIC_MODEL - the model the session ASKED for - which a dedicated node measured naming a model that did not answer on four sessions in one day, because a non-Anthropic name over an unset base URL silently falls back to the primary Anthropic model. Events emitted before this change may carry that claim or the literal `unobserved` (a claim made and refused); both are legacy values a reader must not treat as an observation. Not read by loop-check; this is the audit trail a capability floor would need."
         provider:
           type: string
           description: "The endpoint host the attesting session was pointed at (host only, derived from ANTHROPIC_BASE_URL at emit; scheme, path, and any userinfo are stripped so no key material lands here). Empty means not observable from the environment - the default Anthropic endpoint, or a lane that does not route via env. Same best-effort caveat as model."
@@ -647,7 +662,7 @@ event_types:
     consumers: [fno-agents loop-check]
 
   - name: review_hold_expired
-    description: "A merge surface read a review hold (review:branch:<branch>) whose TTL had lapsed with a dead holder, and cleared past it. The hold exists so a merge cannot land while a review of that head is still executing; a hold that outlives a crashed reviewer would wedge the lane permanently, so it ages out - but never silently, because a lane that clears with no receipt is indistinguishable from one that was never held. Emitted where the decision was taken, not by the reaper."
+    description: "A merge surface read a review hold (review:branch:<branch>) whose TTL had lapsed, whether or not the holder session was still running, and cleared past it. The hold exists so a merge cannot land while a review of that head is still executing; a hold that outlives its review would wedge the lane permanently, so it ages out - but never silently, because a lane that clears with no receipt is indistinguishable from one that was never held. Emitted where the decision was taken, not by the reaper."
     sources: [fno-loop]
     data:
       required: [key, holder]
@@ -657,7 +672,7 @@ event_types:
           description: "The claim key, review:branch:<branch>."
         holder:
           type: string
-          description: "Who registered the hold, so a reader can find the reviewer that died."
+          description: "Who registered the hold, so a reader can find the reviewer whose review outlived its lease."
         head_sha:
           type: string
           description: "The head the expired review was reviewing; empty when the hold recorded none."
@@ -1603,6 +1618,19 @@ event_types:
         kept_suspect_unprobed:
           type: integer
           description: "SUSPECT node claims the roster probe could not answer for: no row resolved to the holder, or the roster itself did not read. Absence, never proof, so the claim is kept."
+        kept_unclassified:
+          type: integer
+          description: "Claims the native door returned no verdict for in the walked directory - the probe was never reached, so this is not an unprobed keep. The per-directory split below names where they were seen."
+        unclassified_dirs:
+          type: object
+          description: "kept_unclassified keyed by the claims directory the sweep walked, so a door reading the wrong directory is visible as that directory's count."
+          additionalProperties:
+            type: integer
+        kept_suspect_unprobed_by:
+          type: object
+          description: "Unprobed keeps keyed by the probe's own reason token (native-verdict-missing, roster-read-degraded, handover-live, ...). The cause is named only where an instrument ran and degraded."
+          additionalProperties:
+            type: integer
         kept_offhost:
           type: integer
         corrupted:
@@ -2565,10 +2593,11 @@ event_types:
           type: string
 
   - name: reign_checkin
-    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any)."
+    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any). Carries canonical scope and change; crown_scope, crown, and result are refused aliases."
     sources: [loop, daemon]
     data:
-      required: []
+      required: [scope, change]
+      forbidden: [crown_scope, crown, result]
       properties:
         scope:
           type: string
@@ -2908,6 +2937,30 @@ event_types:
         interrupt:
           type: string
           description: "Outcome of the interrupt attempt (e.g. no-turn, refused, timeout)."
+
+  - name: agent_stop_claims_released
+    description: "A confirmed stop or rm released the stopped worker's claims (x-9c91 change 5): one event per verb, naming what was released and what the release kept, with the reading that kept it."
+    sources: [daemon]
+    data:
+      required: [name, verb]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+          description: "The stopped row's harness session id, when it had one."
+        verb:
+          type: string
+          description: "stop or rm."
+        released:
+          type: array
+          description: "One {key, holder, path} per claim released."
+        kept:
+          type: array
+          description: "One {key, holder, observed} per claim kept, observed naming the reading (pid present, access-denied, off-host)."
+        error:
+          type: string
+          description: "Set when the claims scan itself failed; released and kept are absent then."
 
   - name: daemon_recovery_error
     description: "An error occurred during the daemon recovery/orphan-reap sweep."
@@ -4652,6 +4705,10 @@ event_types:
         phase:
           type: string
           description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, watchdog, king_wake, heal, stranded, catchup."
+        why:
+          type: string
+          enum: [deadline_exceeded, slice_starved, self_killed, killed]
+          description: "Which timeout mechanism fired (x-d211): the tick's wall deadline (measured 480-487s), a phase slice budget spent while the tick carried on (30s/100s), a kill delivered while this tick's own sync child ran and its update's job bounce is the probable source (measured 183.1s and 440.7s after a binary rewrite; not a budget outcome), or any other signal kill."
         sweep_failures:
           type: integer
           description: "Repo listing failures (present when a sweep ran)."

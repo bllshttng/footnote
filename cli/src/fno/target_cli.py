@@ -20,6 +20,7 @@ init script owns the owner_cwd worktree binding and all state.
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import io
 import json
 import os
@@ -30,13 +31,41 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, NoReturn, Optional, Tuple
 
 import typer
 
-from fno._subprocess_util import propagate_returncode
+from fno._subprocess_util import propagate_returncode, run_bounded
 from fno.paths import resolve_plugin_script
 from fno.tombstones import tombstone_group_cls
+
+# Below the Claude Bash tool's 600s call cap, well below the 10+ minute stalls this bound targets.
+_START_DEADLINE_S = 540
+_STAGE_GRACE_S = 15  # a stage's process group dies this long before the watchdog would
+
+
+def _stage_timeout(deadline: float) -> float:
+    return max(1.0, deadline - time.monotonic() - _STAGE_GRACE_S)
+
+
+def _stage_timeout_exit(step: str, extra: str) -> NoReturn:
+    typer.echo(
+        f"fno do target start: step: {step} exceeded the {_START_DEADLINE_S}s start "
+        f"bound; its process group was killed. {extra}",
+        err=True,
+    )
+    raise typer.Exit(code=124)
+
+
+def _run_bounded_init(cmd: list[str], cwd: Path, deadline: float, node: str) -> subprocess.CompletedProcess:
+    try:
+        return run_bounded(cmd, timeout=_stage_timeout(deadline), cwd=str(cwd))
+    except subprocess.TimeoutExpired:
+        _stage_timeout_exit(
+            "init",
+            f"Claim state is unknown: check fno agents claim status node:{node}. "
+            f"A rerun of fno do target start {node} resumes idempotently.",
+        )
 
 
 target_app = typer.Typer(
@@ -1104,15 +1133,18 @@ def _self_review_refusal(
 
 
 def _hold_branch_under_review(
-    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str = ""
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str
 ) -> None:
     """Register that a review of ``branch`` at ``head_sha`` is RUNNING.
 
     The requester side, so every pipeline review is held without a reviewer
     remembering. On PR 1575 the merge fired mid-review and discarded eight
-    findings, one HIGH. The hold existed and nothing took it. ``branch`` is the
-    PR's own head ref on the post-push form: a local alias with a matching sha
-    keys a hold the merge guard, which reads GitHub, never looks up.
+    findings, one HIGH. The hold existed and nothing took it. ``branch`` is
+    what the caller resolved: the local branch on the pre-push form, the PR's
+    own head ref on the post-push form - a local alias with a matching sha
+    keys a hold the merge guard, which reads GitHub, never looks up. The cwd
+    is never read for one (x-b5f6): a hold on a guessed branch reports
+    protection of a PR it is not protecting.
 
     Best-effort throughout. An unconfirmed send takes nothing. A refused
     invocation takes nothing, since it emits no attestation and nothing would
@@ -1124,7 +1156,6 @@ def _hold_branch_under_review(
     try:
         from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
 
-        branch = branch or (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
         if not branch or branch == "HEAD":
             return
         if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
@@ -1152,7 +1183,7 @@ def request_self_review_cmd(
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
     branch = ""
-    hold_branch = ""  # empty: the helper reads the local branch for itself
+    hold_branch = ""
     metadata: dict[str, Any] = {}
     try:
         if not head_sha:
@@ -1171,6 +1202,7 @@ def request_self_review_cmd(
                 raise RuntimeError(
                     "no branch to review; check out the feature branch"
                 )
+            hold_branch = branch
             base_branch = (
                 _git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                 or ""
@@ -2843,6 +2875,7 @@ def _start_codex_native(
     beastmode: bool,
     no_merge: bool,
     deliverables: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> None:
     """Finish target bootstrap inside a worktree Codex Desktop already owns."""
     base = _prepare_codex_native_branch(cwd, node)
@@ -2938,7 +2971,9 @@ def _start_codex_native(
         cmd += ["--no-merge"]
     if deliverables is not None:
         cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(cmd, cwd=str(cwd))
+    init = subprocess.run(cmd, cwd=str(cwd)) if deadline is None else _run_bounded_init(
+        cmd, cwd, deadline, node
+    )
     if init.returncode != 0:
         typer.echo(
             f"fno do target start: target init failed in app-owned worktree "
@@ -3350,6 +3385,24 @@ def start(
     manifest into the worktree's space slice, claims the node exactly once) -> receipt.
     Run from INSIDE a valid worktree it is a no-op.
     """
+    deadline = time.monotonic() + _START_DEADLINE_S
+    faulthandler.dump_traceback_later(
+        _START_DEADLINE_S, exit=True, file=sys.__stderr__  # type: ignore[arg-type]
+    )
+    try:
+        _start_body(
+            node, plan_path, size, model, harness, _provider_tombstone,
+            beastmode, no_merge, deliverables, deadline,
+        )
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _start_body(
+    node: str, plan_path: Optional[str], size: Optional[str], model: Optional[str],
+    harness: Optional[str], _provider_tombstone: Optional[str], beastmode: bool,
+    no_merge: bool, deliverables: Optional[int], deadline: float,
+) -> None:
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
@@ -3378,6 +3431,7 @@ def start(
                 beastmode=beastmode,
                 no_merge=no_merge,
                 deliverables=deliverables,
+                deadline=deadline,
             )
             return
         if _under_codex_worktrees(cwd):
@@ -3473,7 +3527,10 @@ def start(
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:
         ensure_cmd += ["--harness", ambient_harness]
-    ens = subprocess.run(ensure_cmd, capture_output=True, text=True)
+    try:
+        ens = run_bounded(ensure_cmd, timeout=_stage_timeout(deadline), capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        _stage_timeout_exit("ensure", "Nothing was claimed.")
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
@@ -3651,7 +3708,7 @@ def start(
         init_cmd += ["--beastmode"]
     if deliverables is not None:
         init_cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(init_cmd, cwd=str(wt_path))
+    init = _run_bounded_init(init_cmd, wt_path, deadline, node)
     if init.returncode != 0:
         if created_this_run and not in_place:
             # One receipt line the run currently lacks: the refused init

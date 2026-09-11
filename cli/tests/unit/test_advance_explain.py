@@ -443,7 +443,9 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
 ):
     """AC1-HP + AC2-HP: quiet transcript past the bar -> the apply receipt
     reads row_removed true with status_after idea, and advance --explain
-    answers with a candidate line, never `never a candidate`."""
+    answers with a candidate line, never `never a candidate`. A planless
+    idea with no intake difficulty now reads as an attributed selection
+    drop, so the answer narrates the drop instead of an eligible rank."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_GONE, age_hours=72)
     result = _ab_maintain_apply(monkeypatch)
     assert "row_removed true" in result.output
@@ -462,7 +464,7 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
     assert explain.exit_code == 0, explain.output
     assert "never a candidate" not in explain.output
     assert "x-abt0001" in explain.output
-    assert "eligible, ranked" in explain.output
+    assert "dropped by no-difficulty" in explain.output
 
 
 def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):

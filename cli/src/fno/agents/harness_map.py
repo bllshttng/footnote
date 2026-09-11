@@ -1457,6 +1457,10 @@ def resolve_dispatch(
     # template > per-harness builtin. A derived /target renders through the
     # SAME builtin rungs (suppress the raw verb and fall through); a derived
     # /blueprint renders its own verb: the target template is target-phase.
+    # A registry verb sets skip_normalize and, with takes_node_id=false,
+    # verb_declares_no_id (both consumed below).
+    skip_normalize = False
+    verb_declares_no_id = False
     derived_blueprint = lifecycle_verb == "/blueprint"
     if lifecycle_verb == "/target":
         verb = None
@@ -1481,14 +1485,51 @@ def resolve_dispatch(
             chosen_verb = "/" + chosen_verb[len("/fno:"):]
         _av = cfg.get("allowed_verbs")
         allowed = list(_av) if isinstance(_av, list) else list(_DEFAULT_ALLOWED_VERBS)
-        if chosen_verb not in allowed:
+        from fno.config import resolvable_verbs
+        from fno.review_capability import resolve_skill_presence
+
+        _vr = cfg.get("verb_registry")
+        registry = resolvable_verbs(_vr if isinstance(_vr, Mapping) else None, allowed)
+        descriptor = registry.get(chosen_verb)
+        if chosen_verb not in allowed and descriptor is None:
             raise DispatchResolveError(
-                f"dispatch verb {chosen_verb!r} is not in the allowlist "
-                f"({', '.join(allowed)}); set config.dispatch.allowed_verbs to extend it"
+                f"dispatch verb {chosen_verb!r} is in neither the allowlist "
+                f"({', '.join(allowed)}) nor config.dispatch.verb_registry "
+                f"({', '.join(sorted(registry)) or 'empty'}); extend one of them"
             )
-        # Slash-leading; the post-ladder seam normalizes it per-harness.
-        template = f"{chosen_verb} {{id}}"
-        decision.append(f"command=verb({chosen_verb})")
+        if descriptor is not None:
+            # Registry verb: descriptor carries spelling, capability, claim.
+            if descriptor.requires == "skill":
+                # First token only (the verb may carry args; same contract as
+                # the reviewer probe); malformed falls back to the key.
+                head = descriptor.invocation.split()
+                skill_name = (head[0] if head else chosen_verb).lstrip("/").split(":")[-1]
+                status, reason = resolve_skill_presence(
+                    skill_name, chosen_harness, context="config.dispatch.verb_registry"
+                )
+                if status == "unavailable":
+                    raise DispatchResolveError(reason)
+            if descriptor.invocations and chosen_harness not in descriptor.invocations:
+                raise DispatchResolveError(
+                    f"dispatch verb {chosen_verb!r} is not declared on harness "
+                    f"{chosen_harness!r}; config.dispatch.verb_registry declares "
+                    f"it on: {', '.join(sorted(descriptor.invocations))}"
+                )
+            template = (descriptor.invocations or {}).get(chosen_harness, descriptor.invocation)
+            if descriptor.takes_node_id:
+                template = f"{template} {{id}}"
+            else:
+                verb_declares_no_id = True
+            # The descriptor already spells the verb natively; normalizing
+            # would mint a phantom `$fno:` skill from it.
+            skip_normalize = True
+            decision.append(
+                f"command=registry-verb({chosen_verb}, asserts={descriptor.asserts})"
+            )
+        else:
+            # Slash-leading; the post-ladder seam normalizes it per-harness.
+            template = f"{chosen_verb} {{id}}"
+            decision.append(f"command=verb({chosen_verb})")
     else:
         # Per-harness builtin (x-a5e4): the normalize of `/target --no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
@@ -1522,7 +1563,7 @@ def resolve_dispatch(
     # call is unguarded by design and every caller shares one implementation.
     # Non-slash templates (`$fno:...`) pass through unchanged, and the call is
     # idempotent over the builtin/verb rungs' output.
-    normalized_cmd = normalize_command(template, chosen_harness)
+    normalized_cmd = template if skip_normalize else normalize_command(template, chosen_harness)
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
@@ -1534,16 +1575,17 @@ def resolve_dispatch(
     # where the load gate is a shape check and the dispatch gate is where a
     # capability is required.
     check_loop_participation(chosen_harness, template)
-    if node_id:
-        # `{id}` must appear at least once; a template may reference it more than
-        # once (str.replace substitutes every occurrence).
-        if "{id}" not in template:
-            raise DispatchResolveError(
-                f"command template {template!r} must contain '{{id}}' at least "
-                f"once for substitution"
-            )
+    # `{id}` must appear at least once; a template may reference it more than
+    # once. A registry verb declaring takes_node_id=false is exempt: ignoring
+    # the id is declared, not a dropped substitution.
+    if node_id and "{id}" in template:
         resolved_command = template.replace("{id}", node_id.strip())
         decision.append(f"command=substituted({resolved_command})")
+    elif node_id and "{id}" not in template and not verb_declares_no_id:
+        raise DispatchResolveError(
+            f"command template {template!r} must contain '{{id}}' at least "
+            f"once for substitution"
+        )
     else:
         resolved_command = template
         decision.append(f"command=template({resolved_command})")
@@ -1663,6 +1705,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
             "substrate": _text("substrate"),
             "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
+            "verb_registry": dict(getattr(d, "verb_registry", None) or {}),
             # Strict literal compare, not truthiness: only the "dispatch"
             # grant grants (a stray truthy value or a stub block never does).
             "auto_merge": grant,

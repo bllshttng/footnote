@@ -4222,6 +4222,76 @@ fn x2774_terminal_harness_state_releases_an_open_work_row() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// Change 2: a parent whose own roster state is terminal is not held by its
+/// descendants. The lineage guard's harm needs a RUNNING parent; a terminal
+/// parent retires, its live child stays in the registry, and surface
+/// removal never runs for the parent while it reads working.
+#[test]
+fn xb7f8_a_terminal_parent_is_not_held_by_its_descendants() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "parent.jsonl", 2 * 3600);
+    let fresh = quiet_transcript(transcripts.path(), "child.jsonl", 10);
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "NP",
+            "status": "done",
+            "sessions": [
+                {"phase": "do", "harness": "claude", "session_id": "s-parent", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            ]
+        }]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        let mut child = x2774_spawn("row-child", "t-child", "s-child");
+        child.spawned_by_session = Some("s-parent".into());
+        r.entries
+            .push(x2774_spawn("row-parent", "t-parent", "s-parent"));
+        r.entries.push(child);
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-parent") => Some(vec![quiet.clone()]),
+        Some("s-child") => Some(vec![fresh.clone()]),
+        _ => None,
+    };
+
+    // Terminal parent: the lineage guard yields, the parent retires, the
+    // child stays.
+    let done = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-parent", Some("done")),
+    ]);
+    let summary = x2774_sweep(&home, &emitter, 900, false, picks, done);
+    assert_eq!(summary.retired.len(), 1, "{summary:?}");
+    assert_eq!(summary.retired[0].0, "t-parent", "{summary:?}");
+    assert!(summary.kept_live_descendants.is_empty(), "{summary:?}");
+    let registry = crate::state::load_registry(&home.registry_json()).unwrap();
+    assert!(
+        registry.entries.iter().any(|e| e.name == "row-child"),
+        "the live child stays in the registry"
+    );
+
+    // Working parent: the guard holds exactly as today. Restore the parent
+    // row the acting run above removed.
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries
+            .push(x2774_spawn("row-parent", "t-parent", "s-parent"));
+    })
+    .unwrap();
+    let working = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-parent", Some("working")),
+    ]);
+    let summary = x2774_sweep(&home, &emitter, 900, false, picks, working);
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(
+        summary.kept_live_descendants,
+        vec![("t-parent".to_string(), "t-child".to_string())],
+        "{summary:?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// Change 3: one node, two spawn rows. Older quiet, newer live: the OLDER
 /// retires naming the live peer, the newer keeps under active. Both quiet:
 /// neither retires on the supersession path.
@@ -4364,10 +4434,13 @@ fn x2774_open_work_keeps_name_their_reader() {
 }
 
 /// Change 5: one staged world judged twice. Dry and acting agree row for
-/// row, except the two permitted divergences, each asserted by name:
-/// needs_live_stop (dry only: a claude row with no death evidence) and the
+/// row, except the permitted divergences, each asserted by name:
+/// needs_live_stop (dry only: a claude row with no death evidence), the
 /// freshness re-check (acting only, covered by
-/// activity_arriving_in_the_apply_window_keeps_the_row in gc.rs).
+/// activity_arriving_in_the_apply_window_keeps_the_row in gc.rs), and a
+/// pane row the precheck calls NeedsKill (dry only;
+/// x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row asserts the pane
+/// buckets agree row for row).
 #[test]
 fn x2774_dry_and_acting_agree_row_for_row() {
     let (dir, home) = staged_graph_home();
@@ -4380,7 +4453,8 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         "status": "done",
         "sessions": [
             {"phase": "do", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
-            {"phase": "do", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            {"phase": "do", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "do", "harness": "claude", "session_id": "s-donefresh", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
         ]
     });
     stage_graph(
@@ -4399,10 +4473,13 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         let mut nostop = x2774_spawn("row-nostop", "t-nostop", "s-nostop");
         nostop.harness = Some("claude".into());
         r.entries.push(nostop);
+        r.entries
+            .push(x2774_spawn("row-donefresh", "t-donefresh", "s-donefresh"));
     })
     .unwrap();
     let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
         Some("s-done") => Some(vec![quiet.clone()]),
+        Some("s-donefresh") => Some(vec![fresh.clone()]),
         Some("s-nostop") | Some("s-term") | Some("s-work") => Some(vec![quiet.clone()]),
         _ => None,
     };
@@ -4410,6 +4487,7 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         crate::claude_roster::ClaudeAgentRow::new("t-term", Some("done")),
         crate::claude_roster::ClaudeAgentRow::new("t-work", Some("working")),
         crate::claude_roster::ClaudeAgentRow::new("t-nostop", Some("working")),
+        crate::claude_roster::ClaudeAgentRow::new("t-donefresh", Some("done")),
     ]);
     let dry = x2774_sweep(&home, &emitter, 900, true, &picks, roster.clone());
     let acting = x2774_sweep(&home, &emitter, 900, false, &picks, roster);
@@ -4422,17 +4500,28 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         dry.kept_no_provenance, acting.kept_no_provenance,
         "provenance bucket agrees"
     );
-    let dry_ids: Vec<&str> = dry.retired.iter().map(|(id, _)| id.as_str()).collect();
-    let acting_ids: Vec<&str> = acting.retired.iter().map(|(id, _)| id.as_str()).collect();
+    let mut dry_ids: Vec<&str> = dry.retired.iter().map(|(id, _)| id.as_str()).collect();
+    let mut acting_ids: Vec<&str> = acting.retired.iter().map(|(id, _)| id.as_str()).collect();
+    dry_ids.sort_unstable();
+    acting_ids.sort_unstable();
     assert_eq!(
         dry_ids,
-        vec!["t-done", "t-term"],
-        "dry predicts only rows with provable death evidence"
+        vec!["t-done", "t-donefresh", "t-term"],
+        "dry predicts only rows with provable death evidence; the terminal \
+         row inside grace retires in BOTH runs (x-b7f8)"
     );
     assert_eq!(
         acting_ids,
-        vec!["t-done", "t-term", "t-nostop"],
+        vec!["t-done", "t-donefresh", "t-nostop", "t-term"],
         "acting additionally retires the row whose stop it can confirm"
+    );
+    // x-b7f8 change 1: the early fire is named.
+    assert!(
+        dry.retired
+            .iter()
+            .any(|(id, basis)| id == "t-donefresh" && basis.contains("session terminal")),
+        "{:?}",
+        dry.retired
     );
     assert_eq!(
         dry.needs_live_stop.len(),
@@ -4441,6 +4530,140 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     );
     assert_eq!(acting.needs_live_stop.len(), 0);
     assert_eq!(acting.stop_refused.len(), 0, "{:?}", acting.stop_refused);
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-b7f8 change 3: for a terminal row the apply-window re-check asks one
+/// question - did the session write since classification. A DECREASING
+/// fresh age is a new write: the row keeps and the stop never fires. (The
+/// 274-to-275 case - age equal or older, retire - is covered by the
+/// dry/acting agreement extension above.)
+#[test]
+fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "NW",
+            "status": "done",
+            "sessions": [
+                {"phase": "do", "harness": "claude", "session_id": "s-wrote", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            ]
+        }]),
+    );
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries
+            .push(x2774_spawn("row-wrote", "t-wrote", "s-wrote"));
+    })
+    .unwrap();
+    // The age seam answers 274 in the classification batch and 3 on the
+    // apply-window re-read: the session wrote between the two reads.
+    let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let c2 = std::rc::Rc::clone(&counter);
+    let age_many = move |entries: &[&state::RegistryEntry]| {
+        let n = c2.get();
+        c2.set(n + 1);
+        entries
+            .iter()
+            .map(|e| (crate::gc::row_handle(e), Some(if n == 0 { 274 } else { 3 })))
+            .collect::<std::collections::HashMap<String, Option<i64>>>()
+    };
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-wrote") => Some(vec![]),
+        _ => None,
+    };
+    let roster = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("t-wrote", Some("done")),
+    ]);
+    let roster_for_sweep = roster.clone();
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &gc_sweep::read_graph_entries,
+        &picks,
+        &age_many,
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &move || roster_for_sweep.clone(),
+        &|_| (None, None),
+        &|_| None,
+    );
+    assert!(
+        summary.retired.is_empty(),
+        "the stop never fires while activity arrived: {summary:?}"
+    );
+    assert_eq!(
+        summary.kept_active,
+        vec![("t-wrote".to_string(), 3)],
+        "the decreasing re-read keeps: {summary:?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-58a5: a pane row whose pid is a reaped child (ESRCH) and whose codex
+/// session has no rollout in the store. The precheck answers Unprovable,
+/// so the dry run files it under stop_refused instead of promising the
+/// retirement, and the acting run's real pane stop refuses with the SAME
+/// detail. Neither retired list names it. This is the positive version of
+/// the measured defect: the dry run listed bp-a238 under retired while the
+/// real sweep refused it.
+#[test]
+fn x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "pane.jsonl", 2 * 3600);
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "NP",
+            "status": "done",
+            "sessions": [
+                {"phase": "do", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            ]
+        }]),
+    );
+    // A child that has already been reaped: its pid reads ESRCH to every
+    // later probe, the gone-pid fact the row carries.
+    let mut child = std::process::Command::new("true")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    state::update_registry(&home.registry_json(), |r| {
+        let mut pane = x2774_spawn("row-pane", "t-pane", "s-pane-x58a5");
+        pane.harness = Some("codex".into());
+        pane.substrate = Some("pane".into());
+        pane.pid = Some(pid);
+        pane.pid_start_time = None;
+        r.entries.push(pane);
+    })
+    .unwrap();
+    let picks = |e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+        Some("s-pane-x58a5") => Some(vec![quiet.clone()]),
+        _ => None,
+    };
+    let dry = x2774_sweep(&home, &emitter, 900, true, &picks, no_agents());
+    let acting = x2774_sweep(&home, &emitter, 900, false, &picks, no_agents());
+    assert_eq!(
+        dry.stop_refused, acting.stop_refused,
+        "both runs refuse with an identical detail: {:?} vs {:?}",
+        dry.stop_refused, acting.stop_refused
+    );
+    assert_eq!(dry.stop_refused.len(), 1, "{:?}", dry.stop_refused);
+    assert!(
+        dry.stop_refused[0].1.contains("is gone (ESRCH)")
+            && dry.stop_refused[0].1.contains("codex"),
+        "the refusal names the pid fact and the holder read: {:?}",
+        dry.stop_refused
+    );
+    assert!(!dry.retired.iter().any(|(id, _)| id == "t-pane"));
+    assert!(!acting.retired.iter().any(|(id, _)| id == "t-pane"));
     std::fs::remove_dir_all(home.root()).ok();
 }
 

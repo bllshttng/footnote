@@ -367,65 +367,17 @@ review_event_data="$(jq -cn \
 # a started row with no attestation row is the lost-review marker, so a
 # refusal must not manufacture one. The emit itself sits after those checks.
 
-# Record WHICH MODEL rendered the verdict. Model routing stamps ANTHROPIC_MODEL
-# (and every tier var) for the whole worker process, so a worker routed to a
-# cheap secondary provider renders its own review verdict there - and no
-# per-spawn role guard can see it, because the verdict is a later activity
-# inside an already-routed process. Reading the env is the only signal available
-# at emit; it reports what the environment CLAIMED, never proof of the model
-# that answered, so both stay empty rather than defaulting to a guess a later
-# reader would mistake for evidence. Empty means NO CLAIM WAS MADE, not
-# "primary": resolve_codex_route carries a codex worker's route in `-c model=...`
-# config args with only the API key in env, so a routed codex verdict reads empty
-# here. A claim that WAS made and then refused reads `unobserved` instead, so the
-# two never collapse into one value - see the drift block below. The receipt line
-# at the end prints the stored value verbatim for the same reason.
-model="${ANTHROPIC_MODEL:-}"
+# The emitter does NOT claim a model. The routed-model env names the model the
+# session ASKED for, which can differ from the one that answered; the emit
+# chokepoint (fno doctor event emit) stamps data.model from the session's own
+# transcript instead. provider stays an honest environment fact here: the
+# endpoint host the session was pointed at.
 provider=""
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
   provider="${ANTHROPIC_BASE_URL#*://}"   # strip scheme
   provider="${provider%%/*}"              # host only, no path
   provider="${provider##*@}"              # drop userinfo: a key in the URL must not land in the log
 fi
-
-# A foreign model name over an Anthropic base is the routing-drift case: the
-# request falls back to the primary Anthropic model, so ANTHROPIC_MODEL names a
-# model that did NOT answer. hooks/attest-model.sh already warns at SessionStart.
-# Warning there and stamping the value here anyway would put a known-false claim
-# in the one record the reviewers gate reads.
-#
-# It records the literal `unobserved` rather than blanking the field. Empty here
-# means the env carried no claim at all, so reusing it would leave one value with
-# two explanations - nothing was set, versus something was set and refused - and
-# a reader could not tell a declined claim from an unset field. That is the same
-# assert-a-positive-marker trap this script exists to keep out of the record, one
-# level down. The refusal is a finding, so it is written as one.
-#
-# Host match is exact-or-subdomain so notanthropic.com stays foreign. The RULE
-# is hooks/attest-model.sh's and this copy may not extend it: a skill script
-# cannot source outside its own directory, so the rule lives in two bodies held
-# equal by tests/hooks/test_attest_model.sh, which drives both over one env
-# matrix (aliases, case, padding, userinfo hosts included) and fails when they
-# disagree. Change the rule there first, then mirror it here, or the matrix
-# goes red.
-drift_host="${ANTHROPIC_BASE_URL:-}"
-drift_host="${drift_host#*://}"; drift_host="${drift_host%%/*}"
-drift_host="${drift_host##*@}"; drift_host="${drift_host%%:*}"
-drift_host="$(printf '%s' "$drift_host" | tr '[:upper:]' '[:lower:]')"
-# Judge a trimmed, case-folded copy like the hook does (Python's
-# is_anthropic_model lowercases, and "Claude-Haiku-4-5" is coherent); store the
-# original verbatim when the claim stands.
-claim="${model#"${model%%[![:space:]]*}"}"
-claim="${claim%"${claim##*[![:space:]]}"}"
-claim="$(printf '%s' "$claim" | tr '[:upper:]' '[:lower:]')"
-case "$claim" in
-  ""|claude-*|opus|sonnet|haiku|fable) ;;
-  *)
-    if [[ -z "$drift_host" || "$drift_host" == "anthropic.com" || "$drift_host" == *.anthropic.com ]]; then
-      model="unobserved"
-    fi
-    ;;
-esac
 
 # The harness session of the EMITTING PROCESS (attester_session_id) is NOT read
 # here. A script-side read of its own env is one `VAR=<other-session>` assignment
@@ -478,7 +430,7 @@ if [[ -n "$findings_file" ]]; then
 else
   data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
     --arg session_id "$session_id" --arg harness "$harness" \
-    --arg model "$model" --arg provider "$provider" \
+    --arg provider "$provider" \
     --arg reviewer_context "$reviewer_context" \
     --arg invocation_id "$invocation_id" \
     --arg branch "$branch" \
@@ -487,7 +439,7 @@ else
     --argjson reviewed_line_count "$reviewed_line_count" \
     --argjson reviewed_file_count "$reviewed_file_count" \
     --argjson findings "$findings_json" \
-    '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
+    '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
   # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
   # which is on PATH in the uv test env where the mux is not installed.
   "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
@@ -536,5 +488,5 @@ done
 # The typed-verdict path prints its own receipt; the delegated path's receipt
 # is the verb's stderr line.
 if [[ -z "$findings_file" ]]; then
-  echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
+  echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=<stamped-at-emit> provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
 fi

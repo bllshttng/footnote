@@ -47,6 +47,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "help",
     "host",
     "kill-check",
+    "king-history",
     "route-slot",
     "list",
     "logs",
@@ -417,10 +418,19 @@ async fn run(args: Vec<String>) -> i32 {
     // `court-fold` (x-52d2): the crown scope fold for `fno agents court
     // --nodes` and the local board's court section, daemon-free like
     // court-orphans; the workers column rides the same native claim verdicts
-    // `claim sweep` uses, so a fold and the claims surface cannot disagree
-    // about who holds a node.
+    // `claim sweep` established, so a fold and the claims surface cannot
+    // disagree about who holds a node.
     if verb == "court-fold" {
         return fno_agents::court_fold::run_court_fold(&args[1..]);
+    }
+
+    // `king-history`: the crown-scope reign_checkin readback for
+    // `fno agents king history`. Daemon-free read, `==` dispatch like
+    // court-fold: Python resolves the caller's crown scope and pins the
+    // journal path (identity and paths are Python-owned), the native side
+    // owns the scan so the file-budget Python-tree ratchet holds.
+    if verb == "king-history" {
+        return fno_agents::king_history::run_king_history(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
@@ -2084,7 +2094,7 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 /// but the arms rows print either way.
 async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
-    let mut arms = arms_readout(&home);
+    let (mut arms, trace) = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -2101,9 +2111,10 @@ async fn run_status(json_out: bool) -> i32 {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 let drifted = matches!(drift, DriftState::Drifted { .. });
-                fno_agents::tick_ledger::explain(
+                fno_agents::tick_ledger::explain_with_trace(
                     &mut arms,
                     &fno_agents::tick_ledger::DaemonFacts::Up { uptime_s, drifted },
+                    &trace,
                 );
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert(
@@ -2143,9 +2154,10 @@ async fn run_status(json_out: bool) -> i32 {
         Err(ClientError::DaemonNotRunning) => {
             // The arms table is exactly what a dead control plane needs to
             // show; print it beside the down-daemon signal rather than nothing.
-            fno_agents::tick_ledger::explain(
+            fno_agents::tick_ledger::explain_with_trace(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Down,
+                &trace,
             );
             let payload = json!({
                 "schema_version": 1,
@@ -2168,9 +2180,10 @@ async fn run_status(json_out: bool) -> i32 {
             // shape as DaemonNotRunning - the arms readout stands on its own.
             // Daemon rules do not fire on Unknown, so stale rows read
             // `unexplained` rather than blaming a daemon of unknown health.
-            fno_agents::tick_ledger::explain(
+            fno_agents::tick_ledger::explain_with_trace(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Unknown,
+                &trace,
             );
             let payload = json!({
                 "schema_version": 1,
@@ -2192,8 +2205,14 @@ async fn run_status(json_out: bool) -> i32 {
 }
 
 /// The control-plane arms rows, from the journals the arms write (agents home
-/// + the global mirror) plus their `.1` rotations.
-fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
+/// + the global mirror) plus their `.1` rotations, and the pr_watch tick
+/// trace the readout's cause rules consult (x-d211).
+fn arms_readout(
+    home: &AgentsHome,
+) -> (
+    Vec<fno_agents::tick_ledger::ArmStatus>,
+    fno_agents::tick_ledger::TickTrace,
+) {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2207,7 +2226,9 @@ fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
         .map(|p| p.join("events.jsonl"))
         .unwrap_or_else(|| home.events_jsonl());
     let journals = vec![home.events_jsonl(), global];
-    fno_agents::tick_ledger::read_arms(&journals, now_unix)
+    let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
+    let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
+    (arms, trace)
 }
 
 /// The human render: one owned line per arm (red rows first-class), then the
@@ -3628,6 +3649,7 @@ fn format_success(
             if let Some(outcome) = outcome {
                 line.push_str(&format!(" (turn {outcome})"));
             }
+            line.push_str(&claims_release_suffix(result));
             Some(line)
         }
         "rm" => {
@@ -3738,7 +3760,7 @@ fn format_success(
                 && notes.is_empty()
                 && result.get("pane_removed").is_none_or(Value::is_null)
             {
-                return Some(format!("removed: {name}"));
+                return Some(format!("removed: {name}{}", claims_release_suffix(result)));
             }
             let has_survivor = notes
                 .iter()
@@ -3754,8 +3776,9 @@ fn format_success(
                 format!("{surfaces}; {}", notes.join("; "))
             };
             Some(format!(
-                "removed: {name} ({detail}){}",
-                adopt_hint.unwrap_or_default()
+                "removed: {name} ({detail}){}{}",
+                adopt_hint.unwrap_or_default(),
+                claims_release_suffix(result)
             ))
         }
         "rename" => fno_agents::rename::receipt(name, result),
@@ -3878,6 +3901,37 @@ fn render_list_json(
         "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
+}
+
+/// The `; released N claim(s); kept <key> (<observed>)` suffix a stop/rm line
+/// carries when the daemon released or kept claims for the stopped worker
+/// (x-9c91 change 5d). Empty when the receipt names neither, so a stop that
+/// released nothing renders byte-identical to today.
+fn claims_release_suffix(result: &Value) -> String {
+    let Some(claims) = result.get("claims") else {
+        return String::new();
+    };
+    let (Some(released), Some(kept)) = (
+        claims.get("released").and_then(Value::as_array),
+        claims.get("kept").and_then(Value::as_array),
+    ) else {
+        return String::new();
+    };
+    if released.is_empty() && kept.is_empty() {
+        return String::new();
+    }
+    let mut suffix = format!("; released {} claim(s)", released.len());
+    for kept_claim in kept {
+        suffix.push_str(&format!(
+            "; kept {} ({})",
+            kept_claim.get("key").and_then(Value::as_str).unwrap_or("?"),
+            kept_claim
+                .get("observed")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+    }
+    suffix
 }
 
 /// Shell out to the Python `fno agents discovered-json` helper for the P1

@@ -101,7 +101,7 @@ def test_send_refuses_when_no_holder(runner, isolated, monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
     res = runner.invoke(
         app,
-        ["mail", "send", "node:free-abcd", "please review", "--from-name", "king"],
+        ["mail", "send", "node:free-abcd", "review the change", "--from-name", "king"],
     )
     assert res.exit_code == 16, res.output
     assert "no live holder" in (res.stdout + (res.stderr or "")).lower()

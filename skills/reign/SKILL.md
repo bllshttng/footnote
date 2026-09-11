@@ -76,6 +76,12 @@ Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` abo
 
 What the loop prompt runs every interval and what you run by hand at any time.
 
+Refresh the canon doc first, then read its user block, before the board reads below.
+
+Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact.
+
+Then surface what the user wrote there. Run `fno config paths handoff --scope <scope>` for the doc path. Source `$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh` and run `canon_doc_extract_marker <doc-path> user`. When the result holds anything beyond the seed placeholder, print it verbatim under the line `User notes:`. Never summarize or paraphrase it. Print nothing when the block is empty or placeholder-only.
+
 Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
 
 - open PR count
@@ -94,7 +100,9 @@ Rank is not yours. It is the operator's pin, and `fno backlog rank` refuses an a
 
 Then read [the fleet FAQ](../../docs/fleet-faq.md) for one thing only: an entry whose `Graduates to:` line landed since your last check-in. Move it to Retired in a PR, naming the PR that closed it. Retirement normally rides the PR that closes the gap, so it needs no beat. This check is the backstop, for a gap somebody closed without reading that file.
 
-Journal `reign_checkin`. If nothing changed since the last check-in, print `no change` and stop.
+Journal `reign_checkin` (`fno doctor event emit`) with the canonical keys: `scope` (this crown's exact scope) and `change` (one literal sentence on what moved). Carry the evidence you just printed (PR counts, blockers, capacity, corrections) under distinct extra keys, because extra evidence is preserved verbatim in the journal. The aliases `crown_scope`, `crown`, and `result` are refused: the validator rejects the row and nothing is appended. If nothing changed since the last check-in, journal that too with `change` set to `no change`, and print `no change` and stop.
+
+Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
 ## Recording a ruling
 

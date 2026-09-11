@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 from fno import paths
 from fno.agents import events
+from fno.agents.stop_release import stop_agent  # noqa: F401 - re-exported public verb
 from fno.agents.sender_provenance import (
     _proven_self_sender,
     _resolve_sender_entry,
@@ -3123,11 +3124,13 @@ class StopResult:
 
     ``claude_exit`` is the shellout's exit code on the claude path; ``None``
     for codex / gemini where stop is a synchronous no-op between asks.
+    ``noop`` marks that arm: no stop happened, so no claims get released.
     """
 
     name: str
     provider: str
     claude_exit: Optional[int] = None
+    noop: bool = False
 
 
 @dataclass(frozen=True)
@@ -3717,7 +3720,7 @@ def _stop_cursor_agent_thread(
     return result
 
 
-def stop_agent(
+def _stop_agent_inner(
     name: str,
     *,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
@@ -3794,7 +3797,9 @@ def stop_agent(
                     provider=existing.harness,
                     claude_exit=None,
                 )
-                return StopResult(name=name, provider=existing.harness, claude_exit=None)
+                return StopResult(
+                    name=name, provider=existing.harness, claude_exit=None, noop=True
+                )
 
             if existing.harness != "claude":
                 keeper_sock = getattr(existing, "messaging_socket_path", None)
@@ -6395,31 +6400,22 @@ def _hold_lapsed_for(entry) -> bool:
         return _hold.lapsed(entry)
     except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
         return False
-    return False
 
 
 def _delivery_policy_refusal(target) -> Optional[str]:
     """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
     belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
-    unreadable registry).
-
-    The gate every shared injector consults BEFORE any transport call, so the
-    no-paste guarantee holds on every reachable lane (name/reply, job, project,
-    raw, dispatch, ask, annotate) rather than on whichever lane remembered to
-    check. Accepts the target in whatever form the lane holds: a registry
-    ``AgentEntry``, or an id/handle token matched against ``harness_session_id``,
-    ``short_id``, and ``name``. Unresolvable reads as no-policy -- failing open
-    here fails toward today's behavior (live delivery to workers), never toward
-    stranding a worker's mail on a registry hiccup.
-
-    Never raises."""
+    unreadable registry). The gate every shared injector consults BEFORE any
+    transport call, so the no-paste guarantee holds on every reachable lane
+    rather than on whichever lane remembered to check. Accepts an
+    ``AgentEntry``, or an id/handle token matched against
+    ``harness_session_id``, ``short_id``, and ``name``; an unresolvable read
+    fails open toward live delivery, never toward stranding mail. Never
+    raises."""
     try:
         if target is None:
             return None
-        # Two branches, and the expiry check belongs on BOTH. A caller holding
-        # an AgentEntry never reaches the registry loop below, so a self-heal
-        # on one branch is decorative on the other (dispatch.py:576, :5741 and
-        # :6773 all pass an entry).
+        # The expiry check belongs on BOTH entry and token branches.
         if hasattr(target, "delivery_policy"):
             if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
                 return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY

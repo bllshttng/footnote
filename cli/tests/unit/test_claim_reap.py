@@ -1160,12 +1160,14 @@ class TestSharedPidExclusivity:
         real_door = claims_core.claim_verdicts
         released = False
 
-        def _release_sibling_then_fresh_door(keys=None, *, prefix=None, root=None):
+        def _release_sibling_then_fresh_door(
+            keys=None, *, prefix=None, root=None, claims_dir_path=None
+        ):
             nonlocal released
             if prefix == "" and not released:
                 released = True
                 sibling.unlink()
-            return real_door(keys, prefix=prefix, root=root)
+            return real_door(keys, prefix=prefix, root=root, claims_dir_path=claims_dir_path)
 
         monkeypatch.setattr(claims_core, "claim_verdicts", _release_sibling_then_fresh_door)
         summary = reap_dead_claims(
@@ -1193,7 +1195,7 @@ class TestCliProbeWiring:
         self._fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
-        assert "suspect (roster not consulted)" in r.output
+        assert "roster-read-degraded 1 (roster not consulted)" in r.output
 
     def test_an_empty_scan_never_reaps(self, tmp_path, monkeypatch):
         """Zero rows scanned is not a finding, even with no read error: there is
@@ -1205,7 +1207,7 @@ class TestCliProbeWiring:
         self._fake_roster(monkeypatch, rows=[])
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
-        assert "suspect (roster not consulted)" in r.output
+        assert "probe unanswered: row-absent-no-cwd 1" in r.output
 
     def _transcript_says(self, monkeypatch, finished):
         monkeypatch.setattr(
@@ -1286,7 +1288,7 @@ class TestCliProbeWiring:
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
-        assert "suspect (roster not consulted)" in r.output
+        assert "probe unanswered: row-absent-no-cwd 1" in r.output
 
     def test_an_unparseable_holder_is_never_reaped(self, tmp_path, monkeypatch):
         from fno.agents.watchdog import Row
@@ -1621,3 +1623,80 @@ class TestMuxPaneAbsenceHelper:
 
         runner = self._runner([self._Proc(0, '[{"session":"main","state":"stale"}]')])
         assert _mux_pane_absent_for("bp-x-worker", runner=runner) is None
+
+
+class TestSweepReadsWalkedDir:
+    """AC1/AC2 (x-9c91): the sweep asks the native door about the directory it
+    walks, and a claim with no verdict there is unclassified, never unprobed.
+
+    The old root=cdir.parent.parent round-trip re-resolved the space claims
+    dir one level down, so all 19 space-root claims got no verdict and fell
+    to unknown-keeps labelled "roster not consulted" - a cause nobody
+    measured."""
+
+    def test_AC1_HP_space_root_claim_gets_native_verdict(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+
+        monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+        space = tmp_path / "spaces" / "slug"
+        monkeypatch.setattr("fno.paths.space_dir", lambda *_a, **_k: space)
+        # Session-prover pid not running, no session id: the shape the
+        # native classifier reads Stale on its own (dead pid proves death on
+        # this machine regardless of the TTL arm).
+        acquire_claim(
+            "reap:pr-1496", "reap:pr-1496", pid=_dead_pid(), root=None
+        )
+        asked: list = []
+        real_door = claims_core.claim_verdicts
+
+        def _recording_door(keys=None, *, prefix=None, root=None, claims_dir_path=None):
+            asked.append(claims_dir_path)
+            return real_door(keys, prefix=prefix, root=root, claims_dir_path=claims_dir_path)
+
+        monkeypatch.setattr(claims_core, "claim_verdicts", _recording_door)
+        summary = reap_dead_claims(roots=[None], apply=False)
+        assert asked == [space / "claims"], "the door must be asked about the walked dir"
+        assert summary["would_reap"] == 1
+        assert summary["kept_unclassified"] == 0
+
+    def test_AC1_ERR_missing_verdict_is_unclassified_and_kept(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+
+        acquire_claim("node:x-nc", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        path = claim_path("node:x-nc", root=tmp_path)
+        monkeypatch.setattr(claims_core, "claim_verdicts", lambda *a, **k: {})
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+        assert summary["kept_unclassified"] == 1
+        assert summary["kept_suspect_unprobed"] == 0
+        assert summary["unclassified_dirs"] == {str(claims_dir(tmp_path)): 1}
+        assert path.exists(), "unclassified keeps: the lock file stays in place"
+
+    def test_AC2_EDGE_unclassified_line_names_the_dir_not_roster(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+
+        acquire_claim("node:x-nc2", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        monkeypatch.setattr(claims_core, "claim_verdicts", lambda *a, **k: {})
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "unclassified (no native verdict:" in r.output
+        assert str(claims_dir(tmp_path)) in r.output
+        assert "roster" not in r.output
+
+    def test_AC2_ERR_sweep_event_carries_the_new_buckets(self, monkeypatch):
+        from fno.claims import events as claim_events
+
+        captured: dict = {}
+        monkeypatch.setattr(claim_events, "_emit", lambda event: captured.update(event))
+        summary = {
+            "scanned": 1, "reaped": 0, "would_reap": 0, "kept_live": 0,
+            "kept_suspect": 0, "kept_suspect_alive": 0, "kept_suspect_unprobed": 1,
+            "kept_unclassified": 2, "unclassified_dirs": {"/claims": 2},
+            "kept_suspect_unprobed_by": {"roster-read-degraded": 1},
+            "kept_offhost": 0, "corrupted": 0, "vanished": 0, "contended": 0,
+            "reap_failed": [], "apply": True, "lock_mirror_cleared": 0,
+            "roots": ["/claims"],
+        }
+        claim_events.emit_claim_reap_swept(summary)
+        data = captured["data"]
+        assert data["kept_unclassified"] == 2
+        assert data["unclassified_dirs"] == {"/claims": 2}
+        assert data["kept_suspect_unprobed_by"] == {"roster-read-degraded": 1}

@@ -1,13 +1,16 @@
-"""CI parity test - Python and bash validators must agree on every record.
+"""CI adapter-conformance test - the bash adapter must relay Python's verdict.
 
+Python's ``fno.events.validate`` is the one owner of per-event validation;
+``scripts/lib/events-validate.sh`` is a thin adapter that transports each
+payload to ``python -m fno.events --validate-event`` and relays rc 0/1/2.
 The hand-crafted corpus at ``parity_corpus.jsonl`` covers happy path,
-required-field misses, source/type/gate enum violations, conditional gate
-invariant, mission_complete status enum, and the 64KB data size cap.
+required-field misses, forbidden-alias rejections, source/type/gate enum
+violations, conditional gate invariant, mission_complete status enum, and
+the 64KB data size cap.
 
-If the test fails because Python and bash give different verdicts on the
-same record, the diagnostic names which side accepted vs rejected and the
-failure messages each produced. Fixing the test means re-aligning whichever
-validator drifted; do not paper over a real disagreement.
+If a record's verdicts disagree, the diagnostic names which side accepted
+vs rejected. A bash rejection without a matching Python rejection means the
+adapter grew a second validation brain: delete it, do not realign it.
 """
 from __future__ import annotations
 
@@ -67,10 +70,53 @@ def _bash_verdict(event: dict, type_hint: str | None = None) -> tuple[bool, str]
 _RECORDS = list(_records())
 
 
-def test_bash_schema_cache_identity_is_not_pid_only() -> None:
+def test_bash_validator_is_an_adapter_with_no_validation_brain() -> None:
+    """The shell lib delegates to Python and carries no second validator.
+
+    The retired bash implementation was jq-driven against a parsed-schema
+    cache, so any reappearance of either means a second validation brain
+    grew back and the two-validator drift this adapter retired can return.
+    """
     script = BASH_VALIDATOR.read_text(encoding="utf-8")
 
-    assert "${BASHPID:-$$}-${RANDOM:-0}" in script
+    assert "from fno.events import" in script
+    assert "validate(event)" in script
+    assert "jq " not in script
+    assert "EVENTS_SCHEMA_CACHE" not in script
+    assert "required_fields=" not in script
+
+
+def _adapter_verdict(event: dict | str, type_hint: str | None = None):
+    type_str = type_hint or (event["type"] if isinstance(event, dict) else "reign_checkin")
+    payload = event if isinstance(event, str) else json.dumps(event, separators=(",", ":"))
+    cmd = f"source {BASH_VALIDATOR} && validate_event {type_str} {json.dumps(payload)}"
+    return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, cwd=REPO_ROOT)
+
+
+def test_adapter_shell_contract() -> None:
+    valid = {
+        "ts": "2026-09-10T12:00:00Z",
+        "type": "reign_checkin",
+        "source": "loop",
+        "data": {"scope": "x-a792/fleet", "change": "merged PR 1710"},
+    }
+
+    ok = _adapter_verdict(valid)
+    assert ok.returncode == 0, ok.stderr
+
+    alias = _adapter_verdict(
+        {**valid, "data": {"scope": "s", "change": "c", "crown_scope": "s"}}
+    )
+    assert alias.returncode == 1
+    assert "forbids data field: crown_scope" in alias.stderr
+
+    hint_mismatch = _adapter_verdict(valid, type_hint="phase_transition")
+    assert hint_mismatch.returncode == 1
+    assert "does not match payload type" in hint_mismatch.stderr
+
+    garbage = _adapter_verdict("{not json")
+    assert garbage.returncode == 2
+    assert "not valid JSON" in garbage.stderr
 
 
 def test_corpus_minimum_size() -> None:

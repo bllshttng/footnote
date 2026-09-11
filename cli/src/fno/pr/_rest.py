@@ -730,6 +730,7 @@ def list_prs_rest(
                         "title": row["title"],
                         "headRefName": head["ref"],
                         "url": row["html_url"],
+                        "body": row.get("body") or "",
                     }
                 )
             rows.append(summary)

@@ -14,9 +14,13 @@ condition. Past panel finding: ``feedback_python_subprocess_negative_returncode`
 """
 from __future__ import annotations
 
+import os
 import shutil
+import signal
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def fno_py_cmd() -> list[str]:
@@ -54,3 +58,32 @@ def propagate_returncode(returncode: int) -> int:
     if returncode < 0:
         return 128 + (-returncode)
     return returncode
+
+
+def run_bounded(
+    cmd: list[str], *, timeout: float, capture_output: bool = False, text: bool = False,
+    **popen_kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """Like ``subprocess.run(cmd, timeout=timeout)``, but on timeout or
+    interrupt kills the whole process group, not just the direct child --
+    a plain timeout lets a bash script's grandchildren (e.g. a nested
+    cleanup leg) outlive the caller's own failure report.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)

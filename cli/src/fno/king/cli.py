@@ -501,6 +501,32 @@ def manifest_path_cmd(
     typer.echo(path)
 
 
+def history_cmd(
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to read. Default: this session's own crown."
+    ),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the full JSON payload."),
+) -> None:
+    """Read this crown's recorded reign: its check-ins, newest first, verbatim.
+
+    ``fno agents court -n`` answers who rules NOW; this answers what
+    happened across the reign. Contract: docs/architecture/reign.md.
+    """
+    from fno.king.history import HistoryUnreadable, resolve_scope, run_native
+    from fno.paths import project_events_json
+
+    try:
+        crown = resolve_scope(scope)
+    except HistoryUnreadable as exc:
+        _refuse(f"king: {exc}")
+    code, out, err = run_native(project_events_json(), crown, as_json)
+    if out:
+        typer.echo(out.rstrip("\n"))
+    if err:
+        typer.echo(err.rstrip("\n"), err=True)
+    raise typer.Exit(code)
+
+
 @king_app.command("board")
 def board_cmd(
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the board payload."),
@@ -721,6 +747,8 @@ agents_king_app.command("shape")(shape_cmd)
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
+# Here only, like the faq typer: the retired bare `fno king` menu stays capped.
+agents_king_app.command("history")(history_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
 

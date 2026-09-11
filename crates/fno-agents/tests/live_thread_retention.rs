@@ -47,7 +47,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         reason: None,
         exited: registry.exited,
         unmeasured: false,
-        liveness_age_s: None,
+        liveness_measured_at: None,
         harness_title: None,
         answerable: None,
         attach_id: None,

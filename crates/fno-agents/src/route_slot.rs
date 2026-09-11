@@ -193,11 +193,11 @@ fn lane_label(rung: &str, row_name: &str) -> String {
     }
 }
 
-fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String) {
+fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String, String) {
     let account = row_value(row, "account");
     let detail = match harness_detail {
         Some(d) => d,
-        None => return ("unknown".to_string(), String::new()),
+        None => return ("unknown".to_string(), String::new(), String::new()),
     };
     // A capacity entry is either the detailed mapping runtime_capacity
     // produces or a bare state string; both are admitted. A named account
@@ -216,7 +216,9 @@ fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String)
         if s.is_empty() {
             s = "unknown".to_string();
         }
-        (s, window.to_string())
+        // The harness-wide aggregate is the subject here; it carries no single
+        // observation age, so no age token is rendered.
+        (s, window.to_string(), String::new())
     } else {
         let mut state = detail
             .get("accounts")
@@ -228,13 +230,65 @@ fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String)
         if state.is_empty() {
             state = "unknown".to_string();
         }
-        let window = detail
-            .get("window")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        (state, window)
+        // The row's OWN account names the evidence. The harness-wide `window`
+        // is only the fallback for an older payload without per-account maps.
+        let per_account_source = detail
+            .get("sources")
+            .and_then(|s| s.get(&account))
+            .and_then(Value::as_str);
+        let window = match per_account_source {
+            Some(src) => src.to_string(),
+            None => detail
+                .get("window")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        };
+        let age = match detail.get("observed_at").and_then(Value::as_object) {
+            Some(obs) => match obs.get(&account) {
+                Some(v) => age_label(v.as_f64()),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+        (state, window, age)
     }
+}
+
+/// `never` when nothing was observed (the positive marker: an empty field is
+/// indistinguishable from a dropped token), otherwise the age floored to its
+/// coarsest unit under a day.
+fn age_label(observed_at: Option<f64>) -> String {
+    let Some(t) = observed_at else {
+        return "never".to_string();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let age = (now - t).max(0.0);
+    if age < 60.0 {
+        format!("{}s", age as u64)
+    } else if age < 3600.0 {
+        format!("{}m", (age / 60.0) as u64)
+    } else if age < 86400.0 {
+        format!("{}h", (age / 3600.0) as u64)
+    } else {
+        format!("{}d", (age / 86400.0) as u64)
+    }
+}
+
+/// The evidence suffix shared by every capacity line: `source=<s> age=<a>`,
+/// each token only when it exists.
+fn evidence_suffix(source: &str, age: &str) -> String {
+    let mut s = String::new();
+    if !source.is_empty() {
+        s.push_str(&format!(" source={source}"));
+    }
+    if !age.is_empty() {
+        s.push_str(&format!(" age={age}"));
+    }
+    s
 }
 
 fn candidate_supported(
@@ -527,7 +581,7 @@ fn grid_leg(payload: &Value, rung_base: &str, chain: &mut Vec<Value>) -> Value {
     let effort_ok = payload.get("effort_ok").cloned().unwrap_or(json!({}));
     for row in clearing.iter().chain(unbanded.iter()) {
         let detail = capacity.get(&row.harness);
-        let (mut state, window) = row_capacity(&row.raw, detail);
+        let (mut state, window, _age) = row_capacity(&row.raw, detail);
         if state == "exhausted" || state == "blocked" {
             chain.push(json!(format!(
                 "grid skip {}/{} capacity={state}",
@@ -927,7 +981,7 @@ fn states_leg(payload: &Value) -> Value {
                 let account = row_value(r, "account");
                 let route = row_value(r, "route");
                 let detail = capacity.get(&harness);
-                let (s, w) = row_capacity(r, detail);
+                let (s, w, _age) = row_capacity(r, detail);
                 // Display evidence: the attribution owner's verdict for the
                 // row's named account, and where the observation came from.
                 let ident = if !account.is_empty() && route.is_empty() {
@@ -1198,18 +1252,37 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         return grid_leg(&payload, &rung_base, &mut chain);
     }
 
-    // An explicit model pin outranks the lanes (operator authority); it never
-    // borrows a lane's harness or capacity. Config defaults do NOT outrank
-    // lanes; only a typed flag does. Strict routing instead qualifies the
-    // explicit coordinate against the effective slot's membership.
-    if strict_ctx.is_none()
-        && payload
-            .get("explicit_model")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    // A typed model/vendor/route flag is an operator pin (operator authority)
+    // and outranks the lanes under both grid and strict routing: it never
+    // borrows a lane's harness or capacity, and it returns before the strict
+    // membership walk and the operator_access filter inside it. Config
+    // defaults do NOT outrank lanes; only a typed flag does, because these
+    // value fields are argv-only facts (spawn_defaults.py never sets them
+    // from config injection).
+    let explicit_model_name = payload
+        .get("explicit_model_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_route_name = payload
+        .get("explicit_route_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_vendor_name = payload
+        .get("explicit_vendor_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if explicit_model_name.is_some()
+        || explicit_route_name.is_some()
+        || explicit_vendor_name.is_some()
     {
         chain.push(json!(
-            "slot=model-pin-override (an explicit model outranks the lanes)"
+            "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
         ));
         return none(chain);
     }
@@ -1399,7 +1472,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         }
     }
 
-    let mut demoted: Vec<(usize, String, String, String)> = Vec::new();
+    let mut demoted: Vec<(usize, String, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
     let mut policy_skips: usize = 0;
     let mut resets_seen: Vec<f64> = Vec::new();
@@ -1578,7 +1651,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
                 continue;
             }
         }
-        let (mut state, window) = row_capacity(&row, harness_detail);
+        let (mut state, window, age) = row_capacity(&row, harness_detail);
         if state == "exhausted" || state == "blocked" {
             if let Some(resets) = harness_detail
                 .and_then(|d| d.get("resets"))
@@ -1594,30 +1667,39 @@ fn resolve_slot_walk(payload: &Value) -> Value {
                 }
             }
             chain.push(json!(format!(
-                "slot skip {} capacity={state}",
+                "slot skip {} capacity={state}{}",
                 lane_label(rung, row_name),
+                evidence_suffix(&window, &age),
             )));
             continue;
         }
         if state == "low" && on_low == "skip" {
             chain.push(json!(format!(
-                "slot skip {} capacity=low (on_low=skip)",
+                "slot skip {} capacity=low (on_low=skip){}",
                 lane_label(rung, row_name),
+                evidence_suffix(&window, &age),
             )));
             continue;
         }
         if state != "ok" && state != "low" && state != "available" {
             if on_unknown == "skip" {
                 chain.push(json!(format!(
-                    "slot skip {} capacity={state} (on_unknown=skip)",
+                    "slot skip {} capacity={state} (on_unknown=skip){}",
                     lane_label(rung, row_name),
+                    evidence_suffix(&window, &age),
                 )));
                 continue;
             }
             state = "unknown-permitted".to_string();
         }
         if state == "low" && on_low == "prefer_healthy" {
-            demoted.push((index, rung.clone(), row_name.clone(), window.clone()));
+            demoted.push((
+                index,
+                rung.clone(),
+                row_name.clone(),
+                window.clone(),
+                age.clone(),
+            ));
             chain.push(json!(format!(
                 "slot demote {} capacity=low (on_low=prefer_healthy)",
                 lane_label(rung, row_name),
@@ -1634,12 +1716,13 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             row_name,
             &state,
             &window,
+            &age,
             "",
             strict_ctx.as_ref(),
         );
     }
 
-    if let Some((index, rung, row_name, window)) = demoted.first().cloned() {
+    if let Some((index, rung, row_name, window, age)) = demoted.first().cloned() {
         return pick(
             &mut chain,
             &rows,
@@ -1650,6 +1733,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             &row_name,
             "low",
             &window,
+            &age,
             "no healthy lane; on_low=prefer_healthy",
             strict_ctx.as_ref(),
         );
@@ -1757,12 +1841,16 @@ fn pick(
     row_name: &str,
     state: &str,
     window: &str,
+    age: &str,
     note: &str,
     strict: Option<&(String, String)>,
 ) -> Value {
     let mut line = format!("slot {} capacity={state}", lane_label(rung, row_name),);
     if !window.is_empty() {
         line.push_str(&format!(" window={window}"));
+    }
+    if !age.is_empty() {
+        line.push_str(&format!(" age={age}"));
     }
     if !note.is_empty() {
         line.push_str(&format!(" ({note})"));
@@ -1887,12 +1975,58 @@ fn refusal_terminal(chain: &[Value]) -> Option<(String, String)> {
         ));
     }
     if terminal == "slot=exhausted refuse" {
-        return Some((
-            "exhausted-refuse".to_string(),
-            "every configured lane is exhausted".to_string(),
-        ));
+        // The refusal is the one verdict a caller has to argue with, so it
+        // names the oldest evidence it decided on and the verb that refreshes
+        // it, instead of a bare word.
+        let text = match oldest_evidence(chain) {
+            Some((label, src)) => format!(
+                "every configured lane is exhausted; oldest evidence {label} old (source={src}). Run `fno config accounts usage --refresh` to re-measure."
+            ),
+            None => "every configured lane is exhausted. Run `fno config accounts usage --refresh` to re-measure.".to_string(),
+        };
+        return Some(("exhausted-refuse".to_string(), text));
     }
     None
+}
+
+/// The oldest evidence named on a capacity skip line: its raw age label and
+/// the source that observed it. Skips without an age token (older payloads)
+/// contribute nothing.
+fn oldest_evidence(chain: &[Value]) -> Option<(String, String)> {
+    let mut best: Option<(f64, String, String)> = None;
+    for line in chain {
+        let Some(s) = line.as_str() else { continue };
+        let Some((_, rest)) = s.split_once(" capacity=") else {
+            continue;
+        };
+        let tokens = || rest.split_whitespace().filter_map(|t| t.split_once('='));
+        let Some((_, age_tok)) = tokens().find(|(k, _)| *k == "age") else {
+            continue;
+        };
+        let Some(secs) = parse_age_seconds(age_tok) else {
+            continue;
+        };
+        let src = tokens()
+            .find(|(k, _)| *k == "source")
+            .map(|(_, v)| v)
+            .unwrap_or("");
+        if best.as_ref().map_or(true, |(b, _, _)| secs > *b) {
+            best = Some((secs, age_tok.to_string(), src.to_string()));
+        }
+    }
+    best.map(|(_, label, src)| (label, src))
+}
+
+fn parse_age_seconds(label: &str) -> Option<f64> {
+    let (digits, unit) = label.split_at(label.len().saturating_sub(1));
+    let n: f64 = digits.parse().ok()?;
+    match unit {
+        "s" => Some(n),
+        "m" => Some(n * 60.0),
+        "h" => Some(n * 3600.0),
+        "d" => Some(n * 86400.0),
+        _ => None,
+    }
 }
 
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
@@ -2656,7 +2790,7 @@ mod tests {
             "vendor_counts": {}, "vendor_caps": {}, "vendor_count_errors": {},
             "thread_seatable": {}, "substrate": null, "permission_mode": null,
             "constrain_harness": null,
-            "explicit_lane": false, "explicit_model": false, "gate_bypassed": false,
+            "explicit_lane": false, "gate_bypassed": false,
         });
         if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
             for (k, v) in ovr {
@@ -2850,6 +2984,164 @@ mod tests {
         }));
         assert_eq!(out["routing"], "capacity-held");
         assert!(out["would_take"].as_str().unwrap().contains("exhausted"));
+    }
+
+    // --- the capacity verdict carries its age ------------------------------ //
+
+    fn now_epoch() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
+
+    fn age_token(line: &str) -> String {
+        line.split(" age=")
+            .nth(1)
+            .unwrap_or("")
+            .split(' ')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn the_exhausted_skip_line_names_the_evidence_that_produced_it() {
+        // Fresh 100% window, no lock: the refusal must name source=window and
+        // an age token, not the bare word a caller has to argue with.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x"],
+            "capacity": {"claude": {"state": "exhausted", "window": "window",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "sources": {"zai-main": "window"},
+                                    "observed_at": {"zai-main": now_epoch() - 10.0},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let line = chain_of(&out)
+            .into_iter()
+            .find(|l| l.contains("capacity=exhausted"))
+            .expect("an exhausted skip line");
+        assert!(line.contains("source=window"), "line: {line}");
+        let age = age_token(&line);
+        assert!(age.ends_with('s') && age.len() > 1, "age token: {age}");
+        let digits = age.trim_end_matches('s');
+        assert!(digits.parse::<u64>().is_ok(), "age token: {age}");
+    }
+
+    #[test]
+    fn a_lock_verdict_announces_itself_in_minutes() {
+        // The 09:4xZ case: an active provider lock, no fresh usage. The skip
+        // must say source=lock with an age in minutes.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x"],
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "sources": {"zai-main": "lock"},
+                                    "observed_at": {"zai-main": now_epoch() - 55.0 * 60.0},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let line = chain_of(&out)
+            .into_iter()
+            .find(|l| l.contains("capacity=exhausted"))
+            .expect("an exhausted skip line");
+        assert!(line.contains("source=lock"), "line: {line}");
+        let age = age_token(&line);
+        assert!(age.ends_with('m'), "age token: {age}");
+        let minutes: u64 = age.trim_end_matches('m').parse().expect("minute digits");
+        assert!((50..=60).contains(&minutes), "age token: {age}");
+    }
+
+    #[test]
+    fn a_never_observed_lane_says_age_never_not_nothing() {
+        // `age=never` is the positive marker; an empty age field renders
+        // identically to a dropped token, so the literal is the assertion.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x"],
+            "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy",
+                        "on_unknown": "skip", "by_difficulty": {}},
+            "capacity": {"claude": {"state": "unknown", "window": "absent",
+                                    "accounts": {"zai-main": "unknown"},
+                                    "sources": {"zai-main": "absent"},
+                                    "observed_at": {"zai-main": null},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let line = chain_of(&out)
+            .into_iter()
+            .find(|l| l.contains("capacity=unknown"))
+            .expect("an unknown skip line");
+        assert!(line.contains("source=absent"), "line: {line}");
+        assert!(line.contains(" age=never"), "line: {line}");
+    }
+
+    #[test]
+    fn each_lane_names_its_own_accounts_evidence() {
+        // Two accounts on one harness with different sources: the harness-wide
+        // `window` names the worst account's evidence, so a named row that
+        // printed it would name ITS NEIGHBOR's evidence. Each skip line must
+        // carry its own account's source, and the lines must differ.
+        let now = now_epoch();
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x", "makers-x"],
+            "declared_rows": {
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "band": "low", "account": "zai-main", "route": "zai/glm"},
+                "makers-x": {"name": "makers-x", "harness": "claude", "model": "glm",
+                             "band": "low", "account": "makers"},
+            },
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted",
+                                                 "makers": "exhausted"},
+                                    "sources": {"zai-main": "lock", "makers": "window"},
+                                    "observed_at": {"zai-main": now - 55.0 * 60.0,
+                                                    "makers": now - 20.0},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let skips: Vec<String> = chain_of(&out)
+            .into_iter()
+            .filter(|l| l.contains("capacity=exhausted"))
+            .collect();
+        assert_eq!(skips.len(), 2, "skips: {skips:?}");
+        let flash = skips.iter().find(|l| l.contains("flash-x")).unwrap();
+        let makers = skips.iter().find(|l| l.contains("makers-x")).unwrap();
+        assert!(flash.contains("source=lock"), "flash line: {flash}");
+        assert!(makers.contains("source=window"), "makers line: {makers}");
+        assert_ne!(flash, makers);
+    }
+
+    #[test]
+    fn the_refusal_terminal_names_the_oldest_evidence_and_the_refresh_verb() {
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x"],
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "sources": {"zai-main": "lock"},
+                                    "observed_at": {"zai-main": now_epoch() - 47.0 * 60.0},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let text = out["refusal_terminal"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("oldest evidence 47m old (source=lock)"),
+            "terminal: {text}"
+        );
+        assert!(text.contains("fno config accounts usage --refresh"));
+    }
+
+    #[test]
+    fn an_older_payload_still_renders_off_the_harness_window() {
+        // No sources/observed_at maps: the pre-x-a0c4 payload shape falls back
+        // to the harness-wide window and prints no age token.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["flash-x"],
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "evidence": {}, "resets": {}}},
+        })));
+        let line = chain_of(&out)
+            .into_iter()
+            .find(|l| l.contains("capacity=exhausted"))
+            .expect("an exhausted skip line");
+        assert!(line.contains("source=lock"), "line: {line}");
+        assert!(!line.contains(" age="), "line: {line}");
     }
 
     #[test]
@@ -3202,7 +3494,12 @@ mod tests {
     }
 
     #[test]
-    fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
+    fn strict_explicit_glm_pins_the_model_outranking_the_lanes() {
+        // A typed --model is an operator pin: under strict routing it
+        // outranks lane membership entirely, even when no declared lane
+        // names it. This used to be a named refusal; the law (d-dd8e2743)
+        // says a typed flag is the operator's own statement of intent, and
+        // strict exists to bound the MACHINE's autonomous choice, not this.
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
             "declared_rows": {
@@ -3212,16 +3509,20 @@ mod tests {
             "explicit_model_value": "glm",
         })));
         assert_eq!(out["status"], "none");
-        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert_eq!(out["verdict"], "unarmed");
+        assert!(out["refusal"].is_null());
         assert!(chain_of(&out)
             .iter()
-            .any(|l| l.contains("slot=strict-refusal explicit model \"glm\"")));
+            .any(|l| l.contains("slot=operator-pin-override")));
     }
 
     #[test]
-    fn strict_explicit_vendor_pin_qualifies_against_the_route_vendor() {
-        // The model matches a row on ANOTHER vendor too, but the -P pin names
-        // zai: only the row whose route bills zai survives the walk.
+    fn strict_explicit_vendor_pin_overrides_the_lanes_even_when_one_matches() {
+        // The pin branch returns before the lane walk runs at all, so it
+        // never borrows a lane's route or account - not even a lane the pin
+        // happens to match. Two pins here: one that could have matched a
+        // declared lane, one that names a vendor no lane declares. Both take
+        // the same operator-pin-override exit with no candidate.
         let out = resolve_slot_payload(&strict_payload(json!({
             "policy": {"enforce_inventory": true, "operator_access": "local"},
             "node": {"difficulty": "medium", "priority": "p1", "plan_path": "/plans/p.md"},
@@ -3236,13 +3537,13 @@ mod tests {
             "explicit_model_value": "glm",
             "explicit_vendor_value": "zai",
         })));
-        assert_eq!(out["status"], "pick");
-        assert_eq!(
-            out["candidate"]["lane_fields"]["route"],
-            "zai/glm-5.3-flash[1m]"
-        );
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
 
-        // The pin names a vendor no lane's route declares: refusal by name.
         let out = resolve_slot_payload(&strict_payload(json!({
             "declared_rows": {
                 "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
@@ -3251,10 +3552,43 @@ mod tests {
             "explicit_vendor_value": "zai",
         })));
         assert_eq!(out["status"], "none");
-        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert!(out["refusal"].is_null());
         assert!(chain_of(&out)
             .iter()
-            .any(|l| l.contains("slot=strict-refusal explicit vendor \"zai\"")));
+            .any(|l| l.contains("slot=operator-pin-override")));
+    }
+
+    #[test]
+    fn strict_explicit_route_pin_outranks_the_lanes_with_no_model_or_vendor() {
+        // A bare --route (no -m, no -P) is still an operator pin: the third
+        // coordinate follows the same rule as model and vendor.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
+
+        // Same pin under grid (non-strict) routing: unconditional, same as
+        // model and vendor.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["opus-x"],
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
     }
 
     #[test]

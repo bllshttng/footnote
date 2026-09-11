@@ -315,7 +315,10 @@ fn default_true() -> bool {
 /// v76 : `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
 /// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor
 /// stays 58.
-pub const PROTO_VERSION: u32 = 76;
+/// v77 : `AgentRow.liveness_age_s` (a per-second server-computed age) is
+/// replaced by `liveness_measured_at`, the measurement instant; the client
+/// derives the age at render. Same decode both ways; floor stays 58.
+pub const PROTO_VERSION: u32 = 77;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1086,13 +1089,16 @@ pub struct AgentRow {
     /// an old client that cannot render the third state).
     #[serde(default)]
     pub unmeasured: bool,
-    /// (v67) Age of the served liveness measurement in seconds
+    /// (v77) The served liveness measurement's instant, in epoch seconds
     /// (`liveness_measured_at` on the registry row); `None` = never measured
-    /// by the sweep. Lets the render say "probe older than N s" instead of a
-    /// bare unmeasured glyph. `#[serde(default)]` keeps a v66 reader
-    /// wire-tolerant (defaults None, nothing renders).
+    /// by the sweep. The age is derived at render against the client's own
+    /// clock, so an idle sideline never re-renders from a ticking field.
+    /// Replaces the v67 `liveness_age_s` (a value that grew every second on
+    /// the server and made the row change gate fire each tick). A v76 client
+    /// decodes `None` (`#[serde(default)]`, no `deny_unknown_fields`) and
+    /// only loses the "last probe" suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_age_s: Option<u64>,
+    pub liveness_measured_at: Option<u64>,
     /// (v67) The last title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), from the registry row. The render
     /// joins it into the subline when it differs from the label; `name` is
@@ -4116,7 +4122,9 @@ mod tests {
         // version never moves backwards whichever branch lands first.
         // v75 (x-7649) took 75; floor stays 58.
         // v76  took 76; floor stays 58.
-        assert_eq!(PROTO_VERSION, 76);
+        // v77  took 77: AgentRow carries liveness_measured_at (the instant)
+        // instead of a per-second age; floor stays 58.
+        assert_eq!(PROTO_VERSION, 77);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4421,7 +4429,7 @@ mod tests {
                         exited: false,
                         dnd: false,
                         unmeasured: false,
-                        liveness_age_s: None,
+                        liveness_measured_at: None,
                         harness_title: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
@@ -4475,7 +4483,7 @@ mod tests {
                         exited: true,
                         dnd: false,
                         unmeasured: false,
-                        liveness_age_s: None,
+                        liveness_measured_at: None,
                         harness_title: None,
                         answerable: None,
                         attach_id: None,

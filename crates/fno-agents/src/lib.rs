@@ -51,6 +51,7 @@ pub mod agents_config;
 pub mod agy_ask;
 pub mod attach;
 pub mod authorized_merge;
+pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
 mod bounded_spawn;
@@ -105,7 +106,7 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
-pub mod graph_sqlite;
+
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -114,6 +115,7 @@ mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
+pub mod king_history;
 pub mod king_termination;
 pub mod liveness_sweep;
 pub mod logs;
@@ -861,6 +863,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     "agent_stopped",
+    // Stop/rm claims release (x-9c91): the receipt event for the claims a
+    // stopped or removed worker held; one emit per stop/rm that ran one.
+    "agent_stop_claims_released",
     // A stop the daemon REFUSED to claim: the interrupt never confirmed a
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
@@ -916,6 +921,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "state_reap",
     "graph_write_gate",
     "graph_export_failed",
+    // One 5-minute parity sample: relational export vs authoritative JSON
+    // while JSON is still the backend (the 7-day soak clock's input).
+    "graph_parity_sample",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every

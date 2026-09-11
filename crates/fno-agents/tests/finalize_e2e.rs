@@ -109,6 +109,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20       sys.stdout.write(open(p).read())\n\
          \x20       sys.exit(0)\n\
          \x20   sys.exit(1)\n\
+         if args[:3] == ['agents', 'claim', 'release']:\n\
+         \x20   sys.exit(1 if os.environ.get('FNO_STUB_CLAIM_RELEASE_FAIL') else 0)\n\
          sys.exit(1)\n",
     )
     .unwrap();
@@ -2071,5 +2073,117 @@ fn finalize_files_nothing_on_a_ship_terminal_regardless_of_transcript() {
     assert!(
         !fno_calls(&env).contains("outstanding ask"),
         "a clean ship must never be treated as a stuck-with-a-question terminal"
+    );
+}
+
+/// Same as `run_finalize`, plus the `fno` stub's env vars so the test can
+/// assert (and fail) the `fno agents claim release` invocation itself.
+fn run_finalize_with_stub(
+    env: &Env,
+    reason: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("finalize")
+        .arg("--state")
+        .arg(&env.state)
+        .arg("--cwd")
+        .arg(&env.cwd)
+        .arg("--reason")
+        .arg(reason)
+        .arg("--events")
+        .arg(&env.events)
+        .arg("--global-events")
+        .arg(&env.global_events)
+        .arg("--handoffs-dir")
+        .arg(&env.handoffs)
+        .arg("--postmortems-dir")
+        .arg(&env.postmortems)
+        .env("FNO_SPACES_DIR", &env.spaces)
+        .env("PYTHONPATH", &env.pypath)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                env.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("GH_CALLS_LOG", &env.gh_calls)
+        .env("FNO_STUB_CALLS_LOG", &env.fno_calls)
+        .env("FNO_STUB_OUTSTANDING_STORE", &env.outstanding_store);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.current_dir(&env.cwd).output().expect("run finalize")
+}
+
+/// Append the `target_claim_*` lines to the manifest body, as init does when
+/// it claims the run's node.
+fn manifest_with_claim(env: &Env, key: &str, holder: &str) {
+    let mut m = fs::read_to_string(&env.state).unwrap();
+    m.push_str(&format!(
+        "target_claim_key: \"{key}\"\ntarget_claim_holder: \"{holder}\"\n"
+    ));
+    fs::write(&env.state, m).unwrap();
+}
+
+// ── the cancel terminal settles its own claim ───────────────────────────────
+
+/// AC1-HP: a cancelled run releases the claim its manifest names, and the
+/// release carries `--stamp-do` (which fills `ended_at` on the do row the
+/// session's acquire opened). The argv is the contract.
+#[test]
+fn finalize_cancel_releases_claim_with_stamp_do() {
+    let env = setup("S-cancrel", false);
+    manifest_with_claim(&env, "node:ab-testnode", "session:e4138ef9");
+    let out = run_finalize_with_stub(&env, "Interrupted", &[]);
+    assert!(out.status.success());
+    let c = fno_calls(&env);
+    assert!(
+        c.contains(
+            "fno agents claim release node:ab-testnode --holder session:e4138ef9 --stamp-do"
+        ),
+        "cancel must release the claim with --stamp-do: {c}"
+    );
+}
+
+/// AC1-EDGE: a manifest naming no claim key is a named no-op - nothing
+/// released, exit code the same as any Interrupted finalize.
+#[test]
+fn finalize_cancel_without_claim_key_is_a_named_noop() {
+    let env = setup("S-cancnokey", false);
+    let out = run_finalize_with_stub(&env, "Interrupted", &[]);
+    assert!(out.status.success());
+    assert!(
+        !fno_calls(&env).contains("agents claim release"),
+        "no key named, nothing to release"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no target_claim_key"),
+        "the no-op must be named on stderr: {err}"
+    );
+}
+
+/// AC2-HP: a failed release is one named stderr line and the exit code the
+/// run would have exited with anyway.
+#[test]
+fn finalize_cancel_release_failure_keeps_exit_code() {
+    let env = setup("S-cancfail", false);
+    manifest_with_claim(&env, "node:ab-testnode", "session:e4138ef9");
+    let out = run_finalize_with_stub(&env, "Interrupted", &[("FNO_STUB_CLAIM_RELEASE_FAIL", "1")]);
+    assert!(
+        out.status.success(),
+        "a failed release must not fail finalize"
+    );
+    assert!(
+        fno_calls(&env).contains("agents claim release node:ab-testnode"),
+        "the release was attempted; a silent skip would read as success"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cancel claim release failed"),
+        "name the failure: {err}"
     );
 }

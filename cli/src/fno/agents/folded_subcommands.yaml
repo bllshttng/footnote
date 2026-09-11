@@ -1,0 +1,46 @@
+# Agent subcommands folded under `fno agents` as lazy subcommands.
+# Each entry: import_path, short_help, typer options. Loaded by
+# rust_runtime.FOLDED_AGENT_SUBCOMMANDS.
+autonomy:
+  - fno.autonomy_cli:autonomy_app
+  - Inspect every path that can start a session without an operator asking.
+  - hidden: true
+claim:
+  - fno.claims.cli:cli
+  - Work-claim coordination primitive
+  - hidden: true
+dispatch:
+  - fno.dispatch:dispatch_app
+  - Dispatch ready work into mux panes.
+  - hidden: true
+king:
+  - fno.king.cli:agents_king_app
+  - The king session manifest and escalation controls.
+  - hidden: true
+mail:
+  - fno.mail.cli:mail_app
+  - "Durable polled mailbox: send/unread/ack/reply/drain/status (canonical spelling; root `fno mail` is the shim)."
+  - hidden: true
+mcp:
+  - fno.mcp.cli:mcp_app
+  - MCP sidecar client verbs.
+  - hidden: true
+restart:
+  - fno.restart:restart_command
+  - Restart running fno processes onto fresh binaries.
+  - hidden: true
+roles:
+  - fno.roles.cli:roles_app
+  - Inspect bounded business-role definitions and resolutions.
+  - hidden: true
+# x-6233 (d-cf2d6fe1): worktree lifecycle folds under agents, which also
+# resolves the Python/Rust `workspace` collision - root `workspace` then
+# unambiguously means the mux one. Old spellings stay one-release shims.
+workspace:
+  - fno.workspace.cli:cli
+  - Worktree lifecycle and worker registration.
+  - hidden: true
+worker:
+  - fno.worker.cli:cli
+  - Manage delivery worker phases.
+  - hidden: true

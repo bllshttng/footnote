@@ -935,12 +935,11 @@ def _review_hold_refusal(command=""):
 
     Deliberately coarse in the safe direction. ANY review-hold lockfile in the
     repo denies, without mapping the PR to its branch (which would need the
-    network call this function exists to avoid) and without judging expiry
-    (footnote's hybrid liveness can keep a TTL-lapsed hold LIVE, so a
-    TTL-only read here could ALLOW what the guard refuses - the one direction
-    this hook must never take). A wrong deny costs one command: `fno do pr
-    merge` is the sanctioned primitive, it is not gated by this hook, and it
-    reads the real predicate.
+    network call this function exists to avoid) and without judging expiry:
+    this hook reads file presence only, and the first Python read of a lapsed
+    hold deletes it, so nothing expired lingers here to judge. A wrong deny
+    costs one command: `fno do pr merge` is the sanctioned primitive, it is
+    not gated by this hook, and it reads the real predicate.
     """
     if not _parse_merge_pr(command) or _targets_other_repo(command):
         return None

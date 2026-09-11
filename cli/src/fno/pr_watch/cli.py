@@ -289,6 +289,10 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
+#: Set by the tick around its catch-up leg (x-d211): a child `fno update`
+#: seeing it skips the refresh that bootouts the job owning the tick.
+_ENV_ACTIVE_TICK = "FNO_PR_WATCH_ACTIVE_TICK"
+
 #: A roster probe needs at least this much budget to be worth starting. The
 #: probe measured 3.4s on a 43-row fleet, so anything under this buys a
 #: certain timeout rather than a smaller answer.
@@ -440,6 +444,7 @@ def tick() -> None:
     sweep_started = False
     alarm_ok = True
     cut: list[str] = []
+    cut_whys: dict[str, str] = {}
     phase_s: dict[str, float] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
@@ -452,6 +457,35 @@ def tick() -> None:
             # available, run unbounded like before.
             alarm_ok = False
             log.debug("pr-watch: SIGALRM unavailable outside main thread")
+
+        # x-d211: a bootout kills this process by signal; without a handler
+        # the tick dies with no record. While the marker is set the sync
+        # child is running, so its update's bounce is the probable killer.
+        def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
+            signal.signal(signum, signal.SIG_IGN)
+            why = "self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed"
+            reason = ("killed mid-sync; its own update bouncing this job is the "
+                      "probable source" if why == "self_killed" else
+                      "killed by a signal mid-tick")
+            phase = current_tick_phase()
+            _emit_event("pr_watch_tick_end", {
+                "outcome": "error", "why": why,
+                "duration_s": round(time.monotonic() - started, 3),
+                "phase": phase, "pid": os.getpid(),
+            })
+            _emit_tick_row(
+                "pr_watch_merge",
+                interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
+                skip_reason="error",
+                detail=f"{reason}; started and did not complete, phase={phase}",
+            )
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+        except ValueError:
+            pass
 
         # One alarm per phase (x-c79d): every body runs under its own slice, so
         # a slow phase loses its turn instead of aborting the phases after it.
@@ -468,10 +502,12 @@ def tick() -> None:
                 left = ceiling_box["v"] - (time.monotonic() - started)
             if left is not None and left <= 0:
                 cut.append(name)
+                cut_whys[name] = "deadline_exceeded"
                 phase_s[name] = 0.0
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout", detail="no tick time left")
+                                   skip_reason="timeout",
+                                   detail=f"deadline exceeded before phase {name}")
                 if on_end is not None:
                     on_end(True, 0.0)
                 return False
@@ -485,6 +521,12 @@ def tick() -> None:
             else:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
+            # Which budget fired if the alarm does (x-d211): a cap below the
+            # remaining wall starves one phase; the wall is the tick deadline.
+            cap = _PHASE_CAP_S.get(name)
+            wall_limited = (
+                ceiling_box["v"] is None or cap is None or cap >= (left or 0.0)
+            )
             slice_s = max(1.0, slice_s)
             body_cut = False
             phase_start = time.monotonic()
@@ -497,10 +539,13 @@ def tick() -> None:
             except TickDeadlineExceeded:
                 body_cut = True
                 cut.append(name)
+                cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
-                                   detail=f"phase slice {int(slice_s)}s spent")
+                                   detail=(f"deadline exceeded in phase {name} at "
+                                           f"{int(slice_s)}s" if wall_limited else
+                                           f"phase slice {int(slice_s)}s spent"))
             finally:
                 if alarm_ok:
                     try:
@@ -1215,11 +1260,21 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
-        _run_phase("catchup", _phase_catchup)
+        # Scoped to catch-up (x-d211): its sync shell inherits the marker.
+        prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
+        os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
+        try:
+            _run_phase("catchup", _phase_catchup)
+        finally:
+            if prior_marker is None:
+                os.environ.pop(_ENV_ACTIVE_TICK, None)
+            else:
+                os.environ[_ENV_ACTIVE_TICK] = prior_marker
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.
         timed_out = True
+        cut_whys[current_tick_phase()] = "deadline_exceeded"
         typer.echo(
             f"pr-watch tick: deadline exceeded in phase {current_tick_phase()} - aborted",
             err=True,
@@ -1240,6 +1295,12 @@ def tick() -> None:
             "phase": cut[0] if cut else current_tick_phase(),
             "pid": os.getpid(),
         }
+        # Name which timeout mechanism fired (x-d211): wall outranks slice.
+        if timed_out:
+            if "deadline_exceeded" in cut_whys.values():
+                end_data["why"] = "deadline_exceeded"
+            elif cut:
+                end_data["why"] = "slice_starved"
         if cut:
             end_data["cut"] = list(cut)
         if phase_s:

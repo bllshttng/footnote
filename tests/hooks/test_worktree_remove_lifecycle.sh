@@ -870,6 +870,305 @@ fi
 rm -f "$OUT_W3"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
 
+echo "== 6. the sweep lock resolves its own directory, honestly =="
+
+# 6a. The regression: from a subdirectory the lock must still land in the
+# real common dir and the sweep must produce its normal listing. The lock
+# path is `git rev-parse --path-format=absolute --git-common-dir`; a join of
+# the raw relative answer onto the toplevel only holds at the toplevel.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+mkdir -p "$S/sub"
+OUT_SUB=$(mktemp -t sub-out.XXXXXX)
+ERR_SUB=$(mktemp -t sub-err.XXXXXX)
+( cd "$S/sub" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_SUB" 2>"$ERR_SUB" )
+if grep -q "^STATUS" "$OUT_SUB" && ! grep -q "could not acquire sweep lock" "$ERR_SUB" \
+    && ! grep -q "No such file or directory" "$ERR_SUB"; then
+    pass "sweep runs from a subdirectory, no lock error"
+else
+    fail "sweep from subdirectory" "out=[$(cat "$OUT_SUB")] err=[$(cat "$ERR_SUB")]"
+fi
+rm -f "$OUT_SUB" "$ERR_SUB"
+rm -rf "$S" "$BARE"
+
+# 6b. An unusable lock directory refuses honestly: non-zero exit, and the
+# message names the real cause instead of calling it contention. A caller
+# who reads "after retries" waits out a race that does not exist.
+NONREPO=$(mktemp -d -t wt-nonrepo.XXXXXX)
+OUT_NR=$(mktemp -t nr-out.XXXXXX)
+ERR_NR=$(mktemp -t nr-err.XXXXXX)
+( cd "$NONREPO" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_NR" 2>"$ERR_NR" ); rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "not lock contention" "$ERR_NR" && ! grep -q "after retries" "$ERR_NR"; then
+    pass "unusable lock dir refuses honestly"
+else
+    fail "unusable lock dir refusal" "rc=$rc err=[$(cat "$ERR_NR")]"
+fi
+rm -f "$OUT_NR" "$ERR_NR"
+rm -rf "$NONREPO"
+
+# 6c. Genuine contention keeps its honest shape: a live holder is reported
+# by pid and exits 0, so the honest refusal above can never collapse every
+# lock outcome into one message.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6c.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+echo "$$" > "$LOCKDIR/pid"   # this test's own pid: alive for the whole run
+OUT_C=$(mktemp -t cont-out.XXXXXX)
+ERR_C=$(mktemp -t cont-err.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_C" 2>"$ERR_C" ); rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "another sweep (pid" "$ERR_C"; then
+    pass "genuine contention still reports pid, exit 0"
+else
+    fail "genuine contention shape" "rc=$rc err=[$(cat "$ERR_C")]"
+fi
+rm -f "$OUT_C" "$ERR_C"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+echo "== 7. cleanup --merged consumes the occupancy classifier (x-0396) =="
+
+# A merged, pushed, clean sandbox tree: branch tip reachable from origin/main,
+# nothing unpushed, so step 4 (processes) is the first guard the tree meets.
+# --no-verify: a machine-local pre-push hook refuses branch main on some
+# operator boxes (see section 5b); the fixture is throwaway, the hook is not
+# under test.
+new_merged_tree() {
+    local S BARE
+    S=$(new_sandbox)
+    git -C "$S" branch -M main >/dev/null 2>&1
+    BARE=$(mktemp -d -t wt-occ-bare.XXXXXX); rmdir "$BARE"
+    git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+    git -C "$S" remote add origin "$BARE"
+    git -C "$S" push -q --no-verify origin main >/dev/null 2>&1
+    git -C "$S" worktree add -q -b feature/occ "$S/wt" >/dev/null 2>&1
+    git -C "$S/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m wip >/dev/null 2>&1
+    git -C "$S/wt" push -q --no-verify -u origin feature/occ >/dev/null 2>&1
+    git -C "$S" -c user.email=t@t -c user.name=t merge -q -m merge origin/feature/occ >/dev/null 2>&1
+    git -C "$S" push -q --no-verify origin main >/dev/null 2>&1
+    printf '%s\n' "$S"
+}
+
+# Stub classifier: rows driven by OCC_STUB_MODE, calls logged to OCC_STUB_LOG.
+make_occupancy_stub() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/classify" <<'EOF'
+#!/usr/bin/env bash
+wt="$1"; shift
+printf 'called %s %s\n' "$wt" "$*" >> "$OCC_STUB_LOG"
+mode="${OCC_STUB_MODE:-inert}"
+if [[ "$mode" == "exit2" ]]; then exit 2; fi
+if [[ "$mode" == "short" ]]; then
+  printf '%s\tinert\tterminate\t-\tstub\tstub\n' "$1"
+  exit 0
+fi
+first=1
+for p in "$@"; do
+  m="$mode"
+  if [[ "$mode" == "mixed" ]]; then
+    if [[ $first -eq 1 ]]; then m="holds"; else m="inert"; fi
+    first=0
+  fi
+  if [[ "$mode" == "flip" ]]; then
+    n="$(wc -l < "$OCC_STUB_LOG" | tr -d ' ')"
+    if [[ "$n" -gt 1 ]]; then m="holds"; else m="inert"; fi
+  fi
+  if [[ "$m" == "holds" ]]; then
+    printf '%s\tholds\tkeep\t-\tstub holder\tsleep 300\n' "$p"
+  else
+    printf '%s\tinert\tterminate\t-\tstub inert\tsleep 300\n' "$p"
+  fi
+done
+exit 0
+EOF
+    chmod +x "$dir/classify"
+}
+
+# 6a. AC8-HP: all-inert stub releases the tree in dry run: would-archive plus
+# one indented row per pid, Summary counts it under "would archive".
+S=$(new_merged_tree)
+STUB=$(mktemp -d -t occ-stub.XXXXXX)
+OCCLOG="$STUB/calls.log"; : > "$OCCLOG"
+make_occupancy_stub "$STUB"
+( cd "$S/wt" && exec sleep 300 ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "would-archive"; then
+    pass "all-inert tree prints would-archive (AC8)"
+else
+    fail "AC8 would-archive" "rc=$rc out=[$out]"
+fi
+if echo "$out" | grep -q "    $HOLD inert stub inert | sleep 300"; then
+    pass "would-archive carries the indented per-pid row (AC8)"
+else
+    fail "AC8 indented row" "pid $HOLD missing from [$out]"
+fi
+if echo "$out" | grep -q "^Summary: 1 would archive" && ! echo "$out" | grep -qE "^Summary:.*[1-9] processes"; then
+    pass "Summary counts the tree under would archive, not processes (AC8)"
+else
+    fail "AC8 summary" "[$(echo "$out" | grep '^Summary:')]"
+fi
+
+# 6b. AC9-HP: one holds + one inert -> kept with both rows, counted as processes.
+S=$(new_merged_tree)
+OCCLOG="$STUB/mixed.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec sleep 301 ) & HOLD1=$!
+( cd "$S/wt" && exec sleep 302 ) & HOLD2=$!
+disown "$HOLD1" "$HOLD2" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=mixed FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (processes: 1 held, 1 inert)"; then
+    pass "mixed verdicts print the held/inert receipt (AC9)"
+else
+    fail "AC9 receipt" "rc=$rc out=[$out]"
+fi
+if echo "$out" | grep -q "stub holder" && echo "$out" | grep -q "stub inert"; then
+    pass "both rows named beside the kept tree (AC9)"
+else
+    fail "AC9 rows" "[$out]"
+fi
+echo "$out" | grep -qE "^Summary:.* 1 processes" && pass "Summary processes count includes the held tree (AC9)" || fail "AC9 summary" "[$(echo "$out" | grep '^Summary:')]"
+
+# 6c. AC10-EDGE: stub exits 2, or prints fewer rows than pids -> fail closed.
+for badmode in exit2 short; do
+    S=$(new_merged_tree)
+    OCCLOG="$STUB/$badmode.log"; : > "$OCCLOG"
+    ( cd "$S/wt" && exec sleep 303 ) & HOLD3=$!
+    ( cd "$S/wt" && exec sleep 304 ) & HOLD4=$!
+    disown "$HOLD3" "$HOLD4" 2>/dev/null || true
+    sleep 0.6
+    out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=$badmode FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+    if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (processes: 2 held, 0 inert)" && echo "$out" | grep -q "classifier unavailable"; then
+        pass "$badmode stub fails closed to holds (AC10)"
+    else
+        fail "AC10 $badmode" "rc=$rc out=[$out]"
+    fi
+    kill "$HOLD3" "$HOLD4" 2>/dev/null
+    rm -rf "$S"
+done
+
+# 6d. AC11-EDGE: an unpushed tree is decided at step 2; the stub never runs.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE11=$(mktemp -d -t wt-occ-bare.XXXXXX); rmdir "$BARE11"
+git clone -q --bare "$S" "$BARE11" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE11"
+git -C "$S" worktree add -q -b feature/unpushed "$S/wt" >/dev/null 2>&1
+( cd "$S/wt" && echo x > f.txt && git -c user.email=t@t -c user.name=t add f.txt && git -c user.email=t@t -c user.name=t commit -qm wip ) >/dev/null 2>&1
+OCCLOG="$STUB/unpushed.log"; : > "$OCCLOG"
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (unpushed)" && [[ ! -s "$OCCLOG" ]]; then
+    pass "unpushed tree kept before the classifier is consulted (AC11)"
+else
+    fail "AC11 unpushed-first" "rc=$rc log=[$(cat "$OCCLOG")] out=[$out]"
+fi
+rm -rf "$S"
+
+# 6e. AC12-HP: --kill-orphans is retired: one stderr line, verdicts unchanged.
+S=$(new_merged_tree)
+OCCLOG="$STUB/retired.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec sleep 305 ) & HOLD5=$!
+disown "$HOLD5" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc1=$?
+out_flag=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run --kill-orphans 2>&1); rc2=$?
+if [[ $rc2 -eq 0 ]] && echo "$out_flag" | grep -q -- "--kill-orphans is retired"; then
+    pass "retirement line on stderr (AC12)"
+else
+    fail "AC12 retirement line" "rc=$rc2 out=[$out_flag]"
+fi
+if [[ "$rc1" -eq 0 ]] && [[ "$(echo "$out" | grep -c 'would-archive')" -eq 1 ]] && [[ "$(echo "$out_flag" | grep -c 'would-archive')" -eq 1 ]]; then
+    pass "verdicts equal a run without the flag (AC12)"
+else
+    fail "AC12 verdict parity" "plain=[$out] flagged=[$out_flag]"
+fi
+kill "$HOLD5" 2>/dev/null
+rm -rf "$S"
+rm -rf "$STUB"
+
+echo "== 8. archive-worktree.sh classifies at removal time (x-0396) =="
+
+# 7a. AC13-HP: all re-enumerated pids inert terminate -> signalled exactly,
+# removal proceeds headless with no exit 3. The holder runs in its OWN
+# session (perl setsid) so the archive's self-PGID filter cannot drop it.
+S=$(new_merged_tree)
+STUB=$(mktemp -d -t occ-stub2.XXXXXX)
+OCCLOG="$STUB/ac13.log"; : > "$OCCLOG"
+make_occupancy_stub "$STUB"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(perl -e 'use POSIX; setsid(); open(STDIN,"<","/dev/null"); exec @ARGV' env OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$ARCHIVE" "$S/wt" 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" ]]; then
+    pass "all-inert tree archives headless (AC13)"
+else
+    fail "AC13 archive" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=[$out]"
+fi
+sleep 1
+if kill -0 "$HOLD" 2>/dev/null; then
+    fail "AC13 signal" "terminate pid $HOLD survived"
+else
+    pass "terminate pid signalled (AC13)"
+fi
+rm -rf "$S"
+
+# 7b. AC14-EDGE: one re-enumerated pid holds -> exit 3 headless, nothing signalled.
+S=$(new_merged_tree)
+OCCLOG="$STUB/ac14.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(perl -e 'use POSIX; setsid(); open(STDIN,"<","/dev/null"); exec @ARGV' env OCC_STUB_MODE=holds OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$ARCHIVE" "$S/wt" 2>&1); rc=$?
+if [[ $rc -eq 3 && -d "$S/wt" ]] && echo "$out" | grep -q 'no tty for confirmation'; then
+    pass "holds row keeps the headless decline (AC14)"
+else
+    fail "AC14 decline" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=[$out]"
+fi
+if kill -0 "$HOLD" 2>/dev/null; then
+    pass "no pid signalled on the holds path (AC14)"
+else
+    fail "AC14 no-signal" "holder $HOLD was signalled"
+fi
+kill "$HOLD" 2>/dev/null
+rm -rf "$S"
+
+# 7c. AC14 sweep combo: the removal-time re-read overrules the sweep's older
+# read - a process that turned holds between step 4 and archive keeps the tree.
+# The sweep resolves archive-worktree.sh from ITS OWN repo root, so the fixture
+# carries a thin wrapper that execs the REAL archive: a copy would resolve the
+# reapable probe against the sandbox (no venv, no installed fno on CI) and die
+# rc=2 before the occupancy recheck this test exists to exercise.
+S=$(new_merged_tree)
+mkdir -p "$S/scripts/setup"
+printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$REPO_ROOT/scripts/setup/archive-worktree.sh" > "$S/scripts/setup/archive-worktree.sh"
+chmod +x "$S/scripts/setup/archive-worktree.sh"
+OCCLOG="$STUB/flip.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=flip FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --apply 2>&1); rc=$?
+if [[ $rc -eq 0 && -d "$S/wt" ]] && echo "$out" | grep -q "kept (needs-confirmation)"; then
+    pass "flip between reads keeps the tree as needs-confirmation (AC14)"
+else
+    fail "AC14 flip" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) log=[$(cat "$OCCLOG" 2>/dev/null)] out=[$out]"
+fi
+if grep -q 'called' "$OCCLOG" && [[ "$(grep -c called "$OCCLOG")" -ge 2 ]]; then
+    pass "both reads went through the classifier (AC14)"
+else
+    fail "AC14 two reads" "log=[$(cat "$OCCLOG")]"
+fi
+kill "$HOLD" 2>/dev/null
+rm -rf "$S" "$STUB"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

@@ -123,13 +123,17 @@ fn start_daemon(home: &AgentsHome) -> DaemonChild {
 }
 
 fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
-    let seen = count_events(home, "daemon_started");
+    let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
 }
 
@@ -139,68 +143,22 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
-    let seen = count_events(home, "daemon_started");
+    let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
     }
     let child = cmd.spawn().expect("daemon spawns");
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
-}
-
-/// How many lines of the daemon's event log carry `needle`.
-fn count_events(home: &AgentsHome, needle: &str) -> usize {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.contains(needle))
-        .count()
-}
-
-/// Wait until `needle` has been written at least `at_least` times.
-///
-/// [`wait_for_event`] asks whether the log CONTAINS the needle, which is a
-/// no-op for every daemon after the first under one home: the log is
-/// append-only, so a `daemon_started` line left by the previous daemon
-/// satisfies it instantly and the caller races a socket the new daemon has not
-/// accepted on yet. Counting lines makes the wait about THIS spawn.
-fn wait_for_event_count(home: &AgentsHome, needle: &str, at_least: usize, budget: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < budget {
-        if count_events(home, needle) >= at_least {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!(
-        "event {needle} reached {} of {at_least} within {budget:?}",
-        count_events(home, needle)
-    );
-}
-
-/// Wait for `needle` to appear in the daemon's event log.
-///
-/// The startup reconcile sweep runs CONCURRENTLY with the accept loop (x-ef7f),
-/// so a served response no longer implies the sweep has landed. A test that
-/// reads post-sweep state waits for the event that says it did, rather than
-/// inferring it from response ordering.
-fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < budget {
-        if std::fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
-            .contains(needle)
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("event never appeared within {budget:?}: {needle}");
 }
 
 fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
@@ -333,14 +291,6 @@ fn daemon_env_bin(
     path
 }
 
-fn wait_for(path: &Path, budget: Duration) {
-    let start = Instant::now();
-    while !path.exists() && start.elapsed() < budget {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(path.exists(), "path never appeared: {}", path.display());
-}
-
 /// AC1-HP (Architecture B, plan ab-70faa65b): a cold daemon start runs ONE
 /// bounded reconcile sweep BEFORE serving, so the first `list` reads truthful
 /// liveness. A stale `ask` row recorded `live` at creation (its one-shot process
@@ -421,7 +371,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     let resp = call(
         &home,
@@ -488,7 +438,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
     // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
     // on what it did or did not write.
-    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -591,7 +541,7 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
          runs; took {served_at:?}"
     );
 
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
     let done_at = t0.elapsed();
     // The sweep cannot finish before its own delay elapses, so this reading
     // proves it was still running when the response came back. Both readings
@@ -702,7 +652,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
     // The pid-confirmed termination needs the incumbent REAPED, not only
     // dead: this test process is the parent, so an unwaited child lingers as
     // a zombie and kill(pid, 0) answers alive through the whole grace. A
@@ -1019,7 +969,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
     seed_loss_shaped_registry(&home);
 
     let child = start_daemon(&home);
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
     drop(child);
 
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -1061,7 +1011,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
     drop(child);
 
     assert_eq!(
@@ -1708,7 +1658,7 @@ async fn drift_warned_on_list_stderr_only() {
             }
         }
     };
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
 
     // One real row, so this is also the only coverage of a row projection
     // travelling the whole client -> socket -> daemon -> stdout path. The unit
@@ -1976,7 +1926,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     // the suite runs fast enough to reach the write before the sweep. Its
     // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
     // waits for this event, which is why the same shape is stable there.
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);

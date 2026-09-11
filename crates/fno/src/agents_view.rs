@@ -157,11 +157,13 @@ pub struct RegistryAgent {
     /// can draw the two differently, per the repo's "assert a positive
     /// marker, never an absence" rule applied to the sideline.
     pub liveness: Liveness,
-    /// Age of the served liveness measurement in seconds, from the
-    /// row's `liveness_measured_at`. `None` = never measured (no served
-    /// pair): the render can say "probe older than N s" instead of a bare
-    /// unmeasured glyph.
-    pub liveness_age_s: Option<u64>,
+    /// The served liveness measurement's instant, in epoch seconds, read
+    /// straight from the row's `liveness_measured_at`. `None` = never
+    /// measured (no served pair). The AGE is derived at render against the
+    /// viewer's own clock, so a derived row set is a pure function of the
+    /// document: two ticks over unchanged bytes compare equal and the row
+    /// change gate never fires from the clock.
+    pub liveness_measured_at: Option<u64>,
     /// The LAST title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), stored by the daemon sweep. The
     /// render joins it into the subline when it differs from the label; the
@@ -1793,7 +1795,6 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     ladder
                 }
             });
-        let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
         let harness_title = row
             .get("harness_title")
             .and_then(|v| v.as_str())
@@ -2149,7 +2150,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             crown_scope,
             spawned_by_session,
             liveness,
-            liveness_age_s,
+            liveness_measured_at: measured_at,
             harness_title,
         });
     }
@@ -2363,7 +2364,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: None,
             liveness: Liveness::Alive,
-            liveness_age_s: None,
+            liveness_measured_at: None,
             harness_title: None,
         });
     }
@@ -2422,7 +2423,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: r.harness_session_id.clone(),
             liveness: Liveness::Alive,
-            liveness_age_s: None,
+            liveness_measured_at: None,
             harness_title: r.harness_title.clone(),
         });
     }
@@ -4354,7 +4355,7 @@ config_dir = "~/.claude-alt"
                 Liveness::Alive
             },
             harness: Some("claude".to_string()),
-            liveness_age_s: None,
+            liveness_measured_at: None,
             harness_title: None,
         }
     }

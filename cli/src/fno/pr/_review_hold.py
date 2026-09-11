@@ -524,7 +524,8 @@ def review_activity(
         sys.stderr.write(
             f"note: review hold on {branch} expired (holder {holder}, "
             f"expires_at {status.get('expires_at')}); it no longer blocks. "
-            "A reviewer that died mid-run leaves no findings behind it.\n"
+            "A review hold is a lease: it lapses on its TTL whether or not the "
+            "holder session still runs.\n"
         )
         _emit_expired(
             key=key,

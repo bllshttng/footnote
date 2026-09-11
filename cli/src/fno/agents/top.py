@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 from fno.agents.discover import (
     _SUBAGENT_SCAN_WINDOW_S,
@@ -593,6 +593,26 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     return out
 
 
+#: Twelve-minute reconcile runs are measured, per the FLIGHT_TTL_MS doc in
+#: flight_gate.rs; a single-flight hold older than this shows in `top`.
+LONG_HOLD_S = 12 * 60
+
+
+def long_hold_rows() -> dict:
+    """Single-flight holds over LONG_HOLD_S from the Rust ``long-holds`` op;
+    ``{"error": ...}`` instead of raising: a top render never dies on a read."""
+    from fno.claims.io import claims_dir, global_claims_dir
+    from fno.claims.verdict import run_op
+
+    payload, error = run_op(
+        ["long-holds", "--min-hold-s", str(LONG_HOLD_S)],
+        [global_claims_dir(), claims_dir(None)],
+    )
+    # run_op answers a payload exactly when the error is empty.
+    return cast("dict", payload) if error is None else {"error": error}
+
+
+
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
@@ -611,6 +631,10 @@ def render_top(
         "whose run ended is under run_ended, not missing; per-session "
         "liveness is fno agents truth <handle>"
     )
+    long_holds = long_hold_rows()
+    long_hold_warning = (
+        [f"long holds read failed: {long_holds['error']}"] if "error" in long_holds else []
+    )
     if as_json:
         payload: dict = {
             "workers": rows,
@@ -618,11 +642,16 @@ def render_top(
             "predicate": predicate,
             "lanes": lanes,
             "slot_claims": c.slot_claims,
-            "warnings": list(c.warnings),
+            "warnings": list(c.warnings) + long_hold_warning,
         }
+        if "error" in long_holds:
+            # long_holds stays absent: tell "read, none" from "not read".
+            payload["long_holds_error"] = long_holds["error"]
+        else:
+            payload["long_holds"] = long_holds["rows"]
         if subagents is not None:
             payload["subagents"] = subagents["rows"]
-            payload["warnings"] = c.warnings + subagents["warnings"]
+            payload["warnings"] = c.warnings + long_hold_warning + subagents["warnings"]
         if pane_stats is not None:
             payload["pane_stats"] = pane_stats
         return json.dumps(payload, indent=2)
@@ -632,6 +661,11 @@ def render_top(
     # Lanes lead: a provider cap refuses spawns the table below calls healthy.
     if lanes:
         out.extend(_render_lane_lines(lanes))
+        out.append("")
+    if "error" in long_holds:
+        out.append(f"long holds read failed: {long_holds['error']}")
+    elif long_holds["lines"]:
+        out.extend(long_holds["lines"])
         out.append("")
     # The retirable line leads with the lanes (x-1379): the same shape of
     # fact as a full lane - a cap refusing spawns the table calls healthy.

@@ -281,8 +281,6 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         f"store-{os.getpid()}",
         "--lock-timeout-secs",
         str(_LOCK_TIMEOUT_SECS),
-        "--read-source",
-        _graph_read_source(),
     ]
     if _is_canonical(path):
         from fno import paths as _paths
@@ -649,10 +647,6 @@ def _graph_setting(name: str, default: str) -> str:
 
 def _graph_commit_mode() -> str:
     return _graph_setting("commit_mode", "rows")
-
-
-def _graph_read_source() -> str:
-    return _graph_setting("read_source", "json")
 
 
 def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],

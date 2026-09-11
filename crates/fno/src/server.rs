@@ -1947,7 +1947,7 @@ pub(crate) struct Core {
     /// them), never on the layout path: `dead_sweep_count` feeds every
     /// layout push, and a per-push journal scan would read the whole file
     /// every second.
-    journal: crate::spawn_journal::SpawnJournal,
+    journal: crate::spawn_journal::JournalCache,
     /// (x-cd67 US4) Latest cwd -> git-branch map from the off-loop reader,
     /// joined into each agent row's `subline` at layout time. A cwd absent from
     /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
@@ -13600,7 +13600,7 @@ impl Core {
                 // (x-688b) Row changes are the journal's change signal: a
                 // spawn or removal writes both. Refresh the cached scan here,
                 // off the per-push paths that read it.
-                self.journal = crate::spawn_journal::scan_spawn_journal();
+                self.journal.refresh();
                 if identity_published {
                     // A registry row can publish after a worker pane was
                     // recorded. Force the existing debounce funnel to flush
@@ -13932,7 +13932,7 @@ async fn serve(
         self_tx: core_tx.clone(),
         agents: Vec::new(),
         agents_read_ok: false,
-        journal: crate::spawn_journal::scan_spawn_journal(),
+        journal: crate::spawn_journal::JournalCache::load(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -16987,7 +16987,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness,
-            liveness_age_s: None,
+            liveness_measured_at: None,
             harness: None,
         };
         let mut core = empty_core();
@@ -24715,7 +24715,7 @@ mod tests {
             self_tx,
             agents: Vec::new(),
             agents_read_ok: false,
-            journal: crate::spawn_journal::SpawnJournal::default(),
+            journal: crate::spawn_journal::JournalCache::default(),
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
             truth_by_name: HashMap::new(),

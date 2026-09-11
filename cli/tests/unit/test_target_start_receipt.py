@@ -67,7 +67,7 @@ def test_start_init_failure_names_the_orphan_worktree_and_reclaim_verb(
             return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
 
     result = runner.invoke(target_app, ["start", "x-0b3f"])
 
@@ -99,7 +99,7 @@ def test_start_init_failure_on_a_reused_tree_makes_no_creation_claim(
             return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
 
     result = runner.invoke(target_app, ["start", "x-0b3f"])
 
@@ -132,7 +132,7 @@ def test_start_reads_the_explicit_created_token_not_the_wording(
             return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
     result = runner.invoke(target_app, ["start", "x-0b3f"])
     assert result.exit_code == 3
     assert "created but unclaimed" not in result.output
@@ -150,7 +150,7 @@ def test_start_reads_the_explicit_created_token_not_the_wording(
             return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(target_cli.subprocess, "run", fake_run_created)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run_created)
     result = runner.invoke(target_app, ["start", "x-0b3f"])
     assert result.exit_code == 3
     assert f"worktree at {wt} is created but unclaimed" in result.output

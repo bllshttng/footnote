@@ -504,6 +504,40 @@ def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):
     assert cap["claude"]["state"] == "unknown"
 
 
+def test_runtime_capacity_keeps_per_account_sources_and_observed_at(monkeypatch):
+    """The payload keeps each account's provenance beside its state, so a
+    named row never has to guess whose evidence the harness window named.
+    The fields the Rust walk already reads stay byte-compatible."""
+    import fno.adapters.providers.runtime_state as rs
+    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
+
+    def _many(provider_ids, **_kw):
+        return {
+            "paid": Headroom(
+                HeadroomState.EXHAUSTED, 123.0, source="lock", observed_at=1000.0
+            ),
+            "free": Headroom(
+                HeadroomState.UNKNOWN, None, source="stale", observed_at=None
+            ),
+        }
+
+    monkeypatch.setattr(rs, "headrooms", _many)
+    inv = _inv([
+        {"name": "x", "harness": "claude", "model": "o", "band": "high",
+         "account": "paid"},
+        {"name": "y", "harness": "claude", "model": "m", "band": "low",
+         "account": "free"},
+    ])
+    cap = rr.runtime_capacity(("claude",), settings=_account_settings(), inventory=inv)
+    assert cap["claude"]["sources"] == {"paid": "lock", "free": "stale"}
+    assert cap["claude"]["observed_at"] == {"paid": 1000.0, "free": None}
+    # untouched shapes: the harness-wide worst and the per-account states.
+    # unknown outranks exhausted in _CAPACITY_RANK, so the worst account's
+    # source (stale) is the harness window.
+    assert cap["claude"]["accounts"] == {"paid": "exhausted", "free": "unknown"}
+    assert cap["claude"]["window"] == "stale"
+
+
 # --- resolve_tier / node_model (inventory-backed) --------------------------- #
 
 

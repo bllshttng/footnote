@@ -126,8 +126,9 @@ def cleanup(
     kill_orphans: bool = typer.Option(
         False,
         "--kill-orphans",
-        help="With --merged, SIGTERM ppid-1 orphan processes squatting in a "
-        "candidate worktree instead of skipping it. Live process trees are never killed.",
+        hidden=True,
+        help="Retired: classified processes release a tree by default, "
+        "unclassified ones always keep it.",
     ),
     cargo_targets: bool = typer.Option(
         False,

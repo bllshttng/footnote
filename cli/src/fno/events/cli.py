@@ -329,6 +329,48 @@ def mirror_to_global_log(event: dict, resolved_events: Path, repo_root: Optional
         )
 
 
+def stamp_review_attestation_model(
+    data_dict: dict[str, Any], harness: str, session_id: str
+) -> None:
+    """Stamp data.model on a review_attestation from the emitting process.
+
+    THE MODEL IS STAMPED HERE, SAME RULE AS THE ATTESTER. The routed-model env
+    names the model the session ASKED for; a non-Anthropic name over an unset
+    base URL silently falls back to the primary model, so a claim read from env
+    can name a model that never answered. The session's own transcript reports
+    what actually answered, read through the platform provenance leaf
+    (fno.provenance.observed - L0, like this module, which is why the stamp
+    does not reach the L5 agent-runtime resolver). An unresolvable transcript
+    means NOT OBSERVABLE, so the caller's env claim is dropped, never laundered
+    into the record; empty is the schema's contract for that. A supplied value
+    that disagrees with the transcript is refused naming both, the same rule
+    attester_session_id follows.
+
+    Both review_attestation writers call this - the `fno doctor event emit`
+    chokepoint below and `fno do review classify --attest` - so two rows can
+    never disagree about the rule.
+    """
+    import os
+
+    from fno.provenance.observed import observed_model_for_session
+
+    observed = observed_model_for_session(harness, session_id, os.getcwd())
+    name = observed.get("model") if observed.get("kind") == "observed" else None
+    supplied_model = str(data_dict.get("model") or "").strip()
+    if name:
+        if supplied_model and supplied_model != name:
+            typer.echo(
+                f"error: model supplied as '{supplied_model}' but this session's "
+                f"transcript reads '{name}'. Drop the field; the emitter stamps it. "
+                "No event emitted.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        data_dict["model"] = name
+    else:
+        data_dict.pop("model", None)
+
+
 @cli.command()
 def emit(
     ctx: typer.Context,
@@ -468,6 +510,13 @@ def emit(
             raise typer.Exit(code=1)
         data_dict["attester_session_id"] = resolved_id
         data_dict["attester_witness"] = witness
+        import os
+
+        from fno.harness_identity import harness_from_env
+
+        stamp_review_attestation_model(
+            data_dict, harness_from_env(os.environ, warn=False) or "", resolved_id
+        )
 
     # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user

@@ -3814,6 +3814,7 @@ def _run_unfinished_report(
     report. Recovery internals stay behind --apply/--only; this path never
     renders a session verdict as the operator's answer."""
     from fno.agents import unfinished_work as uw
+    from fno.agents import watchdog as wd
     from fno.paths import resolve_repo_root
 
     roots = uw.report_roots() or [Path(resolve_repo_root())]
@@ -3847,12 +3848,18 @@ def _run_unfinished_report(
         payload["keepers"] = lane_result.to_json()
     except Exception as exc:  # noqa: BLE001 - the report outlives one lane's crash
         lane_lines = [f"keeper lane: crashed: {exc!r}"]
+    # The outage instrument rides the default report: open breakers
+    # and every refusal reason with its count are part of the operator's
+    # answer, and a -J reader must not need --only to learn a lane is down.
+    payload["provider_outages"] = wd.measure_provider_outages_safe(now)
     if json_out:
         sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
         return
     typer.echo(uw.snapshot_digest(snapshot))
     for line in lane_lines:
+        typer.echo(line)
+    for line in wd.provider_outage_lines(payload.get("provider_outages")):
         typer.echo(line)
     for warning in payload["warnings"]:
         print(f"warning: {warning}", file=sys.stderr)
@@ -4215,22 +4222,8 @@ def cmd_watchdog(
         typer.echo(
             f"terminal harness rows: {payload.get('terminal_harness_rows', 0)}"
         )
-        outage_counts = (payload.get("provider_outages") or {}).get("counts") or {}
-        blind_spots = {
-            reason: outage_counts[reason]
-            for reason in ("unknown_route_identity", "transcript_shape_unsupported")
-            if outage_counts.get(reason)
-        }
-        if blind_spots:
-            # Loud, not silent: these rows are outside what the provider-outage
-            # instrument can measure at all, not rows it measured and cleared.
-            named = " ".join(f"{k}={v}" for k, v in sorted(blind_spots.items()))
-            typer.echo(
-                f"provider-outage coverage gap ({named}): route identity "
-                f"missing on daemon-managed rows, or a transcript shape this "
-                f"instrument does not parse - filed as follow-up work, not "
-                f"measured this sweep"
-            )
+        for line in wd.provider_outage_lines(payload.get("provider_outages")):
+            typer.echo(line)
         return
 
     lanes = "all" if apply_all else "wake"

@@ -2119,3 +2119,89 @@ def test_reconcile_entries_share_key_schema(
         )
 
 
+# ---------------------------------------------------------------------------
+# stop/rm release the stopped session's claims (x-9c91 change 5)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_python_leg_releases_claims(tmp_path: Path, monkeypatch, capsys) -> None:
+    """AC5-PY: FNO_AGENTS_RUNTIME=python and a claude stop that succeeds ->
+    the release-stopped op is invoked once with both claims dirs, and stdout
+    carries the release suffix."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+    from fno.agents import dispatch
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, "")
+    )
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kw):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "released": [
+                        {
+                            "key": "node:x-a",
+                            "holder": "spawn-handover:worker-claude",
+                            "path": "/tmp/claims/node%3Ax-a.lock",
+                        }
+                    ],
+                    "kept": [],
+                    "scanned": 1,
+                    "dirs": [],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("fno.claims.verdict.resolve_binary", lambda: tmp_path / "fake-fno-agents")
+    monkeypatch.setattr("fno.claims.verdict.run_subprocess", fake_run)
+
+    dispatch.stop_agent("worker-claude")
+
+    release_cmds = [c for c in commands if "release-stopped" in c]
+    assert len(release_cmds) == 1, commands
+    cmd = release_cmds[0]
+    assert cmd.count("--claims-dir") == 2, cmd
+    out = capsys.readouterr().out
+    assert "; released 1 claim(s)" in out
+
+
+def test_stop_python_leg_without_binary_still_stops(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC5-ERR: resolve_binary() None -> the line prints and the stop
+    still returns success."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, "")
+    )
+    monkeypatch.setattr("fno.claims.verdict.resolve_binary", lambda: None)
+
+    result = dispatch.stop_agent("worker-claude")
+
+    assert result.claude_exit == 0
+    out = capsys.readouterr().out
+    assert "claims not released: fno-agents binary not found" in out
+
+

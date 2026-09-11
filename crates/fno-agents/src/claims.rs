@@ -297,6 +297,12 @@ pub fn global_claims_root_from(
         .map(PathBuf::from)
 }
 
+/// The global claims DIRECTORY (the resolver callers should hold, not a
+/// hand-built `<root>/.fno/claims`).
+pub fn global_claims_dir() -> Option<PathBuf> {
+    global_claims_root().map(|root| root.join(CLAIMS_DIRNAME))
+}
+
 /// Resolve the claims ROOT for `key` by prefix (mirrors `io.claims_root_for`):
 /// `<prefix>:<id>` with a global-id prefix routes to the global root; a
 /// colon-less key or unrecognized prefix returns `None` (caller must pass an
@@ -348,9 +354,19 @@ pub(crate) fn flight_dir(root: &Path) -> PathBuf {
 /// Enumerate readable claims from the global store and an optional repository
 /// store. The caller supplies the repository root; both stores are one logical
 /// view because a global node claim and a worktree-local claim can describe the
-/// same coordination key. A root read failure returns an empty view so callers
-/// fail toward report-only rather than applying on partial facts.
-pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> Vec<ClaimRecord> {
+/// same coordination key.
+///
+/// An unreadable claims root is UNKNOWN claim state, which must refuse
+/// selection rather than read as "nothing is claimed" (Python's
+/// `live_claimed_node_ids(strict=True)` contract). A missing directory is a
+/// legitimate empty root, not a fault. Corrupted rows stay withheld per the
+/// records contract above. A display reader that genuinely wants the old
+/// degrade-to-empty view takes `.unwrap_or_default()` at its own call.
+pub fn list(
+    prefix: Option<&str>,
+    root: Option<&Path>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
     let mut dirs = Vec::new();
     if let Some(global) = global_claims_root() {
         dirs.push(global.join(CLAIMS_DIRNAME));
@@ -364,37 +380,23 @@ pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> V
 /// Scan VERBATIM directories. Spaces-era claims live directly at
 /// `<space>/claims`, a layout no explicit-root spelling of [`list`] reaches
 /// (`--root` appends `.fno/claims` for repo-checkout roots).
-pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> Vec<ClaimRecord> {
-    list_in_result(dirs, prefix, include_stale).unwrap_or_default()
-}
-
-/// Strict twin of [`list`]/[`list_in`] for dispatch admission: an unreadable
-/// claims root is UNKNOWN claim state, which must refuse selection rather
-/// than read as "nothing is claimed" (Python's
-/// `live_claimed_node_ids(strict=True)` contract). A missing directory is a
-/// legitimate empty root, not a fault. Corrupted rows stay withheld per the
-/// records contract above.
-pub fn list_strict(
-    prefix: Option<&str>,
-    root: Option<&Path>,
-    include_stale: bool,
-) -> Result<Vec<ClaimRecord>, String> {
-    let mut dirs = Vec::new();
-    if let Some(global) = global_claims_root() {
-        dirs.push(global.join(CLAIMS_DIRNAME));
-    }
-    if let Some(local) = root {
-        dirs.push(local.join(CLAIMS_DIRNAME));
-    }
-    list_in_result(&dirs, prefix, include_stale)
-}
-
-fn list_in_result(
+pub fn list_in(
     dirs: &[PathBuf],
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
+    list_in_result(dirs, prefix, include_stale).map(|(records, _)| records)
+}
+
+/// Ok carries the records plus the directories whose `read_dir` succeeded,
+/// so a caller can tell a true empty from a scan that never reached a file.
+pub(crate) fn list_in_result(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
     let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut read_dirs = Vec::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
         std::collections::BTreeMap::new();
     for dir in dirs {
@@ -403,7 +405,10 @@ fn list_in_result(
             continue;
         }
         let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                read_dirs.push(dir.clone());
+                entries
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(format!("claims root {} unreadable: {error}", dir.display()));
@@ -446,7 +451,7 @@ fn list_in_result(
             }
         }
     }
-    Ok(best.into_values().map(|(_, rec)| rec).collect())
+    Ok((best.into_values().map(|(_, rec)| rec).collect(), read_dirs))
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +469,7 @@ pub fn now_ms() -> i64 {
 /// `gethostname(2)`, matching Python `socket.gethostname()`. Empty string on
 /// failure (which can never equal a recorded non-empty host, so an unreadable
 /// hostname fails toward "not live" — recoverable, like Python's posture).
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {
@@ -547,7 +552,7 @@ pub fn machine_id() -> String {
 /// `machine` is authoritative whenever present. It is absent only on a claim
 /// written before the field existed; those reproduce the old hostname compare
 /// exactly, so a pre-change claim classifies no worse than it does today.
-fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+pub(crate) fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
     // The machine arm decides only when BOTH sides have an id. A reader that
     // cannot read its own is "unknown", not "a different machine": answering
     // false there would stale a live local claim and make it stealable, and
@@ -846,6 +851,10 @@ pub fn classify_with_basis_and_exclusivity(
             })
     };
     if is_expired(rec, now) {
+        // A review hold is a lease on the review; the holder's session answers another question.
+        if rec.key.starts_with("review:branch:") {
+            return (ClaimState::Stale, basis::TTL_EXPIRED);
+        }
         // Boot-window reservation (x-41f7): every `dispatch:` record names the
         // DISPATCHING process in its holder and carries that process's pid, so
         // the recorded pid IS the verdict. The session witness is never
@@ -1744,7 +1753,7 @@ pub(crate) fn wait_for_event_maintenance(events_path: &Path) {
 /// Shared data fields for claim events (mirrors `events._common`, including
 /// the explicit `expires_at: null` for PID-liveness claims — the EVENT payload
 /// carries null where the LOCKFILE omits the key; that asymmetry is Python's).
-fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
+pub(crate) fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("key".into(), Value::String(rec.key.clone()));
     m.insert("holder".into(), Value::String(rec.holder.clone()));
@@ -2546,7 +2555,6 @@ pub fn release(
     emit_audit_event(events_dir, "claim_released", data);
     Ok(())
 }
-
 /// Inspect a single key (mirrors `core.claim_status`). Never errors: a
 /// missing file (or one that vanishes mid-read) is `Free`, an unreadable one
 /// is `Corrupted` with no record, and an unresolvable claims root reads as
@@ -3031,7 +3039,6 @@ mod tests {
     fn read_claim(root: &TempDir, key: &str) -> ClaimRecord {
         read_claim_file(&lockfile(root, key)).unwrap()
     }
-
     #[test]
     fn parse_ttl_ms_matches_python_units() {
         // BARE digits are SECONDS (parity with Python _parse_ttl / sleep).
@@ -3723,265 +3730,6 @@ mod tests {
         );
     }
 
-    // ---- harness tag (x-3e70) ---------------------------------------------
-
-    // AC6-FR: a claim record written before this change (no `harness` key)
-    // parses with `harness: None` and does not crash.
-    #[test]
-    fn claim_without_harness_key_reads_none() {
-        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n";
-        let rec = parse_claim_str(yaml).expect("legacy record must parse");
-        assert_eq!(rec.harness, None);
-    }
-
-    // A record WITH a harness key round-trips it back.
-    #[test]
-    fn claim_with_harness_key_round_trips() {
-        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\nharness: codex\n";
-        let rec = parse_claim_str(yaml).expect("record must parse");
-        assert_eq!(rec.harness.as_deref(), Some("codex"));
-        // None is omitted from output entirely (not serialized as null).
-        let none = ClaimRecord {
-            harness: None,
-            ..rec.clone()
-        };
-        assert!(!serialize_claim(&none).unwrap().contains("harness"));
-    }
-
-    // ---- session_id tag ----------------------------------------------------
-
-    // AC2: a claim record written before this change (no `session_id` key)
-    // parses with `session_id: None` and does not crash.
-    #[test]
-    fn claim_without_session_id_key_reads_none() {
-        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n";
-        let rec = parse_claim_str(yaml).expect("legacy record must parse");
-        assert_eq!(rec.session_id, None);
-    }
-
-    // A record WITH a session_id key round-trips it back, and None omits the
-    // key entirely (not serialized as null).
-    #[test]
-    fn claim_with_session_id_key_round_trips() {
-        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\nsession_id: abc123\n";
-        let rec = parse_claim_str(yaml).expect("record must parse");
-        assert_eq!(rec.session_id.as_deref(), Some("abc123"));
-        let none = ClaimRecord {
-            session_id: None,
-            ..rec.clone()
-        };
-        assert!(!serialize_claim(&none).unwrap().contains("session_id"));
-    }
-
-    // AC1: resolve_identity resolves session_id and harness from one call, so
-    // make_claim can never stamp a record naming a session of a different
-    // harness than the one it names.
-    #[test]
-    fn resolve_identity_resolves_session_and_harness_together() {
-        let get = |key: &str| match key {
-            "FNO_HARNESS_NAME" => Some("claude".to_string()),
-            "FNO_HARNESS_SESSION_ID" => Some("abc123".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            resolve_identity_from(get),
-            (Some("abc123".to_string()), Some("claude".to_string()))
-        );
-    }
-
-    #[test]
-    fn resolve_harness_single_family_wins_disagreement_is_unknown() {
-        // Two DISAGREEING families are ambiguous: precedence must not pick codex
-        // and tag the claim with a harness this process cannot prove it owns.
-        let both = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("cx".to_string()),
-            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
-            _ => None,
-        };
-        assert_eq!(resolve_harness_from(both).as_deref(), None);
-        // Two markers of ONE family carrying the SAME id -> that family.
-        let same_family = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("cx".to_string()),
-            "CODEX_SESSION_ID" => Some("CX".to_string()),
-            _ => None,
-        };
-        assert_eq!(resolve_harness_from(same_family).as_deref(), Some("codex"));
-        // Two DIFFERENT ids of ONE family disagree: attribute nothing, never
-        // the table-first value (x-0992) - without proof either id could be
-        // the stranger's.
-        let same_family_disagree = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("cx".to_string()),
-            "CODEX_SESSION_ID" => Some("cx2".to_string()),
-            _ => None,
-        };
-        assert_eq!(resolve_harness_from(same_family_disagree).as_deref(), None);
-        // A blank higher-precedence marker is UNSET; a lower real one still wins.
-        let blank_hi = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("   ".to_string()),
-            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
-            _ => None,
-        };
-        assert_eq!(resolve_harness_from(blank_hi).as_deref(), Some("claude"));
-        assert_eq!(
-            resolve_harness_from(|k| (k == "OPENCODE_SESSION_ID").then(|| "ses_1".to_string()))
-                .as_deref(),
-            Some("opencode")
-        );
-        // No markers -> None (unknown), never a panic.
-        assert_eq!(resolve_harness_from(|_| None), None);
-    }
-
-    #[test]
-    fn canonical_pair_resolves_harness_and_parent_session_before_vendor_markers() {
-        let session = "11111111-1111-4111-8111-111111111111";
-        let get = |key: &str| match key {
-            "FNO_HARNESS_NAME" => Some("claude".to_string()),
-            "FNO_HARNESS_SESSION_ID" => Some(session.to_string()),
-            _ => None,
-        };
-
-        assert_eq!(resolve_harness_from(&get).as_deref(), Some("claude"));
-        assert_eq!(ambient_parent_edge_from(&get).0.as_deref(), Some(session));
-        assert_eq!(ambient_parent_edge_from(get).1.as_deref(), Some("claude"));
-    }
-
-    #[test]
-    fn canonical_partial_and_vendor_contradictions_refuse() {
-        assert_eq!(
-            resolve_harness_from(|key| {
-                (key == "FNO_HARNESS_SESSION_ID").then(|| "session-only".to_string())
-            }),
-            None
-        );
-        assert_eq!(
-            resolve_harness_from(|key| match key {
-                "FNO_HARNESS_NAME" => Some("claude".to_string()),
-                "FNO_HARNESS_SESSION_ID" => Some("claude-session".to_string()),
-                "CODEX_THREAD_ID" => Some("codex-session".to_string()),
-                _ => None,
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn command_stamp_scrubs_all_identity_and_sets_only_bound_session() {
-        let mut command = std::process::Command::new("sh");
-        command.env("CODEX_THREAD_ID", "parent");
-        command.env("FNO_AGENT_SELF", "parent");
-        command.env("FNO_AGENT_SUBSTRATE", "pane");
-        command.env(FNO_HARNESS_NAME, "parent");
-        stamp_command_env(
-            &mut command,
-            Some("child"),
-            "claude",
-            Some(" 11111111-1111-4111-8111-111111111111 "),
-        );
-        let values: std::collections::HashMap<_, _> = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
-
-        assert_eq!(
-            values.get("FNO_AGENT_SELF").map(String::as_str),
-            Some("child")
-        );
-        assert_eq!(
-            values.get("FNO_AGENT_HARNESS").map(String::as_str),
-            Some("claude")
-        );
-        assert_eq!(
-            values.get(FNO_HARNESS_NAME).map(String::as_str),
-            Some("claude")
-        );
-        assert_eq!(
-            values.get(FNO_HARNESS_SESSION_ID).map(String::as_str),
-            Some("11111111-1111-4111-8111-111111111111")
-        );
-        assert!(!values.contains_key("CODEX_THREAD_ID"));
-        // These ask lanes stamp no substrate of their own, so the parent's must
-        // go: a child that keeps `pane` reads as attended for life (x-be78).
-        assert!(!values.contains_key("FNO_AGENT_SUBSTRATE"));
-
-        let mut unowned = std::process::Command::new("sh");
-        unowned.env("FNO_AGENT_SELF", "parent");
-        stamp_command_env(&mut unowned, None, "codex", None);
-        let values: std::collections::HashMap<_, _> = unowned
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
-        assert!(!values.contains_key("FNO_AGENT_SELF"));
-    }
-
-    #[test]
-    fn ambient_parent_edge_resolves_id_harness_and_refuses_mixing() {
-        // Single claude marker: the VALUE is the parent session id.
-        let claude = |k: &str| match k {
-            "CLAUDE_CODE_SESSION_ID" => Some("7420e8f7-eeba".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            ambient_parent_edge_from(claude),
-            (
-                Some("7420e8f7-eeba".to_string()),
-                Some("claude".to_string()),
-                ambient_parent_edge_from(|_| None).2
-            )
-        );
-        // Within the codex family one id under both names resolves to it.
-        // Two DIFFERENT ids of the family disagree and attribute nothing
-        // (x-0992) - the durable thread id used to win by position, which
-        // laundered whichever marker sorted first into the parent record.
-        let codex = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("t-1".to_string()),
-            "CODEX_SESSION_ID" => Some("t-1".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            ambient_parent_edge_from(codex),
-            (
-                Some("t-1".to_string()),
-                Some("codex".to_string()),
-                ambient_parent_edge_from(|_| None).2
-            )
-        );
-        let codex_disagree = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("t-1".to_string()),
-            "CODEX_SESSION_ID" => Some("legacy-1".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            ambient_parent_edge_from(codex_disagree),
-            (None, None, ambient_parent_edge_from(|_| None).2)
-        );
-        // Two DISAGREEING families attribute NOTHING: no laundered lineage.
-        let mixed = |k: &str| match k {
-            "CODEX_THREAD_ID" => Some("cx".to_string()),
-            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
-            _ => None,
-        };
-        let (s, h, c) = ambient_parent_edge_from(mixed);
-        assert_eq!((s, h), (None, None));
-        assert!(c.is_some(), "cwd is captured even when identity is refused");
-        // No markers: identity absent, cwd still present, never a panic.
-        let (s, h, _) = ambient_parent_edge_from(|_| None);
-        assert_eq!((s, h), (None, None));
-    }
-
     // ---- liveness classification (contract item 8) ------------------------
 
     fn record(pid: i32, acquired_at: i64, expires_at: Option<i64>, host: &str) -> ClaimRecord {
@@ -4568,7 +4316,7 @@ mod tests {
             AcquireOutcome::Acquired(_)
         ));
 
-        let rows = list(Some("reap:"), Some(local.path()), false);
+        let rows = list(Some("reap:"), Some(local.path()), false).expect("claims read");
         let keys: Vec<_> = rows.iter().map(|row| row.key.as_str()).collect();
         assert_eq!(keys, vec!["reap:global", "reap:local"]);
 
@@ -4984,6 +4732,17 @@ mod tests {
     }
 }
 
+#[path = "claims_release_stopped.rs"]
+mod release_stopped;
+pub use release_stopped::{
+    release_for_stopped_session, session_for_name, StopKeptClaim, StopReleaseReceipt,
+    StopReleasedClaim, StoppedHolder,
+};
+
+#[path = "claims_long_holds.rs"]
+mod long_holds;
+pub use long_holds::{long_holds, run_claim_long_holds, LongHoldRow};
+
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]
 mod reservation_tests;
@@ -4991,3 +4750,7 @@ mod reservation_tests;
 #[cfg(test)]
 #[path = "claims_session_absence_tests.rs"]
 mod claims_session_absence_tests;
+
+#[cfg(test)]
+#[path = "claims_identity_tests.rs"]
+mod identity_tests;

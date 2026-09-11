@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from fno._subprocess_util import run_bounded
+
+# 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
+_SETUP_HOOK_TIMEOUT_S = 120
+
 
 # ---------------------------------------------------------------------------
 # Branch naming (x-ff83 W3)
@@ -193,7 +198,11 @@ def _canonical_base_dir(repo_root: Path) -> Path:
     return Path.home() / "conductor" / "workspaces" / repo_root.name
 
 
-def _run_setup_worktree_hook(repo_root: Path, worktree_path: Path) -> tuple[int, str]:
+def _run_setup_worktree_hook(
+    repo_root: Path,
+    worktree_path: Path,
+    timeout: float = _SETUP_HOOK_TIMEOUT_S,
+) -> tuple[int, str]:
     """Best-effort: run scripts/setup/setup-worktree.sh inside the new worktree.
 
     The script symlinks gitignored shared state (.fno/, internal/,
@@ -202,20 +211,24 @@ def _run_setup_worktree_hook(repo_root: Path, worktree_path: Path) -> tuple[int,
     canonical .fno/ state, so target gates can't see backlog mutations
     from sibling worktrees, codemap goes stale, and inbox drain breaks.
 
-    Returns (returncode, stderr_tail). returncode == -1 indicates the script
-    was not found (silently tolerated). Any non-zero is logged via stderr
-    but never raised - the worktree itself is still usable.
+    Returns (returncode, stderr_tail). -1 means the script was not found
+    (silently tolerated); 124 means it exceeded ``timeout`` and its process
+    group was killed. Any other non-zero is logged but never raised.
     """
     script = repo_root / "scripts" / "setup" / "setup-worktree.sh"
     if not script.exists():
         return (-1, "")
-    proc = subprocess.run(
-        ["bash", str(script)],
-        cwd=str(worktree_path),
-        capture_output=True,
-        text=True,
-        env={**os.environ, "CANONICAL": str(repo_root), "WORKTREE": str(worktree_path)},
-    )
+    try:
+        proc = run_bounded(
+            ["bash", str(script)],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            cwd=str(worktree_path),
+            env={**os.environ, "CANONICAL": str(repo_root), "WORKTREE": str(worktree_path)},
+        )
+    except subprocess.TimeoutExpired:
+        return (124, f"setup-worktree.sh exceeded {timeout:.0f}s; its process group was killed")
     tail = (proc.stderr or proc.stdout or "")[-500:]
     return (proc.returncode, tail)
 
