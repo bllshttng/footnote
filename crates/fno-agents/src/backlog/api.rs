@@ -378,10 +378,13 @@ fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
 fn paginate(rows: Vec<Node>, page: &Page) -> Connection<Node> {
     let total = rows.len();
     let start = match page.after.as_deref().and_then(decode_cursor) {
+        // Identity match, not an ordering scan: the resume must hold under
+        // every OrderBy, and a cursor whose row vanished between pages
+        // degrades to a restart, never to a silent skip.
         Some((ordinal, id)) => rows
             .iter()
-            .position(|n| n.ordinal > ordinal || (n.ordinal == ordinal && n.id > id))
-            .unwrap_or(total),
+            .position(|n| n.ordinal == ordinal && n.id == id)
+            .map_or(0, |i| i + 1),
         None => 0,
     };
     let end = match page.first {
@@ -437,7 +440,9 @@ pub fn comments(
     let slice: Vec<Comment> = rows[start..end].to_vec();
     let end_cursor = slice.last().map(|_| {
         use base64::Engine as _;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{}", end - 1))
+        // Same `(ordinal, id)` codec as the row cursor, with the node id in
+        // the id slot, so decode_cursor can always split it.
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{}:{}", end - 1, node_id))
     });
     Ok(Connection {
         nodes: slice,

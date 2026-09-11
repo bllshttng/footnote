@@ -643,3 +643,90 @@ fn api_cursor_decodes_roundtrip() {
     assert_eq!(decode_cursor(&cursor), Some((7, "ab-one".into())));
     assert_eq!(decode_cursor("not-a-cursor"), None);
 }
+
+#[test]
+fn api_created_at_order_resumes_after_cursor() {
+    // Regression: the resume scan assumed ordinal-ascending rows, which
+    // breaks under OrderBy::CreatedAt; resume by row identity instead.
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        run_created_at_page(store);
+    }
+}
+
+fn run_created_at_page(store: &Store) {
+    let filter = NodeFilter {
+        project: Some("fno".into()),
+        ..Default::default()
+    };
+    let page = Page {
+        first: Some(1),
+        order_by: OrderBy::CreatedAt,
+        ..Default::default()
+    };
+    let one = nodes(store, &filter, &page).unwrap();
+    assert_eq!(one.nodes[0].id, "ab-one", "oldest first");
+    let cursor = one.page_info.end_cursor.clone().unwrap();
+    let two = nodes(
+        store,
+        &filter,
+        &Page {
+            first: Some(1),
+            order_by: OrderBy::CreatedAt,
+            after: Some(cursor),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(two.nodes[0].id, "ab-three", "identity resume");
+    assert!(two.page_info.has_next_page);
+}
+
+#[test]
+fn api_comments_cursor_resumes_without_restart() {
+    // Regression: the note cursor lacked its ':' separator, so every
+    // resume decoded as None and restarted at the first row.
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        note_note(store, "note one");
+        note_note(store, "note two");
+        page_two_asserts(store);
+    }
+}
+
+fn note_note(store: &Store, body: &str) {
+    comment_create(
+        store,
+        "ab-one",
+        CommentCreateInput {
+            body: body.into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+fn page_two_asserts(store: &Store) {
+    let page_one = comments(
+        store,
+        "ab-one",
+        &Page {
+            first: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page_one.nodes.len(), 1);
+    let cursor = page_one.page_info.end_cursor.clone().unwrap();
+    let page_two = comments(
+        store,
+        "ab-one",
+        &Page {
+            first: Some(1),
+            after: Some(cursor),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(page_two.nodes[0].body.as_deref(), Some("note two"));
+}
