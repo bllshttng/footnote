@@ -115,20 +115,14 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
 _UNSAMPLED: object = object()
 
 
-def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
-    """One load-gate decision per report build, or None when unreadable: the
-    gates row and the stop share one sample instead of paying it twice.
+def _explain_load_decision() -> "Optional[object]":
+    """One CPU-axis admission per report build, or None when unreadable: the
+    gates rows and the stop share one sample instead of paying it twice.
     """
     try:
-        from fno.agents.spawn_gate import load_gate_decision
-        from fno.config import load_settings
+        from fno.agents.spawn_gate import _cpu_axis
 
-        agents = load_settings().agents
-        return load_gate_decision(
-            float(agents.max_load_per_cpu),
-            float(agents.max_fleet_cpu_share),
-            float(agents.hard_max_load_per_cpu),
-        )
+        return _cpu_axis()
     except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
         return None
 
@@ -267,7 +261,8 @@ def _max_live() -> int:
 
 
 def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
-    """RAM and load, read the way the gate reads them (never probing to refuse)."""
+    """RAM and the CPU axis, read the way the gate reads them (never probing
+    to refuse)."""
     from fno.agents.spawn_gate import available_ram_gb
 
     out: list[Gate] = []
@@ -276,7 +271,6 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
 
         agents_cfg = load_settings().agents
         floor = float(agents_cfg.min_free_gb)
-        per_cpu = float(agents_cfg.max_load_per_cpu)
     except Exception as exc:  # noqa: BLE001
         return [_unreadable("machine", exc)]
 
@@ -302,42 +296,50 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
             )
 
     try:
-        from fno.agents.spawn_gate import (
-            _LOAD_REFUSAL_REASONS,
-            _load_snapshot,
-            load_gate_decision,
-        )
+        from fno.footprint import Admission
 
-        snapshot = _load_snapshot(per_cpu)
-        decision = load_gate_decision(per_cpu) if load_decision is _UNSAMPLED else cast(
-            "Optional[tuple[str, str, dict]]", load_decision
+        admission = (
+            _cpu_axis_fresh() if load_decision is _UNSAMPLED else cast("Admission", load_decision)
         )
     except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
-    else:
-        if snapshot.spawn_load_status == "unavailable":
-            out.append(
-                _unreadable(
-                    "load-trigger",
-                    RuntimeError("load average unreadable"),
-                    key="agents.max_load_per_cpu",
-                )
-            )
-        else:
-            refusing = decision is not None and decision[0] in _LOAD_REFUSAL_REASONS
-            out.append(
-                Gate(
-                    "load-trigger",
-                    "-" if snapshot.load_1m is None else f"{snapshot.load_1m:.1f}",
-                    f"{snapshot.load_ceiling:.1f} ({per_cpu:g} x {snapshot.load_cpu_count} cpu)",
-                    # Same decision function the real gate runs, so the dry
-                    # run cannot pass a box the spawn would refuse.
-                    "refuse" if refusing else "pass",
-                    key="agents.max_load_per_cpu",
-                    note=None if decision is None else decision[1],
-                )
-            )
+        out.append(_unreadable("cpu-share", exc, key="agents.max_fleet_cpu_share"))
+        return out
+    if admission is None:
+        out.append(_unreadable("cpu-share", RuntimeError("admission unreadable"),
+                               key="agents.max_fleet_cpu_share"))
+        return out
+    verdict = admission.verdict
+    # Same decision function the real gate runs, so the dry run cannot pass a
+    # box the spawn would refuse or hold.
+    out.append(
+        Gate(
+            "cpu-share",
+            f"{admission.fleet_cores:.2f}/{admission.capacity_cores:.2f} cores",
+            f"{admission.ceiling * 100:.0f}%",
+            "refuse" if verdict in ("refuse", "undecidable")
+            else ("hold" if verdict == "hold" else "pass"),
+            key="agents.max_fleet_cpu_share",
+            note=admission.reason,
+        )
+    )
+    out.append(
+        Gate(
+            "load-backstop",
+            "-" if admission.load_15m is None else f"{admission.load_15m:.1f}",
+            f"{admission.backstop:.1f}",
+            "refuse" if (admission.axis == "load_15m" and verdict == "refuse")
+            else ("pass" if admission.load_15m is not None
+                  else "skipped: load unreadable"),
+            key="agents.hard_max_load_per_cpu",
+        )
+    )
     return out
+
+
+def _cpu_axis_fresh() -> object:
+    from fno.agents.spawn_gate import _cpu_axis
+
+    return _cpu_axis()
 
 
 def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
@@ -723,13 +725,15 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
-    # The load gate refuses machine-wide; a preview that left stop empty
-    # would promise a dispatch the real spawn refuses. One decision sample
-    # feeds both this stop and the gates row below.
-    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
-
+    # The CPU axis refuses machine-wide; a preview that left stop empty
+    # would promise a dispatch the real spawn refuses. One admission sample
+    # feeds both this stop and the gates rows below.
     load_decision = _explain_load_decision()
-    if stop is None and load_decision is not None and load_decision[0] in _LOAD_REFUSAL_REASONS:
+    if (
+        stop is None
+        and load_decision is not None
+        and getattr(load_decision, "verdict", None) in ("refuse", "undecidable")
+    ):
         stop = "load-refused"
 
     ordered_names = [

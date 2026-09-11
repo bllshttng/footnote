@@ -1890,24 +1890,36 @@ def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
     assert payload["exit_code"] == 0
 
 
-def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
-    """A gapped fleet share is an undercount; None is the gate's existing
-    never-headroom answer, so the gate refuses above the trigger with the gap
-    named instead of admitting on an undercount."""
+def test_spawn_gate_carries_a_gap_reading_into_the_interval(monkeypatch):
+    """x-7783 LD3: a gap no longer voids the reading. The gate's prefetch
+    hands the gapped reading to the decider, and the share becomes an
+    interval - never a bare None, never silent headroom."""
     from fno import doctor_footprint
     from fno.agents import spawn_gate
 
     reading = doctor_footprint.parse_footprint(
-        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 30.0 1024 fno daemon\n",
         excluded_root_pids=set(),
         attributed_root_pids=set(),
         threshold_excluded_root_pids=set(),
-    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
+    )._replace(
+        attribution_gap="1 pidless codex row(s) unresolved",
+        measured_cpu_cores=0.3,
+    )
     monkeypatch.setattr(
         "fno.doctor_footprint.cause_reading", lambda: (reading, None)
     )
-    assert spawn_gate._fleet_cpu_reading() is None
-    assert spawn_gate._footprint_cause_evidence() is None
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+
+    got_reading, error = spawn_gate._prefetch_fleet_reading()
+    assert error is None and got_reading is reading
+
+    admission = spawn_gate._cpu_axis((got_reading, error))
+    assert admission.bound == "upper"
+    assert admission.verdict in ("admit", "hold", "undecidable")
+    assert admission.gap is not None
 
 
 def test_admission_names_its_axis_and_deciding_numbers(monkeypatch):
