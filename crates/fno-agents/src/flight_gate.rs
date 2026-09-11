@@ -12,7 +12,9 @@
 //!   finds the first waiter's fresh claim under a different holder and no-ops.
 //! - The held receipt carries a running request count (a `.held-requests`
 //!   sidecar beside the claim), the cross-process counterpart of the reap
-//!   arm's `requests=N`.
+//!   arm's `requests=N`. The count belongs to the CURRENT holder: each
+//!   acquire removes the sidecar, so `requests` reads held attempts against
+//!   this acquire, never an all-time tally across holders (x-9c91 change 6).
 //! - Every outcome is one JSON line on stdout and exit 0; a gate-side error
 //!   is exit 3, which the shim treats as fail-open (ungated, the pre-gate
 //!   behavior).
@@ -79,6 +81,16 @@ fn print_receipt(value: &Value) {
     let _ = writeln!(&mut stdout.lock(), "{value}");
 }
 
+/// Remove the held-attempts sidecar on a fresh acquire: the count now
+/// belongs to the NEW holder and starts at zero. NotFound is the normal
+/// first acquire; any other failure is swallowed because the sidecar is
+/// report-only - a lost reset must never fail an acquire (x-9c91 AC6-ERR).
+fn reset_held_requests(key: &str, root: Option<&Path>) {
+    if let Some(path) = requests_path(key, root) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// `flight-acquire <key> --scope <s> --ttl-ms <n> --holder <h> [--claims-root <dir>]`
 /// `            [--events-dir <dir>]`
 ///
@@ -115,6 +127,7 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
     };
     match claims::acquire(&key, &holder, opts.clone()) {
         AcquireOutcome::Acquired(rec) => {
+            reset_held_requests(&key, root_ref);
             print_receipt(&json!({"acquired": true, "holder": rec.holder}));
             return 0;
         }
@@ -135,6 +148,7 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
             if dead {
                 let _ = claims::release(&key, &rec.holder, root_ref, opts.events_dir.as_deref());
                 if let AcquireOutcome::Acquired(rec) = claims::acquire(&key, &holder, opts) {
+                    reset_held_requests(&key, root_ref);
                     print_receipt(&json!({"acquired": true, "holder": rec.holder}));
                     return 0;
                 }
@@ -198,3 +212,62 @@ pub fn run_flight_release(args: &[String]) -> i32 {
 // keep the unused-import lint honest: Value is used by print_receipt callers
 #[allow(dead_code)]
 fn _value_witness(_: &Value) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn verb_args(key: &str, holder: &str, td: &TempDir) -> Vec<String> {
+        vec![
+            key.to_string(),
+            "--holder".into(),
+            holder.into(),
+            "--claims-root".into(),
+            td.path().to_string_lossy().into_owned(),
+            "--ttl-ms".into(),
+            FLIGHT_TTL_MS.to_string(),
+        ]
+    }
+
+    #[test]
+    fn held_requests_count_against_the_current_holder() {
+        let td = TempDir::new().unwrap();
+        let key = "flight:test-reset";
+        let opts = claims::AcquireOpts {
+            ttl_ms: Some(FLIGHT_TTL_MS),
+            reason: Some("flight-gate test: A".into()),
+            root: Some(td.path().to_path_buf()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            claims::acquire(key, "A", opts),
+            claims::AcquireOutcome::Acquired(_)
+        ));
+        // Two held attempts against A: the tally reads 2.
+        assert_eq!(count_held_request(key, Some(td.path())), 1);
+        assert_eq!(count_held_request(key, Some(td.path())), 2);
+        claims::release(key, "A", Some(td.path()), None).unwrap();
+
+        // B's acquire resets the sidecar: the count belongs to the new holder.
+        let rc = run_flight_acquire(&verb_args(key, "B", &td));
+        assert_eq!(rc, 0, "B must acquire");
+        let path = requests_path(key, Some(td.path())).unwrap();
+        assert!(!path.exists(), "a fresh acquire starts the count at zero");
+
+        // One held attempt against B reads requests: 1, not 3.
+        assert_eq!(count_held_request(key, Some(td.path())), 1);
+    }
+
+    #[test]
+    fn an_undeletable_sidecar_never_fails_the_acquire() {
+        let td = TempDir::new().unwrap();
+        let key = "flight:test-stuck-sidecar";
+        // A directory at the sidecar path cannot be remove_file'd: the
+        // reset fails, and the acquire must still report acquired.
+        let path = requests_path(key, Some(td.path())).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let rc = run_flight_acquire(&verb_args(key, "B", &td));
+        assert_eq!(rc, 0, "acquired: true despite the lost reset");
+    }
+}
