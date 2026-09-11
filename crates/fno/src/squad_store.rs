@@ -2182,18 +2182,19 @@ fn mutate_lifecycle(f: impl FnOnce(&mut Vec<ExternalLifecycle>)) -> io::Result<(
     mutate_file(|sf| f(&mut sf.external_lifecycle))
 }
 
-/// Walk `exe`'s ancestors for a directory named `target` carrying a cargo
-/// build-tree marker (`.rustc_info.json` or `CACHEDIR.TAG`). Every exec'd test
-/// binary lives under `target/{debug,release,...}`; no installed binary
-/// (`~/.cargo/bin`, homebrew, a deployed `fno`) does. Pure over the path so the
-/// marker logic is unit-testable; [`assert_writable`] feeds it `current_exe()`.
-/// A bare directory named `target` without a marker is NOT a build tree (the
-/// marker is what proves cargo owns it), so a coincidentally-named dir never
-/// trips the guard.
+/// Walk `exe`'s ancestors for the nearest directory carrying a cargo build-tree
+/// marker (`.rustc_info.json` or `CACHEDIR.TAG`). Every exec'd test binary lives
+/// under a build tree - `target/{debug,release,...}` with the classic layout, or
+/// `<build-dir>/<hash>/debug/deps` under build.build-dir, where the markers sit
+/// on the hash dir and no ancestor is named `target`. No installed binary
+/// (`~/.cargo/bin`, homebrew, a deployed `fno`) carries a marker. Pure over the
+/// path so the marker logic is unit-testable; [`assert_writable`] feeds it
+/// `current_exe()`. A bare directory named `target` without a marker is NOT a
+/// build tree (the marker is what proves cargo owns it), so a coincidentally
+/// named dir never trips the guard.
 fn build_tree_target_dir(exe: &std::path::Path) -> Option<PathBuf> {
     exe.ancestors()
-        .find(|d| d.file_name().is_some_and(|n| n == "target"))
-        .filter(|d| d.join(".rustc_info.json").exists() || d.join("CACHEDIR.TAG").exists())
+        .find(|d| d.join(".rustc_info.json").exists() || d.join("CACHEDIR.TAG").exists())
         .map(|d| d.to_path_buf())
 }
 
@@ -4039,6 +4040,28 @@ mod tests {
         // An installed binary (no `target` ancestor) is never a build tree.
         std::fs::create_dir_all(tmp.join("bin")).unwrap();
         assert_eq!(build_tree_target_dir(&tmp.join("bin").join("fno")), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_tree_marker_detection_covers_the_build_dir_layout() {
+        // Under build.build-dir (measured 2026-09-10) a test binary lives at
+        // <build-base>/<h2>/<h2>/<hash>/debug/deps/<name>; the markers sit on
+        // the hash dir and no ancestor is named `target`. The nearest tagged
+        // ancestor is the build tree, whatever its name.
+        let tmp = std::env::temp_dir().join(format!("fno-guard-bd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash = tmp.join("bd/ef/bac4721f2d16ec");
+        let exe = hash.join("debug/deps/probe-0123456789abcdef");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+        // Untagged -> not a build tree, even with the deps-shaped path.
+        assert_eq!(build_tree_target_dir(&exe), None);
+
+        // Tag on the hash dir -> the hash dir IS the build tree.
+        std::fs::write(hash.join("CACHEDIR.TAG"), "x").unwrap();
+        assert_eq!(build_tree_target_dir(&exe), Some(hash));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

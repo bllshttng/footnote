@@ -41,7 +41,9 @@ pub struct ReapRow {
 fn deps_binary_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"/target/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$").unwrap()
+        // No `/target` segment: under build.build-dir the deps dir lives at
+        // <build-base>/<h2>/<h2>/<hash>/debug/deps, with no dir named target.
+        Regex::new(r"/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$").unwrap()
     })
 }
 
@@ -121,15 +123,16 @@ pub fn detect(ps_output: &str) -> Vec<OrphanedTestBinary> {
     candidates
 }
 
-/// A candidate is confirmed only when its owning target dir carries
-/// CACHEDIR.TAG. A path-shape match alone is a name match.
+/// A candidate is confirmed only when its owning build tree carries
+/// CACHEDIR.TAG. A path-shape match alone is a name match. Under
+/// build.build-dir the grandparent of `deps` is the hash dir, which is where
+/// cargo puts the marker (no ancestor is named `target` there).
 pub fn confirmed(orphan: &OrphanedTestBinary) -> bool {
     let path = Path::new(argv0(&orphan.command));
-    let Some(target) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
+    let Some(build_root) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
         return false;
     };
-    target.file_name().map(|n| n == "target").unwrap_or(false)
-        && target.join("CACHEDIR.TAG").is_file()
+    build_root.join("CACHEDIR.TAG").is_file()
 }
 
 /// `config.test.orphan_min_elapsed_seconds` (900); the env override lets a
@@ -399,6 +402,38 @@ mod tests {
             elapsed_seconds: 3600,
         };
         assert!(!confirmed(&orphan));
+    }
+
+    #[test]
+    fn detects_and_confirms_a_build_dir_deps_binary() {
+        // build.build-dir layout measured 2026-09-10: the deps dir sits under a
+        // sharded hash dir carrying CACHEDIR.TAG, with NO dir named target.
+        let dir = temp_dir("builddir");
+        let hash = dir.join("bd/ef/bac4721f2d16ec");
+        let deps = hash.join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(hash.join("CACHEDIR.TAG"), "Signature: x").unwrap();
+        let bin = deps.join("probe-0123456789abcdef").display().to_string();
+        let found = detect(&snapshot_with(1, &bin));
+        assert_eq!(found.len(), 1, "regex must match without a /target segment");
+        assert!(confirmed(&found[0]), "tag on the hash dir must confirm");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_dir_confirmation_still_demands_the_tag() {
+        // Same shape, no CACHEDIR.TAG on the hash dir: not confirmed.
+        let dir = temp_dir("builddir-notag");
+        let deps = dir.join("bd/ef/bac4721f2d16ec/debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let orphan = OrphanedTestBinary {
+            pid: 1,
+            command: format!("{} 300", deps.join("probe-0123456789abcdef").display()),
+            zombies: 0,
+            elapsed_seconds: 3600,
+        };
+        assert!(!confirmed(&orphan));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
