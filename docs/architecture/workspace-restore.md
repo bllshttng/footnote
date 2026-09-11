@@ -57,7 +57,7 @@ No, and it can raise it. Tabs rebuild from the stored tab trees under every poli
 
 *Graduates to:* the doneness gate running before the policy branch, so every policy skips finished workers' tabs.
 
-The mux server was killed. What happens to your tab trees?
+What happens to your tab trees after the server is killed?
 
 The store keeps the layout that the last topology write left. A SIGKILL writes nothing at death. A tab close writes its tree removal first (`closing_a_shell_tab_writes_its_tree_removal`, `crates/fno/src/server.rs:19380`), and `kill-server` captures the layout on the way down (`CoreMsg::Kill` -> `bye_all` -> `Flow::Shutdown`, `crates/fno/src/server.rs:13021`). Tabs open at each death persist, so trees accrete across server deaths. At the next start, `hold` skips tabs whose every slot binds a done worker.
 
