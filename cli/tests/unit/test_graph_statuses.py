@@ -669,3 +669,105 @@ def test_a_plan_cannot_mark_its_own_node_done(tmp_path):
     plan.write_text("---\nstatus: done\n---\n")
     e = _entry("ab-selfcert", plan_path=str(plan), completed_at=None)
     assert recompute_statuses([e])[0]["status"] == "ready"
+
+
+# -- x-f8b1: the open do row carries its own age, like the graph lock --
+
+def _do_row(started_at: str, session_id: str = "s-do") -> dict:
+    return {
+        "phase": "do",
+        "harness": "claude",
+        "session_id": session_id,
+        "started_at": started_at,
+    }
+
+
+def test_stale_open_do_row_is_marked_but_status_kept():
+    """An 11-day-old open do row (x-4c23's age) carries the diagnostic and
+    the node is STILL in_progress: age records uncertainty, never an
+    owner-death verdict."""
+    old = (datetime.now(timezone.utc) - timedelta(days=11)).isoformat()
+    e = _entry("ab-dostale1", status="in_progress", sessions=[_do_row(old)])
+    result = recompute_statuses([e])
+    assert result[0]["status"] == "in_progress"
+    defect = result[0]["ownership_defect"]
+    assert defect["kind"] == "stale-open-do-unverified"
+    assert defect["liveness"] == "unverified"
+    assert defect["holder"] == "s-do"
+
+
+def test_fresh_open_do_row_gets_no_marker_and_keeps_status():
+    """Positive control: a 17-minute row (x-5c25's spawn-handover window)
+    gets NO marker and no status change - youth is not strandedness."""
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=17)).isoformat()
+    e = _entry("ab-dofresh1", status="in_progress", sessions=[_do_row(fresh)])
+    result = recompute_statuses([e])
+    assert result[0]["status"] == "in_progress"
+    assert "ownership_defect" not in result[0]
+
+
+def test_unreadable_do_row_timestamp_is_marked():
+    bad = _do_row("not-a-date", session_id="s-bad")
+    e = _entry("ab-dobadts1", status="in_progress", sessions=[bad])
+    result = recompute_statuses([e])
+    assert result[0]["status"] == "in_progress"
+    defect = result[0]["ownership_defect"]
+    assert defect["kind"] == "do-row-timestamp-unreadable"
+    assert defect["holder"] == "s-bad"
+
+
+def test_lock_defect_keeps_priority_over_do_row_defect():
+    """A locked node keeps the lock's own marker; the do stamp never
+    overwrites it (the lock route is the one the research attributes)."""
+    old = (datetime.now(timezone.utc) - timedelta(days=11)).isoformat()
+    old_lock = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    e = _entry(
+        "ab-dolockp1",
+        status="in_progress",
+        locked_by="worker",
+        locked_at=old_lock,
+        sessions=[_do_row(old)],
+    )
+    result = recompute_statuses([e])
+    assert result[0]["ownership_defect"]["kind"] == "stale-active-owner-unverified"
+
+
+# -- x-f8b1 change 5: triage health reads the marker, because today nothing does --
+
+def test_triage_health_names_ownership_defect(monkeypatch, capsys):
+    """A defect-carrying node is named with its kind and holder; a clean
+    graph reports zero and leaves the exit code alone."""
+    import json as _json
+
+    from fno.graph import triage
+
+    defect_node = _entry("ab-dohealth1", status="in_progress")
+    defect_node["ownership_defect"] = {
+        "kind": "stale-open-do-unverified",
+        "node_id": "ab-dohealth1",
+        "holder": "s-do",
+        "liveness": "unverified",
+    }
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=17)).isoformat()
+    clean_node = _entry("ab-dohealth2", status="in_progress", sessions=[_do_row(fresh)])
+
+    monkeypatch.setattr(triage, "_triage_entries", lambda: [defect_node, clean_node])
+    triage.cmd_health(
+        project=None, all_projects=False, json_output=True, stale_days=30,
+        check=False, quiet=False,
+    )
+    report = _json.loads(capsys.readouterr().out)
+    named = [d for d in report["ownership_defects"] if d["id"] == "ab-dohealth1"]
+    assert len(named) == 1
+    assert named[0]["kind"] == "stale-open-do-unverified"
+    assert named[0]["holder"] == "s-do"
+    assert report["totals"]["ownership_defects"] == 1
+
+    monkeypatch.setattr(triage, "_triage_entries", lambda: [clean_node])
+    triage.cmd_health(
+        project=None, all_projects=False, json_output=True, stale_days=30,
+        check=False, quiet=False,
+    )
+    report = _json.loads(capsys.readouterr().out)
+    assert report["ownership_defects"] == []
+    assert report["totals"]["ownership_defects"] == 0

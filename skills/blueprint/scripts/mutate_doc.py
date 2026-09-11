@@ -1099,7 +1099,7 @@ def mutate(
     if write_error is not None:
         return 3, write_error
 
-    _sync_graph_status(new_fm.get("node"), resolved)
+    _sync_graph_status(new_fm, resolved)
     _warn_no_file_surface(resolved)
 
     return 0, proposed_doc
@@ -1201,7 +1201,7 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
     write_error = _atomic_write(resolved, proposed)
     if write_error is not None:
         return 3, write_error
-    _sync_graph_status(frontmatter.get("node"), resolved)
+    _sync_graph_status(frontmatter, resolved)
     return 0, proposed
 
 
@@ -1247,7 +1247,46 @@ def _warn_no_file_surface(plan_path: Path) -> None:
     )
 
 
-def _sync_graph_status(node_id: object, plan_path: Path) -> None:
+def _bind_node_id(frontmatter: dict) -> tuple[str | None, str | None]:
+    """Resolve the node id a plan binds, reading ``node`` and ``claims`` as one
+    fact under two spellings.
+
+    Ported from ``plan_claims`` (``cli/src/fno/graph/_intake.py:736``), the
+    parser authority for this fact: 330 of 807 plans carry ``node:`` instead of
+    ``claims:``, so a writer keyed on ``node:`` alone goes blind on roughly 41%
+    of plans - x-7760 authored ``claims:`` and its bind never ran. This script
+    must stay portable, so the union is re-spelled here rather than imported;
+    the two-spelling parity test (``cli/tests/unit/test_plan_bind_routes.py``)
+    pins the two resolvers to the same answers.
+
+    Returns ``(node_id, warning)``: exactly one is non-None. Two well-formed
+    ids that disagree is a broken plan, not a choice to make silently - bind
+    nothing and warn naming both.
+    """
+    node = frontmatter.get("node")
+    node_id = node.strip() if isinstance(node, str) else None
+    if node_id in ("", "null"):
+        node_id = None
+
+    claims_id = None
+    claims = frontmatter.get("claims")
+    if isinstance(claims, str):
+        claims = [claims]
+    if isinstance(claims, list):
+        for entry in claims:
+            if isinstance(entry, str) and entry.strip() not in ("", "null"):
+                claims_id = entry.strip()
+                break
+
+    if node_id and claims_id and node_id != claims_id:
+        return None, (
+            f"plan frontmatter binds two different ids (node: {node_id}, "
+            f"claims: {claims_id}); binding nothing - fix the frontmatter"
+        )
+    return (node_id or claims_id), None
+
+
+def _sync_graph_status(frontmatter: object, plan_path: Path) -> None:
     """Re-derive the node's graph ``status`` now that the doc is blueprinted.
 
     The graph derives `status` FROM this doc, but ``read_graph`` does not
@@ -1257,9 +1296,18 @@ def _sync_graph_status(node_id: object, plan_path: Path) -> None:
     mutation that triggers the recompute, and it doubles as a self-heal for a
     path the node-id rename step moved.
 
+    The bound id is resolved through :func:`_bind_node_id`, so a plan carrying
+    only ``claims:`` binds exactly as one carrying ``node:``.
+
     Best-effort by design: the doc is already durably written, so a missing CLI
     or a failed call warns and never fails the blueprint.
     """
+    if not isinstance(frontmatter, dict):
+        return  # unreadable frontmatter - nothing on the graph to sync yet
+    node_id, warning = _bind_node_id(frontmatter)
+    if warning is not None:
+        sys.stderr.write(f"Warning: {warning}\n")
+        return
     if not isinstance(node_id, str) or not node_id.strip():
         return  # unbound design doc - nothing on the graph to sync yet
     if shutil.which("fno") is None:
