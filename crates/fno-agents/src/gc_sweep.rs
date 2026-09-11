@@ -259,8 +259,6 @@ impl GcSummary {
         }
     }
 }
-    }
-}
 
 /// One state file selected for deletion by the shared age policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
