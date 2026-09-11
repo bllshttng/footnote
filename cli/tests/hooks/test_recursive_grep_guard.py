@@ -138,6 +138,11 @@ ALLOWED = [
     "grep -e -r file.txt",
     "grep -- -r file.txt",
     "grep -f patterns.txt files/",
+    # A bundle LED by a value-taking option is that flag plus its attached
+    # value, never a flag list: `-fr` reads a pattern FILE named r.
+    "grep -fr patterns.txt files/",
+    "grep -er token files/",
+    "grep -m5r token files/",
     # Prose containing the words is not a search.
     "echo 'use grep -r, not grep'",
     "echo grep -r",
@@ -193,8 +198,8 @@ def test_no_repository_means_no_refusal(command: str, no_repo) -> None:
 
 def test_a_symlink_resolving_to_a_tagged_cache_is_refused(tmp_path_factory) -> None:
     root = _git_repo(tmp_path_factory.mktemp("symlink"))
-    _make_cache(root / ".cache-store" / "x-9c8b-target")
-    (root / "target-link").symlink_to(root / ".cache-store" / "x-9c8b-target")
+    _make_cache(root / ".cache-store" / "wt-target")
+    (root / "target-link").symlink_to(root / ".cache-store" / "wt-target")
     assert guard.decide("grep -rn token .", str(root)) is not None
 
 

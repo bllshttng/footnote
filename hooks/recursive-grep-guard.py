@@ -205,6 +205,13 @@ def _is_recursive_argv(argv):
         if tok in _RECURSIVE_LONG:
             return True
         if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1:
+            # A bundle LED by a value-taking option is that flag plus its
+            # attached value, never a flag list: `-fr patterns.txt` reads a
+            # pattern FILE named r, and `-er` searches for the string "r".
+            # Neither is recursive, and scanning the whole token would deny
+            # both. Bundles led by a boolean letter (`-rn`, `-nr`) are lists.
+            if tok[1] in "efmABCD":
+                continue
             if "r" in tok[1:] or "R" in tok[1:]:
                 return True
     return False
