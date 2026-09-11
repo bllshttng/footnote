@@ -393,7 +393,12 @@ fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
     if last_sampled.as_deref() == Some(version.as_str()) {
         return;
     }
-    let Ok(report) = crate::backlog::parity(&state.graph) else {
+    // Same gate discipline as the parity op: the compare holds the shared
+    // read guard so a publish cannot interleave with the sample.
+    let gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+    let report = crate::backlog::parity(&state.graph);
+    drop(gate);
+    let Ok(report) = report else {
         return;
     };
     *last_sampled = Some(version);
@@ -1436,6 +1441,9 @@ fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
 /// The parity op: the thin wire face over the only compare
 /// implementation (backlog::parity); no second compare here.
 fn handle_parity(state: &StoreState) -> Result<Value, StoreError> {
+    // The compare reads graph.json AND the db: under the shared gate so a
+    // concurrent publish can never present it a torn pair.
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     let report = crate::backlog::parity(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "rows": report.rows,
