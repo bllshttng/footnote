@@ -201,6 +201,13 @@ def test_live_permission_mode_reads_the_last_transcript_record(tmp_path, monkeyp
     claude_row = _row(harness="claude", substrate="thread", mux=None, fno_id="F")
 
     assert _live_permission_mode(claude_row) == "bypassPermissions"
+
+    # A record torn by a concurrent append does not decide; the last complete
+    # record does.
+    with transcript.open("a") as handle:
+        handle.write('{"type":"permission-mode","permissionMode":"yolo"')
+    assert _live_permission_mode(claude_row) == "bypassPermissions"
+
     # Another harness never reads a transcript at all.
     assert _live_permission_mode(_row()) is None
 

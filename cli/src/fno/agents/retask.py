@@ -191,11 +191,13 @@ def _live_permission_mode(entry: AgentEntry) -> Optional[str]:
         return None
     try:
         with transcript.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - _TRANSCRIPT_TAIL_BYTES))
+            handle.seek(max(0, os.fstat(handle.fileno()).st_size - _TRANSCRIPT_TAIL_BYTES))
             tail = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return None
+    if tail and not tail.endswith("\n"):
+        # A concurrently appended torn record does not decide; complete records do.
+        tail = tail[: tail.rfind("\n") + 1]
     mode: Optional[str] = None
     for line in tail.splitlines():
         try:
@@ -286,8 +288,7 @@ def _resolve_node_verb(node: str) -> str:
         difficulty=rec.get("difficulty") if rec else None,
         plan_rung=node_plan_rung(rec).value,
     )
-    # The table answers canonical "/blueprint"; the seed probe and the
-    # registry rename both take the bare word.
+    # The table answers canonical "/blueprint"; probe and rename take the bare word.
     return (verb or "target").lstrip("/") or "target"
 
 
