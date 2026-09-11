@@ -6,7 +6,7 @@ The operator ask behind this feature was a live monitor. It must say how the mac
 
 You ask whether the machine can take more workers, or why a dispatch held instead of spawning. This page owns the meter, the lane advisor, and their surfaces. Misreading it reads a stale or switched-off meter as a full machine, or spawns onto a saturated one.
 
-Not for: process-level facts about one worker (is it alive, what holds its pane). Those are the roster and [reaping-faq.md](reaping-faq.md); the meter measures the machine, not the worker.
+Not for: process-level facts about one worker (is it alive, what holds its pane). Those are the roster and [reaping-faq.md](reaping-faq.md). The meter measures the machine, not the worker.
 
 ## The feature is conditional
 

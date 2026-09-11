@@ -6,7 +6,7 @@ This repo uses bare `rm` in most scripts and `command -p rm ... || /bin/rm ...` 
 
 You touch a guarded file, or your `rm` is aliased to a trash tool and a CI check just failed. This page owns that rule and its two-file boundary. Misreading it "fixes" the guarded spelling repo-wide, and the two files that must not risk a trash-alias start depending on your host's `rm` config.
 
-Not for: general delete hygiene elsewhere in the repo, or the reaping sweeps that delete real state. Reaping is [reaping-faq.md](reaping-faq.md); the worktree contract is [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
+Not for: general delete hygiene elsewhere in the repo, or the reaping sweeps that delete real state. Reaping is [reaping-faq.md](reaping-faq.md). The worktree contract is [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
 ## The hazard
 
