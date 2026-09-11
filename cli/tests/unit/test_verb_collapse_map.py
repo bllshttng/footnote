@@ -244,7 +244,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # collapsed `agents` group (mapped-count only), not the top-level `king`
     # hidden alias.
     # +1 for `workspace reap`, the explicit state-retention operator control.
-    assert len(leaves) <= 130
+    # +3 for the inbox user queue leaves (ack/list/status under the renamed
+    # verb); the pre-rename operator spelling stays as a hidden alias the
+    # ratchet still counts, so the rename nets +3, not 0.
+    assert len(leaves) <= 133
     assert "fno-agents" in leaves
 
 
