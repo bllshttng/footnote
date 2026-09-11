@@ -703,6 +703,12 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
     wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    // The pid-confirmed termination needs the incumbent REAPED, not only
+    // dead: this test process is the parent, so an unwaited child lingers as
+    // a zombie and kill(pid, 0) answers alive through the whole grace. A
+    // waiter thread reaps the moment TERM lands - the shape launchd gives
+    // production orphans for free.
+    let reaper = std::thread::spawn(move || incumbent.wait());
 
     // The storm: a restart and a burst of ordinary client verbs at the same
     // moment. Every verb routes through `ensure_daemon`, which is the site that
@@ -797,10 +803,10 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "restart must replace the incumbent this test started"
     );
 
-    // Reap the incumbent before counting. It is our child, so until it is
-    // waited on it lingers as a zombie, and `kill(pid, 0)` answers ALIVE for a
-    // zombie -- the count would then report two supervisors for one live one.
-    let _ = incumbent.wait();
+    // The reaper thread joined below reaped the incumbent the moment TERM
+    // landed; without that reap it would linger as a zombie and the count
+    // would report two supervisors for one live one.
+    reaper.join().expect("incumbent reaper joins");
 
     // The successor serves. `status` stays on the async runtime, so this reads
     // the event loop's liveness rather than a handler's own work.
@@ -864,6 +870,9 @@ async fn daemon_child_env_isolated_probe() {
     let sibling_bin = daemon_env_bin(&sibling_home, "sibling", Some(&marker), &[]);
 
     let mut incumbent = start_daemon(&intended_home);
+    // Reap DURING the restart: the pid-confirmed termination cannot see an
+    // unwaited zombie child of this test process die.
+    let reaper = std::thread::spawn(move || incumbent.wait());
     let restart = {
         let home = intended_home.clone();
         let bin = intended_bin.clone();
@@ -871,7 +880,7 @@ async fn daemon_child_env_isolated_probe() {
     };
     let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
     let outcome = restart.await.unwrap().expect("probe restart succeeds");
-    let _ = incumbent.wait();
+    reaper.join().expect("incumbent reaper joins");
     terminate_untracked(outcome.new_pid);
     let sibling_pid = sibling.id();
     unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };

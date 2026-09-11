@@ -40,18 +40,28 @@ fn ps_table() -> Vec<(u32, String)> {
         .collect()
 }
 
-/// Seconds the process has been alive, from `ps` etime ([[dd-]hh:]mm:ss).
+/// Seconds the process has been alive, from a `ps` etime string
+/// ([[dd-]hh:]mm:ss). The day prefix is not a base-60 digit; split it off
+/// before the fold or every process older than a day reads unparseable.
+fn parse_etime(text: &str) -> Option<f64> {
+    let (days, clock) = match text.split_once('-') {
+        Some((d, rest)) => (d.parse::<f64>().ok()?, rest),
+        None => (0.0, text),
+    };
+    let mut secs = 0.0;
+    for part in clock.split(':') {
+        secs = secs * 60.0 + part.trim().parse::<f64>().ok()?;
+    }
+    Some(secs + days * 86_400.0)
+}
+
+/// Seconds the process has been alive, from `ps` etime.
 fn etime_secs(pid: u32) -> Option<f64> {
     let out = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let mut secs: f64 = 0.0;
-    for part in text.split(':') {
-        secs = secs * 60.0 + part.trim().parse::<f64>().ok()?;
-    }
-    Some(secs)
+    parse_etime(String::from_utf8_lossy(&out.stdout).trim())
 }
 
 fn started_epoch(etime: Option<f64>) -> Option<f64> {
@@ -82,25 +92,30 @@ fn started_before_rewrite(started_at: Option<f64>, exe: Option<&Path>) -> bool {
     started < nanos.as_secs_f64()
 }
 
-/// One Identify with a short bound; `Some` only when the keeper answers
-/// with a parseable IdentifyReply. `identify_tag` selects the lane's frame
-/// (the graph and pane keepers use different request tags, the same reply).
-fn identify_reply(sock: &Path, identify_tag: u8) -> Option<Value> {
+/// One bounded frame round-trip: write `request`, read the reply frame
+/// (`reply_tag`), parse its JSON payload. `None` on any failure.
+fn frame_round_trip(sock: &Path, request: [u8; 5], reply_tag: u8) -> Option<Value> {
     use std::io::{Read, Write};
     let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
     stream.set_read_timeout(Some(PROBE_BUDGET)).ok()?;
     stream.set_write_timeout(Some(PROBE_BUDGET)).ok()?;
-    let frame = [identify_tag, 0, 0, 0, 0];
-    stream.write_all(&frame).ok()?;
+    stream.write_all(&request).ok()?;
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).ok()?;
-    if header[0] != TAG_REPLY {
+    if header[0] != reply_tag {
         return None;
     }
     let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
     let mut payload = vec![0u8; len.min(1 << 20)];
     stream.read_exact(&mut payload).ok()?;
     serde_json::from_slice(&payload).ok()
+}
+
+/// One Identify with a short bound; `Some` only when the keeper answers
+/// with a parseable IdentifyReply. `identify_tag` selects the lane's frame
+/// (the graph and pane keepers use different request tags, the same reply).
+fn identify_reply(sock: &Path, identify_tag: u8) -> Option<Value> {
+    frame_round_trip(sock, [identify_tag, 0, 0, 0, 0], TAG_REPLY)
 }
 
 /// The `on_restart` / `survives` pair, fixed per component so every surface
@@ -173,6 +188,7 @@ fn keeper_rows() -> Vec<Value> {
         let name = session
             .clone()
             .or_else(|| sock.as_ref().map(|s| s.display().to_string()));
+        let started = started_epoch(etime_secs(pid));
         let mut store_graph: Option<String> = None;
         let (verdict, evidence) = match sock.as_deref() {
             None => ("unknown", "argv declares no socket"),
@@ -194,13 +210,15 @@ fn keeper_rows() -> Vec<Value> {
                             _ => {
                                 // A reply with no drift key is a keeper built
                                 // before the self-report; start time is the only
-                                // reading it gives.
+                                // reading it gives. An unreadable start time is
+                                // no verdict, never current.
                                 let exe = Path::new(argv0);
-                                if started_before_rewrite(started_epoch(etime_secs(pid)), Some(exe))
-                                {
+                                if started_before_rewrite(started, Some(exe)) {
                                     ("stale", "predates build self-report")
-                                } else {
+                                } else if started.is_some() {
                                     ("current", "started at-or-after the binary was written")
+                                } else {
+                                    ("unknown", "no readable start time")
                                 }
                             }
                         }
@@ -214,7 +232,7 @@ fn keeper_rows() -> Vec<Value> {
             Some(pid),
             name,
             Some(argv0.to_string()),
-            started_epoch(etime_secs(pid)),
+            started,
             verdict,
             evidence,
         );
@@ -244,12 +262,19 @@ fn keeper_rows() -> Vec<Value> {
 async fn daemon_row() -> Value {
     use crate::client::{call_if_running, ClientError};
     use crate::protocol::Request;
-    let (verdict, evidence) = match call_if_running(
+    let resp = call_if_running(
         &crate::paths::AgentsHome::from_env(),
         &Request::new(1, "agent.status", json!({})),
     )
-    .await
-    {
+    .await;
+    let pid = resp
+        .as_ref()
+        .ok()
+        .and_then(|r| r.result())
+        .and_then(|r| r.pointer("/daemon/pid"))
+        .and_then(Value::as_u64)
+        .map(|p| p as u32);
+    let (verdict, evidence) = match resp {
         Ok(resp) => match resp.result() {
             Some(result) => {
                 let drift = crate::client::drift_from_status(result);
@@ -273,13 +298,33 @@ async fn daemon_row() -> Value {
     };
     row(
         "daemon",
-        None,
+        pid,
         Some("agents home".into()),
         None,
         None,
         &verdict,
         &evidence,
     )
+}
+
+#[cfg(test)]
+mod etime_tests {
+    use super::parse_etime;
+
+    #[test]
+    fn parse_etime_reads_every_ps_shape() {
+        assert_eq!(parse_etime("30"), Some(30.0));
+        assert_eq!(parse_etime("05:30"), Some(330.0));
+        assert_eq!(parse_etime("02:03:04"), Some(7384.0));
+        assert_eq!(parse_etime("1-02:03:04"), Some(93_784.0));
+    }
+
+    #[test]
+    fn parse_etime_refuses_junk_and_empty() {
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("not-a-time"), None);
+        assert_eq!(parse_etime("x-02:03"), None);
+    }
 }
 
 /// Mux server rows from the front door's own `ls --json`; the pid sidecar
@@ -450,18 +495,5 @@ pub async fn cycle_stale_store_keepers() -> (Vec<CycledKeeper>, usize) {
 
 /// Send one Shutdown frame and read the reply (tag 2 out, response tag 4).
 fn shutdown_reply(sock: &Path) -> Option<Value> {
-    use std::io::{Read, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
-    stream.set_read_timeout(Some(PROBE_BUDGET)).ok()?;
-    stream.set_write_timeout(Some(PROBE_BUDGET)).ok()?;
-    stream.write_all(&[2, 0, 0, 0, 0]).ok()?;
-    let mut header = [0u8; 5];
-    stream.read_exact(&mut header).ok()?;
-    if header[0] != 4 {
-        return None;
-    }
-    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
-    let mut payload = vec![0u8; len.min(1 << 20)];
-    stream.read_exact(&mut payload).ok()?;
-    serde_json::from_slice(&payload).ok()
+    frame_round_trip(sock, [2, 0, 0, 0, 0], 4)
 }

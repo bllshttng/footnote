@@ -428,10 +428,11 @@ def _live_mux_sessions(
 
 def running_components(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
-) -> "list[dict]":
+) -> "list[dict] | None":
     """One row per long-lived process from ``fno-agents census --json``
-    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``[]``
-    on any failure, never a false all-clear."""
+    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``None``
+    when the census itself could not run: a dark census is not an empty
+    machine, and [] here would read as an all-clear."""
     try:
         from fno import rust_binary
 
@@ -439,13 +440,13 @@ def running_components(
     except Exception:  # noqa: BLE001
         binary = None
     if binary is None:
-        return []
+        return None
     try:
         proc = runner([str(binary), "census", "--json"], capture_output=True, text=True, check=False, timeout=30)
         rows = json.loads(proc.stdout or "[]") if proc.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return []
-    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        return None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
 
 
 def stale_mux_servers(
@@ -763,11 +764,13 @@ def update_readiness(
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
-    # Running-process census (x-f188 change 7): the third axis. The TUI
-    # renders these rows and computes nothing (Locked Decision 6); it reads
-    # its five fields off each row and ignores the rest. `running_rows`,
-    # never `running`: that name is the interpreter string python_tool carries.
-    running_rows = [r for r in running_components(runner) if r.get("verdict") == "stale"]
+    # Census rows (x-f188 change 7). `running_rows`, never `running`: that
+    # name is the interpreter string python_tool carries.
+    census_rows = running_components(runner)
+    if census_rows is None:
+        degraded.append("running-process census unavailable")
+        census_rows = []
+    running_rows = [r for r in census_rows if r.get("verdict") == "stale"]
 
     degraded_reason = "; ".join(degraded) if degraded else None
 

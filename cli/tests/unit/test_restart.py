@@ -8,7 +8,6 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno import restart
-from fno import update as fno_update
 from fno.cli import app
 
 runner = CliRunner()
@@ -436,8 +435,7 @@ def _quiet_keeper_leg(monkeypatch) -> None:
 
 
 def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> None:
-    """AC6-HP: a stale store keeper moves to a new pid, no mux server is
-    killed, and the last stdout line starts with the ok verdict."""
+    """AC6-HP: stale store keeper cycled, no mux killed, ok verdict last."""
     _fake_daemon_binary(monkeypatch)
     calls: list = []
     keeper_json = json.dumps(
@@ -469,6 +467,7 @@ def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> N
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0, result.output
+    assert "restarted: pid 1 -> 2" in result.output, "the daemon's own receipt survives"
     assert "store keeper /tmp/graph.json pid 11 shut down" in result.output, result.output
     assert "1 pane keeper(s) run an older build" in result.output
     assert "kept with their panes" in result.output
@@ -479,8 +478,7 @@ def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> N
 
 
 def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
-    """AC6-ERR: a failed daemon restart ends on a FAILED verdict line that
-    names the daemon error text, exit 1."""
+    """AC6-ERR: a failed daemon ends on a FAILED verdict naming the error, exit 1."""
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
         restart.subprocess,
@@ -499,8 +497,7 @@ def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
 
 
 def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
-    """AC6-EDGE: a keeper that answers Shutdown busy is spared, named, and
-    the verb exits 1 - a spared keeper is NOT healed."""
+    """AC6-EDGE: a busy-spared keeper is named and the verb exits 1."""
     _fake_daemon_binary(monkeypatch)
     keeper_json = json.dumps(
         {

@@ -215,8 +215,10 @@ pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
         }
     }
     let mut actions = Vec::new();
-    if matches!(outcome, Some(UpdateOutcome::Ok(r)) if !r.running.iter().filter(|row| row.verdict == "stale").collect::<Vec<_>>().is_empty())
-    {
+    if matches!(
+        outcome,
+        Some(UpdateOutcome::Ok(r)) if r.running.iter().any(|row| row.verdict == "stale")
+    ) {
         actions.push(AuxAction::RestartAgents);
     }
     AuxPopup {

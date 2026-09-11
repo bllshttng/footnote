@@ -2546,11 +2546,12 @@ def test_update_readiness_never_empty_guidance_on_full_failure(monkeypatch, tmp_
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
     monkeypatch.setattr(update.shutil, "which", lambda name: None)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "running_components", lambda runner: None)
 
     result = update.update_readiness(runner=_make_runner())
 
     assert result["guidance"].strip() != ""
-    assert result["degraded"] is not None
+    assert "census unavailable" in result["degraded"]
     assert result["update_ready"] is False
 
 
@@ -2871,9 +2872,7 @@ def test_component_lines_name_repair_and_unknown_instrument() -> None:
 
 
 def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path) -> None:
-    """x-f188 AC7 (Python half): up to date + stale running processes -> the
-    guidance no longer returns early; it names what restart cycles and what
-    it keeps."""
+    """x-f188 AC7 (Python half): current + stale rows -> guidance names the restart split."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
     monkeypatch.setattr(
         update,
@@ -2902,7 +2901,6 @@ def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path
             },
         ],
     )
-    monkeypatch.setattr(update, "running_components_runner_passthrough", True, raising=False)
     runner = _make_runner(mux_rows=[])
 
     result = update.update_readiness(runner=runner)
@@ -2916,8 +2914,7 @@ def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path
     assert "keeps 1 pane keeper(s)" in result["guidance"]
 
 def test_running_components_adapter_carries_rows(monkeypatch) -> None:
-    """x-f188: the census lives in fno-agents; the adapter carries rows and
-    reads [] on any failure, never a false all-clear."""
+    """x-f188: rows carry through; a census that cannot run reads None, never []."""
     rows_payload = [
         {"component": "daemon", "verdict": "stale", "evidence": "build self-report"},
         {"component": "store-keeper", "verdict": "current", "sock": "/tmp/g.store.sock"},
@@ -2932,5 +2929,5 @@ def test_running_components_adapter_carries_rows(monkeypatch) -> None:
     def _fail(cmd, **kwargs):
         return types.SimpleNamespace(returncode=9, stdout="", stderr="boom")
 
-    assert update.running_components(runner=_fail) == []
-    assert update.running_components(runner=lambda *a, **k: (_ for _ in ()).throw(OSError("no"))) == []
+    assert update.running_components(runner=_fail) is None
+    assert update.running_components(runner=lambda *a, **k: (_ for _ in ()).throw(OSError("no"))) is None

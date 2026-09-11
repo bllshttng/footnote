@@ -23,7 +23,6 @@ import json
 import shutil
 import subprocess
 import time
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 import typer
@@ -185,8 +184,7 @@ def _revive_orphans(
 
 
 def _fold_keepers(keepers: dict, result: dict, failures: list) -> None:
-    """Fold the daemon child's keepers summary into the result (absent for an
-    older binary); spared keepers are failures."""
+    """Fold the daemon child's keepers summary in; spared keepers are failures."""
     result["store_keepers"] = keepers.get("store_keepers", [])
     result["pane_keepers_stale"] = keepers.get("pane_keepers_stale", 0)
     for c in result["store_keepers"]:
@@ -283,6 +281,8 @@ def restart_command(
                         keepers = parsed
                 elif line.startswith("fno agents restart:") and not line.startswith("fno agents restart: FAILED"):
                     say(line)
+                elif line.strip():
+                    say(line)  # unprefixed daemon receipts ("restarted: pid A -> B")
             spared = keepers is not None and any(
                 c.get("result") != "cycled" for c in keepers.get("store_keepers", [])
             )

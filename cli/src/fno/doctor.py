@@ -4087,7 +4087,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["mux_server_stale"] = _update.stale_mux_servers()
 
     # Advisory running-process census (x-f188); never changes status/exit.
-    result["running_components"] = _update.running_components()
+    result["running_components"] = _update.running_components() or []
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
