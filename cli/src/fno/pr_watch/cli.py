@@ -289,9 +289,8 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
-#: Set by the tick around its catch-up leg (x-d211). A child `fno update`
-#: that sees it skips the trailing `do pr watch refresh`, which bootouts the
-#: LaunchAgent owning the running tick.
+#: Set by the tick around its catch-up leg (x-d211): a child `fno update`
+#: seeing it skips the refresh that bootouts the job owning the tick.
 _ENV_ACTIVE_TICK = "FNO_PR_WATCH_ACTIVE_TICK"
 
 #: A roster probe needs at least this much budget to be worth starting. The
@@ -446,7 +445,6 @@ def tick() -> None:
     alarm_ok = True
     cut: list[str] = []
     cut_whys: dict[str, str] = {}
-    backstop_fired = False
     phase_s: dict[str, float] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
@@ -1277,7 +1275,7 @@ def tick() -> None:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.
         timed_out = True
-        backstop_fired = True
+        cut_whys[current_tick_phase()] = "deadline_exceeded"
         typer.echo(
             f"pr-watch tick: deadline exceeded in phase {current_tick_phase()} - aborted",
             err=True,
@@ -1301,9 +1299,7 @@ def tick() -> None:
         # Name which timeout mechanism fired (x-d211): the wall deadline
         # outranks a spent slice, because it is what ended the tick.
         if timed_out:
-            if backstop_fired or any(
-                w == "deadline_exceeded" for w in cut_whys.values()
-            ):
+            if "deadline_exceeded" in cut_whys.values():
                 end_data["why"] = "deadline_exceeded"
             elif cut:
                 end_data["why"] = "slice_starved"
