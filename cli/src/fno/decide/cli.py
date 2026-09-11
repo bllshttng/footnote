@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import typer
 
-from fno.decide.evidence import READ_HELP
+from fno.decide import READ_HELP
 from fno.decide.graduation import REFERENCE_HELP as grad_reference_help
 
 shim_app = typer.Typer(
@@ -215,7 +215,7 @@ def _record(
         WaiverAuthorityRefusedError,
         record_decision,
     )
-    from fno.decide.evidence import (
+    from fno.decide import (
         UnmeasuredClaimError,
         UnresolvableCitationError,
     )

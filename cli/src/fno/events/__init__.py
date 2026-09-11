@@ -1142,7 +1142,7 @@ def operator_decision(
     queries; ``supersedes`` orders two decisions on one subject so a reader
     of the older one can tell it is not current. ``reads`` carries the
     executed evidence rows for a code fact the ruling asserts (see
-    :mod:`fno.decide.evidence`): cmd, exit code, output head.
+    :mod:`fno.decide`): cmd, exit code, output head.
     """
     data: dict[str, Any] = {"decision_id": decision_id, "decision": decision[:QUESTION_CAP]}
     for key, value in (

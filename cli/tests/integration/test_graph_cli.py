@@ -2003,9 +2003,17 @@ def _note_node():
     return node_id
 
 
-def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph):
+def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkeypatch):
     """AC18-ERR: exit 1, nothing appended, nothing mailed."""
     node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+        },
+    )
 
     r = _invoke(
         "backlog", "note", node_id,
@@ -2017,9 +2025,13 @@ def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph):
     assert node["progress_notes"] == []
 
 
-def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph):
+def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph, monkeypatch):
     """AC19-HP: the note verb advises, never refuses a body."""
     node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {"ok": True, "rows": None, "claims": ["167 lines"]},
+    )
 
     r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines")
 
@@ -2030,9 +2042,20 @@ def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph):
     assert node["progress_notes"][0]["text"] == "the drain loop is 167 lines"
 
 
-def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph):
+def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypatch):
     """AC20-HP: executed reads land on the note beside ts/text."""
     node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": True,
+            "rows": [
+                {"cmd": "echo measured", "exit": 0, "out_head": "measured",
+                 "ts": "2026-09-10T00:00:00Z", "head_sha": ""}
+            ],
+            "claims": None,
+        },
+    )
 
     r = _invoke(
         "backlog", "note", node_id, "advance.py is 200 lines",
@@ -2047,9 +2070,17 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph):
     assert note["reads"][0]["exit"] == 0
 
 
-def test_quiet_still_refuses_a_contradicted_citation(tmp_graph):
+def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
     """AC21-EDGE: a silent annotation is still a fact on the node."""
     node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+        },
+    )
 
     r = _invoke(
         "backlog", "note", node_id,

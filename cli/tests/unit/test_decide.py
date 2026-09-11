@@ -3556,7 +3556,7 @@ def test_operator_authority_records_a_code_fact_with_no_read(
 
 
 def test_agent_lane_refusal_exits_3_and_names_the_claim(
-    root: Path, tmp_graph: Path, index: Path
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The decide door refuses on the same ladder as the law door: exit 3,
     nothing written, claim named."""
@@ -3565,6 +3565,20 @@ def test_agent_lane_refusal_exits_3_and_names_the_claim(
     (root / "advance.py").write_text(
         "\n".join(f"line {i}" for i in range(1, 201)) + "\n", encoding="utf-8"
     )
+    calls: list[dict] = []
+
+    def _gate(payload):
+        calls.append(payload)
+        return {
+            "ok": False,
+            "kind": "unmeasured",
+            "message": (
+                "the ruling asserts a code fact ('advance.py:167') and carries "
+                "no read. Attach --read with the command that produced it."
+            ),
+        }
+
+    monkeypatch.setattr("fno.decide._evidence_gate", _gate)
 
     result = runner.invoke(
         backlog_app,
@@ -3581,3 +3595,4 @@ def test_agent_lane_refusal_exits_3_and_names_the_claim(
     assert "Nothing was recorded." in result.stderr, result.stderr
     assert "advance.py:167" in result.stderr, result.stderr
     assert not index.exists() or index.read_text() == ""
+    assert calls[0]["reads"] is None

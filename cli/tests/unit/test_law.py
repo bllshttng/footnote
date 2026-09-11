@@ -598,6 +598,41 @@ def _with_advance(tmp_path: Path) -> None:
     )
 
 
+def _scripted_gate(monkeypatch: pytest.MonkeyPatch, answer):
+    """Swap the evidence-gate transport for `answer(payload)`; the payloads
+    the lanes send stay assertable on the returned call list."""
+    calls: list[dict] = []
+
+    def _gate(payload):
+        calls.append(payload)
+        return answer(payload)
+
+    monkeypatch.setattr("fno.decide._evidence_gate", _gate)
+    return calls
+
+
+def _run_reads_answer(payload):
+    """A responder that actually runs the requested reads in the payload's
+    root, so the row stored on the ruling carries real command output."""
+    import subprocess
+
+    rows = []
+    for cmd in payload["reads"] or []:
+        done = subprocess.run(
+            cmd, shell=True, cwd=payload["root"], capture_output=True, text=True
+        )
+        rows.append(
+            {
+                "cmd": cmd,
+                "exit": done.returncode,
+                "out_head": "\n".join(done.stdout.splitlines()[:5]),
+                "ts": "2026-09-10T00:00:00Z",
+                "head_sha": "",
+            }
+        )
+    return {"ok": True, "rows": rows}
+
+
 def test_code_fact_with_no_read_is_refused_with_exit_3(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -606,6 +641,17 @@ def test_code_fact_with_no_read_is_refused_with_exit_3(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
     _with_advance(tmp_path)
+    calls = _scripted_gate(
+        monkeypatch,
+        lambda payload: {
+            "ok": False,
+            "kind": "unmeasured",
+            "message": (
+                "the ruling asserts a code fact ('advance.py:167') and carries "
+                "no read. Attach --read with the command that produced it."
+            ),
+        },
+    )
 
     result = _run(
         [
@@ -621,6 +667,8 @@ def test_code_fact_with_no_read_is_refused_with_exit_3(
     assert "Nothing was recorded." in result.output
     assert "advance.py:167" in result.output
     assert index.read_text() == ""
+    assert calls[0]["reads"] is None
+    assert "advance.py:167" in calls[0]["text"]
 
 
 def test_code_fact_with_a_read_records_the_executed_row(
@@ -631,6 +679,7 @@ def test_code_fact_with_a_read_records_the_executed_row(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
     _with_advance(tmp_path)
+    calls = _scripted_gate(monkeypatch, _run_reads_answer)
 
     result = _run(
         [
@@ -645,6 +694,7 @@ def test_code_fact_with_a_read_records_the_executed_row(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    assert calls[0]["reads"] == ["head -5 advance.py"]
     rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
     reads = rows[0]["data"]["reads"]
     assert reads[0]["cmd"] == "head -5 advance.py"
@@ -660,6 +710,14 @@ def test_contradicted_citation_is_refused_even_with_a_read(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
     _with_advance(tmp_path)
+    calls = _scripted_gate(
+        monkeypatch,
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "advance.py:99999: the file has 200 lines.",
+        },
+    )
 
     result = _run(
         [
@@ -676,6 +734,7 @@ def test_contradicted_citation_is_refused_even_with_a_read(
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "99999" in result.output
     assert index.read_text() == ""
+    assert calls[0]["reads"] == ["head -5 advance.py"]
 
 
 def test_attended_operator_records_an_unmeasured_body_untouched(
@@ -719,6 +778,7 @@ def test_body_with_no_code_fact_records_with_no_reads_row(
     """AC15-EDGE: no claim, no change from today's behavior."""
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
+    calls = _scripted_gate(monkeypatch, lambda payload: {"ok": True, "rows": None})
 
     result = _run(
         [
@@ -733,3 +793,6 @@ def test_body_with_no_code_fact_records_with_no_reads_row(
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
     rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
     assert "reads" not in rows[0]["data"]
+    assert calls[0]["text"] == (
+        "Merges belong to the operator\nThe operator owns durable policy."
+    )

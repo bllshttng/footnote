@@ -25,7 +25,7 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
-from fno.decide.evidence import READ_HELP
+from fno.decide import READ_HELP
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     _build_backlog_node,
@@ -2969,7 +2969,7 @@ def cmd_note(
     king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
     fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
     """
-    from fno.decide.evidence import (
+    from fno.decide import (
         UnresolvableCitationError,
         note_evidence,
         unmeasured_note_warning,

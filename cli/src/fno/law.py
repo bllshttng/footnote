@@ -15,7 +15,7 @@ import re
 
 import typer
 
-from fno.decide.evidence import READ_HELP
+from fno.decide import READ_HELP
 
 DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 COORDINATION_MARKERS = (

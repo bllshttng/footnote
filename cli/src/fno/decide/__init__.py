@@ -361,6 +361,131 @@ def require_marked_caller() -> str:
     raise UnattributedAuthorityError()
 
 
+# ── the evidence gate: a code fact carries the read that produced it ──────────
+# A measured claim and an assumed one are written identically, so a ruling
+# body asserting a code fact must carry `--read`: the command that produced
+# it, RUN at record time, exit code and output head stored on the row. The
+# checker and the bounded read runner live in the Rust runtime
+# (`fno-agents evidence-gate`, crates/fno-agents/src/evidence.rs); these are
+# the transport bridge and the flag/error surface the two ruling lanes use.
+# Full contract: docs/architecture/decision-record.md.
+READ_HELP = (
+    "The command that produced a code fact in this ruling. It is RUN at "
+    "record time and its output stored on the row. Repeatable; pair a zero "
+    "with a control: a second read aimed at something known to be present."
+)
+
+
+class UnmeasuredClaimError(ValueError):
+    """A code fact stated with no read attached."""
+
+
+class UnresolvableCitationError(ValueError):
+    """A citation the repo contradicts."""
+
+
+def _evidence_gate(payload: "dict[str, Any]") -> "dict[str, Any]":
+    from fno.rust_binary import verb_call
+
+    # Reads are user commands, up to 5 at 20s each: the transport timeout must
+    # exceed the runner's own budget, or a lawful read dies as a transport
+    # failure instead of its own teaching refusal.
+    return verb_call("evidence-gate", payload, timeout=120)
+
+
+def _gate_error(answer: "dict[str, Any]") -> ValueError:
+    kind = answer.get("kind")
+    message = answer.get("message") or "the evidence gate refused without a reason"
+    if kind == "citation":
+        return UnresolvableCitationError(message)
+    return UnmeasuredClaimError(message)
+
+
+def check_ruling_evidence(
+    decision: str,
+    rationale: "str | None",
+    reads: "list[str] | None",
+) -> "list[dict[str, Any]] | None":
+    """Ruling-lane gate: the rows to store, or None when the body has no claim.
+
+    Order matters: a citation the repo contradicts is refused whatever is
+    attached to it, then a claim with no read. No claim, no change from
+    today's behavior.
+    """
+    from fno.paths import resolve_repo_root
+
+    answer = _evidence_gate(
+        {
+            "lane": "ruling",
+            "text": f"{decision}\n{rationale or ''}",
+            "reads": list(reads) if reads else None,
+            "root": str(resolve_repo_root()),
+            "timeout": 20,
+        }
+    )
+    if not answer.get("ok"):
+        raise _gate_error(answer)
+    return answer.get("rows") or None
+
+
+def note_evidence(
+    text: str,
+    reads: "list[str] | None",
+) -> "tuple[list[dict[str, Any]] | None, list[str] | None]":
+    """Note-lane gate: (rows, claims), each None when not applicable.
+
+    A contradicted citation RAISES (a note is a fact on the node even when
+    --quiet); a claim with no read only reports - the note verb advises,
+    never refuses a body.
+    """
+    from fno.paths import resolve_repo_root
+
+    answer = _evidence_gate(
+        {
+            "lane": "note",
+            "text": text,
+            "reads": list(reads) if reads else None,
+            "root": str(resolve_repo_root()),
+            "timeout": 20,
+        }
+    )
+    if not answer.get("ok"):
+        raise _gate_error(answer)
+    return answer.get("rows") or None, answer.get("claims") or None
+
+
+def unmeasured_note_warning(claims: "list[str]") -> str:
+    return (
+        f"note appended with an unmeasured code fact ('{claims[0]}'): a reader "
+        "cannot tell measured from assumed. Attach --read <command> - it runs "
+        "at record time and its output is stored; pair a zero with a control."
+    )
+
+
+def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
+    """Advise on a long note, never refuse one.
+
+    Why uncapped, and why the blunt multiplier:
+    docs/architecture/backlog-graph-verb-contracts.md.
+    """
+    from fno import style
+
+    try:
+        from fno.config import load_settings
+
+        cap = load_settings().style.word_cap.encounter
+    except Exception:  # noqa: BLE001 - an advisory must never break a write
+        cap = style.MESSAGE_WORD_CAP
+    count = style.word_count(text)
+    if count <= cap * 4:
+        return
+    print(
+        f"note appended ({count} words). Long evidence belongs in a plan doc; "
+        "a note carrying a path is cheaper for every later reader.",
+        file=stream,
+    )
+
+
 def record_decision(
     *,
     decision: str,
@@ -427,8 +552,6 @@ def record_decision(
     # operator (an attended terminal; a waiver verb inherits this).
     read_rows = None
     if provenance.authority_source != "operator":
-        from fno.decide.evidence import check_ruling_evidence
-
         read_rows = check_ruling_evidence(decision, rationale, reads)
 
     # A waiver subject is operator-evidence-only (see WAIVER_SUBJECT_PREFIX).
