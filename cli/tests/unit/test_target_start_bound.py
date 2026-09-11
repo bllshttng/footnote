@@ -9,12 +9,12 @@ only per-`recv`, not per attempt. This file covers the fix: `run_bounded`
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
@@ -42,12 +42,23 @@ def test_run_bounded_kills_the_whole_process_group_on_timeout(tmp_path: Path):
             timeout=1,
         )
 
-    # Positive control: the grandchild really started, so an absent pid
-    # below is proof of the kill, not proof the script never ran.
+    # Positive control: the grandchild really started, so a dead pid below
+    # is proof of the kill, not proof the script never ran.
     assert pidfile.exists(), "grandchild never wrote its pid; nothing to prove the kill"
     pid = int(pidfile.read_text().strip())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    # A killed child can sit as a zombie until its new (post-killpg) parent
+    # reaps it, so poll briefly rather than require instant disappearance.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            status = psutil.Process(pid).status()
+        except psutil.NoSuchProcess:
+            status = None
+        if status in (None, psutil.STATUS_ZOMBIE):
+            break
+        if time.monotonic() > deadline:
+            pytest.fail(f"grandchild pid {pid} still alive (status={status!r}) after kill")
+        time.sleep(0.05)
 
 
 def test_run_bounded_returns_a_completed_process_like_subprocess_run():

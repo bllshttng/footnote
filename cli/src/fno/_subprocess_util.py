@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def fno_py_cmd() -> list[str]:
@@ -65,7 +66,7 @@ def run_bounded(
     timeout: float,
     capture_output: bool = False,
     text: bool = False,
-    **popen_kwargs: object,
+    **popen_kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Like ``subprocess.run(cmd, timeout=timeout)``, but on timeout or
     interrupt kills the whole process group, not just the direct child --

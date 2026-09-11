@@ -3365,7 +3365,9 @@ def start(
     by ``run_bounded`` so it cannot outlive that same deadline.
     """
     deadline = time.monotonic() + _START_DEADLINE_S
-    faulthandler.dump_traceback_later(_START_DEADLINE_S, exit=True, file=sys.__stderr__)
+    faulthandler.dump_traceback_later(
+        _START_DEADLINE_S, exit=True, file=sys.__stderr__  # type: ignore[arg-type]
+    )
     try:
         _start_body(
             node, plan_path, size, model, harness, _provider_tombstone,
