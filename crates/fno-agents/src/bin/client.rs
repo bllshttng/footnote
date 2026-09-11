@@ -84,6 +84,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "resume-argv",
     "review-start",
     "rm",
+    "scratch",
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
@@ -227,6 +228,15 @@ async fn run(args: Vec<String>) -> i32 {
     // fno verb is added. The socket round-trip needs the user's daemon.
     if matches!(verb, "review-start") {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
+    }
+
+    // `scratch` is the scratch-shape sweep (x-caf8): `fno doctor scratch
+    // sweep|report` routes here binary-direct via the Python leaf. Matched
+    // with `matches!` like `mail-inject` so the routable-verb parity guard
+    // does not see it - it is not an `fno agents` verb; the doctor group
+    // owns its surface.
+    if matches!(verb, "scratch") {
+        return fno_agents::scratch::run_cli(&args[1..]);
     }
 
     // `codex-assign-project` is the hidden project-assignment verb (x-dc97):

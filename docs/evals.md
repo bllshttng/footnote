@@ -87,6 +87,18 @@ The report has two wired consumers from day one, so the harness is not a write-o
 1. With history, `fno backlog triage health` shows an `evals` line: regression pass rate, flake count, age, STALE.
 2. CI-flake suites live as regression tasks, making the flake ledger a graded artifact instead of memory notes.
 
+## Scratch-shape sweep
+
+Agents author throwaway scripts under `~/.claude/jobs/<job>/tmp/`. The scratch-shape sweep (`fno doctor scratch sweep`) notices a recurring question and files one p1 node for it. The census behind the rule table, and the remedy rank per shape, live in the crate's scratch module documentation. That rule table is the shipped classifier.
+
+- **What it reads.** `<jobs>/*/tmp/**/*.py|sh` files with mtime inside the window. The window defaults to 28 days (`config.evals.scratch_window_days`). A file whose git blob hash is in repo history is a copy of source. Flat copies report as the `copy_for_diff` shape. A copy under a directory holding `__init__.py`, `.git` or `pyproject.toml` is checkout residue and is skipped. Only what survives is authored scratch.
+- **The recurrence unit is (job, shape).** Files per job measure one agent's habit. Distinct jobs measure the fleet's need. One king writing 158 mail wrappers in a night is one recurrence. Each new pair emits one `scratch_shape_observed` row to the global journal. A pair already recorded inside the window never re-emits, so a re-run the same day is a no-op.
+- **Threshold: three jobs.** Set `config.evals.scratch_threshold`, default 3. In the census, every shape at three or more jobs had a verb remedy. Every shape at two or fewer was one-off or other-project. Two can be one agent twice, because a resume mints a new job dir. Shapes rank by jobs, then files.
+- **One node per run.** `MAX_FILES_PER_SWEEP` is 1. A long list of new nodes is the failure the operator named. Five shapes crossing in one day file one node today. The next files tomorrow. A shape whose `scratch_shape_filed` row names a live node folds onto it (`--wave-of`, no new id). A node done inside the window suppresses. A node done before the window refiles with `--caused-by`.
+- **State words on stdout.** One per line, never silent: `ok`, `insufficient: <reason>`, `filed:<id>`, `folded:<id>`, `suppressed:<id>`, and `would-file:<shape>` under `--dry-run`. The sweep classifies shipped fixture specimens before touching the real jobs dir. A classifier that finds nothing there prints `insufficient: control failed` and emits nothing. A broken classifier can never read as a quiet machine.
+- **Verb hint.** Details name the census rule, the file and job counts, and the three newest specimens. The remedy names the existing verb plus its missing flag, or `no verb today: ...`. Before filing, the sweep probes `fno help <group> --all`. That surface lists hidden leaves, and `fno <group> --help` does not. A remedy that ships hidden is named as existing, never filed as missing.
+- **Reading it.** `fno doctor scratch report` renders the ranked table from the journal: shape, files, jobs, monitors, first and last seen, filed node. `--json` serves machines. The sweep runs as stage five of the daily eval-sweep ignition. It is bounded and logged to `.fno/logs/eval-sweep.log` like every other stage.
+
 ## Context-to-outcome trace
 
 `fno whoami scoreboard --plan-fidelity` derives a context-to-outcome trace from the ledger, backlog graph, and canonical event journal.
