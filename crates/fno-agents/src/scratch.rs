@@ -1297,7 +1297,9 @@ pub fn run_cli(args: &[String]) -> i32 {
             // answer feeds, which is the kind docs/architecture/rust-python-seam.md
             // names legitimate.
             let mut fno = |argv: &[&str]| -> Result<String, String> {
-                let out = std::process::Command::new("fno").args(argv).output();
+                let out = std::process::Command::new(crate::scrape::fno_bin())
+                    .args(argv)
+                    .output();
                 match out {
                     Ok(o) if o.status.success() => {
                         Ok(String::from_utf8_lossy(&o.stdout).into_owned())

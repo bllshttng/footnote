@@ -73,7 +73,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `nudge.rs:35` | conforming | inbox nudge read through the durable channel owner |
 | `provider.rs:544` | violating | a Rust-owned sandbox decision fed by a Python-owned plan-path fact, the split the FFI ruling refuses |
 | `reentry.rs:120` | conforming | account binding read from the store, never reimplemented |
-| `scratch.rs:1300` | conforming | node birth + hidden-leaf probe through the porcelain; the sweep does not own the filing decision, `backlog idea` does |
+| `scratch.rs:1300` | conforming | node birth + hidden-leaf probe through the `fno_bin` resolver's porcelain; the sweep does not own the filing decision, `backlog idea` does |
 | `scrape.rs:174` | infrastructure | the resolver helper itself |
 | `scrape.rs:276` | conforming | pane title sweep read through the pane owner |
 | `spawn_gate.rs:378` | conforming | gate-escape telemetry through the event emit path |
