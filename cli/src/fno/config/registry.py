@@ -569,7 +569,7 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
     ),
     "routing.enforce_inventory": Meta(
-        "never", "Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only; explicit flags constrain, never bypass, and an unresolvable request is a named refusal. Default off.",
+        "never", "Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only, and an unresolvable request is a named refusal. A typed --model, -P, or --route is an operator pin and outranks the declared lanes; every axis the operator did not name still qualifies against them. Default off.",
     ),
     "routing.operator_access": Meta(
         "never", "The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.",

@@ -1198,18 +1198,37 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         return grid_leg(&payload, &rung_base, &mut chain);
     }
 
-    // An explicit model pin outranks the lanes (operator authority); it never
-    // borrows a lane's harness or capacity. Config defaults do NOT outrank
-    // lanes; only a typed flag does. Strict routing instead qualifies the
-    // explicit coordinate against the effective slot's membership.
-    if strict_ctx.is_none()
-        && payload
-            .get("explicit_model")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    // A typed model/vendor/route flag is an operator pin (operator authority)
+    // and outranks the lanes under both grid and strict routing: it never
+    // borrows a lane's harness or capacity, and it returns before the strict
+    // membership walk and the operator_access filter inside it. Config
+    // defaults do NOT outrank lanes; only a typed flag does, because these
+    // value fields are argv-only facts (spawn_defaults.py never sets them
+    // from config injection).
+    let explicit_model_name = payload
+        .get("explicit_model_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_route_name = payload
+        .get("explicit_route_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_vendor_name = payload
+        .get("explicit_vendor_value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if explicit_model_name.is_some()
+        || explicit_route_name.is_some()
+        || explicit_vendor_name.is_some()
     {
         chain.push(json!(
-            "slot=model-pin-override (an explicit model outranks the lanes)"
+            "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
         ));
         return none(chain);
     }
@@ -1285,119 +1304,6 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-
-    // Strict: an explicit coordinate is a CONSTRAINT on the slot's membership,
-    // never a bypass. The walk keeps only the lanes naming that exact
-    // coordinate; a coordinate no row names is the named refusal.
-    let mut plan = plan;
-    if strict_ctx.is_some() {
-        let explicit_model_name = payload
-            .get("explicit_model_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let explicit_route_name = payload
-            .get("explicit_route_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let explicit_vendor_name = payload
-            .get("explicit_vendor_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if let Some(v) = &explicit_vendor_name {
-            // The vendor pin bills whoever it names, so only a row whose
-            // route names that same vendor may satisfy it; a row with no
-            // vendor route is the native coordinate, never the pin's.
-            let vendor_of = |r: Option<&Value>| -> String {
-                r.map(|row| row_value(row, "route"))
-                    .unwrap_or_default()
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
-            };
-            let member = plan
-                .iter()
-                .any(|(_, rn)| vendor_of(rows.get(rn)).as_str() == v.as_str());
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit vendor {v:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit vendor is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if let Some(m) = &explicit_model_name {
-            let member = plan.iter().any(|(_, rn)| {
-                rows.get(rn).map(|r| row_value(r, "model")).as_deref() == Some(m.as_str())
-            });
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit model {m:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit model is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if let Some(rt) = &explicit_route_name {
-            let member = plan.iter().any(|(_, rn)| {
-                rows.get(rn).map(|r| row_value(r, "route")).as_deref() == Some(rt.as_str())
-            });
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit route {rt:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit route is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if explicit_model_name.is_some()
-            || explicit_route_name.is_some()
-            || explicit_vendor_name.is_some()
-        {
-            let vendor_of = |r: Option<&Value>| -> String {
-                r.map(|row| row_value(row, "route"))
-                    .unwrap_or_default()
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
-            };
-            plan.retain(|(_, rn)| {
-                let r = rows.get(rn);
-                let model_ok = explicit_model_name
-                    .as_ref()
-                    .map(|m| r.map(|row| row_value(row, "model")).as_deref() == Some(m.as_str()));
-                let route_ok = explicit_route_name
-                    .as_ref()
-                    .map(|rt| r.map(|row| row_value(row, "route")).as_deref() == Some(rt.as_str()));
-                let vendor_ok = explicit_vendor_name
-                    .as_ref()
-                    .map(|v| vendor_of(r).as_str() == v.as_str());
-                model_ok.unwrap_or(true) && route_ok.unwrap_or(true) && vendor_ok.unwrap_or(true)
-            });
-        }
-    }
 
     let mut demoted: Vec<(usize, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
@@ -2656,7 +2562,7 @@ mod tests {
             "vendor_counts": {}, "vendor_caps": {}, "vendor_count_errors": {},
             "thread_seatable": {}, "substrate": null, "permission_mode": null,
             "constrain_harness": null,
-            "explicit_lane": false, "explicit_model": false, "gate_bypassed": false,
+            "explicit_lane": false, "gate_bypassed": false,
         });
         if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
             for (k, v) in ovr {
@@ -3202,7 +3108,12 @@ mod tests {
     }
 
     #[test]
-    fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
+    fn strict_explicit_glm_pins_the_model_outranking_the_lanes() {
+        // A typed --model is an operator pin: under strict routing it
+        // outranks lane membership entirely, even when no declared lane
+        // names it. This used to be a named refusal; the law (d-dd8e2743)
+        // says a typed flag is the operator's own statement of intent, and
+        // strict exists to bound the MACHINE's autonomous choice, not this.
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",
             "declared_rows": {
@@ -3212,16 +3123,20 @@ mod tests {
             "explicit_model_value": "glm",
         })));
         assert_eq!(out["status"], "none");
-        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert_eq!(out["verdict"], "unarmed");
+        assert!(out["refusal"].is_null());
         assert!(chain_of(&out)
             .iter()
-            .any(|l| l.contains("slot=strict-refusal explicit model \"glm\"")));
+            .any(|l| l.contains("slot=operator-pin-override")));
     }
 
     #[test]
-    fn strict_explicit_vendor_pin_qualifies_against_the_route_vendor() {
-        // The model matches a row on ANOTHER vendor too, but the -P pin names
-        // zai: only the row whose route bills zai survives the walk.
+    fn strict_explicit_vendor_pin_overrides_the_lanes_even_when_one_matches() {
+        // The pin branch returns before the lane walk runs at all, so it
+        // never borrows a lane's route or account - not even a lane the pin
+        // happens to match. Two pins here: one that could have matched a
+        // declared lane, one that names a vendor no lane declares. Both take
+        // the same operator-pin-override exit with no candidate.
         let out = resolve_slot_payload(&strict_payload(json!({
             "policy": {"enforce_inventory": true, "operator_access": "local"},
             "node": {"difficulty": "medium", "priority": "p1", "plan_path": "/plans/p.md"},
@@ -3236,13 +3151,13 @@ mod tests {
             "explicit_model_value": "glm",
             "explicit_vendor_value": "zai",
         })));
-        assert_eq!(out["status"], "pick");
-        assert_eq!(
-            out["candidate"]["lane_fields"]["route"],
-            "zai/glm-5.3-flash[1m]"
-        );
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
 
-        // The pin names a vendor no lane's route declares: refusal by name.
         let out = resolve_slot_payload(&strict_payload(json!({
             "declared_rows": {
                 "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
@@ -3251,10 +3166,43 @@ mod tests {
             "explicit_vendor_value": "zai",
         })));
         assert_eq!(out["status"], "none");
-        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert!(out["refusal"].is_null());
         assert!(chain_of(&out)
             .iter()
-            .any(|l| l.contains("slot=strict-refusal explicit vendor \"zai\"")));
+            .any(|l| l.contains("slot=operator-pin-override")));
+    }
+
+    #[test]
+    fn strict_explicit_route_pin_outranks_the_lanes_with_no_model_or_vendor() {
+        // A bare --route (no -m, no -P) is still an operator pin: the third
+        // coordinate follows the same rule as model and vendor.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        assert!(out["refusal"].is_null());
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
+
+        // Same pin under grid (non-strict) routing: unconditional, same as
+        // model and vendor.
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": ["opus-x"],
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5"},
+            },
+            "explicit_route_value": "zai/glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
     }
 
     #[test]

@@ -24,7 +24,9 @@ class RoutingBlock(BaseModel):
     # a type test at a reader is the trap (x-947c), never the cure.
     models: list[dict[str, Any]] = Field(default_factory=list)
     # Opt-in strict inventory (default off): a spawn qualifies against the
-    # work-kind slot's declared lanes only; a pin constrains, never bypasses.
+    # work-kind slot's declared lanes only. A typed --model, -P or --route is
+    # an operator pin and outranks the declared lanes; every axis the
+    # operator did not name still qualifies against them.
     enforce_inventory: bool = False
     # The operator's access posture: local, remote, or unknown (filters like
     # remote). Declared through config, never inferred.

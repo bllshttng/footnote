@@ -268,7 +268,6 @@ def resolve_slot(
     role: Optional[str] = None,
     protected_role: Optional[str] = None,
     model_occupied: bool = False,
-    explicit_model: bool = False,
     explicit_lane: bool = False,
     work_verb: Optional[str] = None,
     explicit_model_value: Optional[str] = None,
@@ -302,7 +301,7 @@ def resolve_slot(
             capacity=capacity, inventory=inventory, settings=settings,
             substrate=substrate, permission_mode=permission_mode,
             constrain_harness=constrain_harness, explicit_lane=explicit_lane,
-            explicit_model=explicit_model, gate_bypassed=gate_bypassed,
+            gate_bypassed=gate_bypassed,
             role=role, protected_role=protected_role,
             model_occupied=model_occupied,
             work_verb=work_verb or verb,
@@ -520,7 +519,7 @@ def _slot_payload(
     *, rung_base: str, profile: Optional[object], lanes: Any, node: Optional[Mapping],
     capacity: Optional[Mapping[str, object]], inventory: Optional[Any], settings: object,
     substrate: Optional[str], permission_mode: Optional[str], constrain_harness: Optional[str],
-    explicit_lane: bool, explicit_model: bool, gate_bypassed: bool,
+    explicit_lane: bool, gate_bypassed: bool,
     role: Optional[str] = None, protected_role: Optional[str] = None,
     model_occupied: bool = False,
     work_verb: Optional[str] = None,
@@ -553,7 +552,6 @@ def _slot_payload(
         "permission_mode": permission_mode,
         "constrain_harness": constrain_harness,
         "explicit_lane": explicit_lane,
-        "explicit_model": explicit_model,
         "gate_bypassed": gate_bypassed,
         "thread_seatable": _thread_seatable(
             [str(r.get("harness", "")) for r in rows.values()]
@@ -637,7 +635,7 @@ def slot_states(
         rung_base=rung_base, profile=_profile, lanes=lanes, node=None,
         capacity=capacity, inventory=inventory, settings=settings,
         substrate=None, permission_mode=None, constrain_harness=None,
-        explicit_lane=False, explicit_model=False, gate_bypassed=False,
+        explicit_lane=False, gate_bypassed=False,
     )
     payload["mode"] = "states"
     states: dict[str, Any] = {}
