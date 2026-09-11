@@ -42,6 +42,10 @@ fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// Serializes the tests that point process-global env at temp dirs, the
+/// same shape king_board's HOME_LOCK guards.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The king_quiet_scope fixture with the drain fake swapped for `body`:
 /// quiet board, resolving epic scope, fast board subprocesses, and a
 /// `--read-timeout-ms` small enough that a hanging drain dies inside it.
@@ -131,6 +135,7 @@ fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 5], Vec<String>) {
 
 #[test]
 fn a_killed_drain_names_its_timeout_never_a_bare_unreadable() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_dir, _env, args) = quiet_fire("#!/bin/sh\nsleep 5\n");
     let (code, output) = run_loop_check_capture(&args);
     let payload: Value = serde_json::from_str(&output).unwrap();
@@ -153,6 +158,7 @@ fn a_killed_drain_names_its_timeout_never_a_bare_unreadable() {
 
 #[test]
 fn a_failed_drain_quotes_the_command_failure() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_dir, _env, args) =
         quiet_fire("#!/bin/sh\necho 'collector exploded: cannot compile scope' >&2\nexit 3\n");
     let (code, output) = run_loop_check_capture(&args);
