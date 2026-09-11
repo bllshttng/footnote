@@ -554,8 +554,8 @@ def tier3_pane_tokens(
 
     def unsupported(flag: str) -> "list[str]":
         raise DispatchAskError(
-            f"{flag} is not supported for harness {provider!r}; drop it or pick "
-            "a harness that maps it",
+            f"{flag} is not supported for harness {provider!r}; if it is the "
+            "harness's own flag, pass it after the -- fence",
             exit_code=2,
         )
 

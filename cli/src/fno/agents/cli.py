@@ -1057,7 +1057,14 @@ def cmd_spawn(
         ),
     ),
     cwd: str | None = typer.Option(
-        None, "--cwd", "-c", help="Working directory for the agent subprocess."
+        None,
+        "--cwd",
+        "-c",
+        help=(
+            "Working directory for the agent subprocess. On spawn, -c is "
+            "--cwd; a harness's own -c config spelling rides the -- fence "
+            "instead (codex: -- -c key=value)."
+        ),
     ),
     timeout: int | None = typer.Option(
         None,
@@ -1332,6 +1339,17 @@ def cmd_spawn(
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
+    # `-c` is `--cwd` on spawn. The operator template types codex's own
+    # `-c key=value` config spelling here, which silently becomes a working
+    # directory; stop before launch and name the fence that carries it.
+    if cwd and not Path(cwd).exists():
+        print(
+            f"working directory {cwd!r} does not exist; no worker launched. "
+            "On spawn, -c is --cwd. Codex config overrides ride the fence: "
+            "-- -c key=value",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
     # x-85fe: the effective launch dir surfaces in the receipt on the DEFAULT
     # move (a node-less spawn now lands on canonical), coupled with the stderr
     # redirect note. An explicit --cwd (incl. -P/node-resolved) is the caller's
@@ -1414,6 +1432,27 @@ def cmd_spawn(
 
     # The substrate axis (x-2c27): headless is the ergonomic shortcut (x-c772);
     # an empty value resolves to the built-in default (thread where seated).
+    from fno.agents.harness_map import DispatchResolveError, thread_seatable, thread_uncarried
+
+    # A flag the harness's thread lane cannot carry (a typed axis or a fenced
+    # token) resolves pane, the same way pane geometry does. One fenced token
+    # with no message is the legacy seed idiom; the pane is where that seed
+    # has ever been read, so it demotes there too.
+    uncarried = thread_uncarried(
+        harness,
+        {
+            "model": model,
+            "yolo": yolo,
+            "permission_mode": permission_mode,
+            "effort": effort,
+            "add_dir": add_dir,
+            "launch_role": role,
+            "agent": agent,
+            "tools": tools,
+            "deny_tools": deny_tools,
+        },
+        passthrough,
+    )
     defaulted = False
     if headless:
         substrate = "headless"
@@ -1422,11 +1461,9 @@ def cmd_spawn(
     if not substrate:
         # Empty = unset: pane capability implies pane; else thread where seated.
         defaulted = True
-        from fno.agents.harness_map import DispatchResolveError, thread_seatable
-
         pane_implied = bool(
             passthrough or split or at or tab or bounded_placement or squad
-            or monitor is not None
+            or monitor is not None or uncarried is not None
         )
         try:
             seatable = thread_seatable(harness)
@@ -1441,12 +1478,22 @@ def cmd_spawn(
     # claude+once+not-headless and die on the "persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    # Passthrough rides only the PANE argv; the seam covers explicit flags.
-    if passthrough and (substrate != "pane" or once):
-        from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
-
-        print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
-        raise typer.Exit(code=2)
+    # A thread seat meeting an uncarried flag demotes loudly, whether the
+    # seat was named or defaulted: the operator typed the flag expecting it
+    # to land, so the move to pane names itself. An explicit pane or a
+    # headless one-shot is the operator's own choice and stays silent.
+    if (
+        uncarried is not None
+        and substrate != "headless"
+        and (defaulted or substrate in ("thread", "bg"))
+    ):
+        if substrate in ("thread", "bg"):
+            substrate = "pane"
+        print(
+            f"fno agents spawn: substrate: pane (the {harness} thread lane "
+            f"has no carrier for {uncarried})",
+            file=sys.stderr,
+        )
 
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
@@ -1498,8 +1545,16 @@ def cmd_spawn(
     # claude's bg lane honors a mapped --permission-mode via the Python fallback
     # (dispatch_spawn -> _claude_create_path); codex/gemini one-shot lanes
     # hardcode their own bypass and can't express a mapped mode. The pane
-    # substrate maps every provider, so it's exempt here. (x-dfa4)
-    if permission_mode is not None and harness != "claude" and (substrate != "pane" or once):
+    # substrate maps every provider, so it's exempt here. (x-dfa4) The codex
+    # thread lane is exempt too: the shared app-server resolves the posture
+    # (resolve_thread_posture), so a mapped mode rides it natively.
+    codex_thread_lane = harness == "codex" and substrate in ("thread", "bg") and not once
+    if (
+        permission_mode is not None
+        and harness != "claude"
+        and (substrate != "pane" or once)
+        and not codex_thread_lane
+    ):
         remedy = (
             "drop --permission-mode and pass -Y/--yolo"
             if harness == "codex"
@@ -1531,11 +1586,11 @@ def cmd_spawn(
             bad = "--deny-tools"
         if bad is not None:
             # No "use --substrate pane" advice: pane rejects the same tier3 cells
-            # (gemini --add-dir, codex --agent), so it would mislead. Mirror the
-            # tier3_pane_tokens wording instead.
+            # (gemini --add-dir, codex --agent), so it would mislead. The fence
+            # is the one carrier for the harness's own flag spelling.
             print(
-                f"{bad} is not supported for harness {harness!r}; "
-                "drop it or use a harness that maps it",
+                f"{bad} is not supported for harness {harness!r}; if it is the "
+                "harness's own flag, pass it after the -- fence",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
