@@ -97,11 +97,9 @@ def note_recipients(
     def add(address: Optional[str], why: str) -> None:
         if not address or address in seen:
             return
-        # A role holder (`spawn-handover:<worker>`, `target-session:<sid>`)
-        # is a workflow marker, not an address: resolve it where the address
-        # is born; None means nobody stands behind it, a skip not a failure.
-        raw = address
-        address = holder_agent_name(address)
+        # A role holder is a marker, not an address; resolve it where the
+        # address is born. None means nobody is behind it: skip, not fail.
+        address, raw = holder_agent_name(address), address
         if not address or address in seen:
             return
         if self_session and (address.endswith(self_session) or raw.endswith(self_session)):

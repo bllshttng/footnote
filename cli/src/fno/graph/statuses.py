@@ -279,12 +279,9 @@ def live_worked_node_ids(
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose roster workers are live.
 
-    Three sources per node: the session-row join, the node-attributed fold
-    (a registry worker whose graph session row was never written), and the
-    unmeasurable fold (a live row with no session id, attributed by
-    fleet_rows). An unattributable unmeasurable row still refuses: unknown
-    liveness fails closed, so one worker never blanks the measure. Only a
-    graph with no non-terminal node skips the roster read.
+    Sources: the session-row join, the node-attributed fold (registry worker,
+    no graph session row), the unmeasurable fold (no session id, attributed
+    by fleet_rows). Unattributable liveness still refuses.
     """
     try:
         from fno.claims.roster import _really_finished, read_roster
@@ -309,14 +306,13 @@ def live_worked_node_ids(
                 continue
             workers: list[str] = []
             for row in entry.get("sessions") or []:
-                phase = row.get("phase") if isinstance(row, dict) else None
-                if not isinstance(phase, str) or not is_open_phase_row(row, phase):
+                if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                        and is_open_phase_row(row, row["phase"])):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])
-                if roster_row and not _really_finished(roster_row):
-                    worker = roster_row.get("name")
-                    if isinstance(worker, str) and worker:
-                        workers.append(worker)
+                worker = roster_row and not _really_finished(roster_row) and roster_row.get("name")
+                if isinstance(worker, str) and worker and worker not in workers:
+                    workers.append(worker)
             for extra in reading.workers_on(node_id):
                 if _really_finished(extra):
                     continue

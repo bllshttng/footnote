@@ -461,9 +461,8 @@ ADVISORY_WARNING_PREFIX = "roster advisory: "
 #: probe that took a while still returned every row.
 HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
 
-#: Structured line for a live row whose harness session id is missing:
-#: advisory, because the roster still returned every other row; the payload
-#: names the node so the worked overlay skips the one row (x-ae54).
+#: Advisory structured line for a live row with no harness session id; the
+#: payload names the node so the overlay skips the one row (x-ae54).
 UNMEASURABLE_ROW_PREFIX = "unmeasurable-row: "
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a

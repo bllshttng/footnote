@@ -997,17 +997,16 @@ def compare_and_rebind(
 #: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
-#: The requeue pseudo-holder (`backlog/requeue`): the invoking session that
-#: will take the node, not an agent. `holder_agent_name` is the one resolver.
+#: The requeue pseudo-holder (`backlog/requeue`): the session that takes the
+#: node, not an agent. `holder_agent_name` is the one resolver.
 TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 
 
 def holder_agent_name(holder: Optional[str]) -> Optional[str]:
     """Resolve a claim holder to the agent behind it, or None.
 
-    Role holders name a worker or a session, not an address; None means no
-    registry row stands behind the name, so there is nobody to reach - a
-    skip, not a failure. An unprefixed holder passes through.
+    None means no registry row stands behind the name: a skip, not a
+    failure.
     """
     if not holder:
         return None
@@ -1018,22 +1017,20 @@ def holder_agent_name(holder: Optional[str]) -> Optional[str]:
         return name if any(row.name == name for row in load_registry()) else None
     if holder.startswith(TARGET_SESSION_HOLDER_PREFIX):
         sid = holder[len(TARGET_SESSION_HOLDER_PREFIX):]
-        name = next(
+        row = next(
             (
-                row.name
-                for row in load_registry()
-                if sid
-                in {
-                    row.harness_session_id,
-                    getattr(row, "cc_session_id", None),
-                    getattr(row, "session_id", None),
+                r
+                for r in load_registry()
+                if sid in {
+                    r.harness_session_id,
+                    getattr(r, "session_id", None),
+                    getattr(r, "cc_session_id", None),
                 }
             ),
             None,
         )
-    else:
-        return holder
-    return name or None
+        return row.name if row else None
+    return holder
 
 #: Suffix of the per-claim recovery mutex directory. One definition: this
 #: string was written out at six call sites, and a seventh (the dispatch
