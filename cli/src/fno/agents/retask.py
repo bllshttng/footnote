@@ -27,6 +27,10 @@ from fno.agents.spawn_defaults import inject_spawn_defaults
 class RetaskTransportError(RuntimeError):
     """A pane read or send exceeded its bounded transport timeout."""
 
+    def __init__(self, reason: str, detail: Optional[str] = None):
+        super().__init__(reason)
+        self.detail = detail
+
 
 @dataclass(frozen=True)
 class RetaskCoordinate:
@@ -193,8 +197,15 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    if invoke(["mux", "thread", "--server", session, thread_id], 30).returncode:
-        raise RetaskTransportError("thread_view_unavailable")
+    # The door answers the row NAME, not the session uuid (portal_reach.rs
+    # row_answers_key): the fno_id check above only guards the join below.
+    door = invoke(["mux", "thread", "--server", session, entry.name], 30)
+    if door.returncode:
+        lines = (door.stderr or door.stdout or "").strip().splitlines()
+        raise RetaskTransportError(
+            "thread_view_unavailable",
+            detail=lines[-1] if lines else f"exit {door.returncode}",
+        )
     # The pane opened above stays open on a join miss and its name stamping
     # can lag the open, so the join retries; the miss names the opened pane.
     for _ in range(3):
@@ -846,6 +857,8 @@ def run_retask(
             "target_submit_confirmed": False,
             "reason": str(exc),
         }
+        if exc.detail:
+            receipt["detail"] = exc.detail
         if renamed_name[0] != entry.name:
             receipt["registry_name"] = renamed_name[0]
         return receipt

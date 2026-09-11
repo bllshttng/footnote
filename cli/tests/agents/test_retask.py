@@ -1002,3 +1002,58 @@ def test_thread_viewport_refusal_names_the_substrate_and_cause() -> None:
     assert "worker_has_no_thread_ref" in message
     assert entry.name in message
     assert "thread" in message
+
+
+def test_thread_viewport_reaches_by_registry_name_and_joins_the_opened_pane(
+    monkeypatch,
+) -> None:
+    """AC1-HP: the door is keyed by the row name; the join still matches fno_id."""
+    import fno.agents.retask as retask
+
+    entry = _row(harness="claude", substrate="thread", mux=None, fno_id="F", name="bp-x")
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "thread" in argv:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"name": "bp-x", "fno_id": "F", "pane_id": 7}]),
+            stderr="",
+        )
+
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_args, **_kwargs: "main")
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    assert retask.resolve_thread_viewport(entry) == ("main", 7)
+    assert calls[0] == ["fno", "mux", "thread", "--server", "main", "bp-x"]
+
+
+def test_run_retask_thread_door_refusal_carries_the_door_stderr(monkeypatch) -> None:
+    """AC1-ERR: the refusal keeps reason thread_view_unavailable and adds the
+    door's own stderr line as detail, so a caller can tell a reach miss from a
+    broken pipe."""
+    import fno.agents.retask as retask
+
+    row = _row(harness="claude", substrate="thread", mux=None, fno_id="F")
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    stderr_line = "fno mux thread: portal reach: no live row answers bp-xbdb9-retask"
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_a, **_k: target)
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_a, **_k: "main")
+    monkeypatch.setattr("fno.agents.dispatch._mux_recipient_transcript", lambda _entry: None)
+
+    def run(_argv, **_kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr=stderr_line)
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "thread_view_unavailable"
+    assert receipt["detail"] == stderr_line
+    assert receipt["cleared"] is False
