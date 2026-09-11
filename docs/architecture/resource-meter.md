@@ -8,7 +8,7 @@ The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is A
 
 ## What you get without macmon
 
-Two arms still work, because they read fno's own numbers. The cpu-admission arm reads the fleet's share of CPU capacity through the same decider the spawn gate uses (`cpu_admission`), so the advisor can never disagree with a refusal. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
+Two arms still work, because they read fno's own numbers. The cpu-admission arm reads the fleet's share of CPU capacity through `cpu_admission`, the same decider the spawn gate uses. The advisor can never disagree with a refusal. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
 
 ## Why whole-machine
 
