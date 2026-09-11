@@ -845,6 +845,10 @@ pub fn classify_with_basis_and_exclusivity(
             })
     };
     if is_expired(rec, now) {
+        // A review hold is a lease on the review; the holder's session answers another question.
+        if rec.key.starts_with("review:branch:") {
+            return (ClaimState::Stale, basis::TTL_EXPIRED);
+        }
         // Boot-window reservation (x-41f7): every `dispatch:` record names the
         // DISPATCHING process in its holder and carries that process's pid, so
         // the recorded pid IS the verdict. The session witness is never

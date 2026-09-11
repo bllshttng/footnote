@@ -483,6 +483,48 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
     assert claim_status(key, root=tmp_path)["state"] == "free"
 
 
+def test_an_expired_hold_clears_while_its_holder_still_runs(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """x-b5f6, leg two: the hybrid arm read this process's prover-proven pid as
+    Live, so a hold whose TTL lapsed 7 hours earlier still blocked its bystander
+    for as long as the reviewer session ran. A review hold is a lease: it lapses
+    on its TTL whether or not the holder session still runs. Reads the native
+    verdict, so it fails against a binary without the review:branch: arm."""
+    import os
+
+    from fno.claims.core import claim_status
+
+    key = _review_hold.review_hold_key("feature/x")
+    acquire_claim(
+        key,
+        "review-session:s1",
+        ttl_ms=60_000,
+        pid=os.getpid(),
+        pid_provenance="session-prover",
+        harness="claude",
+        harness_session_id="s1",
+        root=tmp_path,
+    )
+    # Control: before expiry the hold blocks, whatever the expiry arm does.
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
+    )
+    assert activity.blocked is True
+    assert activity.blocker == "review_in_flight"
+
+    _expire_claim(tmp_path, key)
+    emitted: list[dict] = []
+    monkeypatch.setattr(_review_hold, "_emit_expired", lambda **kw: emitted.append(kw))
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
+    )
+    assert activity.blocked is False
+    assert emitted and emitted[0]["holder"] == "review-session:s1"
+    assert "expired" in capsys.readouterr().err
+    assert claim_status(key, root=tmp_path)["state"] == "free"
+
+
 # ---- the review-cap invocation gate ----
 #
 # The two-round cap was enforced at the merge decision only, so rounds three
