@@ -86,6 +86,14 @@ struct Fleet {
     dir: PathBuf,
 }
 
+impl Drop for Fleet {
+    // The fleet dir is a fake HOME; a panic must reap it too, or the leaked
+    // scratch outlives the run that made it (x-7ca7 wave 2).
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
 impl Fleet {
     fn new(tag: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("cross-door-{tag}-{}", std::process::id()));
@@ -470,7 +478,6 @@ exit 2
         (Err(_), Err(_)) => {}
         (b, a) => panic!("squad store changed shape on re-run: {b:?} vs {a:?}"),
     }
-    std::fs::remove_dir_all(&fleet.dir).ok();
 }
 
 impl Fleet {

@@ -74,12 +74,19 @@ impl RunFailure {
 /// alone answers in 4s; the same command piped-only-at-exit died at the 26s
 /// slice). The poll granularity (25ms) is far below any slice this board
 /// hands out, and the kill is the degrade-not-crash contract's enforcement half.
+///
+/// The child leads its own process group and the kill hits the whole group:
+/// a bare `kill` to the leader orphans its subprocess tree (uv, git, gh under
+/// the real `fno` front door), which then keep writing into whatever HOME the
+/// caller staged - under test, a tempdir that dies with the test, recreating
+/// it after the drop (x-7ca7's 23.5 GB of leaked `.tmp*` fake-HOMEs).
 pub(crate) fn run_with_timeout(
     cmd: &[String],
     cwd: &Path,
     timeout: Duration,
 ) -> Result<Vec<u8>, RunFailure> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut child = Command::new(&cmd[0])
         .args(&cmd[1..])
@@ -87,6 +94,7 @@ pub(crate) fn run_with_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| RunFailure::Failed(format!("{}: {}", cmd[0], e)))?;
     let deadline = Instant::now() + timeout;
@@ -108,6 +116,13 @@ pub(crate) fn run_with_timeout(
         }
         buf
     });
+    // SIGKILL to the child's whole group (negative pid). The leader reaps via
+    // `child.wait()`; group members die with it.
+    fn kill_group(child: &std::process::Child) {
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    }
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -131,7 +146,7 @@ pub(crate) fn run_with_timeout(
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    kill_group(&child);
                     let _ = child.wait();
                     let shown: Vec<String> = cmd.iter().take(6).cloned().collect::<Vec<_>>();
                     let mut shown = shown.join(" ");
