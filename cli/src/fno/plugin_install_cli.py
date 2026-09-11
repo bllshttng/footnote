@@ -245,10 +245,20 @@ def install(
     if stale:
         typer.echo(f"removed stale copies: {', '.join(stale)}")
     try:
-        from fno.reclaim import run_reclaim
+        from fno.rust_binary import resolve_binary
 
-        lanes = run_reclaim(apply=True)
-        moved = sum(lane.bytes for lane in lanes)
-        typer.echo(f"reclaim: {moved / (1024**3):.1f} GB across {sum(l.count for l in lanes)} path(s)")
-    except Exception as exc:  # noqa: BLE001 - install must not fail on the janitor
+        binary = resolve_binary()
+        if binary is not None:
+            result = subprocess.run(
+                [str(binary), "reclaim", "--apply"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            tail = (result.stdout or result.stderr or "").strip().splitlines()
+            if tail:
+                typer.echo(f"reclaim: {tail[0]}")
+        else:
+            typer.echo("reclaim skipped: fno-agents binary not found", err=True)
+    except OSError as exc:  # install must not fail on the janitor
         typer.echo(f"reclaim skipped: {exc}", err=True)

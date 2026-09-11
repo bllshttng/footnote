@@ -138,9 +138,6 @@ class PathsBlock(BaseModel):
     fleet_dir: Optional[str] = None
     postmortems_dir: Optional[str] = None
     worktrees_base: Optional[str] = None
-    # Build base for cargo intermediates: CARGO_BUILD_BUILD_DIR is set to
-    # <base>/{workspace-path-hash} (default ~/.fno/cargo-build). target/ in the
-    # checkout keeps only final binaries.
     cargo_targets_base: Optional[str] = None
     memory_dir: Optional[str] = None
     hook_logs_dir: Optional[str] = None

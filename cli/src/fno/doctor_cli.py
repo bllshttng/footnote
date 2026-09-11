@@ -18,8 +18,8 @@ from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_graph import graph_app
 from fno.doctor_lanes import lanes_command
+from fno.doctor_reclaim import reclaim_command
 from fno.evals.cli import evals_app
-from fno.reclaim import reclaim_command
 from fno.events.cli import cli as event_app
 from fno.lint_cli import lint
 from fno.observer.cli import observer_app

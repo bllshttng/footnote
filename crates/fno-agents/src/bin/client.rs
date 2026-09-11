@@ -71,6 +71,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "reap",
     "roster-reap",
     "reconcile",
+    "reclaim",
     "recover",
     "reentry-plan",
     "rename",
@@ -455,6 +456,13 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
+    }
+    // `reclaim` (x-7ca7): the machine janitor, daemon-free. Not a routable
+    // `fno agents` verb; the Python surface is `fno doctor reclaim`, a thin
+    // wrapper that shells HERE, and the daemon's daily sweep calls the gate
+    // in-process.
+    if verb == "reclaim" {
+        return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
