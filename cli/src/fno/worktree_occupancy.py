@@ -57,7 +57,10 @@ def _argv0(row: dict) -> str:
 
 def _cmd(row: dict) -> str:
     argv = _argv(row)
-    return " ".join(argv) if argv else str(row.get("name") or "")
+    cmd = " ".join(argv) if argv else str(row.get("name") or "")
+    # A TSV row is one physical line: a `zsh -c <script>` argv embeds real
+    # newlines, and a row-counting bridge would read every one as a second row.
+    return " ".join(cmd.split())
 
 
 def _snapshot_orphan(row: dict, home: str) -> bool:

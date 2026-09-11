@@ -148,6 +148,15 @@ class TestOrphanedShell:
         hits = by_pid(run([20], {20: zsh}))
         assert (hits[20].verdict, hits[20].action) == ("holds", "keep")
 
+    def test_multiline_argv_yields_a_one_physical_line_row(self):
+        """A `zsh -c` script embeds real newlines; the TSV row must not."""
+        script = "source ~/.claude/shell-snapshots/s.sh\nexport A=1\neval 'until true; do sleep 5; done'"
+        zsh = row(20, 1, ["/bin/zsh", "-c", script])
+        hits = run([20], {20: zsh})
+        assert len(hits) == 1
+        assert "\n" not in hits[0].cmd and "\t" not in hits[0].cmd
+        assert (hits[0].verdict, hits[0].action) == (INERT, TERMINATE)
+
 
 class TestUnclassified:
     def test_unmatched_programs_hold_with_their_name(self):
