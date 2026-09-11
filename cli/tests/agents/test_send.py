@@ -3414,6 +3414,19 @@ def test_team_body_validated_before_any_delivery(
     assert result.exit_code != 0, result.output
 
 
+def test_team_human_summary_line(tmp_path: Path, monkeypatch) -> None:
+    """AC2-HP: without --json the per-recipient receipts are followed by the
+    exact `team scope=<scope>: sent N, queued N, failed N` summary."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_team_rows()
+    _team_inject_ok(monkeypatch)
+
+    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "fleet notice"])
+
+    assert result.exit_code == 0, result.output
+    assert "team scope=all: sent 3, queued 0, failed 0" in result.output
+
+
 def test_team_stopped_fleet_still_delivers(tmp_path: Path, monkeypatch) -> None:
     """AC2-STOPPED: an active incident stop never gates the announcement channel."""
     use_tmpdir(monkeypatch, tmp_path)

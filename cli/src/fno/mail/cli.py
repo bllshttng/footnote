@@ -4378,8 +4378,7 @@ def cmd_send(
 def _team_recipients(scope: str) -> list[tuple[str, str]]:
     """Snapshot a fleet scope: sorted (name, identity), deduped by identity.
 
-    ``all`` = every non-terminal row with a session identity; ``kings`` = rows
-    holding any crown; else crown scope via resolve_to_king's territory equality.
+    ``all``/``kings`` are live-row filters; else crown scope via resolve_to_king.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
     from fno.harness_identity import session_identity_key
@@ -4409,10 +4408,9 @@ def cmd_team(
 ) -> None:
     """Announce one body to a fleet scope via the ordinary named-send core.
 
-    The registry snapshot is taken before the first send; every recipient rides
-    dispatch_send unchanged. Delivery is per recipient and irreversible: the
-    body is validated once here, successes stand, and a partial failure exits 1
-    naming every unsent recipient. Mail is never gated by a fleet incident stop.
+    Delivery is per recipient and irreversible: the body is validated once,
+    successes stand, and a partial failure exits 1 naming every unsent
+    recipient. Mail is never gated by a fleet incident stop.
     """
     from fno.agents.dispatch import dispatch_send
     from fno.agents.self_stamp import stamp_from
