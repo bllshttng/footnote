@@ -782,7 +782,13 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # `node-route` is shelled by the squad prune's cascade fold for a verdict
     # per unknown member; `roster-reap` is the roster sweep's own door. Both
     # are binary-first surfaces, never `fno` auto-routes.
-    routable = arms | (specials - {"board", "notify-watch", "node-route", "roster-reap"})
+    # `reclaim` is `fno doctor reclaim`'s door and `plugin-install` is
+    # `fno config plugin install`'s: both thin Python wrappers shell the
+    # binary through resolve_binary, never auto-route.
+    routable = arms | (
+        specials
+        - {"board", "notify-watch", "node-route", "roster-reap", "reclaim", "plugin-install"}
+    )
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"

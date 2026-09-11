@@ -381,3 +381,21 @@ def test_append_event_and_the_accessor_fence_agree_on_an_absent_pin(monkeypatch)
     monkeypatch.setenv("FNO_SPACES_DIR", str(_OUTSIDE.parent / "spaces"))
     with pytest.raises(UndeclaredStateRootError):
         paths.spaces_root()
+
+
+def test_doctor_test_build_dir_stays_under_the_sandbox():
+    """The child CARGO_BUILD_BUILD_DIR must live in the sandbox, never operator state.
+
+    The first CI run after the build-dir feature shipped wrote 1298 cargo
+    intermediates into the runner's real ``~/.fno/cargo-build``: the child env
+    computed the value from the PARENT's state root, and the state canary
+    refused the whole shard. This pins the value under the sandbox the child
+    actually runs in.
+    """
+    from fno import test_cmd
+
+    env = test_cmd._child_env(Path(__file__).resolve().parents[2])
+    value = env["CARGO_BUILD_BUILD_DIR"]
+    base = Path(value.split("{workspace-path-hash}")[0])
+    assert base.is_relative_to(test_cmd._sandbox()), value
+    assert value.endswith(".fno/cargo-build/{workspace-path-hash}")

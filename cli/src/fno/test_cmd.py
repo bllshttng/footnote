@@ -45,7 +45,6 @@ from xml.etree import ElementTree
 import click
 
 from fno.hermetic import neutralise, poison
-from fno.paths import cargo_build_dir_value
 from fno.test_runner import run_suite_bounded, test_timeout_seconds, wait_or_kill_group
 
 _TAIL_LINES = 40
@@ -332,10 +331,17 @@ def _child_env(root: Path) -> dict:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
-    # cargo intermediates go to the shared build base, never the checkout's
-    # target/ (final binaries still land there). Set AFTER neutralise, which
-    # scrubs a developer's own value as ambient state.
-    env["CARGO_BUILD_BUILD_DIR"] = cargo_build_dir_value()
+    # Cargo intermediates go under the SANDBOX's state root, never the
+    # operator's real one and never the checkout's target/. Computed from the
+    # sandbox, not cargo_build_dir_value(): that reads the PARENT's state
+    # root, and a value pointing at ~/.fno/cargo-build makes every cargo
+    # invocation inside a test write into operator state - the exact write
+    # the state canary refuses. Matches what the child itself would resolve
+    # (its HOME is the sandbox home). Set AFTER neutralise, which scrubs a
+    # developer's own value as ambient state.
+    env["CARGO_BUILD_BUILD_DIR"] = (
+        f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
+    )
     # Per-run TMPDIR: the SANDBOX itself, not a second directory. The fence
     # allows state paths only under TMPDIR (fno.events._hermetic_allowed_roots),
     # so a separate scratch root would refuse the sandbox HOME and every fixture
