@@ -402,14 +402,34 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     // x-db9c: a holder the probe batch never answered for is a hole in the
     // board's evidence, not a worker verdict. Name every hole in one warning
     // line so a partially-answered batch is visible in the payload, not only
-    // through the rows its absence silently removed.
+    // through the rows its absence silently removed. The expected set mirrors
+    // the probe feed exactly (king-priority claimed nodes + dead-state
+    // claims): a live claim on a lower-priority node is never fed to the
+    // probe, so counting it here would warn forever about a holder nobody
+    // promised to measure.
     let mut unmeasured_holders: Vec<String> = Vec::new();
     if inputs.holder_activity_error.is_none() {
-        let mut expected: HashSet<String> = claim_rows
+        let probed_ids: HashSet<String> = inputs
+            .claimed_nodes
+            .rows()
             .iter()
-            .map(holder_token)
-            .filter(|t| !t.is_empty())
+            .filter(|n| KING_PRIORITIES.contains(&s_str(n, "priority").unwrap_or("")))
+            .filter_map(|n| s_str(n, "id").map(str::to_string))
             .collect();
+        let mut expected: HashSet<String> = HashSet::new();
+        for row in &claim_rows {
+            let token = holder_token(row);
+            if token.is_empty() {
+                continue;
+            }
+            let dead_state = DEAD_CLAIM_STATES.contains(&s_str(row, "state").unwrap_or(""));
+            let node_id = s_str(row, "key")
+                .and_then(|k| k.strip_prefix("node:"))
+                .unwrap_or("");
+            if dead_state || probed_ids.contains(node_id) {
+                expected.insert(token);
+            }
+        }
         for token in &expected {
             if !inputs.holder_activity.contains_key(token) {
                 unmeasured_holders.push(token.clone());

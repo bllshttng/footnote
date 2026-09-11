@@ -169,7 +169,7 @@ mod tests {
     fn a_live_handover_row_stays_in_the_scan() {
         // The regression guard task 4 exists to pin: a live launch-window
         // lease is a row the board probes, never one the scan drops. The
-        // lease-keyed skip this test retires (PR 1730) removed the row
+        // lease-keyed skip this test retires removed the row
         // pre-classification, so an in_progress node in its launch window
         // read driver-none and landed in unheld_progress - the exact
         // silence the scan-level skip manufactured.
