@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::agents_view::{self, RegistryAgent};
 use crate::server::agent_harness_session_id;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeldWorker {
     pub(crate) name: String,
     pub(crate) harness: String,
@@ -243,6 +243,7 @@ pub(crate) fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldW
 /// removal markers. One pass, because restore reads this journal twice
 /// otherwise; the split accessors below keep the two halves independently
 /// testable.
+#[derive(Debug, PartialEq)]
 pub(crate) struct JournalEvents {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
@@ -255,6 +256,17 @@ pub(crate) struct JournalEvents {
     pub(crate) spawned_names: std::collections::HashSet<String>,
 }
 
+/// The journal event types the parse reads. Kept beside the `match` it
+/// feeds: a line carrying none of these names verbatim cannot match any
+/// arm, so the scan skips it before building a serde_json::Value - the
+/// measured journal is ~97 percent noise (mostly `inside_leg_report`).
+const HANDLED_TYPES: [&str; 4] = [
+    "agent_spawned",
+    "agent_removed",
+    "agent_row_reaped",
+    "registry_row_removed",
+];
+
 pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     let mut receipts: HashMap<(String, String), HeldWorker> = HashMap::new();
     // Recency, not presence: a removal older than the name's latest spawn is
@@ -265,6 +277,12 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     // the never-bound markers: a spawn line AFTER the reap revives the name.
     let mut reaped_raw: HashMap<String, (usize, ReapedMarker)> = HashMap::new();
     for (idx, line) in raw.lines().enumerate() {
+        // The type name always appears verbatim in a handled line, so this
+        // only drops lines the match below would discard anyway; idx stays
+        // the true line number (enumerate wraps the unfiltered iterator).
+        if !HANDLED_TYPES.iter().any(|t| line.contains(t)) {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -496,6 +514,92 @@ pub(crate) fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
     }
 }
 
+/// The journal plus the (mtime, len) stamps it was scanned from. An attached
+/// idle server still republishes rows on the clock, and every publish used to
+/// re-read and re-parse every retained segment (~16 MB here) even though the
+/// journal only moves when a worker lifecycle event lands. `refresh()` stats
+/// the segment list instead and rescans only when a path or a stamp moved.
+#[derive(Default)]
+pub(crate) struct JournalCache {
+    journal: SpawnJournal,
+    stamps: Vec<(std::path::PathBuf, std::time::SystemTime, u64)>,
+}
+
+impl std::ops::Deref for JournalCache {
+    type Target = SpawnJournal;
+
+    fn deref(&self) -> &SpawnJournal {
+        &self.journal
+    }
+}
+
+impl std::ops::DerefMut for JournalCache {
+    fn deref_mut(&mut self) -> &mut SpawnJournal {
+        &mut self.journal
+    }
+}
+
+impl JournalCache {
+    /// Scan once at construction (the server's birth read).
+    pub(crate) fn load() -> Self {
+        Self::load_at(&agents_view::registry_path().with_file_name("events.jsonl"))
+    }
+
+    /// Path-injected core of [`JournalCache::load`], so the stamp gate is
+    /// unit-testable without touching the operator's registry location.
+    pub(crate) fn load_at(live: &std::path::Path) -> Self {
+        let mut cache = Self::default();
+        cache.rescan(live);
+        cache
+    }
+
+    /// Rescan only when the segment list or any (mtime, len) moved. Returns
+    /// whether it rescanned, so a caller can tell a real refresh from a
+    /// no-op stat pass.
+    pub(crate) fn refresh(&mut self) -> bool {
+        self.refresh_at(&agents_view::registry_path().with_file_name("events.jsonl"))
+    }
+
+    /// Path-injected core of [`JournalCache::refresh`].
+    pub(crate) fn refresh_at(&mut self, live: &std::path::Path) -> bool {
+        let stamps = segment_stamps(live);
+        if stamps == self.stamps {
+            return false;
+        }
+        self.rescan(live);
+        true
+    }
+
+    fn rescan(&mut self, live: &std::path::Path) {
+        self.stamps = segment_stamps(live);
+        self.journal = scan_journal_at(live);
+    }
+}
+
+/// The segment paths plus their (mtime, len), OLDEST FIRST with the live
+/// file last - the same enumeration `read_journal_text_at` concatenates, so
+/// an unchanged stamp list means unchanged bytes underneath.
+fn segment_stamps(live: &std::path::Path) -> Vec<(std::path::PathBuf, std::time::SystemTime, u64)> {
+    let dir = live.parent().map(std::path::Path::to_path_buf);
+    let mut paths = dir
+        .map(|dir| spawn_receipt_segments(&dir, "events.jsonl"))
+        .unwrap_or_default();
+    paths.push(live.to_path_buf());
+    paths
+        .into_iter()
+        .map(|path| {
+            let (mtime, len) = match std::fs::metadata(&path) {
+                Ok(m) => (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()),
+                // A missing segment is the known empty state, not a stale
+                // stamp: when the file appears its stamp differs from the
+                // epoch zero and the rescan fires.
+                Err(_) => (std::time::UNIX_EPOCH, 0),
+            };
+            (path, mtime, len)
+        })
+        .collect()
+}
+
 /// (x-6b0b) The journal's retained segments plus the live file, concatenated
 /// OLDEST FIRST and newline-terminated per segment, with the first read
 /// error. Shared with the mux CLI's prune evidence (`member_evidence`), so
@@ -656,6 +760,125 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// AC3-HP: an unchanged journal is never re-read. Two refreshes over the
+    /// same bytes stat but do not rescan; one appended line flips the live
+    /// file's stamp and the next refresh rescans (the positive control).
+    #[test]
+    fn an_unmoved_journal_is_not_rescanned() {
+        let s = JournalScratch::new("cache-unmoved");
+        let live = s.segment("events.jsonl");
+        std::fs::write(
+            &live,
+            r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+        )
+        .unwrap();
+        let mut cache = JournalCache::load_at(&live);
+        assert!(!cache.refresh_at(&live), "same stamps: no rescan");
+        assert!(!cache.refresh_at(&live), "still no rescan");
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&live)
+            .unwrap();
+        f.write_all(
+            b"\n{\"type\":\"agent_spawned\",\"data\":{\"name\":\"w2\",\"provider\":\"codex\",\"harness_session_id\":\"s2\",\"substrate\":\"pane\"}}",
+        )
+        .unwrap();
+        assert!(cache.refresh_at(&live), "an append moves the stamp: rescan");
+        assert!(
+            cache.journal.spawned_names.contains("w2"),
+            "the rescan saw the appended spawn"
+        );
+    }
+
+    /// AC3-EDGE: across appends, a rotation of the live file to `.1`, and
+    /// noise lines, the cache's view equals a fresh scan over the same
+    /// files - the stamp gate never serves a stale scan.
+    #[test]
+    fn the_cache_matches_a_fresh_scan_across_append_and_rotation() {
+        let s = JournalScratch::new("cache-rotation");
+        let live = s.segment("events.jsonl");
+        std::fs::write(
+            &live,
+            concat!(
+                r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+                "\n",
+                r#"{"type":"inside_leg_report","data":{"noise":true}}"#,
+            ),
+        )
+        .unwrap();
+        let mut cache = JournalCache::load_at(&live);
+
+        // Append, rotate (live -> .1), start a new live file with a revocation
+        // of the rotated receipt plus a never-bound removal and a reap.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&live)
+            .unwrap();
+        f.write_all(b"\n{\"type\":\"control_plane_tick\"}").unwrap();
+        std::fs::rename(&live, s.segment("events.jsonl.1")).unwrap();
+        std::fs::write(
+            &live,
+            concat!(
+                r#"{"type":"agent_removed","data":{"name":"w","harness":"codex","harness_session_id":"s1"}}"#,
+                "\n",
+                r#"{"type":"registry_row_removed","data":{"name":"nb","reason":"identity never bound"}}"#,
+                "\n",
+                r#"{"type":"agent_row_reaped","data":{"name":"rp","resumable":true,"harness":"codex","harness_session_id":"s9","basis":"done"}}"#,
+                "\n",
+                r#"{"type":"control_plane_tick"}"#,
+            ),
+        )
+        .unwrap();
+
+        assert!(cache.refresh_at(&live), "rotation moved files: rescan");
+        let fresh = scan_journal_at(&live);
+        assert_eq!(cache.journal.receipts, fresh.receipts);
+        assert_eq!(cache.journal.never_bound, fresh.never_bound);
+        assert_eq!(cache.journal.reaped, fresh.reaped);
+        assert_eq!(cache.journal.spawned_names, fresh.spawned_names);
+        assert_eq!(cache.journal.error, fresh.error);
+        assert!(
+            fresh.receipts.is_empty(),
+            "the revocation landed on the rotated receipt"
+        );
+        assert_eq!(fresh.never_bound.len(), 1, "the never-bound marker parsed");
+        assert_eq!(fresh.reaped.len(), 1, "the resumable reap parsed");
+    }
+
+    /// The prefilter keeps every handled type: one line of each of the 4,
+    /// surrounded by noise, yields the same events as the handled lines
+    /// alone. Guards the cheap skip from ever dropping a real row.
+    #[test]
+    fn the_prefilter_keeps_every_handled_type() {
+        let handled = [
+            r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+            r#"{"type":"agent_removed","data":{"name":"w","harness":"codex","harness_session_id":"s1"}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"rp","resumable":true,"harness":"codex","harness_session_id":"s9","basis":"done"}}"#,
+            r#"{"type":"registry_row_removed","data":{"name":"nb","reason":"identity never bound"}}"#,
+        ];
+        let mut with_noise = String::new();
+        for line in handled {
+            with_noise.push_str(line);
+            with_noise.push('\n');
+            with_noise.push_str(r#"{"type":"inside_leg_report","data":{"x":1}}"#);
+            with_noise.push('\n');
+            with_noise.push_str("not json at all");
+            with_noise.push('\n');
+        }
+        let plain = handled.join("\n");
+        let from_plain = parse_journal_events(&plain);
+        let from_noisy = parse_journal_events(&with_noise);
+        assert_eq!(from_plain, from_noisy, "noise changes nothing");
+        // The spawn/revoke pair nets to zero receipts; the other three
+        // markers each keep their one line.
+        assert_eq!(from_noisy.receipts.len(), 0);
+        assert_eq!(from_noisy.spawned_names.len(), 1);
+        assert_eq!(from_noisy.reaped.len(), 1);
+        assert_eq!(from_noisy.never_bound.len(), 1);
     }
 
     #[test]
