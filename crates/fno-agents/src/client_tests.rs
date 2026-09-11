@@ -485,18 +485,24 @@ fn format_success_rm() {
 }
 
 /// The transport-failure line names the row and answers from the registry
-/// verdict the caller passed, never from the past-tense pre-exec banner.
+/// verdict the caller passed, never from the past-tense pre-exec banner. An
+/// unread store (`None`) says so instead of wearing an absent verdict.
 #[test]
 fn rm_failure_line_names_the_row_and_the_registry_verdict() {
     assert_eq!(
-        rm_failure_line("bar-agent", "protocol: connection closed", true),
+        rm_failure_line("bar-agent", "protocol: connection closed", Some(true)),
         "fno-agents: rm bar-agent: protocol: connection closed; \
          nothing was removed - the row is still registered"
     );
     assert_eq!(
-        rm_failure_line("bar-agent", "protocol: connection closed", false),
+        rm_failure_line("bar-agent", "protocol: connection closed", Some(false)),
         "fno-agents: rm bar-agent: protocol: connection closed; \
          the row is no longer registered"
+    );
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", None),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         the registry could not be read to confirm whether anything was removed"
     );
 }
 
