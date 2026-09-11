@@ -1714,34 +1714,27 @@ def reap_cmd(
                 f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
                 "(dry-run; pass --apply)"
             )
-        # The suspect buckets are split because "kept: 2 suspect" is the line
-        # that taught the operator this verb was useless: it could not say
-        # whether those two were protected by a measurement or merely unmeasured.
-        # "roster not consulted" survives only beside the token that measured
-        # the degraded read - never as a blanket label for every unprobed keep.
+        # "roster not consulted" only ever renders beside the token that
+        # measured the degraded read, never as a blanket unprobed label.
         suspect = f"{summary['kept_suspect']} suspect"
         if summary["kept_suspect_alive"]:
             suspect += f", {summary['kept_suspect_alive']} suspect (worker alive)"
+        unprobed_by = summary.get("kept_suspect_unprobed_by") or {}
         if summary["kept_suspect_unprobed"]:
-            unprobed_by = summary.get("kept_suspect_unprobed_by") or {}
-            if unprobed_by:
-                detail = ", ".join(
-                    f"{token} {count} (roster not consulted)"
-                    if token == "roster-read-degraded"
-                    else f"{token} {count}"
-                    for token, count in sorted(unprobed_by.items())
-                )
-                suspect += f", {summary['kept_suspect_unprobed']} suspect (probe unanswered: {detail})"
-            else:
-                suspect += f", {summary['kept_suspect_unprobed']} suspect (probe unanswered)"
+            detail = ", ".join(
+                f"{token} {count} (roster not consulted)"
+                if token == "roster-read-degraded"
+                else f"{token} {count}"
+                for token, count in sorted(unprobed_by.items())
+            )
+            suffix = f": {detail}" if detail else ""
+            suspect += f", {summary['kept_suspect_unprobed']} suspect (probe unanswered{suffix})"
         if summary.get("kept_unclassified"):
             dirs = ", ".join(
                 f"{path} {count}"
                 for path, count in sorted((summary.get("unclassified_dirs") or {}).items())
             )
-            suspect += (
-                f", {summary['kept_unclassified']} unclassified (no native verdict: {dirs})"
-            )
+            suspect += f", {summary['kept_unclassified']} unclassified (no native verdict: {dirs})"
         typer.echo(
             f"kept: {summary['kept_live']} live, {suspect}, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
@@ -1815,13 +1808,10 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 
 
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
-    """The former `claim force-release`. Archived to .expired/.
-
-    Nothing at the resolved path is a REFUSAL now, not a success: exit 1,
-    naming the path that was read and, when the encoded file exists in the
-    other default root, that path with the --root that reaches it. The
-    2026-09-09 x-cff2 specimen printed `force-released` while the real lock
-    file stayed byte-identical in the root this call did not resolve.
+    """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
+    naming the path read and, when the file exists in the other default root,
+    that path - the x-cff2 specimen printed `force-released` while the real
+    lock stayed byte-identical in the root this call did not resolve.
     """
     try:
         outcome = _claims_core.force_release_claim(
@@ -1849,13 +1839,14 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
         return
 
     encoded = _claims_io.encode_key(key)
-    others = []
-    for raw_root, cdir in _claims_io.dedup_claims_roots(
-        [_claims_io.global_claims_root(), None]
-    ):
-        candidate = cdir / f"{encoded}.lock"
-        if candidate != outcome.path and candidate.exists():
-            others.append((raw_root, candidate))
+    others = [
+        (raw, cdir / f"{encoded}.lock")
+        for raw, cdir in _claims_io.dedup_claims_roots(
+            [_claims_io.global_claims_root(), None]
+        )
+        if (cdir / f"{encoded}.lock") != outcome.path
+        and (cdir / f"{encoded}.lock").exists()
+    ]
     if json_output:
         typer.echo(
             json.dumps(

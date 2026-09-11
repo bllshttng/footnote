@@ -1612,12 +1612,7 @@ def list_claims_with_counts(
 
 
 class ForceReleaseOutcome(NamedTuple):
-    """What a force-release found at the resolved path (x-9c91 change 4).
-
-    ``archived=False`` means no claim file existed where this call looked -
-    which is how a key resolved to the WRONG root reports "success" today
-    while the real lock file sits untouched in the other root.
-    """
+    """What a force-release found at the resolved path (x-9c91): archived=False means nothing was there."""
 
     path: Path
     archived: bool
@@ -1856,13 +1851,9 @@ def reap_dead_claims(
     ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
     ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
     ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
-    reason)``), ``apply``, ``roots``. The two new suspect buckets split what
-    used to be one number: "kept: 2 suspect" is the line that taught the
-    operator the reaper was useless, because it could not say whether those
-    two were protected or merely unmeasured. ``kept_unclassified`` is a
-    third split: a claim with no native verdict in the walked directory was
-    never probed at all, so it counts there with the directory it was seen
-    in, never under the probe buckets. A ``claim_reap_swept`` event fires on every
+    reason)``), ``apply``, ``roots``. The suspect buckets split what used to
+    be one number; a claim with no native verdict in the walked directory
+    counts under ``kept_unclassified``, never under the probe buckets. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1877,10 +1868,8 @@ def reap_dead_claims(
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
-        # Verbatim --claims-dir: cdir is already the resolved claims directory,
-        # and the old root=cdir.parent.parent round-trip re-resolved it one
-        # level down, so every space-root claim got no verdict and fell to
-        # unknown-keeps (x-9c91).
+        # Verbatim: cdir is resolved, and root=cdir.parent.parent re-resolved
+        # it one level down, so space-root claims got no verdict (x-9c91).
         native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
 
     ts = now_ms()
@@ -1891,14 +1880,11 @@ def reap_dead_claims(
         "offhost": 0, "suspect": 0, "live": 0,
         "suspect_alive": 0, "suspect_unprobed": 0,
     }
-    # A claim the native door never classified (no verdict row for its key in
-    # the walked directory) is not "unprobed" - the roster probe was never the
-    # instrument that failed. It is unclassified, and the per-dir count names
-    # the directory to fix.
+    # No verdict row in the walked dir is unclassified (never "unprobed");
+    # the per-dir count names the directory to fix. unprobed_by folds the
+    # probe's own reason tokens, one per None answer.
     kept_unclassified = 0
     unclassified_dirs: dict[str, int] = {}
-    # Why the abandonment probe answered None, folded one token per unprobed
-    # keep from the probe's own reasons dict.
     unprobed_by: dict[str, int] = {}
 
     def _sweep_verdict(

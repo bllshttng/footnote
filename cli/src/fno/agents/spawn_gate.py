@@ -1584,15 +1584,11 @@ def run_gate(
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
                 if provider_cap is not None:
                     # Contention is a peer or a corpse, never a full cap: the
-                    # cap read is the thing the mutex protects, so unlike the
-                    # uncapped arm this path may not proceed unserialized.
-                    # Takeover asks THE single reap decision (sweep_verdict)
-                    # about the gate claim file, so it can never disagree
-                    # with what the sweep would decide about the same file
-                    # (x-9c91 change 3): force-release only a provably-dead
-                    # holder, name the native basis in the override reason,
-                    # and keep queueing past a live holder or an unanswerable
-                    # door. Re-acquire on the next pass, still serialized.
+                    # cap read is the thing the mutex protects. Takeover asks
+                    # THE single reap decision (sweep_verdict) about the gate
+                    # claim file (x-9c91): force only a provably-dead holder,
+                    # keep queueing past a live one or an unanswerable door,
+                    # and re-acquire on the next pass, still serialized.
                     from fno.claims.core import (
                         ClaimGoneAway,
                         ClaimVerdictError,
@@ -1620,8 +1616,7 @@ def run_gate(
                     try:
                         gate_claim = read_claim_file(gate_path)
                     except ClaimCorrupted:
-                        # Claims are written atomically, so corruption means
-                        # the file is damaged, not held: it serializes nobody.
+                        # Atomic writes mean corruption is damage, not a hold.
                         force_release_claim(
                             GATE_CLAIM_KEY,
                             "spawn-gate gate claim corrupted past the wait budget",
@@ -1649,15 +1644,15 @@ def run_gate(
                             f"({exc}); queueing"
                         )
                     else:
+                        basis = str(gate_native.get("basis") or bucket)
                         if provably_dead:
                             _warn(
                                 "spawn-gate: forcing gate claim past the wait "
-                                f"budget (native basis {gate_native.get('basis') or bucket})"
+                                f"budget (native basis {basis})"
                             )
                             force_release_claim(
                                 GATE_CLAIM_KEY,
-                                "spawn-gate held past the wait budget; native basis "
-                                + str(gate_native.get("basis") or bucket),
+                                f"spawn-gate held past the wait budget; native basis {basis}",
                                 root=_gate_claims_root(),
                             )
                             mutex_blocked_since = None

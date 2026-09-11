@@ -2922,6 +2922,30 @@ event_types:
           type: string
           description: "Outcome of the interrupt attempt (e.g. no-turn, refused, timeout)."
 
+  - name: agent_stop_claims_released
+    description: "A confirmed stop or rm released the stopped worker's claims (x-9c91 change 5): one event per verb, naming what was released and what the release kept, with the reading that kept it."
+    sources: [daemon]
+    data:
+      required: [name, verb]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+          description: "The stopped row's harness session id, when it had one."
+        verb:
+          type: string
+          description: "stop or rm."
+        released:
+          type: array
+          description: "One {key, holder, path} per claim released."
+        kept:
+          type: array
+          description: "One {key, holder, observed} per claim kept, observed naming the reading (pid present, access-denied, off-host)."
+        error:
+          type: string
+          description: "Set when the claims scan itself failed; released and kept are absent then."
+
   - name: daemon_recovery_error
     description: "An error occurred during the daemon recovery/orphan-reap sweep."
     sources: [daemon]

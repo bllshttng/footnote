@@ -42,6 +42,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "list" {
         return run_claim_list(&args[1..]);
     }
+    if op == "release-stopped" {
+        return run_release_stopped(&args[1..]);
+    }
     // The backlog one-in-flight gate's lock operations (x-ef2c): arguments of
     // this verb, never new leaves. The lock is held in the name of the
     // CALLING process (--pid), never this short-lived binary, and a dead
@@ -228,6 +231,79 @@ fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
     claim_status_value_with_witness(rec, Some(witness), &witness_answer)
+}
+
+/// `fno-agents claim release-stopped --name <n> [--session <sid>] --claims-dir <dir>`
+/// (`--claims-dir` repeatable, `--events-dir <dir>` optional) — release every
+/// claim a stopped worker holds. Prints the receipt as one JSON line and
+/// exits 0; exit 3 on a claims-root read error, as the flight verbs do.
+fn run_release_stopped(args: &[String]) -> i32 {
+    let mut name: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut events_dir: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--name" => match it.next() {
+                Some(v) => name = Some(v.clone()),
+                None => {
+                    eprintln!("fno-agents: claim release-stopped: --name requires a value");
+                    return 2;
+                }
+            },
+            "--session" => match it.next() {
+                Some(v) => session = Some(v.clone()),
+                None => {
+                    eprintln!("fno-agents: claim release-stopped: --session requires a value");
+                    return 2;
+                }
+            },
+            "--claims-dir" => match it.next() {
+                Some(v) => dirs.push(PathBuf::from(v)),
+                None => {
+                    eprintln!("fno-agents: claim release-stopped: --claims-dir requires a value");
+                    return 2;
+                }
+            },
+            "--events-dir" => match it.next() {
+                Some(v) => events_dir = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("fno-agents: claim release-stopped: --events-dir requires a value");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("fno-agents: claim release-stopped: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("fno-agents: claim release-stopped requires --name");
+        return 2;
+    };
+    if dirs.is_empty() {
+        eprintln!("fno-agents: claim release-stopped requires at least one --claims-dir");
+        return 2;
+    }
+    let target = crate::claims::StoppedHolder {
+        name,
+        harness_session_id: session,
+    };
+    match crate::claims::release_for_stopped_session(&target, &dirs, events_dir.as_deref()) {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                serde_json::to_value(&receipt).unwrap_or(Value::Object(Default::default()))
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("fno-agents: claim release-stopped failed: {error}");
+            3
+        }
+    }
 }
 
 fn claim_status_value_with_witness(

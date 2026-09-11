@@ -610,9 +610,7 @@ def _pid_observed(pid: object) -> str:
         return "present"
     except psutil.NoSuchProcess:
         return "absent"
-    except psutil.AccessDenied:
-        return "unreadable"
-    except Exception:  # noqa: BLE001 - an unprobeable pid stays unreadable
+    except Exception:  # noqa: BLE001 - denied or unprobeable stays unreadable
         return "unreadable"
 
 
@@ -630,13 +628,9 @@ def _sidecar_requests(cdir: Path, key: str) -> int:
 
 
 def long_hold_rows() -> dict:
-    """Single-flight holds older than LONG_HOLD_S across both claims roots.
-
-    The block exists because a held counter that only lived inside
-    flight-acquire receipts was invisible from `top` (x-9c91 change 7). A
-    row carries the key, holder, pid with its observed probe, held age, and
-    the sidecar's request count. A failed claims read returns
-    ``{"error": ...}`` and never raises: a top render must not die on it.
+    """Single-flight holds older than LONG_HOLD_S across both claims roots
+    (x-9c91 change 7). Returns ``{"error": ...}`` instead of raising: a top
+    render must not die on a claims read.
     """
     from fno.claims.core import list_claims
     from fno.claims.io import dedup_claims_roots, global_claims_root
@@ -646,7 +640,7 @@ def long_hold_rows() -> dict:
         rows: list[dict] = []
         for raw_root, cdir in dedup_claims_roots([global_claims_root(), None]):
             for claim in list_claims(prefix="flight:", root=raw_root, include_stale=True):
-                held_s = (now_ms - int(claim.get("acquired_at") or 0)) // 1000
+                held_s = max(0, (now_ms - int(claim.get("acquired_at") or 0)) // 1000)
                 if held_s <= LONG_HOLD_S:
                     continue
                 rows.append(
@@ -655,12 +649,12 @@ def long_hold_rows() -> dict:
                         "holder": claim.get("holder"),
                         "pid": claim.get("pid"),
                         "pid_observed": _pid_observed(claim.get("pid")),
-                        "held_s": max(0, held_s),
+                        "held_s": held_s,
                         "requests": _sidecar_requests(cdir, str(claim.get("key"))),
                     }
                 )
         rows.sort(key=lambda r: -r["held_s"])
-    except Exception as exc:  # noqa: BLE001 - a top render never dies on a claims read
+    except Exception as exc:  # noqa: BLE001 - see docstring
         return {"error": f"{type(exc).__name__}: {exc}"}
     return {"rows": rows}
 
@@ -673,12 +667,12 @@ def _render_long_hold_lines(long_holds: dict) -> list[str]:
     if not rows:
         return []
     out = [f"single-flight holds over {LONG_HOLD_S // 60}m:"]
-    for r in rows:
-        out.append(
-            f"  {r['key']}  holder {r['holder']}  pid {r['pid']} "
-            f"({r['pid_observed']})  held {_fmt_age(r['held_s'])}  "
-            f"requests {r['requests']}"
-        )
+    out.extend(
+        f"  {r['key']}  holder {r['holder']}  pid {r['pid']} "
+        f"({r['pid_observed']})  held {_fmt_age(r['held_s'])}  "
+        f"requests {r['requests']}"
+        for r in rows
+    )
     return out
 
 

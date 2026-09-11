@@ -49,12 +49,9 @@ def claim_verdicts(
 ) -> dict[str, dict[str, Any]]:
     """Return native verdict rows for many keys in one subprocess.
 
-    ``claims_dir_path``, when given, is passed verbatim as ``--claims-dir``:
-    the door scans exactly that directory. Without it, ``root`` is resolved
-    through :func:`claims_dir` (which appends ``.fno/claims`` to an explicit
-    root), so a caller that already HOLDS a resolved claims directory must
-    use ``claims_dir_path`` - passing that directory as ``root`` would send
-    the door to a directory one level down that does not exist.
+    ``claims_dir_path`` is passed verbatim as ``--claims-dir``; ``root``
+    would be re-resolved one level down, so a caller holding a resolved
+    claims directory must use it.
     """
     binary = resolve_binary()
     if binary is None:

@@ -389,7 +389,7 @@ pub fn list_strict(
     list_in_result(&dirs, prefix, include_stale)
 }
 
-fn list_in_result(
+pub(crate) fn list_in_result(
     dirs: &[PathBuf],
     prefix: Option<&str>,
     include_stale: bool,
@@ -464,7 +464,7 @@ pub fn now_ms() -> i64 {
 /// `gethostname(2)`, matching Python `socket.gethostname()`. Empty string on
 /// failure (which can never equal a recorded non-empty host, so an unreadable
 /// hostname fails toward "not live" — recoverable, like Python's posture).
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {
@@ -547,7 +547,7 @@ pub fn machine_id() -> String {
 /// `machine` is authoritative whenever present. It is absent only on a claim
 /// written before the field existed; those reproduce the old hostname compare
 /// exactly, so a pre-change claim classifies no worse than it does today.
-fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+pub(crate) fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
     // The machine arm decides only when BOTH sides have an id. A reader that
     // cannot read its own is "unknown", not "a different machine": answering
     // false there would stale a live local claim and make it stealable, and
@@ -1744,7 +1744,7 @@ pub(crate) fn wait_for_event_maintenance(events_path: &Path) {
 /// Shared data fields for claim events (mirrors `events._common`, including
 /// the explicit `expires_at: null` for PID-liveness claims — the EVENT payload
 /// carries null where the LOCKFILE omits the key; that asymmetry is Python's).
-fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
+pub(crate) fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("key".into(), Value::String(rec.key.clone()));
     m.insert("holder".into(), Value::String(rec.holder.clone()));
@@ -2546,7 +2546,6 @@ pub fn release(
     emit_audit_event(events_dir, "claim_released", data);
     Ok(())
 }
-
 /// Inspect a single key (mirrors `core.claim_status`). Never errors: a
 /// missing file (or one that vanishes mid-read) is `Free`, an unreadable one
 /// is `Corrupted` with no record, and an unresolvable claims root reads as
@@ -3031,7 +3030,6 @@ mod tests {
     fn read_claim(root: &TempDir, key: &str) -> ClaimRecord {
         read_claim_file(&lockfile(root, key)).unwrap()
     }
-
     #[test]
     fn parse_ttl_ms_matches_python_units() {
         // BARE digits are SECONDS (parity with Python _parse_ttl / sleep).
@@ -4983,6 +4981,13 @@ mod tests {
         assert!(read_claim_file(&lockfile(&td, "session:race")).is_ok());
     }
 }
+
+#[path = "claims_release_stopped.rs"]
+mod release_stopped;
+pub use release_stopped::{
+    release_for_stopped_session, StopKeptClaim, StopReleaseReceipt, StopReleasedClaim,
+    StoppedHolder,
+};
 
 #[cfg(test)]
 #[path = "claims_reservation_tests.rs"]
