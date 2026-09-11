@@ -156,8 +156,7 @@ def _revive_orphans(
                 err=True,
             )
             continue
-        # x-84b2: ro-<verb>-<node-or-session>-<short>; the old name becomes an
-        # alias of the new row on success.
+        # x-84b2: ro-<verb>-<identity>-<short>; the old name aliases the new row.
         from fno.agents.naming import (
             AgentNameError,
             dispatch_agent_name,

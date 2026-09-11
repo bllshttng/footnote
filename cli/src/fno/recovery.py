@@ -1102,8 +1102,7 @@ def _clear_dead_owner(node: str, cwd: str) -> bool:
 
 
 def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None:
-    """x-84b2: keep the predecessor name addressable on the successor row.
-    Best-effort: a miss never recolors a launched respawn."""
+    """Best-effort: keep the predecessor name addressable on the successor row."""
     if not (new_name and old_name):
         return
     try:
@@ -1117,11 +1116,8 @@ def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None
 def _recovery_agent_name(
     predecessor: Optional[str], node_or_session: str, short: str
 ) -> str:
-    """The x-84b2 ``rec-<verb>-<node-or-session>-<short>`` recovery name: the
-    resumed worker's verb parsed from the predecessor (legacy ``target-*`` /
-    ``think-*`` still resolve; else the builtin t), the recovered node id or a
-    typed ``session-<handle>`` identity, and the short discriminator.
-    """
+    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
+    parses from the predecessor (legacy spellings still resolve, else t)."""
     from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
 
     parsed = parse_dispatch_agent_name(predecessor or "")

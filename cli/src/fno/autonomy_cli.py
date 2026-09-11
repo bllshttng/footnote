@@ -47,10 +47,8 @@ class SpawnerStatus:
 
 
 def dispatch_provenance() -> list[tuple[str, str, str]]:
-    """The 18 dispatch paths (x-84b2) as ``(site, source, verb)`` rows: the 13
-    autonomous spawners of the status table plus spawn-on-blueprint and the
-    four extra paths from the operator input brief. Data lives in the binary
-    (``name-codes``); the crate-local yaml is the source of record."""
+    """The 18 dispatch paths (x-84b2) as ``(site, source, verb)`` rows, served
+    by the binary."""
     from fno.agents.naming import provenance_rows
 
     return list(provenance_rows())
@@ -58,8 +56,7 @@ def dispatch_provenance() -> list[tuple[str, str, str]]:
 
 @lru_cache(maxsize=1)
 def _provenance_by_spawner() -> dict:
-    # Lazy + cached: an import-time binary exec would pay one RPC per import
-    # and break collection wherever the binary lags the source.
+    # Lazy: an import-time binary exec would break collection on a stale binary.
     return {row[0]: row for row in dispatch_provenance()}
 
 
@@ -346,7 +343,7 @@ def format_table(rows: list[SpawnerStatus]) -> str:
         return "true" if v else "false"
 
     def _code_cell(v: Optional[str]) -> str:
-        return v if v else "-"
+        return v or "-"
 
     table_rows = [
         (
@@ -390,13 +387,8 @@ def status_command(
 
 
 def audit_dispatch_provenance() -> None:
-    """Positive completeness marker for the x-84b2 vocabulary (AC5-GUARD).
-
-    Prints one row per dispatch path, then the marker the CI provenance audit
-    greps for. Exits 1 on a short inventory, an unknown code, duplicate
-    sites, or a lost sob/ac split or ab pair - the marker line, not an empty
-    grep, is the evidence.
-    """
+    """Positive completeness marker (AC5-GUARD): one row per dispatch path,
+    then the marker CI greps; exits 1 on any inventory defect."""
     from fno.agents.naming import dispatch_sources, dispatch_verbs
 
     rows = dispatch_provenance()

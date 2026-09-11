@@ -46,11 +46,8 @@ RECENCY_WINDOW_S = 1800  # 30 min
 # fire per session is always near the end (append-ordered).
 _TAIL_BYTES = 256 * 1024
 
-# Worker names are canonical ``[<source>-]<verb>-<node>-<slug>`` (x-84b2) via
-# parse_dispatch_agent_name; the regexes below remain only as the LEGACY
-# fallback for pre-cutover ``target-<node>`` / ``think-<node>`` rows (the
-# documented legacy-read window). A loose match is safe: a mis-parse yields a
-# key that does not resolve -> unknown -> no change (fail-quiet, AC7).
+# Canonical names parse via parse_dispatch_agent_name; the regexes are the
+# LEGACY fallback for pre-cutover rows. A mis-parse fails quiet (AC7).
 _NAME_NODE_RE = re.compile(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 
 # Same shape widened to the design-pass dispatcher's ``think-<node>[-<reason>]``
@@ -58,20 +55,15 @@ _NAME_NODE_RE = re.compile(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 # ``fno agents list`` node join through parse_node_id cannot regress.
 _NAME_MISSION_RE = re.compile(r"^(target|think)-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 
-# Verb code -> mission kind (x-84b2): t/f are PR-shaped target-class work;
-# bp/r/th are design/research passes whose only completion artifact is a
-# linked ``plan_path``.
+# Verb code -> mission kind (x-84b2): t/f are PR-shaped; bp/r/th are design
+# passes whose only artifact is a linked ``plan_path``.
 _VERB_TO_MISSION = {"t": "target", "f": "target", "bp": "think", "r": "think", "th": "think"}
 
 _HOLDER_PREFIX = "target-session:"
 
 
 def parse_node_id(name: Optional[str]) -> Optional[str]:
-    """Extract a node id from a worker name, or None.
-
-    Canonical dispatch names first (``t-<node>-``, ``ab-bp-<node>-``, ...),
-    then the legacy ``target-<node>-`` convention.
-    """
+    """Extract a node id from a worker name (canonical first, then legacy), or None."""
     if not name:
         return None
     parsed = parse_dispatch_agent_name(name)
@@ -85,9 +77,7 @@ def parse_worker_mission(name: Optional[str]) -> Optional[tuple[str, str]]:
     """``(node_id, kind)`` for a convention-named worker, else None.
 
     Kind is ``target`` (PR-shaped mission) or ``think`` (design pass, whose only
-    completion artifact is a linked ``plan_path``). Canonical dispatch names
-    map through the verb code; the legacy ``target-*``/``think-*`` spellings
-    still resolve (legacy-read window). Names are a *convention*, not
+    completion artifact is a linked ``plan_path``). Names are a *convention*, not
     a guarantee - real spawns like ``tgt-x-4175-liveness`` exist - so this is only
     ever the fallback behind a manifest read, and a miss returns None rather than
     a guess (the caller fails closed on None).

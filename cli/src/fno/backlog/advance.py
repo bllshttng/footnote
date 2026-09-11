@@ -1114,10 +1114,7 @@ def schedule_shadow(
 
 
 def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
-    """RETIRED with x-84b2: the worker name states the verb as a code
-    (``ab-bp-<node>-<slug>``); the receipt states it as a word. Deliberately
-    loud, so a stale caller fails here instead of minting an unqualified name.
-    """
+    """RETIRED: the verb rides the dispatch name as a code, loud for stale callers."""
     raise NotImplementedError(
         "_verb_qualifier retired: the verb rides the dispatch name as a code "
         "(fno.agents.naming.verb_code_for); the receipt carries the word."
@@ -1142,9 +1139,7 @@ def _node_effective_verb(node: dict) -> Optional[str]:
 
 
 def refuse_unknown_source(verb_name: str, source):
-    """x-84b2: an unknown --source refuses at the door (exit 2), never
-    defaults - fabricating provenance is what the vocabulary stops. Lives
-    beside the mint so the source table has one importer edge."""
+    """An unknown --source refuses at the door (exit 2), never defaults."""
     import typer
     from fno.agents.naming import dispatch_sources
 
@@ -1161,21 +1156,8 @@ def _worker_agent_name(
     source: Optional[str] = None,
     verb_code: str = "t",
 ) -> str:
-    """Provenance-carrying bg worker name: ``[<source>-]<verb>-<node>-<slug>``.
-
-    Thin adapter over the canonical dispatch vocabulary
-    (:func:`fno.agents.naming.dispatch_agent_name`, x-84b2), which also
-    enforces the runtime's 64-char limit this call site used to skip - a long
-    configured node id assembled a name ``fno agents spawn`` rejected, losing
-    the dispatch with no session and no event (x-3218). ``source`` is the
-    explicit dispatch origin (``ab``/``ac``/``sob``/``rd``/...); ``None`` is
-    the attended manual form, which never fabricates provenance.
-
-    Raises :class:`~fno.agents.naming.AgentNameError` when the required
-    identity cannot be represented (including an unknown source or verb);
-    the dispatch path projects that as a node-identifying failure event
-    rather than a launched lane.
-    """
+    """Provenance-carrying bg worker name ``[<source>-]<verb>-<node>-<slug>``;
+    raises AgentNameError when the identity cannot be represented."""
     return dispatch_agent_name(source, verb_code, node_id, slug=node_slug)
 
 
@@ -1324,14 +1306,8 @@ def _spawn_worker(
     """Dispatch a fire-and-forget autonomous worker.
 
     The workflow verb is DERIVED from the node's plan rung and difficulty
-    (x-ebd2, law d-834b6ff1); the node's ``dispatch_verb`` reconciles through
-    the same conditional and the receipt names both. Full contract:
-    docs/architecture/backlog-graph-verb-contracts.md
-
-    ``source`` (x-84b2) is the explicit dispatch origin stamped into the
-    worker name; ``None`` is the attended manual form. The reconcile pass is
-    always ``rd``: passing a different source with a reconcile manifest is an
-    impossible pair and refuses.
+    (x-ebd2, law d-834b6ff1). ``source`` (x-84b2) stamps the worker name;
+    the reconcile pass is always ``rd`` (an impossible pair refuses).
     """
     is_reconcile = bool(reconcile_manifest)
     if is_reconcile:
@@ -1370,15 +1346,9 @@ def _spawn_worker(
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
-    # x-84b2: the verb code resolves (and refuses out-of-vocabulary verbs)
-    # BEFORE the resolver, so a bad verb never reaches the spawn seam. The
-    # name itself is minted after the resolver: a refused dispatch never
-    # spends a mint.
+    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver, and
+    # the name mints ONCE here, before spawn, riding the receipt.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
-    # x-84b2: the name is minted ONCE here, before spawn, and travels in the
-    # receipt so every event copies the exact registered value. The verb code
-    # in the name replaces the old post-hoc qualifier: the name states the
-    # verb by code, the receipt states it by word.
     agent_name = _worker_agent_name(
         node_id,
         node_slug,
