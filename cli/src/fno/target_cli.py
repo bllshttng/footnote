@@ -674,7 +674,7 @@ def _fetch_dispatch_region_file(
     if not isinstance(root, str) or not os.path.isdir(root):
         return None
     try:
-        from fno.graph.cli import _fetch_retro_comment, _read_merged_region
+        from fno.graph.maintain import _fetch_retro_comment, _read_merged_region
 
         comment = _fetch_retro_comment(
             source_pr, finding_hash, root, repo=repo

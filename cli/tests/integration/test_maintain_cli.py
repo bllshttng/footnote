@@ -354,6 +354,61 @@ def test_maintain_cli_appends_health_history(tmp_graph):
     maintain_records = [r for r in lines if r.get("scope") == "maintain"]
     assert maintain_records, "expected a maintain record in health-history"
     assert maintain_records[-1]["report"]["applied"] is True
+    # AC5: a run that finishes inside its budget records itself as complete.
+    assert maintain_records[-1]["report"]["complete"] is True
+    assert isinstance(maintain_records[-1]["report"]["duration_s"], (int, float))
+    assert maintain_records[-1]["report"]["incomplete_leg"] is None
+
+
+def test_maintain_json_payload_carries_complete_and_duration(tmp_graph):
+    result = _invoke(["-J"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["complete"] is True
+    assert isinstance(payload["duration_s"], (int, float))
+
+
+def test_maintain_budget_exceeded_exits_4_names_leg_and_appends_partial_row(
+    tmp_graph, monkeypatch
+):
+    """AC3/AC4: a pass that runs out of its budget exits 4, names the leg it
+    stopped in on stderr, keeps the finished legs on stdout (the legs that
+    never ran are omitted, not shown as zero), and lands a complete:false
+    health-history row carrying the leg and the duration."""
+    import fno.graph.maintain as gm
+
+    _seed(tmp_graph, [_node("ab-keep03", cwd="/home/u/code/fno", project="fno")])
+
+    class _DyingBudget:
+        """Dies at the dedup boundary: five detect legs have completed."""
+
+        def __init__(self, seconds):
+            pass
+
+        def enter(self, leg):
+            if leg == "dedup":
+                raise gm.BudgetExceeded("dedup", 301.4)
+
+        def remaining(self):
+            return 0.0
+
+    monkeypatch.setattr(gm, "Budget", _DyingBudget)
+    result = _invoke([])
+    assert result.exit_code == 4, result.output
+    assert "budget exceeded in leg 'dedup'" in result.stderr
+    assert "5/14 legs completed" in result.stderr
+    assert "results partial" in result.stderr
+    # Finished legs stay on stdout; dedup (never run) is absent, not zero.
+    assert "  rescope: 0" in result.stdout
+    assert "  harness-shape: 0" in result.stdout
+    assert "dedup:" not in result.stdout
+
+    hist = Path.home() / ".fno" / "health-history.jsonl"
+    lines = [json.loads(ln) for ln in hist.read_text().splitlines() if ln.strip()]
+    row = [r for r in lines if r.get("scope") == "maintain"][-1]["report"]
+    assert row["complete"] is False
+    assert row["incomplete_leg"] == "dedup"
+    assert isinstance(row["duration_s"], (int, float))
 
 
 # --- auto-defer apply-leg (#34, task 2.1) ----------------------------------
