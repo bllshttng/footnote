@@ -2,6 +2,12 @@
 
 The operator ask behind this feature was a live monitor. It must say how the machine is doing and make a best guess on how many more lanes the fleet can take. Three surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter, once you switch the meter on. The court panel puts both in front of a person, behind `prefix` then `C` in the mux.
 
+## Is this page for you?
+
+You ask whether the machine can take more workers, or why a dispatch held instead of spawning. This page owns the meter, the lane advisor, and their surfaces. Misreading it reads a stale or switched-off meter as a full machine, or spawns onto a saturated one.
+
+Not for: process-level facts about one worker (is it alive, what holds its pane). Those are the roster and [reaping-faq.md](reaping-faq.md); the meter measures the machine, not the worker.
+
 ## The feature is conditional
 
 The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.

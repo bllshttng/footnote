@@ -2,6 +2,12 @@
 
 A thread is fno's own persistent session lane: fno can put a worker on a live session by id, end the client, and re-attach later. Whether a harness can take that lane is not a property of the harness. It is a property of what fno has built for it. This page is the rule the code follows, the measured lane table, and the gate that keeps the table honest.
 
+## Is this page for you?
+
+You ask why a spawn landed on a pane instead of a thread, or whether a harness can host a background lane at all. This page owns the threadability selector and the lane table. Misreading it pins a substrate flag a harness refuses, and the spawn dies at classification.
+
+Not for: what restore does with a dead lane, or which session ids are resumable. That is [workspace-restore.md](workspace-restore.md) and [pane-worker-relaunch.md](pane-worker-relaunch.md).
+
 ## The selector
 
 Threadability is derived, never named. The selector is one field in the packaged capability contract, `cli/src/fno/agents/harness_capabilities.toml`: `resume_strategy.forms`. Both runtimes resolve the lane from it with the same three branches. Neither resolver contains a harness name, so a new row lands in its lane with no code edit.

@@ -2,6 +2,12 @@
 
 This repo uses bare `rm` in most scripts and `command -p rm ... || /bin/rm ...` in exactly two files. That split is deliberate. `scripts/ci/check-disposable-rm.sh` enforces it in CI: a bare `rm` in either guarded file fails the build, and a bare `rm` anywhere else passes. This document states the rule so the next contributor does not "normalize" one spelling into the other.
 
+## Is this page for you?
+
+You touch a guarded file, or your `rm` is aliased to a trash tool and a CI check just failed. This page owns that rule and its two-file boundary. Misreading it "fixes" the guarded spelling repo-wide, and the two files that must not risk a trash-alias start depending on your host's `rm` config.
+
+Not for: general delete hygiene elsewhere in the repo, or the reaping sweeps that delete real state. Reaping is [reaping-faq.md](reaping-faq.md); the worktree contract is [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
+
 ## The hazard
 
 Wrapping `rm` to a trash tool is a common safety setup. On such a machine a bare `rm` MOVES the path to the trash instead of unlinking it. For almost every delete in this repo that is tolerable. The path leaves its old location either way, so the calling script's own logic is unaffected. The cost is disk consumption on that host, which is a property of the host's `rm` configuration.

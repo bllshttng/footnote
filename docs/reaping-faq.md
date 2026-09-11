@@ -6,6 +6,12 @@ Run `fno agents reap --dry-run` and find your row handle in the report. The dry 
 
 Measured on this machine on 2026-09-10 with the dry run: 1 `would retire` line, 49 `kept` lines, 1 `held` line. The largest bucket was `open work` with 22 rows. Eight rows sat behind a permanent exemption: 2 operator rows, 4 crowned rows, 2 adopted rows. Counts like these move within the hour, so run your own dry run and date the result.
 
+## Is this page for you?
+
+A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses. This page owns the keep reasons, the three sweep programs, and the checks that tell them apart. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
+
+Not for: the worktree removal contract (which trees prune on merge and which never do). That is answered at [The row retired and its tree stayed](#the-row-retired-and-its-tree-stayed) and owned by [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
+
 ## Read the answer
 
 Every report line has three parts: the verb, the row handle, and the reason in parentheses.
