@@ -33,6 +33,28 @@ session_app = typer.Typer(
 BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
 
 
+def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
+    """Release exactly OUR holder and stamp the receipt; a close never fails
+    on its release - the claim just waits out its TTL."""
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    try:
+        released = release_claim(
+            claim_key, holder, strict=True, root=claims_root_for(claim_key)
+        )
+        receipt["claim_released"] = bool(released)
+        if released:
+            receipt["claim_holder"] = holder
+    except Exception as exc:  # noqa: BLE001 - a close never fails on its release
+        receipt["claim_released"] = False
+        typer.echo(
+            f"session close: {claim_key} not released: "
+            f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
+            err=True,
+        )
+
+
 def _plan_claims(plan_path: str) -> "set[str]":
     """Delegate to the single parser (``_intake.plan_claims``).
 
@@ -530,45 +552,14 @@ def cmd_session_close(
     # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and
     # this close is the only terminal that lifecycle has. Release exactly OUR
     # holder, never the key: a successor target session may already hold the
-    # claim under its own after rebinding it at init.
-    from fno.claims.core import release_claim
-    from fno.claims.io import claims_root_for
-
+    # claim under its own after rebinding it at init. A claim has one holder,
+    # so at most one branch matches.
     holder = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
     claim_key = f"node:{node_id}"
     if holder.startswith("spawn-handover:"):
-        try:
-            released = release_claim(
-                claim_key, holder, strict=True, root=claims_root_for(claim_key)
-            )
-            receipt["claim_released"] = bool(released)
-            if released:
-                receipt["claim_holder"] = holder
-        except Exception as exc:  # noqa: BLE001 - a close never fails on its release
-            receipt["claim_released"] = False
-            typer.echo(
-                f"session close: {claim_key} not released: "
-                f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
-                err=True,
-            )
+        _release_into(receipt, claim_key, holder)
     elif blueprint_held:
-        try:
-            released = release_claim(
-                claim_key,
-                blueprint_holder,
-                strict=True,
-                root=claims_root_for(claim_key),
-            )
-            receipt["claim_released"] = bool(released)
-            if released:
-                receipt["claim_holder"] = blueprint_holder
-        except Exception as exc:  # noqa: BLE001 - a close never fails on its release
-            receipt["claim_released"] = False
-            typer.echo(
-                f"session close: {claim_key} not released: "
-                f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
-                err=True,
-            )
+        _release_into(receipt, claim_key, blueprint_holder)
     else:
         receipt["claim_released"] = False
     if json_out:

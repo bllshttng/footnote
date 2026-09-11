@@ -1,0 +1,152 @@
+"""Which backlog verbs does the external tracker backend refuse or mark?
+
+Every registered backlog verb is classified exactly ONCE, here, against the
+LIVE registry (never a frozen count): tracker-owned verbs wrap their
+registered callback with the shared external refusal BEFORE any graph
+read/write, and footnote-owned verbs carry the read-side marker the
+consumer census pins (scripts/diagnostics/tracker-consumers.py --verbs).
+A verb missing from both lists fails the import, and a listed verb the
+registry no longer carries fails it too (no tombstones, no renames smuggled
+past the classification). Misclassifying a read as tracker-owned only
+refuses it externally; misclassifying a mutation as footnote-owned is the
+dangerous direction, so unsure verbs sit tracker-owned.
+"""
+
+_TRACKER_OWNED_VERBS = frozenset(
+    {
+        # node lifecycle + creation
+        "add",
+        "idea",
+        "new",
+        "intake",
+        "decompose",
+        "update",
+        "note",
+        # encounter appends to a node's graph record, exactly like note
+        "encounter",
+        "remove",
+        "migrate-priorities",
+        "migrate-difficulty",
+        "migrate-updated-at",
+        "reopen",
+        "supersede",
+        "unsupersede",
+        # board/rank/queue state
+        "rank",
+        "reprioritize",
+        "defer",
+        "undefer",
+        # stamps contained_in + parent under the lock
+        "contain",
+        "queue",
+        "unqueue",
+        "pick",
+        "unclaim",
+        "requeue",
+        # storage + sweep machinery
+        "archive",
+        "unarchive",
+        "archive-dedupe-ids",
+        "maintain",
+        "groom",
+        # graph-row mutation (stamps deferred_kind under the lock)
+        "backfill-deferred-kind",
+        # graph-state read: under an external backend the local graph is not
+        # the store, so the read must refuse with the rest
+        "stuck-epics",
+        # orchestration that stamps nodes
+        "advance",
+        "reconcile",
+        "reconcile-findings",
+        "lanes",
+        "lane-fill",
+        "dispatch-lanes",
+        # join spawns workers into a held worktree; the joiners, not join,
+        # write task rows ()
+        "join",
+        # footnote-owned DATA with a graph-resident write path (refused until the
+        # write moves to the sidecar seam)
+        "cost",
+        "session add",
+        "session close",
+        "session open",
+        "session reap-open",
+        "decide",
+        "decisions",
+        "decide-retract",
+        "decide-reindex",
+        # sub-app mutations
+        "triage apply",
+        "capture promote",
+        "batch join",
+        "batch prepare",
+        "batch ship",
+        "batch ship-closeable",
+        # task rows + task claims write graph state (list materializes rows)
+        "task list",
+        "task update",
+    }
+)
+
+_FOOTNOTE_OWNED_VERBS = frozenset(
+    {
+        # seam reads / renders
+        "get",
+        "status",
+        "view",
+        "find",
+        "next",
+        "ready",
+        "worked",
+        "queued",
+        "provenance",
+        "roadmap",
+        "bases",
+        "album",
+        "project-root",
+        "board",
+        "undispatched",
+        # replays the post-publish views after a native (mux) store write;
+        # renders only, never a graph write
+        "render-views",
+        "discover",
+        # demand reads encounters and writes nothing
+        "demand",
+        # completion works on any backend by design (task 4.1)
+        "done",
+        # footnote-owned sidecar files, no graph write
+        "relatedness build",
+        "relatedness get",
+        "epic status",
+        # capture-pile file machinery (no graph writes; promote is tracker-owned)
+        "capture add",
+        "capture archive",
+        "capture capture-pass",
+        "capture dismiss",
+        "capture empty-pass",
+        "capture list",
+        "capture scan",
+        "capture tidy",
+        # triage read/propose surfaces (apply is tracker-owned)
+        "triage consistency",
+        "triage context",
+        "triage health",
+        "triage projects",
+        "triage propose",
+        "triage rank",
+        "triage trend",
+        "triage validate",
+        # batch read surfaces
+        "batch open",
+        "batch status",
+        "batch metrics",
+        # read-only operators' surface over the graph store
+        # graph-store integrity check (read-only)
+        "collisions check",
+    }
+)
+
+#: Tracker-owned verbs whose refusal a caller must read as "no grain here",
+#: not as a stop. Under a non-graph backend there are no task rows at all, so
+#: a wave has nothing to guard and dispatches exactly as it did before.
+_NO_GRAIN_ON_EXTERNAL_BACKEND = frozenset({"task list", "task update"})
