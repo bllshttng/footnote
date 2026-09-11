@@ -40,7 +40,11 @@ fn resume_agent_runs_the_staged_resume_argv() {
     let (c, mut rx) = client_with_rx(1);
     core.clients.push(c);
     core.staged_resume_argv = Some(vec![
-        "codex".into(),
+        // argv[0] is an absolute benign binary (the house /bin/cat shape):
+        // the spawn gate refuses a program not on PATH, and a CI runner has
+        // no codex. The grant and --cd tokens ride positions 1.. verbatim;
+        // the grant SPLICE itself is pinned by the fno-agents parity tests.
+        "/bin/cat".into(),
         "-c".into(),
         "sandbox_workspace_write.writable_roots=[\"/wt/.fno/plans\"]".into(),
         "--cd".into(),
@@ -64,11 +68,10 @@ fn resume_agent_runs_the_staged_resume_argv() {
         .collect();
     assert_eq!(new_panes.len(), 1, "exactly one resumed pane");
     let entry = core.panes.get(&new_panes[0]).unwrap();
-    let joined = entry.cmd.as_deref().unwrap_or_default();
-    assert!(
-        joined.contains("writable_roots") || entry.cmd.as_deref() == Some("codex"),
-        "the staged argv reached the pane: {:?}",
-        entry.cmd
+    assert_eq!(
+        entry.cmd.as_deref(),
+        Some("cat"),
+        "the staged argv's program ran - the staging reached the spawn, not the declared form"
     );
     for pid in new_panes {
         core.reap_pane(pid);
@@ -115,8 +118,10 @@ fn resume_agent_fails_open_when_resume_argv_unavailable() {
     core.handle(CoreMsg::ResumeArgvReady {
         id: 1,
         argv: Ok((
+            // Absolute argv[0]: the spawn gate refuses a program not on
+            // PATH, and a CI runner has no codex.
             vec![
-                "codex".to_string(),
+                "/bin/cat".to_string(),
                 "resume".to_string(),
                 "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
             ],
