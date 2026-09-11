@@ -1370,11 +1370,15 @@ def _spawn_worker(
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
+    # x-84b2: the verb code resolves (and refuses out-of-vocabulary verbs)
+    # BEFORE the resolver, so a bad verb never reaches the spawn seam. The
+    # name itself is minted after the resolver: a refused dispatch never
+    # spends a mint.
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     # x-84b2: the name is minted ONCE here, before spawn, and travels in the
     # receipt so every event copies the exact registered value. The verb code
     # in the name replaces the old post-hoc qualifier: the name states the
     # verb by code, the receipt states it by word.
-    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     agent_name = _worker_agent_name(
         node_id,
         node_slug,

@@ -166,15 +166,18 @@ pub fn agent_name(
     }
     let required = required_parts.join("-");
     if required.len() > MAX_LEN {
+        // Single-quote the components, never Debug's double quotes: the shell
+        // dispatchers relay this message into a `reason="..."` field whose
+        // grammar a double quote would break.
         let mut detail = format!(
-            "required agent-name identity is {} chars, over the {}-char runtime limit: prefix={:?} node={:?}",
+            "required agent-name identity is {} chars, over the {}-char runtime limit: prefix='{}' node='{}'",
             required.len(), MAX_LEN, prefix, node_id
         );
         if !qualifier.is_empty() {
-            detail.push_str(&format!(" qualifier={:?}", qualifier));
+            detail.push_str(&format!(" qualifier='{}'", qualifier));
         }
         if !disc.is_empty() {
-            detail.push_str(&format!(" discriminator={:?}", disc));
+            detail.push_str(&format!(" discriminator='{}'", disc));
         }
         return Err(NameError::refused(detail));
     }
@@ -200,7 +203,7 @@ pub fn agent_name(
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !ok {
         return Err(NameError::refused(format!(
-            "generated agent name {:?} violates the runtime contract [A-Za-z0-9_-]{{1,{}}} (node={:?})",
+            "generated agent name '{}' violates the runtime contract [A-Za-z0-9_-]{{1,{}}} (node='{}')",
             name, MAX_LEN, node_id
         )));
     }
@@ -219,7 +222,7 @@ pub fn verb_code_for(word: Option<&str>) -> Result<String, NameError> {
     let v = v.trim_start_matches('/');
     let v = if v.is_empty() { "target" } else { v };
     codes().word_codes.get(v).cloned().ok_or_else(|| {
-        NameError::refused(format!("unknown dispatch verb {:?}", word.unwrap_or("")))
+        NameError::refused(format!("unknown dispatch verb '{}'", word.unwrap_or("")))
     })
 }
 
@@ -236,7 +239,7 @@ pub fn dispatch_agent_name(
     let v = verb.trim();
     if !dispatch_verbs().contains(v) {
         return Err(NameError::refused(format!(
-            "unknown dispatch verb {:?}",
+            "unknown dispatch verb '{}'",
             verb
         )));
     }
@@ -246,7 +249,7 @@ pub fn dispatch_agent_name(
             let s = s.trim();
             if !dispatch_sources().contains(s) {
                 return Err(NameError::refused(format!(
-                    "unknown dispatch source {:?}",
+                    "unknown dispatch source '{}'",
                     source.unwrap_or("")
                 )));
             }
