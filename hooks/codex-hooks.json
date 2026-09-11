@@ -49,6 +49,11 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/truncation-guard.py",
             "statusMessage": "checking for a truncated count-or-existence read"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recursive-grep-guard.py",
+            "statusMessage": "checking recursive grep cache traversal"
           }
         ]
       }
