@@ -42,13 +42,11 @@ EXIT_REGISTRY_SCHEMA = 81
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
-#: x-7783 LD4: the CPU-hold re-sample gap and the admission debounce. Longer
-#: than the slot poll because the `ps` CPU column is a decaying average on
-#: macOS - two reads 2s apart are one sample twice.
+#: x-7783 LD4: hold re-sample gap and admission debounce (the macOS `ps`
+#: CPU column is a decaying average; two reads 2s apart are one sample).
 CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
-#: x-e32e: a bg-socket census slower than this names its own wait on stderr
-#: instead of leaving the spawn silent while lsof grinds under load.
+#: x-e32e: a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
 GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
@@ -273,8 +271,7 @@ class LiveCensus:
 
 @dataclass(frozen=True)
 class LoadSnapshot:
-    # x-7783: display/trend fields only. Nothing gates on any of them; the
-    # CPU axis reads its own inputs inside cpu_admission.
+    # x-7783: display/trend only; nothing gates on these.
     load_1m: float | None
     load_cpu_count: int
     load_5m: float | None = None
@@ -959,9 +956,8 @@ _CURRENT_SPAWN: "contextvars.ContextVar[tuple[Optional[str], Optional[str]]]" = 
     contextvars.ContextVar("fno_spawn_gate_current", default=(None, None))
 )
 
-#: x-7783 AC13: the axes this gate run has read so far, as one-word verdicts,
-#: plus the axis currently being decided. Stamped onto every refusal that does
-#: not carry its own, so any receipt answers "what did you read, what decided".
+#: x-7783 AC13: the axes read so far (one-word verdicts) and the axis being
+#: decided, stamped onto refusals that carry no explicit axis fields.
 _CURRENT_AXES_READ: "contextvars.ContextVar[dict[str, str]]" = (
     contextvars.ContextVar("fno_spawn_gate_axes_read", default={})
 )
@@ -999,9 +995,8 @@ def _refuse(
     """
     spawn_name, substrate = _CURRENT_SPAWN.get()
     event_data = {**(receipt or {}), **event}
-    # x-7783 AC13: a refusal names the axis that decided and every axis read
-    # before it. An explicit event field wins; the contextvar is the best
-    # effort a non-CPU refusal site (ram, slots, king share) can supply.
+    # x-7783 AC13: an explicit axis field wins; the contextvar is the best
+    # effort a non-CPU refusal site can supply.
     axes_read = _CURRENT_AXES_READ.get()
     if axes_read and "axes_read" not in event_data:
         event_data["axes_read"] = dict(axes_read)
@@ -1483,9 +1478,8 @@ def run_gate(
             _admission_token=_PROVIDER_ADMISSION_TOKEN,
         )
     cap, floor_gb, limits = gate_settings()
-    # The retired trigger (max_load_per_cpu) is NOT read here (x-7783 AC7):
-    # the CPU axis reads its own share ceiling and backstop per sample inside
-    # _cpu_axis, so a held spawn re-reads them the way it re-samples.
+    # The retired trigger key is read nowhere (x-7783 AC7); the CPU axis
+    # re-reads its thresholds per sample inside _cpu_axis.
 
     provider_cap = (
         provider_lanes_cap(limits.get(route_provider))
@@ -1543,9 +1537,8 @@ def run_gate(
     #: or not yet contended). Reset on every success so a long legitimate queue
     #: never accumulates into a spurious fail-open.
     mutex_blocked_since: Optional[float] = None
-    #: x-e32e: ONE bg-socket scan per spawn. The lsof census costs seconds
-    #: under load, and a fresh scan on every queue poll is what hung one spawn
-    #: for 12 minutes. The first census pays for it; later passes reuse it.
+    #: x-e32e: ONE bg-socket scan per spawn; a fresh scan on every queue
+    #: poll is what hung a spawn for 12 minutes.
     sock_map: Optional[dict[str, int]] = None
     sock_scanned = False
     axes_read: dict[str, str] = {}
@@ -1642,9 +1635,8 @@ def run_gate(
                 if substrate == "headless":
                     _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 return guard
-            # x-7783 Change 2: the CPU axis decides BEFORE the census, so a
-            # hold never pays the lsof scan and the slot cap returns to being
-            # the backstop behind it (LD1).
+            # x-7783: the CPU axis decides BEFORE the census, so a hold
+            # never pays the lsof scan (LD1).
             _CURRENT_AXIS.set("cpu")
             admission = _cpu_axis(prefetched_fleet)
             verdict = admission.verdict
@@ -1672,9 +1664,7 @@ def run_gate(
             if verdict in ("refuse", "undecidable"):
                 guard.release()
                 if verdict == "undecidable":
-                    # LD3: the ceiling falls inside the interval - the machine
-                    # is measurably busy and ownership is unknown. That is
-                    # where refusing is defensible, and it refuses at once.
+                    # LD3: ceiling inside the interval refuses at once.
                     reason = "cpu_share_undecidable"
                 elif admission.axis == "load_15m":
                     reason = "load_backstop"
@@ -1744,9 +1734,6 @@ def run_gate(
                         )
                 if not hold_pause:
                     if not sock_scanned:
-                        # x-e32e: the one lsof scan of this spawn happens on
-                        # the census path only, once, and names itself when it
-                        # was slow instead of leaving the spawn silent.
                         from fno.agents.session_procs import bg_socket_pid_map
 
                         scan_started = time.monotonic()
