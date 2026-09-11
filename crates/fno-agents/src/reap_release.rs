@@ -97,9 +97,13 @@ pub(crate) fn fresh_hold_refusal(hold: &gc_sweep::Hold, threshold_s: u64) -> Str
     )
 }
 
-/// The witness refusal for a `sources disagree` release: any witness node
-/// that does not read done names itself and refuses. The witnesses ride the
-/// hold detail as `sessions <node> vs registry <node>`.
+/// The witness refusal for a `sources disagree` release: a witness whose
+/// node still carries ACTIVE work names itself and refuses. Done and the
+/// inactive NODE statuses (deferred, idea, gc.rs INACTIVE_NODE_STATUSES)
+/// are not open work - a node parked at deferred is exactly the shape the
+/// x-2774 session-shaped releases already retire onto - so they release.
+/// The witnesses ride the hold detail as `sessions <node> vs registry
+/// <node>`.
 pub(crate) fn witness_refusal(home: &AgentsHome, hold: &gc_sweep::Hold) -> Option<String> {
     let (a, b) = hold.detail.split_once(" vs ")?;
     let statuses = gc_sweep::read_graph_node_states(home);
@@ -110,7 +114,8 @@ pub(crate) fn witness_refusal(home: &AgentsHome, hold: &gc_sweep::Hold) -> Optio
             .and_then(|s| s.get(node))
             .map(|(status, _)| status.as_str())
             .unwrap_or("unknown");
-        if status != "done" {
+        let parked = crate::gc::INACTIVE_NODE_STATUSES.contains(&status);
+        if status != "done" && !parked {
             return Some(format!(
                 "{}: {node} reads {status}; a release never retires open work",
                 hold.id

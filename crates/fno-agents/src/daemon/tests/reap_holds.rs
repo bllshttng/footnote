@@ -625,3 +625,43 @@ fn ac3_the_conflict_release_reads_all_done_over_bare_witness_nodes() {
         "bare witness nodes, never the hold strings: {basis}"
     );
 }
+
+/// King specimen (2026-09-11): a deferred witness is parked, not open work.
+/// The release gate accepts done and the inactive statuses; only ACTIVE
+/// work refuses.
+#[test]
+fn the_witness_gate_releases_a_parked_witness_and_refuses_an_active_one() {
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([
+            {"id": "x-done", "status": "done", "additional_prs": [], "sessions": []},
+            {"id": "x-defer", "status": "deferred", "additional_prs": [], "sessions": []},
+            {"id": "x-ready", "status": "ready", "additional_prs": [], "sessions": []},
+        ]),
+    );
+    let hold_for = |detail: &str| gc_sweep::Hold {
+        id: "row".to_string(),
+        reason: "sources disagree",
+        detail: detail.to_string(),
+        age_s: Some(7200),
+        age_basis: "row created",
+        escalated: true,
+    };
+
+    let parked = crate::reap_release::witness_refusal(
+        &home,
+        &hold_for("sessions x-done vs registry x-defer"),
+    );
+    assert!(parked.is_none(), "deferred is not open work: {parked:?}");
+
+    let active = crate::reap_release::witness_refusal(
+        &home,
+        &hold_for("sessions x-done vs registry x-ready"),
+    )
+    .unwrap();
+    assert!(
+        active.contains("x-ready reads ready; a release never retires open work"),
+        "{active}"
+    );
+}
