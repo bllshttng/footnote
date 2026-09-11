@@ -72,6 +72,9 @@ def read_roster(
             "state": r.state,
             "cwd": r.cwd,
             "row_id": str(r.row_id or ""),
+            "pid": getattr(r, "pid", None),
+            "pid_start_time": getattr(r, "pid_start_time", None),
+            "mux": getattr(r, "mux", None),
         }
         if r.node:
             index.setdefault(r.node, []).append(entry)
@@ -97,7 +100,12 @@ def _worker_reachability(worker: dict):
     row (a finished worker's row never leaves `working`, measured live
     2026-09-11); a terminal word with no transcript stays positive evidence.
     """
-    from fno.agents.reachability import classify_reachability
+    from fno.agents.reachability import (
+        TRANSCRIPT_EVIDENCE_S,
+        classify_reachability,
+        pane_falsifier,
+        pid_falsifier,
+    )
 
     state = worker.get("state")
     try:
@@ -111,10 +119,16 @@ def _worker_reachability(worker: dict):
         )
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         facts = None
+    # A FRESH tail is a resumed session's witness (x-a613) over a corpse pid.
+    falsifier = pid_falsifier(worker.get("pid"), worker.get("pid_start_time")) or pane_falsifier(
+        worker.get("mux")
+    )
     if facts is None:
         # No transcript: the supervisor word is the only evidence. An active
         # word stays reachable; a terminal word positively ended the row (a
         # killed worker with a rotated transcript must still free its node).
+        if falsifier is not None:
+            return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
         if state in ("working", "watching", "your-move"):
             return classify_reachability(truth_state=state, age_s=None, falsifier=None)
         falsifier = f"finished-state:{state}" if state in _finished_row_states() else None
@@ -123,10 +137,12 @@ def _worker_reachability(worker: dict):
         # A transcript PRESENT but undatable: the measured wrong answer read
         # this as engaged. It is UNKNOWN - a verdict about the instrument -
         # never engaged-by-default and never positively finished.
-        return classify_reachability(truth_state=None, age_s=None, falsifier=None)
+        return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
     age = int(max(0.0, time.time() - facts.last_event_epoch))
+    if falsifier is not None and age <= TRANSCRIPT_EVIDENCE_S:
+        falsifier = None
     return classify_reachability(
         truth_state=classify_tail(facts.last_role, facts.last_text, age),
         age_s=age,
-        falsifier=None,
+        falsifier=falsifier,
     )

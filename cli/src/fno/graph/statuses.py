@@ -274,6 +274,20 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
         return set()
 
 
+def closed_worker_session_ids(entry: dict) -> set[str]:
+    """Session ids whose own phase row on this node closed and none is open
+    (the x-6f98 close receipt): finished with THIS node ahead of the
+    predicate, whatever the transcript did afterwards."""
+    closed: set[str] = set()
+    open_ids: set[str] = set()
+    for row in entry.get("sessions") or []:
+        if not (isinstance(row, dict) and isinstance(row.get("session_id"), str)
+                and isinstance(row.get("phase"), str)):
+            continue
+        (open_ids if is_open_phase_row(row, row["phase"]) else closed).add(row["session_id"])
+    return closed - open_ids
+
+
 def live_worked_node_ids(
     *, strict: bool = False, entries: list[dict] | None = None
 ) -> dict[str, list[str]]:
@@ -306,12 +320,13 @@ def live_worked_node_ids(
             if not isinstance(node_id, str) or not node_id:
                 continue
             workers: list[str] = []
+            closed_ids = closed_worker_session_ids(entry)
 
             def _admit(name, verdict):
-                # x-dead: undatable rows are listed marked, never vanished.
+                # x-dead: unmeasured rows are listed marked, never vanished.
                 label = (
                     name if verdict == REACHABLE
-                    else f"{name} (unmeasurable: transcript could not be dated)"
+                    else f"{name} (unmeasurable: no positive liveness evidence)"
                 )
                 if isinstance(label, str) and label and label not in workers:
                     workers.append(label)
@@ -321,12 +336,14 @@ def live_worked_node_ids(
                         and is_open_phase_row(row, row["phase"])):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])
-                if roster_row is None:
+                if roster_row is None or roster_row.get("row_id") in closed_ids:
                     continue
                 verdict = _worker_reachability(roster_row).verdict
                 if verdict in (REACHABLE, UNKNOWN):
                     _admit(roster_row.get("name"), verdict)
             for extra in reading.workers_on(node_id):
+                if extra.get("row_id") in closed_ids:
+                    continue
                 verdict = _worker_reachability(extra).verdict
                 if verdict in (REACHABLE, UNKNOWN):
                     _admit(extra.get("name"), verdict)

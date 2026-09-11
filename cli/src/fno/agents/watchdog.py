@@ -46,7 +46,12 @@ Verdict = namedtuple(
 )
 #: ``agent`` (default "claude") resolves the row's transcript store (x-c624);
 #: apply lanes re-read the transcript through it, so it rides the verdict too.
-Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
+#: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
+Row = namedtuple(
+    "Row",
+    "row_id name state node cwd agent pid pid_start_time mux",
+    defaults=(None, "", "claude", None, None, None),
+)
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
@@ -1426,6 +1431,9 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 # The loop exists only because this entry is NOT claude; the
                 # harness it filtered on is the one the row must carry.
                 agent=str(getattr(entry, "harness", "") or "claude"),
+                pid=getattr(entry, "pid", None),
+                pid_start_time=getattr(entry, "pid_start_time", None),
+                mux=getattr(entry, "mux", None),
             )
         )
         seen_row_ids.add(row_id)

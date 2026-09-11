@@ -3124,13 +3124,13 @@ def _observe_node_claim(
     if occupied and block_reason is None:
         # x-dead task 2.2: `blocked`/`already-claimed` starved auto_continue
         # for 97 minutes; name what was consulted and what it found.
-        parts: list[str] = []
-        if claim_state in ("live", "suspect"):
-            parts.append(f"claim {claim_state} held by {holder}")
-        if worker:
-            parts.append(f"worked overlay: {worker}")
-        if parts:
-            block_reason = "held: " + "; ".join(parts)
+        parts = [
+            p for p in (
+                f"claim {claim_state} held by {holder}" if claim_state in ("live", "suspect") else "",
+                f"worked overlay: {worker}" if worker else "",
+            ) if p
+        ]
+        block_reason = "held: " + "; ".join(parts) if parts else None
     dead_action = (
         None
         if occupied or not enforce_failure_limit

@@ -115,7 +115,64 @@ def test_an_undatable_transcript_never_renders_a_live_worker(cwd_tmp, roster, mo
     assert "basis" not in info
     r = runner.invoke(cli, ["status", NODE])
     assert "UNCLAIMED but a live worker" not in r.output
-    assert "undatable, UNKNOWN never live" in r.output
+    assert "unmeasured, never live" in r.output
+
+
+def test_a_dead_pid_falsifies_a_silent_row(cwd_tmp, roster, monkeypatch):
+    # Measured gap 2026-09-11 16:35Z (the bp-1939 shape): a row with a
+    # positively dead pid and a dated-but-silent transcript read
+    # UNKNOWN-by-silence and held its node. The falsifiers reach the
+    # predicate through the roster row, so this reads finished.
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
+    monkeypatch.setattr(
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 11 * 3600,
+            tail_text="", last_role="assistant", last_text="...", pr_polls=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.reachability.pid_falsifier", lambda *_a, **_kw: "process-gone"
+    )
+    roster(_workers({"name": "bp-1939-arm-timeout", "state": "working",
+                     "cwd": "/wt/ac1-node", "row_id": "bp-1939",
+                     "pid": 999999, "pid_start_time": None, "mux": None}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    r = runner.invoke(cli, ["status", NODE])
+    assert "bp-1939-arm-timeout" in r.output
+    assert "finished session" in r.output or "1 finished" in r.output
+
+
+def test_a_fresh_transcript_outranks_a_dead_pid(cwd_tmp, roster, monkeypatch):
+    # The resume guard: a harness resume kills the pid while the session
+    # keeps writing (x-a613); the fresh tail holds the node.
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
+    monkeypatch.setattr(
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 60,
+            tail_text="", last_role="assistant", last_text="working", pr_polls=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.reachability.pid_falsifier", lambda *_a, **_kw: "process-gone"
+    )
+    roster(_workers({"name": "t-resumed", "state": "working",
+                     "cwd": "/wt/ac1-node", "row_id": "t-resumed",
+                     "pid": 999999, "pid_start_time": None, "mux": None}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert info["worked_by"] == ["t-resumed"]
 
 
 def test_a_stale_working_word_yields_to_a_done_tail(cwd_tmp, roster, monkeypatch):

@@ -916,7 +916,7 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in unmeasurable)
         return (
             f"{state}, no positively-live worker; {len(unmeasurable)} row(s) "
-            f"undatable, UNKNOWN never live: {rendered}. "
+            f"unmeasured, never live: {rendered}. "
             f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
         )
     unresolved = info.get("roster_rows_unresolved", 0)
@@ -1002,6 +1002,20 @@ def status(
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
         workers = info.get("roster_workers") or []
+        try:
+            from fno.graph.statuses import closed_worker_session_ids
+            from fno.graph.store import read_graph
+            from fno.paths import graph_json
+
+            entry = next(
+                (e for e in read_graph(graph_json())
+                 if isinstance(e, dict) and str(e.get("id") or "") == node_id),
+                None,
+            )
+            closed = closed_worker_session_ids(entry) if entry else set()
+        except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
+            closed = set()
+        workers = [w for w in workers if str(w.get("row_id") or "") not in closed]
         from fno.agents.reachability import REACHABLE, UNKNOWN
 
         worker_verdicts = {
