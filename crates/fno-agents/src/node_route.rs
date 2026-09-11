@@ -291,6 +291,16 @@ pub fn resolve(
     let ids: HashSet<String> = graph.statuses.keys().cloned().collect();
     let key = crate::graph_store::work_state_key(sid);
     let mut route = NodeRoute::default();
+    // The sessions witness is the whole set (x-e3cc): a session dispatched
+    // under several nodes carries one sessions[] row per node, so a later
+    // source answering ANY of them agrees with the witness - only an answer
+    // outside the set is a conflict. `graph_store::work_state` already reads
+    // the set the same way; this comparison was the one row left behind.
+    let sessions_set: HashSet<String> = graph
+        .index
+        .get(&key)
+        .map(|rows| rows.iter().map(|(node, _)| node.clone()).collect())
+        .unwrap_or_default();
     // The strong tier: dispatch records, all in-memory reads.
     let strong = [
         (
@@ -305,6 +315,14 @@ pub fn resolve(
         (NodeSource::Name, name_route(&e.name, &ids)),
     ];
     for (source, answer) in strong {
+        if source != NodeSource::Sessions && route.node.is_some() {
+            if let Some(node) = &answer {
+                if sessions_set.contains(node) {
+                    route.agreeing.push(source);
+                    continue;
+                }
+            }
+        }
         if !merge(&mut route, source, answer) {
             return route;
         }
@@ -562,6 +580,49 @@ mod tests {
         assert_eq!(
             route.conflict,
             Some((NodeSource::Name, "x-aaaa".to_string()))
+        );
+        assert!(route.agreeing.is_empty());
+    }
+
+    // AC1-HP (x-e3cc): a session dispatched under several nodes carries one
+    // sessions[] row per node, so a later strong source answering ANY of
+    // them agrees with the witness. Only an answer outside the set is a
+    // conflict, and `route.node` stays the first row so the work verdict
+    // does not move.
+    #[test]
+    fn a_session_named_under_several_nodes_agrees_with_any_member_of_the_set() {
+        let mut g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        g.index.insert(
+            "sid-set".to_string(),
+            vec![
+                ("x-aaaa".to_string(), "done".to_string()),
+                ("x-bbbb".to_string(), "done".to_string()),
+            ],
+        );
+        let e = entry("unidentified-row", Some("x-bbbb"));
+        let route = resolve(&e, "sid-set", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(route.agreeing, vec![NodeSource::Registry]);
+        assert_eq!(route.conflict, None);
+    }
+
+    // AC1-EDGE (x-e3cc): an answer outside the set is still a conflict.
+    #[test]
+    fn a_registry_answer_outside_the_sessions_set_conflicts() {
+        let mut g = graph(&[("x-aaaa", "done"), ("x-cccc", "done")]);
+        g.index.insert(
+            "sid-conflict".to_string(),
+            vec![("x-aaaa".to_string(), "done".to_string())],
+        );
+        let mut e = entry("unidentified-row", Some("x-cccc"));
+        e.harness_session_id = Some("sid-conflict".into());
+        let route = resolve(&e, "sid-conflict", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(
+            route.conflict,
+            Some((NodeSource::Registry, "x-cccc".to_string()))
         );
         assert!(route.agreeing.is_empty());
     }

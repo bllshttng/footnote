@@ -1965,7 +1965,7 @@ fn render_list_json_shape_matches_python_contract() {
         "missing 'discovered_sessions' key"
     );
     assert_eq!(parsed["discovered_count"], 0);
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
     assert_eq!(parsed["count"], 1);
     assert_eq!(
         parsed["fields_omitted"], result["fields_omitted"],
@@ -2047,13 +2047,20 @@ fn render_list_with_discovered_lane() {
         "status": "busy",
         "agent": "claude",
     })];
-    let out = render_list_json(&agents, &filters, &json!(["model"]), &discovered);
+    let out = render_list_json(
+        &agents,
+        &filters,
+        &json!(["model"]),
+        &discovered,
+        Some(3),
+        Some(3),
+    );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
     assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
 
-    let table = render_list_table(&agents, &discovered);
+    let table = render_list_table(&agents, &discovered, Some(3), Some(3));
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
     // ADDRESS leads and the alias is demoted to LABEL. The alias led this
     // table for its whole life, so it was the leftmost thing a reader
@@ -2106,7 +2113,7 @@ fn render_list_table_carries_the_mailbox_address() {
         }
     ]);
 
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2159,7 +2166,7 @@ fn render_list_table_has_checked_and_pid_columns_not_live() {
             "log_path": null,
         }
     ]);
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
     // AC5-UI: header shows STATUS + CHECKED + PID, and LIVE is gone.
     assert!(
@@ -2235,7 +2242,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2259,6 +2266,45 @@ fn render_list_table_has_event_age_and_last_message_columns() {
     assert!(
         !gone.contains("0s"),
         "absent stamp never reads fresh: {gone}"
+    );
+}
+
+/// x-e3cc: a total probe outage is named in the table, not left to read as a
+/// wall of `unknown` statuses. The daemon's stderr WARN is write-only; this
+/// line is the receipt the operator actually sees.
+#[test]
+fn render_list_table_names_a_total_probe_outage() {
+    let agents = json!([
+        {
+            "name": "any-worker",
+            "harness": "claude",
+            "status": "unknown",
+            "address": null,
+            "short_id": null,
+            "session_id": null,
+            "cwd": "/home/user/proj",
+            "created_at": "2026-05-25T00:00:00Z",
+            "last_message_at": null,
+            "live_status": null,
+            "pid": null,
+            "last_reconciled_at": null,
+            "log_path": null
+        }
+    ]);
+    let table = render_list_table(&agents, &[], Some(43), Some(0));
+    assert!(
+        table.contains("truth probe failed: 0 of 43 rows answered"),
+        "outage must be named, got: {table}"
+    );
+    assert!(
+        table.contains("unmeasured, not healthy"),
+        "the statuses must be disclaimed: {table}"
+    );
+
+    let healthy = render_list_table(&agents, &[], Some(43), Some(43));
+    assert!(
+        !healthy.contains("truth probe failed"),
+        "a healthy page carries no outage line: {healthy}"
     );
 }
 

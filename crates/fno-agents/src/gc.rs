@@ -96,6 +96,11 @@ pub struct GcRow {
     /// nothing, so a fresh mtime without a living writer is an artifact -
     /// but an absent or unanswerable pid never does: only ESRCH is death.
     pub pid_gone: bool,
+    /// A `reap --release` ruling for THIS row (x-e3cc): the release lifts
+    /// the transcript-unresolved gate, so an absent transcript age retires
+    /// instead of holding. Set only when the verb's ruling matched the row;
+    /// a missing age is never quiet on any other path.
+    pub release_quiet: bool,
 }
 
 impl GcRow {
@@ -326,6 +331,9 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 /// transcript and a transcript inside the grace window both keep the row.
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     match row.transcript_age_s {
+        // x-e3cc: the release lifts this one gate for this one row. Every
+        // other path reads absence as unresolved, never as quiet.
+        None if row.release_quiet => (GcAction::Retire, None),
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
         // x-2774 change 8: a provably dead pid (ESRCH) overrides recency.
         // Recency without a living writer is not liveness; only ESRCH
@@ -469,6 +477,43 @@ pub fn gc_sweep(
         &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
         &crate::daemon::rm_take_worktree,
+    );
+    summary.settled_do_rows = settled
+        .into_iter()
+        .map(|row| (row.node, row.harness, row.session_id))
+        .collect();
+    summary.settle_refused = refused;
+    summary
+}
+
+/// `fno agents reap --release <row>`: the same production seams as
+/// [`gc_sweep`], with one release ruling riding the pass (x-e3cc). The
+/// settle runs first exactly as the real sweep runs it, so a do row the
+/// batch can fill is already filled before the row pass reads the graph.
+pub fn gc_sweep_release(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_secs: i64,
+    retain_days: u64,
+    release: &gc_sweep::Release,
+) -> gc_sweep::GcSummary {
+    let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
+    let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
+    let mut summary = gc_sweep::run_with_release(
+        home,
+        emitter,
+        grace_secs,
+        false,
+        retain_days,
+        &gc_sweep::read_graph_entries,
+        &|e| store.borrow_mut().matches(e),
+        &probe_entry_ages,
+        &|e| gc_sweep::stop_row_process(home, e),
+        &crate::gc_native::apply_active_surface_removal,
+        &crate::claude_roster::read_all_agents,
+        &gc_sweep::production_tree_probe,
+        &crate::daemon::rm_take_worktree,
+        Some(release),
     );
     summary.settled_do_rows = settled
         .into_iter()
@@ -1668,6 +1713,7 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            release_quiet: false,
         }
     }
 
@@ -2459,6 +2505,7 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            release_quiet: false,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }

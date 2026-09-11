@@ -402,7 +402,11 @@ fn stale_cause(
             return Some("tick_timeout".to_string());
         }
         if pm_stale {
-            return Some("scheduler_silent".to_string());
+            // A state, never a cause (x-e3cc): the reader measured only that
+            // no tick stamp landed inside 2x interval. A failed tick stamps
+            // nothing, so the scheduler may be running and its tick failing;
+            // "scheduler_silent" claimed more than the reader measured.
+            return Some("tick_overdue".to_string());
         }
     }
     None
@@ -422,8 +426,8 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
         "tick_timeout" => {
             "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
         }
-        "scheduler_silent" => {
-            "no pr-watch tick inside 2x interval; run fno do pr watch status".to_string()
+        "tick_overdue" => {
+            "no tick stamp inside 2x interval; run fno do pr watch status".to_string()
         }
         _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
     }
@@ -840,10 +844,10 @@ mod tests {
         let reap = rows.iter().find(|r| r.arm == "reap").unwrap();
         assert_eq!(reap.cause.as_deref(), Some("daemon_down"));
         assert!(reap.line.contains("STALE"), "line: {}", reap.line);
-        // A launchd arm blames its stalled scheduler tier, not the daemon:
-        // pr_watch_merge is itself stale, so the silence is scheduler-wide.
+        // A launchd arm names its overdue tick tier, not the daemon:
+        // pr_watch_merge is itself stale, so the stamps are tier-wide overdue.
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert_eq!(kw.cause.as_deref(), Some("scheduler_silent"));
+        assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         drop(guard);
     }
 
@@ -889,10 +893,10 @@ mod tests {
     }
 
     #[test]
-    fn explain_names_scheduler_silent_when_the_whole_launchd_tier_stalled() {
+    fn explain_names_tick_overdue_when_the_whole_launchd_tier_stalled() {
         let (guard, journal) = empty_journal();
         // Everything never-ticked: pr_watch_merge is itself stale, so the
-        // other launchd arms blame the scheduler, not themselves.
+        // other launchd arms name the overdue tick, never the scheduler.
         let mut rows = read_arms(&[journal], 1_800_000_000);
         explain(
             &mut rows,
@@ -902,9 +906,9 @@ mod tests {
             },
         );
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert_eq!(kw.cause.as_deref(), Some("scheduler_silent"));
+        assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
         assert!(
-            kw.line.contains("fno do pr watch status"),
+            kw.line.contains("no tick stamp inside 2x interval"),
             "line: {}",
             kw.line
         );

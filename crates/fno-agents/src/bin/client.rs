@@ -2400,6 +2400,37 @@ fn run_reap(rest: &[String]) -> i32 {
         return if report.passes() { 0 } else { 1 };
     }
 
+    // The release verb (x-e3cc): apply a ruling to one escalated hold
+    // through the sweep's own door. Classify, refuse fresh holds and open
+    // work by name, apply, print the whole-sweep receipt.
+    if let Some(pos) = rest.iter().position(|a| a == "--release") {
+        let handle = rest.get(pos + 1).map(String::as_str).unwrap_or("");
+        if handle.is_empty() || handle.starts_with("--") {
+            eprintln!(
+                "fno-agents: reap --release needs a row handle (name, short id or session id)"
+            );
+            return 2;
+        }
+        // Everything except the flag pair and the handle is an error; only
+        // --json is legal beside a release.
+        let extras: Vec<String> = rest
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *i != pos && *i != pos + 1 && !matches!(a.as_str(), "--json" | "-J"))
+            .map(|(_, a)| a.clone())
+            .collect();
+        if !extras.is_empty() {
+            eprintln!(
+                "fno-agents: reap --release takes only a handle and --json (got: {})",
+                extras.join(" ")
+            );
+            return 2;
+        }
+        let home = AgentsHome::from_env();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        return fno_agents::reap_release::run(&home, &cwd, handle);
+    }
+
     let dry_run = rest.iter().any(|a| a == "--dry-run");
     let no_mux = rest.iter().any(|a| a == "--no-mux");
     let extras: Vec<&str> = rest
@@ -2417,7 +2448,7 @@ fn run_reap(rest: &[String]) -> i32 {
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-    let summary = if dry_run {
+    let mut summary = if dry_run {
         fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
         // Source "daemon" matches the event schema's declared source for
@@ -2430,6 +2461,7 @@ fn run_reap(rest: &[String]) -> i32 {
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
         )
     };
+    summary.mark_escalated(fno_agents::agents_config::hold_escalate_after(&cwd));
 
     // The dry-run JSON read also carries the census (x-70e1 task 4): the
     // complete per-session identity, observed surfaces and source coverage,
@@ -3678,9 +3710,16 @@ fn format_success(
                     &filters,
                     fields_omitted,
                     &discovered,
+                    result["truth_probe_asked"].as_u64(),
+                    result["truth_probe_answered"].as_u64(),
                 ))
             } else {
-                Some(render_list_table(agents, &discovered))
+                Some(render_list_table(
+                    agents,
+                    &discovered,
+                    result["truth_probe_asked"].as_u64(),
+                    result["truth_probe_answered"].as_u64(),
+                ))
             }
         }
         "reconcile" => {
@@ -3741,13 +3780,15 @@ fn format_success(
 /// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
 /// [...], "filters_applied": {...}, "schema_version": 6}`. Stays
 /// byte-shape-aligned with Python's `format.render_json`.
-const LIST_JSON_SCHEMA_VERSION: u32 = 6;
+const LIST_JSON_SCHEMA_VERSION: u32 = 7;
 
 fn render_list_json(
     agents: &Value,
     filters_applied: &Value,
     fields_omitted: &Value,
     discovered: &[Value],
+    truth_probe_asked: Option<u64>,
+    truth_probe_answered: Option<u64>,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     let payload = json!({
@@ -3757,6 +3798,8 @@ fn render_list_json(
         "discovered_count": discovered.len(),
         "fields_omitted": fields_omitted,
         "filters_applied": filters_applied,
+        "truth_probe_asked": truth_probe_asked,
+        "truth_probe_answered": truth_probe_answered,
         "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
@@ -3929,7 +3972,12 @@ fn truncate_cell(s: &str, width: usize) -> String {
 /// shows the disagreement instead of hiding it. This is a functional table;
 /// byte-exact match with Python is not required (Python's table is
 /// time-dependent via relative timestamps).
-fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
+fn render_list_table(
+    agents: &Value,
+    discovered: &[Value],
+    truth_probe_asked: Option<u64>,
+    truth_probe_answered: Option<u64>,
+) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
     // on claude. Same rename on the Python renderer.
@@ -4012,6 +4060,16 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     }
 
     let mut lines = Vec::new();
+    // The instrument's receipt, in the artifact itself (x-e3cc): a total
+    // outage must not read as a wall of `unknown` statuses the reader was
+    // meant to trust. The daemon's stderr WARN is write-only; this line is
+    // the one the operator actually sees.
+    if truth_probe_asked.unwrap_or(0) > 0 && truth_probe_answered == Some(0) {
+        lines.push(format!(
+            "truth probe failed: 0 of {} rows answered; every STATUS below is unmeasured, not healthy",
+            truth_probe_asked.unwrap_or(0)
+        ));
+    }
     // Header row
     let header_line = headers
         .iter()

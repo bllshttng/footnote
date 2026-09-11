@@ -494,6 +494,7 @@ fn run_request(
                     crate::gc_sweep::RetireOrder {
                         id: entry.name.clone(),
                         released: false,
+                        via_release: false,
                         basis: format!(
                             "merge-cleanup:{} all nodes done+merged",
                             request.request_id

@@ -722,7 +722,13 @@ fn family1_truth_batch_latched(
 /// probes once did.
 fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const BASE: Duration = Duration::from_secs(5);
-    const PER_HANDLE: Duration = Duration::from_millis(300);
+    // Measured on the 42-row live roster (x-e3cc): the batch cost 15.9 s, about
+    // 370 ms a row once transcript tails dominate, and the previous 300 ms a
+    // row put the bound at 17.9 s, which ordinary contention tipped. A tipped
+    // batch falls back to per-row probes that time out too, and the whole page
+    // renders unanswered rows as `unknown`. 750 ms a row keeps this fleet under
+    // the ceiling with headroom.
+    const PER_HANDLE: Duration = Duration::from_millis(750);
     const CEILING: Duration = Duration::from_secs(60);
     std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
 }
@@ -1460,8 +1466,8 @@ mod tests {
             "12 handles took 1.6s measured"
         );
         assert!(
-            forty >= Duration::from_secs(15),
-            "31 handles took 3.9s measured"
+            forty >= Duration::from_secs(30),
+            "42 handles took 15.9s measured (x-e3cc)"
         );
 
         // Capped, so one pathological transcript cannot wedge a sweep for

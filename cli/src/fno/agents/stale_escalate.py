@@ -79,7 +79,7 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
 
 
 #: Closers reconcile_channel mints. Mechanical, never a human verdict.
-_MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
+_MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate", "reap-hold-escalate"})
 
 
 def _is_answer_close(rec: dict, qids: "set[str]") -> bool:

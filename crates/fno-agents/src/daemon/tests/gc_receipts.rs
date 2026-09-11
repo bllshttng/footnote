@@ -76,7 +76,10 @@ pub(super) fn uniform_ages(
 
 /// Build the injected graph seam from `(session, node, status)` triples and
 /// `(session, node)` open-do pairs.
-fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<GraphRead> {
+pub(super) fn graph_read(
+    named: &[(&str, &str, &str)],
+    open_do: &[(&str, &str)],
+) -> Option<GraphRead> {
     let mut index: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
     let mut statuses: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -110,7 +113,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
 /// named on a done node, its staged transcript quiet (grace 0), stop
 /// confirmed, no tree.
 
-fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
+pub(super) fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
     crate::claude_roster::ClaudeAgentsSnapshot::unknown("test: no snapshot staged")
 }
 
@@ -3156,7 +3159,7 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
 /// A home whose graph path (`home.root().parent()/graph.json`) lands INSIDE
 /// the test's tmpdir: the root is a subdir of it. `tmp_home` makes the root
 /// the tmpdir itself, so its graph path would be the shared temp dir.
-fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
+pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     let dir = tempfile::tempdir().unwrap();
     let home = AgentsHome::at(dir.path().join("agents"));
     home.ensure_root().unwrap();
@@ -3164,7 +3167,7 @@ fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
 }
 
 /// Stage a real graph file at the state root.
-fn stage_graph(dir: &std::path::Path, entries: Value) {
+pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
     std::fs::write(
         dir.join("graph.json"),
         serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
@@ -3173,7 +3176,7 @@ fn stage_graph(dir: &std::path::Path, entries: Value) {
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
-fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Vec<Value>) -> Value {
+pub(super) fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Vec<Value>) -> Value {
     json!({
         "id": id,
         "status": "done",
@@ -3185,7 +3188,7 @@ fn done_node(id: &str, merge_status: Value, aprs: Value, sessions: Vec<Value>) -
 }
 
 /// One open do row.
-fn open_do_row(harness: &str, sid: &str) -> Value {
+pub(super) fn open_do_row(harness: &str, sid: &str) -> Value {
     json!({
         "phase": "do",
         "harness": harness,
@@ -3779,6 +3782,7 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     let mut receipts = std::collections::BTreeMap::new();
     receipts.insert(entry.name.clone(), receipt);
     let order = gc_sweep::RetireOrder {
+        via_release: false,
         id: "latew".into(),
         basis: "test".into(),
         created_at: entry.created_at.clone(),
@@ -3891,7 +3895,7 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
 /// A sweep with the agents snapshot and stop seam staged separately, so a
 /// test can prove WHICH evidence confirmed (or refused) the stop.
 #[allow(clippy::too_many_arguments)]
-fn evidence_sweep(
+pub(super) fn evidence_sweep(
     sweep_home: &AgentsHome,
     emitter: &EventEmitter,
     grace_secs: i64,
@@ -3918,7 +3922,7 @@ fn evidence_sweep(
     )
 }
 
-fn claude_worker_row(name: &str, short: &str) -> state::RegistryEntry {
+pub(super) fn claude_worker_row(name: &str, short: &str) -> state::RegistryEntry {
     let mut row = ask_row(name, None);
     row.short_id = short.into();
     row.harness = Some("claude".into());
