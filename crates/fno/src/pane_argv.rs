@@ -169,18 +169,20 @@ mod tests {
 
     #[test]
     fn process_argv_reads_a_real_child() {
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("sleep 5")
+        // A DIRECT child, not a shell: std's spawn returns only after the
+        // exec, so /proc's argv is already populated. A `sh -c` middleman
+        // races its own exec of sleep, whose empty-cmdline gap is what the
+        // loaded CI runner kept hitting.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("37")
             .spawn()
-            .expect("spawn sh");
+            .expect("spawn sleep");
         let read = process_argv(child.id());
         child.kill().ok();
         child.wait().ok();
         let read = read.expect("a live child's argv is readable");
         assert!(
-            read.windows(2).any(|w| w[0] == "sleep" && w[1] == "5")
-                || read.iter().any(|t| t.ends_with("/sh") || t == "sh"),
+            read.first().is_some_and(|t| t.ends_with("sleep")) && read.contains(&"37".to_string()),
             "the reader sees the child, not only itself: {read:?}"
         );
     }
