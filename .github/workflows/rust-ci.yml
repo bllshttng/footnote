@@ -148,6 +148,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/build
             crates/fno-agents/target
             crates/fno/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
@@ -365,6 +366,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/build
             crates/fno-agents/target
             crates/fno/target
           # A key of its OWN, and one that is NOT a prefix match for the shared

@@ -1,3 +1,7 @@
 [build]
 rustc-wrapper = "scripts/lib/cargo-rustc-wrapper.sh"
 incremental = false
+# Intermediates live outside the checkout; target/ keeps only final binaries.
+# CARGO_BUILD_BUILD_DIR (set by fno to <paths.cargo_targets_base>/{workspace-path-hash})
+# overrides this value.
+build-dir = "{cargo-cache-home}/build/{workspace-path-hash}"

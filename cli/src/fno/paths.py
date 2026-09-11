@@ -730,6 +730,26 @@ def state_dir() -> Path:
     return _guard_state_path(_resolve(settings.state_dir))
 
 
+def cargo_build_dir_value() -> str:
+    """The CARGO_BUILD_BUILD_DIR value: ``<base>/{workspace-path-hash}``.
+
+    cargo expands the template itself and the hash is per workspace root, so
+    parallel checkouts never share the artifact lock and intermediates never
+    land in a checkout. Base: ``config.paths.cargo_targets_base``, else
+    ``<state_dir>/cargo-build``.
+    """
+    try:
+        override = _settings().paths.cargo_targets_base
+        base = (
+            _resolve(os.path.expanduser(override))
+            if override
+            else state_dir() / "cargo-build"
+        )
+    except Exception:  # noqa: BLE001 - broken settings degrade to the default base
+        base = Path(os.path.expanduser("~/.fno/cargo-build"))
+    return f"{base}/{{workspace-path-hash}}"
+
+
 def graphql_quota_lock() -> Path:
     """Config-independent machine lock held from quota probe through command."""
     return locks_dir() / "github-graphql-quota.lock"

@@ -52,7 +52,7 @@ FIELD_META: dict[str, Meta] = {
     "paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
     "paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),
     "paths.worktrees_base": Meta("never", "Override base dir for worktrees."),
-    "paths.cargo_targets_base": Meta("never", "Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid."),
+    "paths.cargo_targets_base": Meta("never", "Cargo build base: where cargo intermediates land, as <base>/{workspace-path-hash} via CARGO_BUILD_BUILD_DIR (default ~/.fno/cargo-build). Each checkout hashes to its own dir, so parallel builds never share the cargo artifact lock; the checkout's target/ keeps only final binaries."),
     "paths.memory_dir": Meta("never", "Override path to the memory dir."),
     "paths.hook_logs_dir": Meta("never", "Override path to hook logs."),
     "paths.inbox_dir": Meta("never", "Override path to the cross-project messaging inbox dir."),
