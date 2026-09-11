@@ -770,7 +770,7 @@ pub fn run_sweep(
         if already.contains(&(pair.shape.to_string(), pair.job_id.clone())) {
             continue;
         }
-        if let Some(emitter) = emit {
+        if let Some(emitter) = emit.filter(|_| !opts.dry_run) {
             let _ = emitter.emit(
                 "scratch_shape_observed",
                 &json!({
@@ -835,6 +835,11 @@ pub fn run_sweep(
         };
         match resolution {
             Filing::Fold(node) => {
+                if opts.dry_run {
+                    // A fold mutates the target node; under --dry-run the
+                    // sweep calls nothing, so the fold prints nothing.
+                    continue;
+                }
                 let (hint, _, title) = verb_hint(shape);
                 let details = details_body(shape, *jobs, *files_n, &new_pairs, hint);
                 match fno(&[
@@ -862,6 +867,10 @@ pub fn run_sweep(
                 lines.push(format!("suppressed:{node}"));
             }
             Filing::File(caused_by) => {
+                if opts.dry_run {
+                    lines.push(format!("would-file:{shape}"));
+                    continue;
+                }
                 if filed_this_run >= MAX_FILES_PER_SWEEP {
                     continue; // waits for tomorrow; prints nothing by contract
                 }
@@ -1222,18 +1231,9 @@ fn load_evals_config(repo_root: &Path) -> (usize, i64) {
 
 /// `git rev-parse --show-toplevel` from `cwd`, or the cwd itself.
 fn repo_root_of_cwd() -> PathBuf {
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        if out.status.success() {
-            let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !top.is_empty() {
-                return PathBuf::from(top);
-            }
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    crate::paths::worktree_repo_root(
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    )
 }
 
 fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -1475,32 +1475,6 @@ mod tests {
     const CI_PROBE: &str = "#!/usr/bin/env bash\n curl -s \"https://api.github.com/repos/o/r/commits/$SHA/check-runs\" | jq '.check_runs[] | select(.conclusion != \"success\")'\n";
     const LIVENESS: &str = "#!/usr/bin/env python3\nimport os, time\nfresh = time.time() - os.stat('/x/y').st_mtime < 600\nos.kill(1234, 0)\n";
     const TRANSCRIPT: &str = "#!/usr/bin/env python3\nimport glob, os, json\nfor p in glob.glob(os.path.expanduser('~/.claude/projects/*/x.jsonl')):\n    json.loads(open(p).readline())\n";
-
-    #[test]
-    fn debug_newest_filed_reads_the_seeded_row() {
-        let tmp = temp_root("dbg");
-        let journal = tmp.join("events.jsonl");
-        std::fs::write(
-            &journal,
-            format!(
-                "{}\n",
-                json!({
-                    "ts": now_ts(),
-                    "type": "scratch_shape_filed",
-                    "source": "agents",
-                    "data": {"shape": "longtext_arg", "node_id": "x-live1", "outcome": "seeded"},
-                })
-            ),
-        )
-        .unwrap();
-        eprintln!("RAW: {}", std::fs::read_to_string(&journal).unwrap());
-        let events = read_events(&journal);
-        eprintln!("PARSED {}/{} lines", events.len(), 1);
-        let filed = newest_filed(&events);
-        eprintln!("FILED: {:?}", filed.keys().collect::<Vec<_>>());
-        assert!(filed.contains_key("longtext_arg"));
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 
     #[test]
     fn rule_table_classifies_the_fixture_specimens() {
@@ -1844,6 +1818,99 @@ mod tests {
         let filed: Vec<_> = lines.iter().filter(|l| l.starts_with("filed:")).collect();
         assert_eq!(filed.len(), 1, "one file per run, got {lines:?}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dry_run_calls_nothing_and_names_would_file_shapes() {
+        let tmp = temp_root("dryrun");
+        for job in ["j1", "j2", "j3"] {
+            write(
+                &tmp.join("jobs"),
+                &format!("{job}/tmp/mail_{job}.sh"),
+                LONGTEXT,
+            );
+        }
+        let paths = sweep_paths(&tmp);
+        seed_journal(
+            &paths.journal,
+            &[filed_row("longtext_arg", "x-live1", now_ts(), "seeded")],
+        );
+        std::fs::write(
+            &paths.graph,
+            r#"{"entries":[{"id":"x-live1","status":"idea"}]}"#,
+        )
+        .unwrap();
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(
+            &paths,
+            &SweepOpts {
+                threshold: 3,
+                window_days: 28,
+                dry_run: true,
+            },
+            Some(&emit),
+            &mut runner,
+        );
+        // longtext_arg holds a live node, so it would fold and prints
+        // nothing; no other shape runs, so the list is empty except `ok`.
+        assert_eq!(
+            lines,
+            vec!["ok"],
+            "a dry run folds onto a live node silently, got {lines:?}"
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "dry run must call no fno verb at all: {:?}",
+            fake.calls()
+        );
+        assert_eq!(journal_count(&paths.journal, "scratch_shape_observed"), 0);
+        assert_eq!(journal_count(&paths.journal, "scratch_shape_filed"), 1);
+
+        // Without the live node, every file candidate names itself.
+        let tmp2 = temp_root("dryrun2");
+        for job in ["j1", "j2", "j3"] {
+            write(
+                &tmp2.join("jobs"),
+                &format!("{job}/tmp/mail_{job}.sh"),
+                LONGTEXT,
+            );
+            write(
+                &tmp2.join("jobs"),
+                &format!("{job}/tmp/gate_{job}.py"),
+                GATE_WAIT,
+            );
+        }
+        let paths2 = sweep_paths(&tmp2);
+        let fake2 = FakeFno::new();
+        let emit2 = EventEmitter::new(paths2.journal.clone(), "agents");
+        let mut runner2 = fake2.runner();
+        let lines2 = run_sweep(
+            &paths2,
+            &SweepOpts {
+                threshold: 3,
+                window_days: 28,
+                dry_run: true,
+            },
+            Some(&emit2),
+            &mut runner2,
+        );
+        assert!(
+            lines2.contains(&"would-file:longtext_arg".to_string()),
+            "got {lines2:?}"
+        );
+        assert!(
+            lines2.contains(&"would-file:gate_wait".to_string()),
+            "got {lines2:?}"
+        );
+        assert!(
+            fake2.calls().is_empty(),
+            "dry run must not probe or file: {:?}",
+            fake2.calls()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp2);
     }
 
     #[test]
