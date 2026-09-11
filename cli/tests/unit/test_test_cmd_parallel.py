@@ -4,10 +4,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from fno import test_cmd, test_runner
+from fno import test_cmd
 
 
-def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
+def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch, no_native_owner):
     captured: dict[str, list[str]] = {}
 
     class _Proc:
@@ -27,9 +27,6 @@ def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("")
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
     monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
-    # A dev machine has the deployed fno-agents on PATH; the native test-run
-    # owner would wrap the argv this test pins.
-    monkeypatch.setattr(test_runner, "_native_owner_binary", lambda: None)
 
     assert test_cmd._run([]) == 0
     assert captured["cmd"][1:9] == [
@@ -43,7 +40,7 @@ def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
     ]
 
 
-def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch):
+def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch, no_native_owner):
     captured: dict[str, list[str]] = {}
 
     class _Proc:
@@ -63,9 +60,6 @@ def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch):
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("")
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
     monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
-    # A dev machine has the deployed fno-agents on PATH; the native test-run
-    # owner would wrap the argv this test pins.
-    monkeypatch.setattr(test_runner, "_native_owner_binary", lambda: None)
 
     assert test_cmd._run(["-n", "1", "--maxprocesses=2", "--dist", "loadscope"]) == 0
     cmd = captured["cmd"]
