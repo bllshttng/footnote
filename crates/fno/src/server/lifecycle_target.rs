@@ -294,7 +294,7 @@ impl super::Core {
             );
             return super::Flow::Continue;
         }
-        let flow = self.close_pane(pane_id);
+        let flow = self.close_pane_reasoned(pane_id, "removed via sideline");
         self.notice(
             client_id,
             format!("removed {name}: child stopped, pane closed"),

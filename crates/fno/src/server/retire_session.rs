@@ -26,9 +26,10 @@ impl Core {
         reply: ControlReply,
     ) -> Flow {
         // Identity resolution runs pane-side, through the same
-        // pane-to-member join every worker close walks. A pane with no
-        // member context (an operator shell, a portal viewer) carries no
-        // harness identity and can never match.
+        // pane-to-member join every worker close walks. A pane carries a
+        // member's identity only while it IS that member's pane: portal
+        // viewers are titled after the row they watch, so the join also
+        // requires `member_pane` to agree (x-9b37).
         let candidates: Vec<u64> = self.panes.keys().copied().collect();
         let mut targets = Vec::new();
         for pid in candidates {
@@ -40,17 +41,53 @@ impl Core {
                 targets.push(pid);
             }
         }
+        // (x-9b37) The receipt names what closed instead of only counting:
+        // "closed the worker" and "closed the worker and the operator's
+        // viewer" must not read the same.
+        let closed_panes: Vec<String> = targets
+            .iter()
+            .map(|pid| {
+                self.panes
+                    .get(pid)
+                    .and_then(|e| e.name.clone())
+                    .unwrap_or_else(|| format!("pane {pid}"))
+            })
+            .collect();
+        let tabs_before: Vec<(u64, crate::tree::TabId, String)> = self
+            .session
+            .squads
+            .iter()
+            .flat_map(|sq| {
+                sq.tabs.iter().map(move |t| {
+                    let label = match (&sq.name, &t.name) {
+                        (Some(sq_name), Some(t_name)) => format!("{sq_name}/{t_name}"),
+                        (Some(sq_name), None) => format!("{sq_name}/tab {}", t.id),
+                        (None, Some(t_name)) => t_name.clone(),
+                        (None, None) => format!("tab {}", t.id),
+                    };
+                    (sq.id, t.id, label)
+                })
+            })
+            .collect();
         let mut flow = Flow::Continue;
-        let mut closed = 0usize;
+        let closed = targets.len();
         for pid in targets {
             // close_pane inherits the established close semantics: empty-tab
             // removal, portal stand-in replacement and the de-persist
             // contract all stay one code path with every other close.
-            closed += 1;
-            if self.close_pane(pid) == Flow::Shutdown {
+            if self.close_pane_reasoned(pid, "session retired") == Flow::Shutdown {
                 flow = Flow::Shutdown;
             }
         }
+        let tabs_removed: Vec<String> = tabs_before
+            .into_iter()
+            .filter(|(sid, tid, _)| {
+                self.session
+                    .squad(*sid)
+                    .is_none_or(|sq| !sq.tabs.iter().any(|t| t.id == *tid))
+            })
+            .map(|(_, _, label)| label)
+            .collect();
         let (retired, batch) = match crate::squad_store::retire_session_members_with_generations(
             Some(&self.store_generations),
             &harness,
@@ -70,6 +107,8 @@ impl Core {
         let _ = reply.send(ServerMsg::SessionRetired {
             retired,
             panes_closed: closed,
+            closed_panes,
+            tabs_removed,
         });
         flow
     }
@@ -88,13 +127,18 @@ impl Core {
                 .iter()
                 .find(|member| member.worker.as_deref() == Some(name.as_str()))
         }) {
-            return DetachedPane::from_member(
-                member,
-                squad,
-                sq.name.clone().unwrap_or_default(),
-                sq.key.clone(),
-                sq.origins.clone(),
-            );
+            // (x-9b37) The name alone is a lie a portal can tell. A
+            // member's identity moves only with its own pane, so the
+            // inverse join must agree before this pane carries it.
+            if self.member_pane(member) == Some(pane) {
+                return DetachedPane::from_member(
+                    member,
+                    squad,
+                    sq.name.clone().unwrap_or_default(),
+                    sq.key.clone(),
+                    sq.origins.clone(),
+                );
+            }
         }
         self.agents
             .iter()
