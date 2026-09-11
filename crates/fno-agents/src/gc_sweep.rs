@@ -3576,8 +3576,10 @@ mod tests {
         assert_eq!(
             verdict.hold,
             Some(KeepReason::NodeConflict {
-                a: "name".into(),
-                b: "N2".into()
+                // Both witnesses ride the hold (x-e3cc): the first source's
+                // answer names itself beside the dissenting one.
+                a: "sessions N1".into(),
+                b: "name N2".into()
             }),
             "the contradicting witness holds the row"
         );
