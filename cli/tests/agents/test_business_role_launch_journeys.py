@@ -95,7 +95,7 @@ class _MuxRunner:
         if argv[1:4] == ["mux", "pane", "read"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[1:4] == ["mux", "pane", "kill"]:
-            assert argv[4:] == ["--session", "main", "7"]
+            assert argv[4:] == ["--server", "main", "7"]
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected mux call: {argv}")
 

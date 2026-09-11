@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from fno.agents.harness_map import capabilities, dispatch_command
+from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -173,7 +174,7 @@ def resolve_thread_viewport(
     """Open a thread's dedicated viewport and return its positive pane id."""
     runner = runner or subprocess.run
     thread_id = entry.fno_id
-    session = (os.environ.get("FNO_SESSION") or "main").strip()
+    session = resolve_mux_session(None).strip()
     if not isinstance(thread_id, str) or not thread_id.strip():
         # Name the row defect. A bare transport code here read as a broken
         # pipe, so an absent field looked like something a retry could fix.
@@ -184,8 +185,6 @@ def resolve_thread_viewport(
             "carries no thread reference, so there is no thread to open. "
             "A retry cannot fix it."
         )
-    if not session:
-        raise RetaskTransportError("thread_view_unavailable")
     fno_bin = os.environ.get("FNO_BIN") or "fno"
 
     def invoke(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -194,13 +193,13 @@ def resolve_thread_viewport(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
-    if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
+    if invoke(["mux", "thread", "--server", session, thread_id], 30).returncode:
         raise RetaskTransportError("thread_view_unavailable")
     # The pane opened above stays open on a join miss and its name stamping
     # can lag the open, so the join retries; the miss names the opened pane.
     for _ in range(3):
         try:
-            panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
+            panes = invoke(["mux", "pane", "ls", "--server", session, "--json"], 10)
             rows = json.loads(panes.stdout)
         except RetaskTransportError:
             raise
@@ -661,7 +660,7 @@ def run_retask(
     def read_frame() -> str:
         try:
             result = subprocess.run(
-                ["fno", "mux", "pane", "read", "--session", session, pane, "--lines", "80"],
+                ["fno", "mux", "pane", "read", "--server", session, pane, "--lines", "80"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -676,7 +675,7 @@ def run_retask(
         try:
             subprocess.run(
                 [
-                    "fno", "mux", "pane", "wait", "--session", session, pane,
+                    "fno", "mux", "pane", "wait", "--server", session, pane,
                     "--quiet-ms", "400", "--timeout", "8",
                 ],
                 capture_output=True,
@@ -693,7 +692,7 @@ def run_retask(
 
     def send(text: str, submit: bool) -> bool:
         command = [
-            "fno", "mux", "pane", "send", "--session", session, pane,
+            "fno", "mux", "pane", "send", "--server", session, pane,
             "--text", text, "--raw",
         ]
         if submit:

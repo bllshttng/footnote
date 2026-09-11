@@ -1270,7 +1270,7 @@ exit 2
         &shim_dir.join("fno"),
         r#"#!/bin/sh
 if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "kill" ] && \
-   [ "$4" = "--session" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
+   [ "$4" = "--server" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
   /bin/rm -f "$MUX_STATE"
   exit 0
 fi

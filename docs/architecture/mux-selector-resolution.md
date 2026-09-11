@@ -38,7 +38,7 @@ One resolver, three callers. A resolver wired into only one door leaves the othe
 
 A row that resolves but hosts no pane (`mux == None`) never attaches. Attaching creates a pane, and the server's inherited fd limit makes that a wave-wedging side effect. The doors print the follow command (`fno agents peek <name> --follow`) and exit `17` (`EXIT_NOT_PANE_HOSTED`).
 
-Selector focus ignores `FNO_SESSION`. That variable names the session you sit in, not the one the target pane lives in. An explicit `--session` still overrides, as it does for `where`.
+Selector focus ignores `FNO_SERVER` (and the deprecated `FNO_SESSION`). That variable names the server you sit in, not the one the target pane lives in. An explicit `--server` still overrides, as it does for `where`.
 
 ## The web-bridge state file
 

@@ -345,7 +345,7 @@ def pane_read_via_mux(
 
     proc = (runner or subprocess.run)(
         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-         "--session", session, str(pane_id), "--lines", str(lines)],
+         "--server", session, str(pane_id), "--lines", str(lines)],
         capture_output=True, text=True, timeout=timeout_s, check=False,
     )
     if proc.returncode != 0:

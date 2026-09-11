@@ -416,6 +416,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env_remove("NO_COLOR");
+    cmd.env("FNO_SERVER", &cfg.session);
     cmd.env("FNO_SESSION", &cfg.session);
     cmd.env("FNO_PANE", &cfg.pane_key);
     let epoch = std::time::SystemTime::now()

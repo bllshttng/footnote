@@ -1452,7 +1452,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
             # A zero-pane session would only contribute an
             # ambiguous []; the probe never raises on a malformed row.
             continue
-        panes = _mux("mux", "pane", "ls", "--session", str(session), "--json")
+        panes = _mux("mux", "pane", "ls", "--server", str(session), "--json")
         if panes is None or getattr(panes, "returncode", 1) != 0:
             return None
         try:

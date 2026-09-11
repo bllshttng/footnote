@@ -143,11 +143,24 @@ Intake prints `linked plan to <id>`, not `claimed`, and names the verb that take
 
 A receipt that said a plan was claimed stated a fact about the first sense while writing the second. The word is retired from that line.
 
+## Session: one word, two senses
+
+`session` named the largest mux container and the smallest harness unit at the same time. `fno mux server --session fno-x7955-live` minted a whole server, one socket and every workspace on it, while `session` everywhere else in footnote means one agent transcript. On 2026-09-04 an operator read a deliberate, correctly isolated scratch server as an accident, because the flag said `session`. The mux server axis is now `server`. The transcript keeps `session`.
+
+| Sense | Surface | Means |
+|---|---|---|
+| harness session | `FNO_HARNESS_SESSION_ID`, the `--session-id` flag on backlog and resume verbs, `mail-inject --session` | one transcript, roughly pane-level; this sense keeps the word |
+| mux server | `--server`, `FNO_SERVER` | one socket and its workspaces; `fno mux server --server main` is repetitive and never ambiguous |
+
+`host` was rejected: `claims.rs` writes `host` as the machine into every claim record, and `registry.py` defines `host_mode` as the interactive-drive axis.
+
+The old spellings stay as deprecated aliases that work and warn: `--session`, `FNO_SESSION`, `--mux-session` on `dispatch one`, and pane-identity `--session-id`. Each prints one stderr line naming the replacement, and the alias will be removed in a future release. Env precedence is: flag, then `FNO_SERVER`, then `FNO_SESSION`, then `main`. When `FNO_SESSION` is the value that decided the server, its warning prints. A pane's writers set `FNO_SERVER` and `FNO_SESSION` to the same value, so new panes never warn and old readers keep working.
+
+Workspace and squad are one object under two names. The ruling lives at `workspace()` in `crates/fno/src/mux_cli.rs`. A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
+
 ## Recognized and unrecognized harness values
 
-Session-marker detection (`HARNESS_SESSION_MARKERS` in `cli/src/fno/harness_identity.py`) recognizes four harnesses today: `codex`, `claude`, `gemini`, `opencode`.
-`agy` dispatches through its own adapter (`crates/fno-agents/src/agy_ask.rs`) but has no session marker.
-`oh-my-pi` and `openclaw` are operator-named harnesses the code does not model at all yet; they appear in this table as legal vocabulary, not as values any code path recognizes.
+Session-marker detection (`HARNESS_SESSION_MARKERS` in `cli/src/fno/harness_identity.py`) recognizes four harnesses today: `codex`, `claude`, `gemini`, `opencode`. `agy` dispatches through its own adapter (`crates/fno-agents/src/agy_ask.rs`) but has no session marker. `oh-my-pi` and `openclaw` are operator-named harnesses the code does not model yet. They appear in this table as legal vocabulary, not as values any code path recognizes.
 
 A literal like `agy` or `openclaw` under a provider-named binding is still a defect even though no session marker detects that harness.
 
@@ -167,6 +180,8 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | `FNO_AGENT_HARNESS` | harness | injected at spawn, read for identity |
 | `FNO_HARNESS_NAME` | harness | fno-owned canonical family stamp on spawned children; vendor markers remain the fallback for operator-started or adopted sessions |
 | `FNO_HARNESS_SESSION_ID` | harness session identity | fno-owned exact bound harness session id; absent when the launcher does not know it before exec |
+| `--server`, `FNO_SERVER` | mux server | the server axis: one socket and its workspaces |
+| `--session`, `FNO_SESSION`, `--mux-session`, pane-identity `--session-id` | mux server | deprecated aliases of `--server` / `FNO_SERVER`; they work, warn once, and keep live dispatch running |
 | spawn/register receipt `harness` | harness | |
 | spawn/register receipt `provider` | provider | present only when a route was applied |
 | spawn/register receipt `model` | model | effective model; an explicit `--model` wins over `--route` |

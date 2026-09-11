@@ -49,15 +49,12 @@ use crate::tree::Dir;
 /// a hang. Generous next to a socket round-trip, tight next to a human.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Resolve the target session: explicit flag/arg > `FNO_SESSION` (set in
-/// every pane the server spawns) > the default. Pure, so precedence is
-/// unit-testable (Locked 7).
-pub fn resolve_session(explicit: Option<&str>, env: Option<&str>) -> String {
-    explicit
-        .map(str::to_string)
-        .or_else(|| env.filter(|s| !s.is_empty()).map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_SESSION.to_string())
-}
+mod server_axis;
+
+pub use server_axis::{
+    env_server, flag_value, note_server_flag, resolve_session, take_common_flags,
+    LEGACY_SERVER_ENV, SERVER_ENV,
+};
 
 /// What one socket probe learned.
 enum Probe {
@@ -1783,11 +1780,12 @@ fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
                     }
                 });
             }
-            Some("--session") => {
+            Some(flag @ ("--server" | "--session")) => {
+                note_server_flag(flag);
                 session = Some(match it.next().and_then(|v| v.to_str()) {
                     Some(v) => v.to_string(),
                     None => {
-                        eprintln!("fno mux workspace restore: --session needs a value");
+                        eprintln!("fno mux workspace restore: {flag} needs a value");
                         return EXIT_USAGE;
                     }
                 });
@@ -2648,15 +2646,6 @@ pub struct ParsedPane {
     pub cmd: PaneCmd,
 }
 
-/// Read the value of a `--flag value` pair, advancing `i` past the value.
-fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, String> {
-    *i += 1;
-    args.get(*i)
-        .and_then(|a| a.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| format!("{flag} needs a value"))
-}
-
 fn parse_u64(s: &str, flag: &str) -> Result<u64, String> {
     s.parse::<u64>()
         .map_err(|_| format!("{flag} needs a number, got {s:?}"))
@@ -2836,7 +2825,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 }
                 "--json" => json = true,
                 "--claim" => claim = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
                 // (x-5f7f) The registry name of the worker this pane hosts.
                 // Validated here with the same rule the store's load gate
@@ -2983,7 +2975,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
             "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             // (x-d865) split/break/ls flags.
             "--direction" | "-d" => {
                 direction = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
@@ -3390,27 +3385,6 @@ fn run_on_existing_server(
     }
 }
 
-/// Split off a leading `--session <s>` / `--json` prefix shared by the small
-/// `tab`/`layout` verbs, returning the rest for verb-specific parsing.
-fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<String>), String> {
-    let mut session = None;
-    let mut json = false;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let tok = args[i]
-            .to_str()
-            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
-        match tok {
-            "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
-            other => rest.push(other.to_string()),
-        }
-        i += 1;
-    }
-    Ok((session, json, rest))
-}
-
 /// A `--workspace <name>` (alias `--squad`) -> `PaneTarget`, defaulting to `CurrentRoute`.
 ///
 /// `id:<n>` addresses a squad by the id `fno mux pane ls` reports, so a caller
@@ -3464,7 +3438,10 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         let res = (|| -> Result<(), String> {
             match tok {
                 "--json" => json = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
                 "--tab" => {
@@ -3651,9 +3628,11 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         };
         let res = (|| -> Result<(), String> {
             match tok {
-                "get" | "--json" | "--session" => {
-                    if tok == "--session" {
-                        let _ = flag_value(flags, &mut i, "--session")?;
+                "get" | "--json" | "--server" | "--session" => {
+                    // A re-parse of flags the common prefix already consumed:
+                    // the note fired there, so this skip stays silent.
+                    if tok == "--server" || tok == "--session" {
+                        let _ = flag_value(flags, &mut i, tok)?;
                     }
                 }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
@@ -5800,7 +5779,10 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
         match tok {
             "--json" => json = true,
             "--force" => force = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--to" => to = Some(parse_u64(&flag_value(args, &mut i, "--to")?, "--to")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
@@ -6531,7 +6513,10 @@ fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String
             .to_str()
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
             "--node" => node = Some(flag_value(args, &mut i, "--node")?),
@@ -6767,15 +6752,8 @@ mod tests {
         assert_eq!(squad_target(None), PaneTarget::CurrentRoute);
     }
 
-    #[test]
-    fn mux_session_resolution_flag_beats_env_beats_default() {
-        // Locked 7: --session flag > FNO_SESSION env > "main" (AC3-EDGE).
-        assert_eq!(resolve_session(Some("other"), Some("work")), "other");
-        assert_eq!(resolve_session(None, Some("work")), "work");
-        assert_eq!(resolve_session(None, None), DEFAULT_SESSION);
-        // An empty env var reads as unset, not as a session named "".
-        assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
-    }
+    #[path = "server_axis_flag_tests.rs"]
+    mod server_axis_flag_tests;
 
     fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
         let args: Vec<OsString> = tokens.iter().map(OsString::from).collect();

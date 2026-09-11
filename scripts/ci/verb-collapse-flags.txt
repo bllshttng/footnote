@@ -1,6 +1,7 @@
 # Hidden options on argument-dispatched actions, one per line.
 agents ask !--provider
 agents discovered-json !--provider
+agents dispatch one !--mux-session
 agents rm !--audit-actor
 agents rm !--audit-reason
 agents rm !--audit-reclaimed-bytes
@@ -47,6 +48,7 @@ do target resolve-model !--provider
 do target start !--provider
 doctor footprint !--cause-only
 doctor event find !--session
+dispatch one !--mux-session
 event find !--session
 mail hold-release !--poll-s
 mail pane-prepare !--session
@@ -58,6 +60,7 @@ resume receipt write !--session
 retro run !--pr
 retro run !--session
 agents pane-identity !--session
+agents pane-identity !--session-id
 state init !--allow-stub
 target init !--provider
 target resolve-model !--provider

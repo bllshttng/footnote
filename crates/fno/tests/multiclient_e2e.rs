@@ -570,7 +570,7 @@ fn multiclient_nested_same_session_attach_refused_pre_raw_mode() {
     let out = h.raw_output();
     assert!(out.contains("main"), "refusal names the session: {out}");
     assert!(
-        out.contains("--session") && out.contains("unset FNO_SESSION"),
+        out.contains("--server") && out.contains("unset FNO_SERVER FNO_SESSION"),
         "refusal names both remedies: {out}"
     );
     assert!(

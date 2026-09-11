@@ -19,6 +19,7 @@
 #   T9  path-traversal FNO_SESSION is sanitized, pin stays contained
 #   T10 malformed payload still emits (markers independent of the parse)
 #   T11 non-numeric FNO_PANE degrades to emit, no path escape
+#   T13 FNO_SERVER-only pin matches the FNO_SESSION pin (x-f209)
 
 set -uo pipefail
 
@@ -50,6 +51,7 @@ run_hook() {
       FNO_PANE="${FNO_PANE:-}" \
       FNO_PANE_EPOCH="${FNO_PANE_EPOCH:-}" \
       FNO_SESSION="${FNO_SESSION:-}" \
+      FNO_SERVER="${FNO_SERVER:-}" \
       bash "$HOOK" "$state" ) >/dev/null 2>&1
   cat "$sink"
 }
@@ -134,6 +136,21 @@ RT5="$TMP/run5"; mkdir -p "$RT5"; sink11="$TMP/sink11"
     FNO_PANE="../../pwn" FNO_PANE_EPOCH=11000 FNO_SESSION=main bash "$HOOK" working ) >/dev/null 2>&1
 { has '133;C' <"$sink11" && [[ -z "$(find "$TMP" -maxdepth 1 -name '*pwn*' 2>/dev/null)" ]]; } \
   && pass "T11 non-numeric FNO_PANE degrades to emit, no escape" || fail "T11 expected contained degrade-emit"
+
+# T13 (x-f209): FNO_SERVER carries the server axis now; a pane hosted by a
+# pre-rename server carries only FNO_SESSION. Both spellings must compute the
+# SAME pin, so the host/nested gate behaves identically under either.
+export FNO_PANE=13 FNO_PANE_EPOCH=13000; unset FNO_SESSION; export FNO_SERVER=main
+out="$(run_hook working host-13)"
+has '133;C' <<<"$out" && pass "T13 FNO_SERVER-only host emits C" || fail "T13 host should emit C"
+out="$(run_hook working nested-13)"
+has '133' <<<"$out" && fail "T13 nested should be silent" || pass "T13 nested emits nothing"
+# The new pane contract writes BOTH vars to one value: same pin, same gate.
+export FNO_SESSION=main
+export FNO_PANE=14 FNO_PANE_EPOCH=14000
+out="$(run_hook working host-14)"
+has '133;C' <<<"$out" && pass "T13 both-vars host emits C" || fail "T13 both-vars host should emit C"
+unset FNO_SERVER
 
 # --- report-payload lane: what ARGS reach `fno-agents report` ---
 

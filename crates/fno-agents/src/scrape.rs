@@ -186,7 +186,7 @@ pub fn fno_bin() -> std::ffi::OsString {
 /// sweeps rather than piling them up).
 fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Option<String>>> {
     let out = Command::new(bin)
-        .args(["mux", "pane", "ls", "--session", session, "--json"])
+        .args(["mux", "pane", "ls", "--server", session, "--json"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -215,7 +215,7 @@ fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<Stri
             "pane",
             "read",
             &pane.to_string(),
-            "--session",
+            "--server",
             session,
             "--json",
         ])

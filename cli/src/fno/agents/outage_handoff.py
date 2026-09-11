@@ -191,7 +191,7 @@ def stop_source_exact(
         try:
             killed = runner(
                 [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                 "--session", str(session), str(pane_id)],
+                 "--server", str(session), str(pane_id)],
                 capture_output=True,
                 text=True,
                 timeout=30,

@@ -2034,7 +2034,7 @@ def production_handoff_candidate(
                 while time.monotonic() < deadline:
                     proc = subprocess.run(
                         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-                         "--session", spawned.session, str(spawned.pane_id),
+                         "--server", spawned.session, str(spawned.pane_id),
                          "--lines", "20"],
                         capture_output=True, text=True, timeout=5, check=False,
                     )
@@ -2066,7 +2066,7 @@ def production_handoff_candidate(
             def stop(spawned: Any) -> bool:
                 subprocess.run(
                     [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                     "--session", spawned.session, str(spawned.pane_id)],
+                     "--server", spawned.session, str(spawned.pane_id)],
                     capture_output=True, text=True, timeout=10, check=False,
                 )
                 stopped = _mux_pane_alive({
@@ -2190,7 +2190,7 @@ def _production_pane_occupancy(harness: str) -> int:
     session = resolve_mux_session(None)
     proc = subprocess.run(
         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "ls",
-         "--session", session, "--json"],
+         "--server", session, "--json"],
         capture_output=True, text=True, timeout=10, check=False,
     )
     if proc.returncode != 0:

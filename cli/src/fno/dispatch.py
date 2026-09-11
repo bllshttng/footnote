@@ -47,8 +47,14 @@ def _dispatch_callback() -> None:
 
 @dispatch_app.command("one")
 def cmd_one(
-    session: str = typer.Option(
-        ..., "--mux-session", help="Mux session to spawn the pane into (FNO_SESSION)."
+    server: Optional[str] = typer.Option(
+        None, "--server", help="Mux server to spawn the pane into (FNO_SERVER)."
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None,
+        "--mux-session",
+        hidden=True,
+        help="Deprecated alias for --server.",
     ),
     node: Optional[str] = typer.Option(
         None, "--node", help="Dispatch this node id/slug (default: fno backlog next)."
@@ -66,13 +72,24 @@ def cmd_one(
         False, "--json", "-J", help="Emit a one-line JSON verdict."
     ),
 ) -> None:
-    """Dispatch one ready node into a new pane in SESSION, through the spawn gate.
+    """Dispatch one ready node into a new pane on SERVER, through the spawn gate.
 
     Verdict ``outcome`` is one of ``launched | no-work | already-dispatching |
     quota-deferred | failed`` (plus the guard's own refusal reasons). A full
     fleet no longer returns a verdict: the spawn gate queues inside ``run_gate``
     or refuses with its own exit code. Exit 0 for everything but ``failed``.
     """
+    from fno._flag_aliases import merge_deprecated_alias
+
+    session = merge_deprecated_alias(
+        server,
+        session_legacy,
+        canonical_flag="--server",
+        legacy_flag="--mux-session",
+    )
+    if session is None:
+        typer.echo("fno agents dispatch one: --server is required")
+        raise typer.Exit(code=2)
     verdict = _dispatch_one(session=session, node=node, project=project, account=account)
     if json_output:
         typer.echo(json.dumps(verdict))
