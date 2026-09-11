@@ -1475,8 +1475,12 @@ pub(crate) fn run_with_release(
                 }
                 .as_str();
                 if r.matches(reason, &detail) {
+                    // Both sides of the hold are "<source> <node>" strings
+                    // (x-e3cc change 1), so the dissenting NODE is the last
+                    // token, never the whole side.
+                    let dissent_node = b.split_whitespace().last().unwrap_or(b).to_string();
                     let mut nodes = vec![verdict.route.node.clone().unwrap_or_default()];
-                    nodes.push(b.clone());
+                    nodes.push(dissent_node);
                     nodes.dedup();
                     work = WorkState::AllDone { nodes };
                     confirm_hold = None;

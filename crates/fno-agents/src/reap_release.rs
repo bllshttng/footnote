@@ -102,9 +102,9 @@ pub(crate) fn fresh_hold_refusal(hold: &gc_sweep::Hold, threshold_s: u64) -> Str
 /// hold detail as `sessions <node> vs registry <node>`.
 pub(crate) fn witness_refusal(home: &AgentsHome, hold: &gc_sweep::Hold) -> Option<String> {
     let (a, b) = hold.detail.split_once(" vs ")?;
+    let statuses = gc_sweep::read_graph_node_states(home);
     for side in [a, b] {
         let node = side.split_whitespace().last()?;
-        let statuses = gc_sweep::read_graph_node_states(home);
         let status = statuses
             .as_ref()
             .and_then(|s| s.get(node))

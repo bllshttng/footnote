@@ -1965,7 +1965,7 @@ fn render_list_json_shape_matches_python_contract() {
         "missing 'discovered_sessions' key"
     );
     assert_eq!(parsed["discovered_count"], 0);
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
     assert_eq!(parsed["count"], 1);
     assert_eq!(
         parsed["fields_omitted"], result["fields_omitted"],
@@ -2058,7 +2058,7 @@ fn render_list_with_discovered_lane() {
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
     assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
 
     let table = render_list_table(&agents, &discovered, Some(3), Some(3));
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));

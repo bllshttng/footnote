@@ -564,3 +564,61 @@ fn ac3_err_the_verb_refuses_a_not_done_witness() {
         "{refusal}"
     );
 }
+
+/// The conflict-release lift at apply time: work reads AllDone over the two
+/// witness NODES (bare ids, never the "<source> <node>" hold strings), and
+/// the basis names both. Found by the review sweep: the first draft pushed
+/// the formatted dissent side into the nodes vec.
+#[test]
+fn ac3_the_conflict_release_reads_all_done_over_bare_witness_nodes() {
+    let home = tmp_home("gc-ac3-conflict");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = ask_row("conf-row", None);
+        row.short_id = "confrow".into();
+        row.node = Some("x-cccc".into());
+        row.harness_session_id = Some("sess-conf".into());
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let graph = graph_read(
+        &[("sess-conf", "x-aaaa", "done"), ("x-cccc", "x-cccc", "done")],
+        &[],
+    );
+    let release = gc_sweep::Release {
+        handle: "confrow".to_string(),
+        reason: "sources disagree".to_string(),
+        detail: "sessions x-aaaa vs registry x-cccc".to_string(),
+    };
+    let summary = gc_sweep::run_with_release(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &|_| Some(vec![quiet.clone()]),
+        &staged_ages(&|_| Some(vec![quiet.clone()])),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+        Some(&release),
+    );
+
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let basis = &summary.retired[0].1;
+    assert!(
+        basis.starts_with("released sources disagree held 2h00m"),
+        "basis: {basis}"
+    );
+    assert!(
+        basis.contains("every named node done: x-aaaa, x-cccc"),
+        "bare witness nodes, never the hold strings: {basis}"
+    );
+}

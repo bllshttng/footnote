@@ -3780,7 +3780,7 @@ fn format_success(
 /// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
 /// [...], "filters_applied": {...}, "schema_version": 6}`. Stays
 /// byte-shape-aligned with Python's `format.render_json`.
-const LIST_JSON_SCHEMA_VERSION: u32 = 6;
+const LIST_JSON_SCHEMA_VERSION: u32 = 7;
 
 fn render_list_json(
     agents: &Value,
