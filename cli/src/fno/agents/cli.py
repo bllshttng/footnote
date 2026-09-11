@@ -985,13 +985,8 @@ def cmd_spawn(
     passthrough: list[str] | None = typer.Argument(
         None,
         help=(
-            "Provider CLI flags after a `--` separator (x-1caa): `spawn \"hi\" "
-            "-- --verbose` forwards --verbose to the harness's own CLI, so a "
-            "flag fno never declared needs no code change. The parser stays "
-            "strict - an unknown fno flag before `--` (e.g. --modle) still "
-            "fails here rather than being silently forwarded. Pane substrate "
-            "only; the tokens ride the composed argv through the same "
-            "refusals (-p/--print, --settings, --session-id) that govern fno's "
+            "Provider CLI flags after a `--` separator, pane substrate only: "
+            "they ride the composed argv through the same refusals as fno's "
             "own flags."
         ),
     ),
@@ -999,9 +994,8 @@ def cmd_spawn(
         "",
         "--name",
         help=(
-            "Agent name (optional; an adjective-noun slug is minted when omitted). "
-            "A name is a handle you rarely care about, so it moved off the "
-            "positional: the one positional is the prompt."
+            "Agent name; an adjective-noun slug is minted when omitted. The "
+            "one positional is the prompt."
         ),
     ),
     harness: str | None = typer.Option(
@@ -1009,12 +1003,9 @@ def cmd_spawn(
         "--harness",
         "-H",
         help=(
-            "The CLI binary to launch. The declared harnesses - claude, codex, "
-            "gemini, opencode, agy, pi, cursor-agent - get the full lane. Any "
-            "other binary on PATH also spawns, into a pane with fno as the "
-            "viewport; pass its init flags after '--'. Defaults to the "
-            "invoking harness, then claude. NOTE: -H no longer means headless; "
-            "for a one-shot use --substrate headless / --headless / --once."
+            "The CLI binary to launch (default: the invoking harness, then "
+            "claude). Undeclared binaries spawn into a pane with fno as the "
+            "viewport. For a one-shot: --substrate headless."
         ),
     ),
     vendor: str | None = typer.Option(
@@ -1022,10 +1013,9 @@ def cmd_spawn(
         "--provider",
         "-P",
         help=(
-            "The model VENDOR the harness talks to: zai, or any "
-            "model_routing.providers name. Pairs with --model to name the route "
-            "(--provider zai --model glm-5.3 == --route zai,glm-5.3). This is NOT "
-            "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
+            "The model VENDOR (zai or a model_routing.providers name), paired "
+            "with --model to name the route. NOT the CLI binary (-H). "
+            "Capital -P: -p is headless."
         ),
     ),
     recorded_provider: str | None = typer.Option(
@@ -1051,13 +1041,9 @@ def cmd_spawn(
         "",
         "--substrate",
         help=(
-            "Session substrate (x-2c27): thread (the default where the "
-            "harness seats one: persistent, viewed through a portal; bg is a "
-            "deprecated alias) | pane (mux-hosted PTY, the closable fallback "
-            "for harnesses with no thread lane) | headless (-p/--exec "
-            "one-shot). Pane placement flags and a `--` passthrough fence "
-            "imply pane. Python owns the pane back half (fno mux pane run + "
-            "registry mux ref); thread/headless keep their existing lanes."
+            "thread (the default where the harness seats one) | pane (mux-"
+            "hosted PTY) | headless (one-shot). Placement flags and a `--` "
+            "fence imply pane. Full map: docs/guides/agents-spawn-flags.md."
         ),
     ),
     headless: bool = typer.Option(
@@ -1066,21 +1052,16 @@ def cmd_spawn(
         "-p",
         help=(
             "Shortcut for --substrate headless: a one-shot worker. Wins over "
-            "--substrate; equivalent to --once/-o. `-p` mirrors the harnesses' own "
-            "one-shot short (claude -p / codex exec); the vendor axis takes the "
-            "capital -P to keep the letter free for it."
+            "--substrate."
         ),
     ),
     sandbox_write_policy: str | None = typer.Option(
         None,
         "--sandbox-write-policy",
         help=(
-            "Path to a JSON policy file whose `sandbox` block composes into "
-            "the worker's ONE --settings file (the OS-layer write allowlist, "
-            "e.g. `fno backlog join`). The same file carries the hook layer's "
-            "deny_edit list, so one artifact drives both enforcement layers. "
-            "Refused on the pane substrate, where mux_spawn reserves "
-            "--settings for its hook server."
+            "JSON policy file whose `sandbox` block composes into the "
+            "worker's ONE --settings file beside the hook layer's deny_edit "
+            "list. Refused on the pane substrate."
         ),
     ),
     cwd: str | None = typer.Option(
@@ -1129,25 +1110,16 @@ def cmd_spawn(
         None,
         "--role",
         help=(
-            "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
-            "roles (coordinate|tidy|orient|consolidate|post-merge) and the "
-            "delivery lane (build) route to a secondary provider (z.ai GLM by "
-            "default) when configured; the build lane is opt-in by config "
-            "presence (set model_routing.roles.build). Production roles "
-            "(implement|review-verdict) and the default (no --role) stay on the "
-            "primary Anthropic model."
+            "Per-spawn model selection role. Auxiliary roles route to a "
+            "secondary provider when configured; the default stays primary."
         ),
     ),
     route: str | None = typer.Option(
         None,
         "--route",
         help=(
-            "Explicit per-dispatch model route as provider/model (e.g. "
-            "zai/glm-5.3; legacy comma zai,glm-5.3 also accepted). Bypasses the "
-            "--role table and guard (explicit intent "
-            "is not auto-routing) and wins over any configured lane. FAILS CLOSED: "
-            "an unknown provider, non-anthropic protocol, or missing key refuses "
-            "the spawn - never a silent primary-model launch. claude only."
+            "Explicit route provider/model (zai/glm-5.3). Wins over --role; "
+            "FAILS CLOSED on an unknown provider or missing key. claude only."
         ),
     ),
     monitor: str | None = typer.Option(
@@ -1162,28 +1134,18 @@ def cmd_spawn(
         None,
         "--account",
         help=(
-            "Pin this ONE worker to a registered claude account (x-d012) without "
-            "touching the daemon-wide active ~/.claude slot. Resolves a "
-            "ProviderRecord to an env overlay: an account with its own config_dir "
-            "(the verified-correct mechanism, bills right) sets CLAUDE_CONFIG_DIR; "
-            "a managed account rides the shared slot only when it IS the active "
-            "occupant. A managed non-active account is refused with a pointer to "
-            "config-dir registration (the setup-token env lane bills the wrong "
-            "account and is not used). Explicit operator intent only - never "
-            "inferred by failover/dispatch. claude only; fail-closed, nothing "
-            "spawned on refusal."
+            "Pin this ONE worker to a registered claude account without "
+            "touching the active ~/.claude slot. Fail-closed, claude only. "
+            "Semantics: docs/guides/agents-spawn-flags.md."
         ),
     ),
     dispatch_account: str | None = typer.Option(
         None,
         "--dispatch-account",
         help=(
-            "The destination provider RECORD of an autonomous quota cutover, as "
-            "chosen by `fno agents dispatch resolve --autonomous`. Unlike --account "
-            "(operator intent, claude-only) this carries the record's dispatch "
-            "env for ANY harness, which is what a claude->codex cutover needs. "
-            "The record id travels on argv; its credentials never do. "
-            "Fail-closed: an unknown or unstageable record spawns nothing."
+            "Provider RECORD from `dispatch resolve --autonomous`: its "
+            "dispatch env rides for ANY harness; credentials never travel. "
+            "Fail-closed."
         ),
     ),
     model: str | None = typer.Option(
@@ -1191,11 +1153,8 @@ def cmd_spawn(
         "--model",
         "-m",
         help=(
-            "Model for the worker, forwarded as --model <m> to the provider's "
-            "own CLI (exact passthrough, no fuzzy resolution). On the default "
-            "pane substrate every provider honors it (claude/codex/gemini/agy/"
-            "opencode/cursor-agent); on --substrate thread/headless it reaches claude, codex, and agy. "
-            "Unset = provider default; opencode defaults to zai-coding-plan/glm-5.3."
+            "Forwarded as --model <m> to the provider's own CLI (exact "
+            "passthrough). Unset = provider default."
         ),
     ),
     permission_mode: str | None = typer.Option(
@@ -1216,22 +1175,16 @@ def cmd_spawn(
         "--resume",
         "-r",
         help=(
-            "Seed a NEW claude session from an existing transcript. The content "
-            "carries over; the session id does NOT. `claude --bg --resume` always "
-            "forks, so the result is a new id, a new agent-view row, and a new fno "
-            "binding. To bring a session back under its OWN id, use "
-            "`fno agents resume <name>`. Accepts a full session uuid OR the 8-hex "
-            "short-id shown in receipts (x-f76e); with no --substrate it implies "
-            "thread. claude + thread only."
+            "Seed a NEW claude session from a transcript (uuid or 8-hex "
+            "short-id): content carries over, the id does NOT. To revive under "
+            "the SAME id: fno agents resume. claude + thread only."
         ),
     ),
     add_dir: str | None = typer.Option(
         None,
         "--add-dir",
         help=(
-            "Grant the worker extra write access to a directory (x-b6e2). Maps to "
-            "the harness's own --add-dir on claude/codex/agy/cursor-agent (additive "
-            "to the worker's own workspace); opencode/gemini reject it (fail-closed)."
+            "Extra write access for the worker; opencode/gemini reject it."
         ),
     ),
     agent: str | None = typer.Option(
@@ -1292,21 +1245,16 @@ def cmd_spawn(
         None,
         "--at",
         help=(
-            "Exact origin placement (x-6928): pin the new pane next to the calling "
-            "pane. `--at current` resolves the caller from FNO_PANE (run inside a "
-            "mux pane) and fails closed instead of falling back. Requires --split "
-            "and --substrate pane."
+            "Pin the new pane next to the caller (`--at current` reads "
+            "FNO_PANE, fails closed). Requires --split."
         ),
     ),
     tab: str | None = typer.Option(
         None,
         "--tab",
         help=(
-            "Place a pane in a mux tab selector. A bare number is the visible "
-            "1-based ordinal the tab bar shows; id:<n> is the stable tab id "
-            "for scripts; name:<s>/ordinal:<n>/active/new are explicit forms. "
-            "A bare name is a pane group: reuse the first numbered group tab "
-            "with room, or create the next. --substrate pane only."
+            "Mux tab selector (number, id:<n>, name:<s>, active/new, or a "
+            "group name). --substrate pane only."
         ),
     ),
     bounded_placement: bool = typer.Option(
@@ -1314,9 +1262,8 @@ def cmd_spawn(
         "--bounded-placement",
         hidden=True,
         help=(
-            "Spawn-side lane for automated placement (the outage handoff's "
-            "successor spawn): serialize placement under the mux lease, select "
-            "a stable tab with room, and enforce at most four panes per tab."
+            "Automated placement: serialized under the mux lease, max four "
+            "panes per tab."
         ),
     ),
     crown: list[str] = typer.Option(
@@ -1324,18 +1271,10 @@ def cmd_spawn(
         "--crown",
         "-k",
         help=(
-            "Grant an orchestrator crown on the spawned worker, over the "
-            "territory named here. Repeatable: pass epic id(s) (a Director; "
-            "several crown one over the set), ONE project name (a project "
-            "king), or SEVERAL projects for a portfolio. The altitude is derived from "
-            "what you name - there is no --level, and a node that is not an epic "
-            "is refused, since implementers get no crowns. Stamped with the "
-            "grantor derived from THIS session, never self-declared. Works on "
-            "--substrate pane and thread (crown on thread is claude-only until the "
-            "court plumbing learns the opencode serve lane); refused on "
-            "headless, whose one-shot exits before it can reign. If the caller "
-            "already holds the named territory, add --succeed: that explicit "
-            "flag transfers the crown and strips the caller atomically."
+            "Grant an orchestrator crown over this territory: epic id(s), one "
+            "project, or several. Altitude derives from what you name; "
+            "refused on headless. Full contract: "
+            "docs/guides/agents-spawn-flags.md."
         ),
     ),
     succeed: bool = typer.Option(
@@ -1351,10 +1290,8 @@ def cmd_spawn(
         None,
         "--node",
         help=(
-            "Backlog node id (or slug) this pane is working (x-84a8). Node-driven "
-            "pane spawns export FNO_NODE/FNO_SLUG/FNO_PLAN into the pane so the "
-            "prompt (starship) can render provenance. Ad-hoc spawns omit it. "
-            "FNO_SLUG/FNO_PLAN resolve from the graph unless --slug/--plan given."
+            "Backlog node this pane works: exports FNO_NODE/FNO_SLUG/FNO_PLAN "
+            "for prompt provenance (--slug/--plan override the graph read)."
         ),
     ),
     slug: str | None = typer.Option(
@@ -1367,13 +1304,8 @@ def cmd_spawn(
         "",
         "--session-phase",
         help=(
-            "Lifecycle phase for the sessions row a node-bearing spawn opens on "
-            "the node (x-4342): a spawned contributor that never holds the claim "
-            "crosses no stamping chokepoint, so spawn opens the row itself. "
-            "Empty (the default) infers from the message: /target-family work "
-            "stamps do (its claim-acquire stamp fills the same row), everything "
-            "else stamps review. No node resolved (--node or a review-verb "
-            "prompt naming one node id) means no row."
+            "Lifecycle phase for the sessions row a node-bearing spawn opens. "
+            "Empty infers from the message; no node resolved means no row."
         ),
     ),
     force: bool = typer.Option(
@@ -1381,9 +1313,8 @@ def cmd_spawn(
         "--force",
         "-F",
         help=(
-            "Spawn-gate bypass (x-c5cc): skip the max_live cap AND the "
-            "min_free_gb RAM floor. Workers are still QoS-demoted and still "
-            "counted by the next un-forced spawn."
+            "Bypass the max_live cap and the RAM floor; the worker is still "
+            "QoS-demoted and still counted."
         ),
     ),
     no_wait: bool = typer.Option(
@@ -1409,27 +1340,14 @@ def cmd_spawn(
         help="Read the prompt from a file ('-' = stdin) instead of the positional.",
     ),
 ) -> None:
-    """Spawn a new agent.
+    """Spawn a new agent; ``ask`` is the follow-up lane.
 
-    ``spawn`` creates a new peer. Use ``ask`` for follow-up messages to
-    an already-running agent.
-
-    Default substrate ``pane`` (4a-G2): the agent runs as a mux pane
-    (``fno mux pane run``), the registry row carries ``mux: {session,
-    pane_id}``, and the receipt is one JSON line with ``mux_session`` +
-    ``pane_id``.
-
-    claude ``--substrate bg``: creates a persistent bg thread; prints a
-    compact JSON receipt on stdout: {\"name\": ..., \"short_id\": ...,
-    \"harness\": \"claude\", \"status\": \"live\"}, plus \"provider\" (the model
-    vendor) and \"model\" keys only when a route was applied (-P/--route) or a
-    model named.
-
-    codex/gemini --once: creates + exchanges + tears down the registry
-    row. stdout = provider reply verbatim. stderr = teardown receipt.
-
-    Plain spawn for codex/gemini (no --once) requires the fno-agents daemon
-    (Rust runtime); this Python path exits 13 with guidance.
+    Receipts: pane = one JSON line with mux_session + pane_id; claude bg
+    thread = compact JSON ({\"name\", \"short_id\", \"harness\", \"status\"}, plus
+    \"provider\"/\"model\" only when a route or model was applied); --once = the
+    provider reply verbatim. Plain codex/gemini spawn needs the fno-agents
+    daemon; this Python path exits 13 with guidance. Flag reference:
+    docs/guides/agents-spawn-flags.md.
     """
     # --squad is a hidden back-compat alias for --workspace (US2); --workspace wins.
     squad = squad if squad is not None else squad_compat
@@ -2150,14 +2068,10 @@ def cmd_spawn(
                 file=sys.stderr,
             )
 
-    # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
-    # the substrate fan-out. This Python gate is the SOLE gate on every path
-    # that reaches cmd_spawn (the front door execs the binary for bg/headless,
-    # so those normally gate in Rust; the Rust pane arm re-execs back here) —
-    # exactly one gate evaluation per spawn (LD1). `--once` is the
-    # pre-substrate spelling of a headless one-shot, so it gates as headless.
-    # --wait loops HERE, in the CLI, not in the gate: the gate core has a Rust
-    # twin under a parity harness, and a retry wrapper touches neither.
+    # Spawn gate (x-c5cc): the SOLE gate on every path reaching cmd_spawn,
+    # exactly one evaluation per spawn (LD1). --wait loops HERE in the CLI,
+    # not in the gate: the gate core has a Rust twin under a parity harness,
+    # and a retry wrapper touches neither.
     if wait is not None and no_wait:
         print("error: --wait and --no-wait are mutually exclusive", file=sys.stderr)
         raise typer.Exit(code=2)
@@ -2179,9 +2093,9 @@ def cmd_spawn(
 
     from fno.agents.spawn_gate import GateRefused, run_gate
 
-    # The reasons a --wait may outlast. Anything else (a policy or config
-    # refusal) exits at once: waiting out a verdict the gate will not revisit
-    # is a hang wearing a retry's clothes.
+    # The reasons a --wait may outlast; anything else (policy or config)
+    # exits at once - waiting out a verdict the gate will not revisit is a
+    # hang wearing a retry's clothes.
     waitable_reasons = frozenset(
         {
             "load_backstop",

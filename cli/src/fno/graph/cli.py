@@ -1555,29 +1555,23 @@ def cmd_idea(
         if separate:
             typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        topology_flags = []
-        if blocked_by:
-            topology_flags.append("--blocked-by")
-        if parent:
-            topology_flags.append("--parent")
-        if roadmap_id:
-            topology_flags.append("--roadmap-id")
-        if vision_path:
-            topology_flags.append("--vision-path")
-        if project:
-            topology_flags.append("--project")
-        if cwd:
-            topology_flags.append("--cwd")
-        if size:
-            topology_flags.append("--size")
-        if batch:
-            topology_flags.append("--batch")
-        if related:
-            topology_flags.append("--related")
-        if type_ != "feature":
-            topology_flags.append("--type")
-        if priority != "p2":
-            topology_flags.append("--priority")
+        topology_flags = [
+            flag
+            for flag, given in (
+                ("--blocked-by", blocked_by),
+                ("--parent", parent),
+                ("--roadmap-id", roadmap_id),
+                ("--vision-path", vision_path),
+                ("--project", project),
+                ("--cwd", cwd),
+                ("--size", size),
+                ("--batch", batch),
+                ("--related", related),
+                ("--type", type_ != "feature"),
+                ("--priority", priority != "p2"),
+            )
+            if given
+        ]
         if topology_flags:
             typer.echo(
                 "Error: wave filing cannot use node-only topology flags: "

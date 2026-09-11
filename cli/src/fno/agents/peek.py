@@ -1016,9 +1016,9 @@ def _peek_all(
     codex_sessions_dir: Optional[Path],
     opencode_storage_dir: Optional[Path],
 ) -> int:
-    """``--all``: run the tail (and ``--grep``) over every registry session that
-    carries a transcript. The stderr summary names sessions READ, so zero
-    matches across a searched corpus never reads as an unsearched one."""
+    """``--all``: the tail (and ``--grep``) over every registry session with a
+    transcript. The stderr summary names sessions READ, so zero matches across
+    a searched corpus never reads as an unsearched one."""
     from fno.agents.registry import load_registry
 
     try:
@@ -1027,20 +1027,15 @@ def _peek_all(
         err.write("registry unreadable; --all has no sessions to enumerate\n")
         return EXIT_UNSUPPORTED
     seen: set[tuple[str, str]] = set()
-    sessions_read = 0
-    matched_total = 0
+    sessions_read = matched_total = 0
     for row in rows:
-        sid = getattr(row, "harness_session_id", None)
-        agent = getattr(row, "harness", None)
+        sid, agent = getattr(row, "harness_session_id", None), getattr(row, "harness", None)
         if not sid or not agent or (agent, sid) in seen:
             continue
         seen.add((agent, sid))
         try:
             records = recent_records(
-                agent,
-                sid,
-                getattr(row, "cwd", "") or "",
-                lines,
+                agent, sid, getattr(row, "cwd", "") or "", lines,
                 projects_root=projects_root,
                 codex_sessions_dir=codex_sessions_dir,
                 opencode_storage_dir=opencode_storage_dir,
@@ -1056,17 +1051,15 @@ def _peek_all(
         matched_total += len(hits)
         if grep is not None and not hits:
             continue
-        if json_out:
-            for r in hits:
+        if not json_out:
+            out.write(f"# {agent} {sid}\n")
+        for r in hits:
+            if json_out:
                 out.write(
-                    json.dumps(
-                        {"session_id": sid, "agent": agent, "role": r.role, "text": r.text}
-                    )
+                    json.dumps({"session_id": sid, "agent": agent, "role": r.role, "text": r.text})
                     + "\n"
                 )
-        else:
-            out.write(f"# {agent} {sid}\n")
-            for r in hits:
+            else:
                 out.write(_render(r) + "\n")
     if grep is not None:
         err.write(

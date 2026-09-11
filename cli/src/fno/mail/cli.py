@@ -1058,11 +1058,8 @@ def cmd_reply(
         None, "--sender-session",
         help=(
             "Full session id to answer when the stored sender handle is "
-            "ambiguous. A legacy message carries only a head-8 handle, and under "
-            "UUIDv7 that is a ~65.536-second clock bucket, so two workers started "
-            "in one minute share it. Naming the full id here keeps the thread: "
-            "the reply still carries the original in_reply_to. A value that is "
-            "not one of the candidates sends nothing."
+            "ambiguous (a legacy head-8 is a shared clock bucket). A value "
+            "that is not one of the candidates sends nothing."
         ),
     ),
     style_exception: str | None = typer.Option(
@@ -3557,13 +3554,9 @@ def cmd_send(
     name: str | None = typer.Argument(
         None,
         help=(
-            "Agent name, short-id (first 8 of the session id), or full session "
-            "id. Codex: use the full session_id or pane; never head-8. A codex "
-            "session id is UUIDv7, so its first 8 characters are a "
-            "65.536-second timestamp bucket rather than random - siblings "
-            "spawned in one minute share them - and a head-8 aimed at a codex "
-            "row is refused outright, not merely when it happens to be "
-            "ambiguous today. Claude ids are UUIDv4, so either form works there."
+            "Agent name, short-id, or full session id. A codex head-8 is a "
+            "65.536-second UUIDv7 bucket, not random, and is refused against "
+            "a codex row; claude ids are UUIDv4, so either form works."
         ),
     ),
     message: str | None = typer.Argument(
@@ -3583,9 +3576,8 @@ def cmd_send(
     from_name: str | None = typer.Option(
         None, "--from-name",
         help=(
-            "Identity advertised in the envelope (must be XML-attribute-safe). "
-            "Unset defaults to 'fno' for an agent send, or the working "
-            "dir's project for an inbox-kind send."
+            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
+            "agent send, the working dir's project for an inbox-kind send."
         ),
     ),
     origin: str | None = typer.Option(
@@ -3606,9 +3598,8 @@ def cmd_send(
         False, "--from-self",
         help=(
             "Stamp the sender with this session's own canonical mail handle "
-            "(the reply handle `fno whoami` shows) instead of the project. "
-            "Use with --to-project when you will hold for the reply. Fails loud "
-            "(exit 2) with no ambient harness identity - never a silent floor."
+            "(the reply handle `fno whoami` shows). Fails loud (exit 2) with "
+            "no ambient harness identity."
         ),
     ),
     to_project: str | None = typer.Option(
@@ -3633,10 +3624,8 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
-            "contract, so pair it with --to-project; question/fyi to a bare "
-            "session handle is refused (a handle has no drain that reads them). "
-            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi); pair with --to-project. "
+            "Omit for a default agent-to-agent send (live if a peer is hosted)."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -3692,26 +3681,19 @@ def cmd_send(
     to_self: bool = typer.Option(
         False, "--to-self",
         help=(
-            "Address this session as the recipient (no <id> needed). With --raw "
-            "the envelope is stripped so a slash command parses at your own "
-            "prompt line - this is how an agent reaches a verb the harness serves "
-            "to a typed invocation. The audit event records the sender, since an "
-            "unwrapped payload carries no `from`."
+            "Address this session as the recipient (no <id> needed). With "
+            "--raw the envelope is stripped so a slash command parses at your "
+            "own prompt line; the audit event records the sender."
         ),
     ),
     force: bool = typer.Option(
         False, "--force", "-F",
         help=(
             "Deliver over the PANE transport: type the wrapped body at the "
-            "recipient's prompt instead of running the live-inject ladder. Every "
-            "mail semantic is kept - same envelope, same msg-id, same reply "
-            "handle, same outbox row - and only the transport changes, so a "
-            "live-miss no longer forces you to switch verbs and lose all four. "
-            "The receipt says `typed (pane <id>)`, NEVER `delivered`: bytes "
-            "written to a PTY is not delivery and is certainly not action. Opt-in "
-            "on purpose - the pane path asks permission from nothing, so it can "
-            "also select a showing prompt's default; it reads the pane first and "
-            "refuses one."
+            "recipient's prompt, keeping every mail semantic. The receipt says "
+            "`typed (pane <id>)`, NEVER `delivered` - bytes written to a PTY "
+            "is not action. It reads the pane first and refuses a showing "
+            "prompt."
         ),
     ),
     style_exception: str | None = typer.Option(
@@ -3721,24 +3703,18 @@ def cmd_send(
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
-    Name mode (``send <name> <message>``) requires the agent to already exist;
-    unknown names exit 16. Project mode (``send --to-project <X> <message>``)
-    resolves over the registry: one live peer delivers live, none queues durable
-    for project X, many errors with the candidate list unless ``--any``. Crown
-    mode (``send --to-king <scope> <message>``) resolves the crown holder at
-    send time, then delivers by name; nobody or a split crown refuses.
+    Name mode requires the agent to exist (unknown names exit 16). Project
+    mode resolves over the registry: one live peer delivers live, none
+    queues durable, many errors with the candidate list unless ``--any``.
+    Crown mode resolves the crown holder at send time; nobody or a split
+    crown refuses. Delivery is live-inject-FIRST; the durable envelope is
+    the fallback tier. Address it by the ADDRESS column of ``fno agents
+    list`` - the NAME column is a spawn label, not a mailbox. A stranded
+    send: ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
 
-    Delivery is live-inject-FIRST; the durable envelope is the fallback tier.
-    Sustained agent-lock contention writes nothing and exits 11.
-
-    Address it by the ADDRESS column of ``fno agents list`` (or the full session
-    id). The NAME column is a spawn label and a discovered lane's LABEL is an
-    alias; neither is a mailbox. If a send does strand, ``fno agents mail sent
-    --unclaimed`` finds it and ``fno agents mail withdraw <id>`` retracts it.
-
-    Stdout contract: exactly one line, either ``msg-<id> delivered (hosted)`` or
-    ``msg-<id> queued (durable) [<reason>]``, where ``<reason>`` is the live
-    lane's own cause. Exit 0 for both; failures go to stderr with a nonzero exit.
+    Stdout contract: exactly one line, ``msg-<id> delivered (hosted)`` or
+    ``msg-<id> queued (durable) [<reason>]``. Exit 0 for both; failures go
+    to stderr with a nonzero exit.
     """
     from fno.agents.dispatch import (
         DispatchAskError,

@@ -38,29 +38,25 @@ def cmd_ask(
     from_name: str = typer.Option(
         "fno",
         "--from-name",
-        help=(
-            "Identity advertised in the cross-session-message envelope "
-            "on follow-up. Ignored on create. Must be XML-attribute-safe."
-        ),
+        help="Envelope identity (XML-attribute-safe); ignored on create.",
     ),
     yolo: bool = typer.Option(
         False,
         "--yolo",
         "-Y",
         help=(
-            "Provider-specific dangerous-mode bypass. For codex: passes "
-            "--dangerously-bypass-approvals-and-sandbox (replaces the "
-            "default --sandbox workspace-write). For claude: no-op with "
-            "a single-line stderr note. Opt-in; you own the blast radius."
+            "Dangerous-mode bypass: codex gets "
+            "--dangerously-bypass-approvals-and-sandbox; claude no-ops with a "
+            "stderr note. Opt-in; you own the blast radius."
         ),
     ),
     to_project: str | None = typer.Option(
         None,
         "--to-project",
         help=(
-            "Anycast: ask whoever works on this project. ask is synchronous, so "
-            "this resolves to exactly one live peer; none/ambiguous is an error "
-            "(use `send --to-project` for the durable-queue path). Use instead of <name>."
+            "Anycast to whoever works on this project; ask is synchronous, so "
+            "exactly one live peer is required (use `send --to-project` for "
+            "the durable-queue path)."
         ),
     ),
     any_live: bool = typer.Option(
@@ -93,22 +89,11 @@ def cmd_ask(
 ) -> None:
     """Send a message to a registered agent (follow-up only).
 
-    ``ask`` requires the agent to already exist. Unknown names exit 16
-    with a hint pointing at ``fno agents spawn <name> --harness <harness>``.
-    Use ``spawn`` / ``host`` for initial agent creation.
-
-    Project mode (``ask --to-project <X> <message>``) resolves over the
-    registry; because ask blocks for a reply it requires exactly one live
-    peer (none/ambiguous exit nonzero).
-
-    Prints the recipient's reply verbatim on stdout (no banner, no
-    trailing newline added by fno).
-
-    The follow-up itself runs on the Rust runtime (the ask adapters were
-    ported; the parity harnesses freeze its behavior). This body keeps
-    only the work the binary cannot do: the ``--to-project`` anycast
-    resolution, which routes here first and then execs the binary with a
-    resolved name.
+    Requires the agent to exist; unknown names exit 16 pointing at
+    ``fno agents spawn``. Project mode requires exactly one live peer.
+    The reply prints verbatim on stdout. The follow-up runs on the Rust
+    runtime; this body keeps only the ``--to-project`` anycast resolution
+    the binary cannot do.
     """
     from fno import rust_binary
     from fno._flag_aliases import refuse_retired_provider
