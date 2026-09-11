@@ -48,6 +48,44 @@ def _delivery_event_paths(rows: list[dict], canonical_root: Path) -> list[Path]:
     return paths
 
 
+def _event_node_id(e: dict) -> str | None:
+    raw = e.get("data")
+    d = raw if isinstance(raw, dict) else {}
+    nid = e.get("graph_node_id") or d.get("graph_node_id")
+    return nid if isinstance(nid, str) and nid else None
+
+
+def _scope_to_project(
+    rows: list[dict],
+    graph_nodes: list[dict],
+    events: list[dict],
+    project: str,
+) -> tuple[list[dict], list[dict], list[dict], dict]:
+    """Scope the denominator to one project. Rows and nodes carry the project
+    directly; events ride their node id. Rows with no project stay
+    unattributed - counted in the returned scope, never copied in."""
+    pnodes = {
+        n.get("id")
+        for n in graph_nodes
+        if isinstance(n.get("id"), str) and n.get("project") == project
+    }
+    scoped_rows = [r for r in rows if r.get("project") == project]
+    unattributed = sum(1 for r in rows if not r.get("project"))
+
+    def _event_in(e: dict) -> bool:
+        nid = _event_node_id(e)
+        return nid is not None and nid in pnodes
+
+    scoped_events = [e for e in events if _event_in(e)]
+    scope = {
+        "project": project,
+        "nodes": len(pnodes),
+        "unattributed_rows": unattributed,
+        "other_project_rows": len(rows) - len(scoped_rows) - unattributed,
+    }
+    return scoped_rows, [n for n in graph_nodes if n.get("id") in pnodes], scoped_events, scope
+
+
 def scoreboard_command(
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the scoreboard as JSON."),
@@ -93,16 +131,27 @@ def scoreboard_command(
         False,
         "--by-provider",
         help=(
-            "Provider-outcome attribution: cost per shipped PR per "
-            "provider/model (wedge spend included), post-ship bounce rate, "
-            "median iterations, and re-dispatch counts, with an unattributed "
-            "bucket and a coverage line. Feeds quota-aware dispatch."
+            "Provider-outcome attribution: shipped runs and delivered nodes "
+            "per provider/model (wedge spend included, nodes counted once, "
+            "shared credit shown), post-ship bounce rate, median iterations, "
+            "and re-dispatch counts, with an unattributed bucket and a "
+            "coverage line. Feeds quota-aware dispatch."
         ),
     ),
     lanes: bool = typer.Option(
         False,
         "--lanes",
         help="Lane truth: retrospective provider/model/effort cells plus live occupancy and headroom.",
+    ),
+    project: str = typer.Option(
+        None,
+        "--project",
+        help=(
+            "Scope every denominator to one project: rows and graph nodes "
+            "carry the project, events ride their node id. Rows with no "
+            "project stay unattributed - counted in the scope line, never "
+            "copied into the project."
+        ),
     ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
@@ -143,12 +192,33 @@ def scoreboard_command(
         typer.echo(f"{e.path}: parse error at byte {e.offset}: {e.msg}", err=True)
         raise typer.Exit(1)
 
+    scope = None
+    if project:
+        rows, scoped_nodes, _unused, scope = _scope_to_project(rows, read_graph_nodes(graph_path), [], project)
+        pnodes = {n.get("id") for n in scoped_nodes}
+
+        def _nodes():
+            return scoped_nodes
+
+        def _events(kinds):
+            return [e for e in read_jsonl_events(events_paths, kinds) if _event_node_id(e) in pnodes]
+
+    else:
+
+        def _nodes():
+            return read_graph_nodes(graph_path)
+
+        def _events(kinds):
+            return read_jsonl_events(events_paths, kinds)
+
     if calibration:
         cal = build_calibration(
-            read_jsonl_events(events_paths, {"verifier_verdict"}),
+            _events({"verifier_verdict"}),
             rows,
-            read_graph_nodes(graph_path),
+            _nodes(),
         )
+        if scope:
+            cal["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(cal, indent=2))
             return
@@ -158,11 +228,13 @@ def scoreboard_command(
     if by_skill:
         sb = build_skill_scoreboard(
             rows,
-            read_graph_nodes(graph_path),
-            read_jsonl_events(events_paths, {"human_touch"}),
+            _nodes(),
+            _events({"human_touch"}),
             since_days=since,
             now=datetime.now(),
         )
+        if scope:
+            sb["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(sb, indent=2))
             return
@@ -172,11 +244,13 @@ def scoreboard_command(
     if efficiency:
         eff = build_efficiency(
             rows,
-            read_jsonl_events(events_paths, {"loop_check"}),
-            read_graph_nodes(graph_path),
+            _events({"loop_check"}),
+            _nodes(),
             since_days=since,
             now=datetime.now(),
         )
+        if scope:
+            eff["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(eff, indent=2))
             return
@@ -186,10 +260,12 @@ def scoreboard_command(
     if by_provider:
         pb = build_provider_scoreboard(
             rows,
-            read_graph_nodes(graph_path),
+            _nodes(),
             since_days=since,
             now=datetime.now(),
         )
+        if scope:
+            pb["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(pb, indent=2))
             return
@@ -205,13 +281,15 @@ def scoreboard_command(
         settings = load_settings()
         lane_view = build_lanes(
             rows,
-            read_graph_nodes(graph_path),
+            _nodes(),
             [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
-            read_jsonl_events(events_paths, {"provider_rate_limited"}),
+            _events({"provider_rate_limited"}),
             dict(provider_limits_table(settings.agents)),
             since_days=since,
             now=datetime.now(),
         )
+        if scope:
+            lane_view["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(lane_view, indent=2))
             return
@@ -230,9 +308,11 @@ def scoreboard_command(
             trace_paths, CONTEXT_TRACE_EVENT_KINDS
         )
         trace_events = trace_read["events"]
+        if project:
+            trace_events = [e for e in trace_events if _event_node_id(e) in pnodes]
         pf = build_plan_fidelity(
             rows,
-            read_graph_nodes(graph_path),
+            _nodes(),
             since_days=since,
             now=datetime.now(),
             loop_check_events=[
@@ -241,20 +321,24 @@ def scoreboard_command(
             trace_events=trace_events,
             event_coverage=trace_read["coverage"],
         )
+        if scope:
+            pf["project_scope"] = scope
         if json_out:
             typer.echo(_json.dumps(pf, indent=2))
             return
         _render_plan_fidelity(pf)
         return
 
-    touch_events = read_jsonl_events(events_paths, {"human_touch"})
-    graph_nodes = read_graph_nodes(graph_path)
+    touch_events = _events({"human_touch"})
+    graph_nodes = _nodes()
 
     # Naive LOCAL throughout: the ledger's `completed` is written naive-local, so
     # `now` matches it; aware event timestamps are converted to local in
     # fold._parse_ts. One timeline, no local/UTC boundary skew.
     sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=datetime.now())
 
+    if scope:
+        sb["project_scope"] = scope
     if json_out:
         typer.echo(_json.dumps(sb, indent=2))
         return
@@ -437,7 +521,7 @@ def _render_by_provider(pb: dict) -> None:
             "unattributed rows are a visible bucket, never dropped.\n"
         )
     out("\n")
-    out(f"  {'provider':<16}{'model':<22}{'runs':>6}{'shipped':>9}{'spend$':>10}{'$/shipped':>11}{'bounce%':>13}{'med iter':>10}{'retries':>9}\n")
+    out(f"  {'provider':<16}{'model':<22}{'runs':>6}{'ships':>7}{'nodes':>7}{'shared':>8}{'spend$':>10}{'$/ship':>9}{'bounce%':>13}{'med iter':>10}{'retries':>9}\n")
     prev = None
     for row in pb["rows"]:
         provider = row["provider"] if row["provider"] != prev else ""
@@ -446,8 +530,9 @@ def _render_by_provider(pb: dict) -> None:
         # bounce rides with its denominator: "50% of 4" never a bare rate
         bounce = f"{row['bounce_rate_pct']}% of {row['shipped_linked']}" if row["bounce_rate_pct"] is not None else "n/a"
         out(
-            f"  {provider:<16}{row['model']:<22}{row['runs']:>6}{row['shipped']:>9}"
-            f"{row['spend_usd']:>10.2f}{cps:>11}{bounce:>13}{_fmt(row['median_iterations']):>10}{row['retry_rows']:>9}\n"
+            f"  {provider:<16}{row['model']:<22}{row['runs']:>6}{row['shipped']:>7}"
+            f"{row.get('delivered_nodes', 0):>7}{row.get('shared_nodes', 0):>8}"
+            f"{row['spend_usd']:>10.2f}{cps:>9}{bounce:>13}{_fmt(row['median_iterations']):>10}{row['retry_rows']:>9}\n"
         )
 
 
@@ -520,14 +605,23 @@ def _render(sb: dict) -> None:
     shipped = sb.get("shipped_nodes")
     if shipped is not None:
         by_term = sb.get("shipped_by_terminal", 0)
-        out(f"\nShipped       {shipped} nodes (merged PR on the node); "
-            f"by session terminal alone: {by_term}\n")
+        classes = sb.get("delivery_classes") or {}
+        class_bits = " ".join(f"{n} {name}" for name, n in sorted(classes.items()))
+        out(f"\nShipped       {shipped} nodes (confirmed merge, doc or delivery "
+            f"evidence); by session terminal alone: {by_term}\n")
+        if class_bits:
+            out(f"              by evidence: {class_bits}\n")
         if sb.get("merged_nodes_without_ledger_row"):
             out(f"              merged nodes with no ledger row: "
                 f"{sb['merged_nodes_without_ledger_row']}\n")
         if shipped and by_term < 0.9 * shipped:
             out("  ! terminal-only undercounts nodes whose PR merged after the "
                 "session stopped; the merge is the count.\n")
+    scope = sb.get("project_scope")
+    if scope:
+        out(f"\nProject scope {scope['project']}: {scope['nodes']} nodes; "
+            f"{scope['unattributed_rows']} unattributed row(s) and "
+            f"{scope['other_project_rows']} other-project row(s) kept out.\n")
 
     out("\nStop-cause distribution\n")
     if sb["stop_cause"]:

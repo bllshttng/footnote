@@ -408,6 +408,41 @@ def test_merged_node_without_ledger_row_is_delivery_with_missing_cost():
     assert sb["spend"]["ship_terminal_usd"] == 0.0
 
 
+# --- AC2: the denominator is scoped once ------------------------------------
+def test_project_scope_counts_once_and_keeps_unattributed_out(tmp_path, monkeypatch):
+    graph = [
+        {"id": "x-1", "project": "p1", "merge_status": "merged", "completed_at": _RECENT},
+        {"id": "x-2", "project": "p2", "merge_status": "merged", "completed_at": _RECENT},
+    ]
+    rows = [
+        # p1: a retry, then the delivering run - one delivered node.
+        {"completed": _RECENT, "termination_reason": "NoProgress", "graph_node_id": "x-1", "cost_usd": 1.0, "project": "p1", "provider_id": "zai"},
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 2.0, "project": "p1", "provider_id": "zai"},
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 3.0, "project": "p1", "provider_id": "claude"},
+        # p2 must not leak into p1; the unattributed row is counted, not copied.
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-2", "cost_usd": 9.0, "project": "p2"},
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "cost_usd": 5.0},
+    ]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    res = runner.invoke(_app(), ["--project", "p1", "--json"])
+    sb = json.loads(res.output)
+    assert sb["shipped_nodes"] == 1
+    assert sb["project_scope"]["project"] == "p1"
+    assert sb["project_scope"]["unattributed_rows"] == 1
+    assert sb["project_scope"]["other_project_rows"] == 1
+    assert sb["spend"]["ship_terminal_usd"] == 6.0
+
+
+def test_stale_queued_status_loses_to_merge_evidence():
+    # A queued value nothing writes is stale state if it ever surfaces;
+    # current merge evidence wins and no queued population is invented.
+    graph = [{"id": "x-m", "merge_status": "queued", "merged_at": _RECENT}]
+    sb = build_scoreboard([], [], graph, since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 1
+    assert sb["delivery_classes"] == {"merged": 1}
+
+
 # --- x-fe4d: the JSON stream stays strict (no NaN/Infinity tokens) ----------
 def test_num_never_returns_nonfinite():
     from fno.scoreboard.fold import _num

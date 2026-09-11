@@ -24,7 +24,8 @@ def reference_deliveries(graph_nodes: list[dict], rows: list[dict]) -> dict:
 
     by_node: dict[str, dict] = {}
     for nid, n in by_id.items():
-        merged = n.get("merge_status") == "merged"
+        # A merge timestamp is merge evidence even when the status is stale.
+        merged = n.get("merge_status") == "merged" or bool(n.get("merged_at"))
         by_node[nid] = {
             "class": "merged" if merged else "no_evidence",
             "delivered": merged,
@@ -62,7 +63,7 @@ def reference_deliveries(graph_nodes: list[dict], rows: list[dict]) -> dict:
                 "node_known": False,
             }
             continue
-        if kind == "ship" or n.get("merge_status") == "merged":
+        if kind == "ship" or n.get("merge_status") == "merged" or n.get("merged_at"):
             continue  # the node pass already classified it honestly
         cls = "delivered_doc" if kind == "doc" else "delivered_delivery"
         by_node[nid] = {

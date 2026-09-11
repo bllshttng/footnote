@@ -1065,6 +1065,7 @@ def build_provider_scoreboard(
 
     buckets: dict[tuple[str, str], dict] = {}
     attributed = 0
+    node_buckets: dict[str, set] = {}
     for r in windowed:
         provider = _key(r.get("provider_id"), "unattributed")
         if provider != "unattributed":
@@ -1072,9 +1073,12 @@ def build_provider_scoreboard(
         b = buckets.setdefault(
             (provider, _key(r.get("model"), "unknown")),
             {"runs": 0, "shipped": 0, "shipped_linked": 0, "bounced": 0,
-             "spend": 0.0, "measured_cost": False, "iterations": [], "nids": set(), "nid_rows": 0},
+             "spend": 0.0, "measured_cost": False, "iterations": [], "nids": set(),
+             "delivered_nids": set(), "nid_rows": 0},
         )
         b["runs"] += 1
+        shipped_now = _row_shipped(r, deliveries)
+        b["shipped"] += int(shipped_now)
         b["spend"] += _num(r.get("cost_usd"))
         if _num_opt(r.get("cost_usd")) is not None:  # a real recorded cost, not a coerced-missing 0
             b["measured_cost"] = True
@@ -1083,24 +1087,33 @@ def build_provider_scoreboard(
         if nid:
             b["nids"].add(nid)
             b["nid_rows"] += 1
-        if _row_shipped(r, deliveries):
-            b["shipped"] += 1
+        if shipped_now:
             it = _num_opt(r.get("iterations"))
             if it is not None:
                 b["iterations"].append(it)
+            if nid:
+                # Delivered nodes count ONCE per bucket no matter how many
+                # retries ran; credit is shared, never copied, across the
+                # buckets that worked the same node.
+                b["delivered_nids"].add(nid)
+                node_buckets.setdefault(nid, set()).add((provider, _key(r.get("model"), "unknown")))
             if nid and w4_available and nid in by_id:
                 b["shipped_linked"] += 1
                 if _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes) in ("bounced", "reverted"):
                     b["bounced"] += 1
 
+    shared_nodes = {nid for nid, ks in node_buckets.items() if len(ks) > 1}
     out_rows = []
     for (provider, model), b in buckets.items():
+        delivered_nids = b["delivered_nids"]
         out_rows.append(
             {
                 "provider": provider,
                 "model": model,
                 "runs": b["runs"],
                 "shipped": b["shipped"],
+                "delivered_nodes": len(delivered_nids),
+                "shared_nodes": len(delivered_nids & shared_nodes),
                 "spend_usd": round(b["spend"], 2),
                 # None (not $0.00) when nothing shipped OR the bucket recorded no
                 # real cost - a missing-cost bucket is unmeasurable, not free, and
