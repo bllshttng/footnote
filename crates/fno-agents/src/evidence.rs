@@ -120,10 +120,17 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result
 }
 
 /// One failure line per citation the repo contradicts, empty when clean.
+/// The tracked-file read happens only when a citation exists: a claim-free
+/// body answers without touching git.
 pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
+    let claims = find_code_claims(text);
+    if !claims.iter().any(|c| citation_re().is_match(c)) {
+        return Vec::new();
+    }
     let tracked = tracked_files(root);
+    let tracked_norm: Vec<String> = tracked.iter().map(|p| p.replace('\\', "/")).collect();
     let mut failures: Vec<String> = Vec::new();
-    for claim in find_code_claims(text) {
+    for claim in claims {
         if !citation_re().is_match(&claim) {
             continue;
         }
@@ -136,7 +143,6 @@ pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
             .unwrap_or("0")
             .parse()
             .unwrap_or(0);
-        let tracked_norm: Vec<String> = tracked.iter().map(|p| p.replace('\\', "/")).collect();
         let exact: Vec<&String> = tracked_norm.iter().filter(|p| *p == path_text).collect();
         let resolved: Option<&String> = if !exact.is_empty() {
             Some(exact[0])
