@@ -70,6 +70,12 @@ pub fn wait_for_path(path: &Path, budget: std::time::Duration) {
 }
 
 /// Wait until the daemon's event log carries `needle`.
+///
+/// The startup reconcile sweep runs CONCURRENTLY with the accept loop, so a
+/// served response no longer implies the sweep has landed; a test that reads
+/// post-sweep state waits for the event that says it did. The timeout verdict
+/// names WHICH wait failed: the event did not occur, or the writer could not
+/// write (see [`absence_verdict`]).
 pub fn wait_for_event(
     home: &fno_agents::paths::AgentsHome,
     needle: &str,
@@ -85,19 +91,134 @@ pub fn wait_for_event(
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    panic!("event never appeared within {budget:?}: {needle}");
+    panic!(
+        "{}",
+        absence_verdict(
+            &home.events_jsonl(),
+            &home.root().join("daemon.stderr"),
+            needle,
+            budget,
+        )
+    );
+}
+
+/// The evidence block appended to a timed-out event wait's panic: which file
+/// was read, and whether the writer said it could not write.
+///
+/// The claim audit lands in a DIFFERENT journal than the event log this wait
+/// polls, and reports a failed append ONLY on the daemon's stderr
+/// (`emit_audit_event`). CI at 8fe7d556a2af: the wait panicked "event never
+/// appeared" for 30s while stderr printed "events.jsonl lock timeout" every
+/// two seconds - an absence verdict over a blocked writer, on a file the
+/// failing writer never touched. Pure (paths in, string out) so the units run
+/// without a daemon.
+pub fn absence_verdict(
+    journal: &Path,
+    stderr: &Path,
+    needle: &str,
+    budget: std::time::Duration,
+) -> String {
+    format!(
+        "event {needle} never appeared within {budget:?}\n{}",
+        absence_evidence(journal, stderr)
+    )
+}
+
+fn absence_evidence(journal: &Path, stderr: &Path) -> String {
+    let journal_lines = fs::read_to_string(journal)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let mut out = format!(
+        "journal read: {} ({journal_lines} lines)\n",
+        journal.display()
+    );
+    let Ok(text) = fs::read_to_string(stderr) else {
+        out.push_str(&format!(
+            "the daemon.stderr capture file was missing at {}; no writer verdict is possible\n",
+            stderr.display()
+        ));
+        return out;
+    };
+    let bytes = fs::metadata(stderr).map(|m| m.len()).unwrap_or(0);
+    out.push_str(&format!(
+        "daemon.stderr capture: {} ({bytes} bytes)\n",
+        stderr.display()
+    ));
+    let failures: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("failed to emit") || l.contains("events.jsonl lock timeout"))
+        .collect();
+    if failures.is_empty() {
+        out.push_str("no emit failure was recorded; the event did not occur\n");
+        return out;
+    }
+    let last = failures[failures.len() - 1];
+    out.push_str(&format!(
+        "the writer could not write: {} emit failure(s); last: {last}\n",
+        failures.len()
+    ));
+    if let Some(i) = last.find("timeout: ") {
+        out.push_str(&format!("lock path: {}\n", &last[i + "timeout: ".len()..]));
+    }
+    out
 }
 
 /// Spawn the daemon under `home` and wait for socket + start event. Idle-exit
 /// is disabled so a daemon outliving its test cannot strand the suite.
 pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
+    fs::create_dir_all(home.root()).expect("home root creates");
+    // The daemon's stderr is evidence, not noise: a failed claim-audit append
+    // is reported ONLY on stderr (emit_audit_event), and an inherited stderr
+    // sends those lines to the CI job log where no assertion can read them.
+    // A file, not a pipe: no reader thread for a chatty child (x-be1d).
+    let stderr =
+        fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = std::process::Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     wait_for_path(&home.supervisor_sock(), std::time::Duration::from_secs(10));
     wait_for_event(home, "daemon_started", std::time::Duration::from_secs(10));
     DaemonChild(child)
+}
+
+/// How many lines of the daemon's event log carry `needle`.
+pub fn count_events(home: &fno_agents::paths::AgentsHome, needle: &str) -> usize {
+    fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(needle))
+        .count()
+}
+
+/// Wait until `needle` has been written at least `at_least` times.
+///
+/// [`wait_for_event`] asks whether the log CONTAINS the needle, which is a
+/// no-op for every daemon after the first under one home: the log is
+/// append-only, so a `daemon_started` line left by the previous daemon
+/// satisfies it instantly and the caller races a socket the new daemon has
+/// not accepted on yet. Counting lines makes the wait about THIS spawn. The
+/// timeout verdict is the same evidence block as [`wait_for_event`].
+pub fn wait_for_event_count(
+    home: &fno_agents::paths::AgentsHome,
+    needle: &str,
+    at_least: usize,
+    budget: std::time::Duration,
+) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if count_events(home, needle) >= at_least {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "event {needle} reached {} of {at_least} within {budget:?}\n{}",
+        count_events(home, needle),
+        absence_evidence(&home.events_jsonl(), &home.root().join("daemon.stderr"),)
+    );
 }
 
 /// 29 rows shaped like the 26 the 2026-09-01 registry loss took: claude and
