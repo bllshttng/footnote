@@ -2161,6 +2161,15 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     import fno.agents.mux_spawn as mux_spawn
 
     use_tmpdir(monkeypatch, tmp_path)
+    # The sandbox probe execs the real `codex` binary (the provider-exec
+    # guard blocks that); this test's subject is the unbound receipt, and an
+    # unknown verdict is the pass-through arm the refusal path takes.
+    from fno.agents.sandbox_probe import SandboxProbe
+
+    monkeypatch.setattr(
+        "fno.agents.sandbox_probe.probe_codex_sandbox",
+        lambda cwd: SandboxProbe("unknown", note="stubbed in test"),
+    )
     fake_runner = FakeRunner(run_stdout="9\n")
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
@@ -2585,6 +2594,16 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     import fno.adapters.providers.loader as provider_loader
     from fno.agents.mux_spawn import MuxSpawnResult
     from types import SimpleNamespace
+
+    # Same incidental gate as the unbound-receipt test: the bounded-codex
+    # leg probes the sandbox by exec'ing the real `codex` binary; this
+    # test's subject is the captured routing, so pass the probe through.
+    from fno.agents.sandbox_probe import SandboxProbe
+
+    monkeypatch.setattr(
+        "fno.agents.sandbox_probe.probe_codex_sandbox",
+        lambda cwd: SandboxProbe("unknown", note="stubbed in test"),
+    )
 
     captured = {}
 
