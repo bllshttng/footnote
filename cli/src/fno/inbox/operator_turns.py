@@ -19,10 +19,15 @@ ambient identity): ``FNO_OPERATOR_SESSION_ID``, ``FNO_OPERATOR_HARNESS``,
 tools/tests/hook seam - a Stop hook runs outside the harness process, so it
 pins nothing and lets the ambient identity resolve.
 
+Machine envelopes and markers (task-notification, teammate delivery,
+interrupt markers, bash echo, compaction preamble) are refused at
+``classify`` and counted; every read names what it skipped, because a filter
+that drops a real operator turn silently is worse than the noise it removes.
+
 Known hole, named on purpose: ``fno agents mail send --raw`` strips the
-envelope, so raw mail reads as operator here. Over-counting is the safe
-direction: a false queue entry costs one ack, a missed operator turn costs
-the failure this queue exists to close.
+envelope, so raw mail still reads as operator here. For that residual,
+over-counting is the safe direction: a false queue entry costs one ack, a
+missed operator turn costs the failure this queue exists to close.
 """
 
 from __future__ import annotations
@@ -45,11 +50,21 @@ _EXCERPT_CHARS = 160
 _ARG_TOKEN_RE = re.compile(r"[a-zA-Z0-9._/:@%+=~-]+")
 _SENTENCE_TAILS = (".", "?", "!", ";", ",")
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-_SYNTHETIC_PREFIXES = (
-    "<command-name>",
-    "<local-command",
-    "<user_instructions>",
-    "<environment_context>",
+#: Skip rules: ``(prefix, skip_reason)`` matched against the reminder-stripped
+#: turn text. Every prefix is a harness-injected envelope or marker a person
+#: cannot type; the reason names the shape in the visible skip report.
+_SKIP_RULES: tuple[tuple[str, str], ...] = (
+    ("<command-name>", "command_invocation"),
+    ("<command-message>", "command_invocation"),
+    ("<local-command", "command_invocation"),
+    ("<user_instructions>", "synthetic"),
+    ("<environment_context>", "synthetic"),
+    ("<task-notification>", "task_notification"),
+    ("<bash-input>", "bash_echo"),
+    ("<bash-stdout>", "bash_echo"),
+    ("[Request interrupted by user", "interrupt_marker"),
+    ("This session is being continued from a previous conversation", "compaction_preamble"),
+    ("Another Claude session sent a message:", "teammate_message"),
 )
 
 
@@ -61,8 +76,9 @@ operator_app = typer.Typer(
     name="user",
     help="Queue of this session's undispositioned user turns, derived "
     "from the transcript and acked to a per-session ledger under "
-    "~/.fno/operator-capture/. Hole: raw mail (send --raw) reads as "
-    "a user turn; over-counting is the safe direction.",
+    "~/.fno/operator-capture/. Machine envelopes are refused and counted "
+    "by name. Residual hole: raw mail (send --raw) reads as a user turn; "
+    "over-counting is the safe direction there.",
     no_args_is_help=True,
 )
 
@@ -188,23 +204,28 @@ def _is_bare_command(text: str) -> bool:
     )
 
 
-def classify(text: str) -> Optional[str]:
-    """The operator-shaped text of a turn, or ``None`` when it is not one.
+def classify(text: str) -> tuple[Optional[str], str]:
+    """The operator-shaped text of a turn, or ``(None, reason)`` when it is not one.
 
     In order, failing toward the queue: injected mail never queues; a bare
     command invocation carries no ruling; a turn with no user text outside
-    system-reminder/hook content is not a turn; everything else queues.
+    system-reminder/hook content is not a turn; a machine envelope or marker
+    is refused with its named reason; everything else queues. The reason is
+    ``""`` when the turn is kept, so the caller can count what it dropped.
     """
     from fno.mail.envelope import contains_fno_mail_tag
 
     if contains_fno_mail_tag(text):
-        return None
+        return None, "fno_mail"
     cleaned = _SYSTEM_REMINDER_RE.sub("", text.strip()).strip()
-    if not cleaned or cleaned.startswith(_SYNTHETIC_PREFIXES):
-        return None
+    if not cleaned:
+        return None, "no_user_text"
+    for prefix, reason in _SKIP_RULES:
+        if cleaned.startswith(prefix):
+            return None, reason
     if _is_bare_command(cleaned):
-        return None
-    return cleaned
+        return None, "bare_command"
+    return cleaned, ""
 
 
 #: The retroactivity window. The read is tail-bounded so a multi-MB
@@ -213,8 +234,14 @@ def classify(text: str) -> Optional[str]:
 _TAIL_BYTES = 2_000_000
 
 
-def read_operator_turns(transcript_path: Path) -> list[dict]:
-    """Operator turns, oldest first, as ``{turn_id, ts_epoch, text}``."""
+def read_operator_turns(transcript_path: Path) -> tuple[list[dict], dict[str, int]]:
+    """Operator turns, oldest first, plus a per-reason skip tally.
+
+    Returns ``({turn_id, ts_epoch, text}, {reason: count})``. The tally is
+    the visible half of a refusal: every machine turn dropped at classify
+    is counted by name, so a read that filtered something can always say
+    what and why.
+    """
     try:
         with transcript_path.open("rb") as fh:
             fh.seek(0, 2)
@@ -228,6 +255,7 @@ def read_operator_turns(transcript_path: Path) -> list[dict]:
         newline = raw.find("\n")
         raw = raw[newline + 1 :] if newline >= 0 else ""
     turns: list[dict] = []
+    skipped: dict[str, int] = {}
     for line_no, line in enumerate(raw.splitlines()):
         try:
             obj = json.loads(line)
@@ -235,16 +263,27 @@ def read_operator_turns(transcript_path: Path) -> list[dict]:
             continue
         if not isinstance(obj, dict) or not _is_user_turn(obj):
             continue
-        text = classify(_turn_text(obj))
-        if text is not None:
-            turns.append(
-                {
-                    "turn_id": _turn_id(obj, text, line_no),
-                    "ts_epoch": _turn_ts_epoch(obj),
-                    "text": text,
-                }
-            )
-    return turns
+        text, reason = classify(_turn_text(obj))
+        if text is None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        turns.append(
+            {
+                "turn_id": _turn_id(obj, text, line_no),
+                "ts_epoch": _turn_ts_epoch(obj),
+                "text": text,
+            }
+        )
+    return turns, skipped
+
+
+def format_skip_report(skipped: dict[str, int]) -> str:
+    """One stderr line naming every refused shape and count; empty when none."""
+    if not skipped:
+        return ""
+    total = sum(skipped.values())
+    detail = ", ".join(f"{reason}={n}" for reason, n in sorted(skipped.items()))
+    return f"skipped {total} machine turn(s): {detail}"
 
 
 def _ledger_path(session_id: str) -> Path:
@@ -298,7 +337,8 @@ def excerpt(text: str, limit: int = _EXCERPT_CHARS) -> str:
 
 def queue_depth(session_id: str, transcript_path: Path) -> dict:
     acked = read_acked_turn_ids(session_id)
-    pending = [t for t in read_operator_turns(transcript_path) if t["turn_id"] not in acked]
+    turns, skipped = read_operator_turns(transcript_path)
+    pending = [t for t in turns if t["turn_id"] not in acked]
     oldest = pending[0] if pending else None
     age = None
     if oldest is not None and oldest["ts_epoch"] is not None:
@@ -308,6 +348,7 @@ def queue_depth(session_id: str, transcript_path: Path) -> dict:
         "oldest_age_s": age,
         "oldest_excerpt": excerpt(oldest["text"]) if oldest else None,
         "oldest_turn_id": oldest["turn_id"] if oldest else None,
+        "skipped": skipped,
     }
 
 
@@ -333,7 +374,11 @@ def cmd_list(
     """Undispositioned user turns, oldest first."""
     sid, path = _resolve_with_transcript()
     acked = read_acked_turn_ids(sid)
-    pending = [t for t in read_operator_turns(path) if t["turn_id"] not in acked]
+    turns, skipped = read_operator_turns(path)
+    pending = [t for t in turns if t["turn_id"] not in acked]
+    report = format_skip_report(skipped)
+    if report:
+        typer.echo(report, err=True)
     if limit is not None:
         pending = pending[:limit]
     if json_output:
@@ -378,6 +423,9 @@ def cmd_status(
     if json_output:
         typer.echo(json.dumps(depth, indent=2))
         return
+    report = format_skip_report(depth.get("skipped") or {})
+    if report:
+        typer.echo(report, err=True)
     if depth["depth"] == 0:
         typer.echo("user queue: 0")
         return
