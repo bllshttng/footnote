@@ -63,6 +63,11 @@ from fno.agents.writable_dirs import (
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.placement_verify import verify_bounded_placement
+from fno.agents.existing_pane import (
+    pane_placement_conflict,
+    resolve_existing_pane,
+    start_existing_pane,
+)
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -3336,6 +3341,7 @@ def dispatch_spawn_pane(
     split: Optional[str] = None,
     at: Optional[str] = None,
     tab: Optional[str] = None,
+    pane: Optional[int] = None,
     # Internal stable-id lane: bounded placement passes id:<n> after it has
     # selected the tab itself. Not a user flag - the user surface is --tab.
     tab_id: Optional[str] = None,
@@ -3393,6 +3399,12 @@ def dispatch_spawn_pane(
         )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
+
+    conflict = pane_placement_conflict(
+        pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
+    )
+    if conflict:
+        raise DispatchAskError(conflict, exit_code=2)
 
     # The pane half of the crowned-spawn typing: `pane` is the DEFAULT
     # substrate, so typing only on the bg lane left the common case improvising.
@@ -3561,6 +3573,17 @@ def dispatch_spawn_pane(
     message, _payload_measures = prepare_spawn_payload(message)
 
     session = resolve_mux_session(session)
+    existing_pane = None
+    if pane is not None:
+        existing_pane = resolve_existing_pane(
+            session,
+            pane,
+            _strict_json_list(
+                ["mux", "pane", "ls", "--server", session, "--json"],
+                runner,
+                noun="pane listing",
+            ),
+        )
     tab_selector: Optional[str] = None
     pane_group: Optional[str] = None
     if tab:
@@ -3789,31 +3812,35 @@ def dispatch_spawn_pane(
         # become the sole backfill candidate, stamping this row with the
         # sibling's id. Sampling here keeps the bound as tight as the pane run.
         spawn_started_ms = int(time.time() * 1000)
-        run_args = [
-            "mux",
-            "pane",
-            "run",
-            "--claim",
-            "--server",
-            session,
-            "--cwd",
-            str(cwd),
-            # (x-5f7f) The registry name of the worker this pane hosts: the
-            # server records the pane as a squad member joined to that row by
-            # name, so it survives a mux restart as an idle, resumable row.
-            # Both pane producers cross this argv (this spawn lane and the
-            # dispatch porcelain that calls it), so one flag covers both.
-            "--worker",
-            name,
-            *placement_args,
-        ]
-        # Exact placement answers --json so the server authors the receipt
-        # (anchor/direction/fallback); Python never synthesizes those from the
-        # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
-        json_receipt = bool(at or tab_id)
-        if json_receipt:
-            run_args.append("--json")
-        run_args += ["--", *wrapped]
+        if existing_pane is not None:
+            run_args = []
+            json_receipt = False
+        else:
+            run_args = [
+                "mux",
+                "pane",
+                "run",
+                "--claim",
+                "--server",
+                session,
+                "--cwd",
+                str(cwd),
+                # (x-5f7f) The registry name of the worker this pane hosts: the
+                # server records the pane as a squad member joined to that row by
+                # name, so it survives a mux restart as an idle, resumable row.
+                # Both pane producers cross this argv (this spawn lane and the
+                # dispatch porcelain that calls it), so one flag covers both.
+                "--worker",
+                name,
+                *placement_args,
+            ]
+            # Exact placement answers --json so the server authors the receipt
+            # (anchor/direction/fallback); Python never synthesizes those from the
+            # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
+            json_receipt = bool(at or tab_id)
+            if json_receipt:
+                run_args.append("--json")
+            run_args += ["--", *wrapped]
         # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
         # bg_create ordering fix in dispatch.py. `{**os.environ, ...}` here
         # seeds the pane-run transport (and, at server birth, the mux server
@@ -3889,11 +3916,16 @@ def dispatch_spawn_pane(
                         "create that could not be confirmed, never a create "
                         "that is known to have failed",
                     )
+        elif existing_pane is not None:
+            assert pane is not None
+            proc = start_existing_pane(session, pane, str(cwd), wrapped, _run_mux, runner)
         else:
             proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
-        if proc.returncode == _MUX_CONTROL_UNANSWERED:
+        if existing_pane is not None:
+            pane_id = pane
+        elif proc.returncode == _MUX_CONTROL_UNANSWERED:
             # The verb reached the server; only the reply did not come back
             # (LD2). Reconcile instead of asserting no pane was created - the
             # reconcile itself never retries the run (LD1).
@@ -3947,6 +3979,7 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 ) from exc
 
+        assert pane_id is not None
         if pane_group is not None:
             try:
                 place_pane_in_group_tab(session, pane_id, pane_group, runner)

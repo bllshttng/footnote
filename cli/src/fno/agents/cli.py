@@ -1290,6 +1290,7 @@ def cmd_spawn(
             "Mux tab selector (number, id:<n>, name:<s>, active/new, or group name). Pane only."
         ),
     ),
+    pane: int | None = typer.Option(None, "--pane", help="Start in an existing pristine idle pane by id."),
     mux_session: str | None = typer.Option(
         None,
         "--mux-session",
@@ -1518,7 +1519,7 @@ def cmd_spawn(
         defaulted = True
         pane_implied = bool(
             passthrough or split or at or tab or bounded_placement or squad
-            or monitor is not None or uncarried is not None
+            or pane is not None or monitor is not None or uncarried is not None
         )
         try:
             seatable = thread_seatable(harness)
@@ -1715,6 +1716,24 @@ def cmd_spawn(
             raise typer.Exit(code=2)
 
     from fno.agents.spawn_defaults import placement_refusal
+
+    if pane is not None:
+        from fno.agents.existing_pane import pane_placement_conflict
+
+        conflict = pane_placement_conflict(
+            pane, workspace=squad, split=split, at=at, tab=tab,
+            bounded=bounded_placement,
+        )
+        if conflict:
+            print(conflict, file=sys.stderr)
+            raise typer.Exit(code=2)
+        if substrate != "pane" or once:
+            print(
+                "--pane applies only to --substrate pane (thread/headless "
+                "have no existing mux pane target)",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
 
     refusal = placement_refusal(
         substrate=substrate, once=once, squad=squad, split=split, at=at,
@@ -2389,6 +2408,7 @@ def cmd_spawn(
                     split=split,
                     at=at,
                     tab=tab,
+                    pane=pane,
                     bounded_placement=bounded_placement,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
