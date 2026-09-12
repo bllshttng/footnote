@@ -12,6 +12,8 @@ Not for: process-level facts about one worker (is it alive, what holds its pane)
 
 The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.
 
+One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` (default 0.9) is the band the `machine_watch` arm and the `machine` payload object band whole-machine CPU against. The arm reads `ps` and the load average through the footprint payload, so it works on every machine. It does not read `resource_meter.enabled`, and it has no enable key of its own: `reap` and `retire` carry none either. The throttle key `resource_meter.notifications.throttle_minutes` (default 60) spaces its repeat notices.
+
 ## What you get without macmon
 
 Two arms still work, because they read fno's own numbers. The cpu-admission arm reads the fleet's share of CPU capacity through `cpu_admission`, the same decider the spawn gate uses. The advisor can never disagree with a refusal. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.

@@ -16,7 +16,7 @@ use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
-use fno_agents::spawn_gate::machine_status_line;
+use fno_agents::spawn_gate::machine_reading_notes;
 use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
@@ -2273,9 +2273,14 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
         );
     }
     // Best-effort: a machine whose footprint cannot be read prints no line
-    // rather than a stale or fabricated one.
-    if let Some(line) = machine_status_line() {
+    // rather than a stale or fabricated one. The keeper note names the path
+    // the live store keeper runs from, beside the footer (x-d6ad AC13).
+    let (machine_line, keeper_note) = machine_reading_notes();
+    if let Some(line) = machine_line {
         println!("machine: {line}");
+    }
+    if let Some(note) = keeper_note {
+        println!("{note}");
     }
 }
 

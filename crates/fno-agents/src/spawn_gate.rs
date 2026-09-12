@@ -1102,23 +1102,30 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
     Some(argv)
 }
 
-/// One line for `fno agents status`: 1-min load, CPU capacity, and the claude
-/// spare pool - the same reading the load-refusal evidence line uses, so a
-/// caller can see the pool's share BEFORE a spawn ever gets refused on it.
-/// `None` when footprint could not be read (best-effort, never blocks status).
-pub fn machine_status_line() -> Option<String> {
-    format_machine_status_line(&footprint_cause_raw().ok()?)
+/// The status footer's reading and the store keeper's path note, from ONE
+/// footprint probe (x-d6ad): `(machine line, keeper note)`. Both best-effort
+/// - a machine whose footprint cannot be read yields `(None, None)`, never a
+/// stale or fabricated line.
+pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
+    let raw = footprint_cause_raw().ok();
+    let footer = raw.as_deref().and_then(format_machine_status_line);
+    let keeper = raw.as_deref().and_then(|raw| {
+        let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+        let commands: Vec<String> = payload.top.iter().map(|c| c.command.clone()).collect();
+        crate::drift::keeper_path_note(&commands, std::env::current_exe().ok().as_deref())
+    });
+    (footer, keeper)
 }
 
-/// The pure formatter behind [`machine_status_line`], split out so it is
-/// testable without shelling out to `fno doctor footprint`.
+/// The pure formatter behind the footer, split out so it is testable without
+/// shelling out to `fno doctor footprint`. It reads the payload's `machine`
+/// object - the ONE Python decider's verdict - and leads with the busy
+/// fraction against the band, never with a bare load figure (x-d6ad AC9/LD2).
 fn format_machine_status_line(raw: &str) -> Option<String> {
     let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
-    if payload.cpu_capacity_cores <= 0.0 || !payload.cpu_capacity_cores.is_finite() {
-        return None;
-    }
-    let load = payload
-        .load_1m
+    let machine = payload.machine.as_ref()?;
+    let load = machine
+        .load_15m
         .filter(|v| v.is_finite())
         .map(|v| format!("{v:.1}"))
         .unwrap_or_else(|| "unknown".to_string());
@@ -1130,10 +1137,20 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
     } else {
         String::new()
     };
-    Some(format!(
-        "load_1m={load} capacity={:.2}cores{pool}",
-        payload.cpu_capacity_cores
-    ))
+    match machine.busy_fraction {
+        Some(busy) => Some(format!(
+            "{:.0}% busy of {:.2} cores against band {:.0}% -> {} · load_15m {} · \
+             {} runnable of {} processes{pool}",
+            busy * 100.0,
+            machine.capacity_cores,
+            machine.band * 100.0,
+            machine.verdict,
+            load,
+            machine.runnable.unwrap_or(0),
+            machine.processes.unwrap_or(0)
+        )),
+        None => Some(format!("{} · load_15m {load}{pool}", machine.verdict)),
+    }
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
@@ -1473,16 +1490,18 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
     }
 
-    /// The `fno agents status` machine line: load, capacity, and the pool
-    /// named beside them so a caller sees the pool's share before a spawn is
-    /// ever refused on it.
+    /// The `fno agents status` machine line: the busy fraction against the
+    /// band, the verdict, and the load and runnable census beside them
+    /// (x-d6ad AC9), with the pool named so a caller sees the pool's share
+    /// before a spawn is ever refused on it.
     #[test]
-    fn machine_status_line_names_load_capacity_and_pool() {
-        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2,"spare_pool_process_count":45,"spare_pool_cpu_cores":7.98,"load_1m":102.4}"#;
+    fn machine_status_line_names_band_verdict_and_census() {
+        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2,"spare_pool_process_count":45,"spare_pool_cpu_cores":7.98,"machine":{"verdict":"hot","reason":"r","busy_fraction":0.917,"band":0.9,"machine_cores":11.0,"capacity_cores":12.0,"runnable":160,"processes":1100,"load_15m":279.12,"throttle_minutes":30}}"#;
         let line = format_machine_status_line(raw).expect("payload formats");
         assert_eq!(
             line,
-            "load_1m=102.4 capacity=12.00cores claude_spare_pool=45proc/7.98cores"
+            "92% busy of 12.00 cores against band 90% -> hot · load_15m 279.1 · \
+             160 runnable of 1100 processes claude_spare_pool=45proc/7.98cores"
         );
     }
 
@@ -1490,21 +1509,29 @@ MemAvailable:    8000000 kB\n";
     /// best-effort status is not all-or-nothing on one field.
     #[test]
     fn machine_status_line_omits_pool_and_reads_load_unknown() {
-        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2}"#;
+        let raw = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"calm","reason":"r","busy_fraction":0.432,"band":0.9,"machine_cores":5.186,"capacity_cores":12.0,"runnable":66,"processes":1010,"load_15m":null,"throttle_minutes":60}}"#;
         let line = format_machine_status_line(raw).expect("payload formats");
-        assert_eq!(line, "load_1m=unknown capacity=12.00cores");
+        assert_eq!(
+            line,
+            "43% busy of 12.00 cores against band 90% -> calm · load_15m unknown · \
+             66 runnable of 1010 processes"
+        );
     }
 
-    /// An unreadable capacity (missing/zero/non-finite) yields no line at all
-    /// rather than a fabricated one.
+    /// An absent machine object yields no line at all rather than a
+    /// fabricated one, and the verdict-only shape prints for an unreadable
+    /// sensor (busy_fraction null).
     #[test]
-    fn machine_status_line_is_none_on_unreadable_capacity() {
+    fn machine_status_line_is_none_without_a_machine_object() {
         assert_eq!(format_machine_status_line("{}"), None);
         assert_eq!(format_machine_status_line("not json"), None);
         assert_eq!(
-            format_machine_status_line(r#"{"fleet_cpu_cores":1.0,"cpu_capacity_cores":0}"#),
+            format_machine_status_line(r#"{"cpu_capacity_cores":12}"#),
             None
         );
+        let unreadable = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"unreadable","reason":"footprint probe did not answer inside 8s","busy_fraction":null,"band":0.9,"machine_cores":null,"capacity_cores":12.0,"runnable":null,"processes":null,"load_15m":null,"throttle_minutes":60}}"#;
+        let line = format_machine_status_line(unreadable).expect("payload formats");
+        assert!(line.starts_with("unreadable · load_15m unknown"), "{line}");
     }
 
     /// x-7783 AC9: the shared fixture pins the branch this gate takes per
