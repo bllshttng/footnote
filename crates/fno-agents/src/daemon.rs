@@ -34,6 +34,7 @@ mod blocking_bound;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod roster_death;
+mod stop_refusal_detail;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
@@ -5802,25 +5803,29 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             json!({"already_exited": true, "short_id": entry.short_id}),
         );
     }
-    // A pane-hosted row's ONE live ref is the mux pane (state.rs invariant:
-    // mux XOR worker-socket identity XOR bg thread), and `stop` reaches no pane.
-    // Answering it with a success would report work this verb did not perform
-    // over a live pane - the zombie shape. Refuse and name the working verb with
-    // the row's own ref, in handle_rm's refusal voice. Keys on `entry.mux`,
-    // never the harness, so it covers claude, codex, opencode, and agy pane
-    // rows in one branch. Above the claude branch on purpose: stop_claude's
-    // no-transport-id fallback signals the recorded pid instead, which kills
-    // the process inside the pane and leaves the pane itself.
+    // A pane-hosted row's ONE live ref is the mux pane; the refusal text and
+    // its branch table live in stop_refusal_detail. Above the claude branch on
+    // purpose: stop_claude's no-transport-id fallback signals the recorded pid
+    // instead, which kills the process inside the pane and leaves the pane
+    // itself.
     if let Some(mux) = entry.mux.as_ref() {
+        // Both reads are blocking subprocesses: run them off the executor like
+        // handle_rm_with's chain. The precheck pays its lsof/holder read only
+        // when the pane is already gone.
+        let probe = off_executor(|| run_mux_pane_probe(&mux.session, mux.pane_id));
+        let precheck = (probe == PaneProbe::Absent).then(|| {
+            let owned = entry.clone();
+            off_executor(move || crate::pane_stop::precheck_pane_stop(&owned))
+        });
         return Response::err(
             req.id,
             ErrorCode::InvalidParams,
-            format!(
-                "agent {name} is a pane worker; `stop` reaches no pane and would report a \
-                 stop it did not perform. Kill the pane: \
-                 `fno mux pane kill {}:{}`. The registry row survives that; \
-                 clear it with `fno agents rm {name}`.",
-                mux.session, mux.pane_id
+            stop_refusal_detail::pane_row_refusal(
+                &name,
+                &mux.session,
+                mux.pane_id,
+                probe,
+                precheck.as_ref(),
             ),
         );
     }
