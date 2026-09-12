@@ -783,6 +783,7 @@ fn refused_worker_items_with(
         let probe = truths.get(&crate::daemon::registry_truth_handle(e));
         let (progress, _basis) = crate::daemon::progress_from_truth(
             probe,
+            crate::truth_probe::BatchOutcome::Measured,
             e.harness_name(),
             e.route_settings_path.as_deref(),
         );

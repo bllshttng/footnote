@@ -5,7 +5,11 @@
 use super::*;
 
 pub(super) fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::truth_probe::family1_truth_probe_many)
+    handle_list_with_truth(
+        ctx,
+        req,
+        crate::truth_probe::family1_truth_probe_many_measured,
+    )
 }
 
 /// One row's list-lane attention key: evidence tier, then longest-silent
@@ -122,12 +126,27 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// state is not progress evidence when its transcript stopped advancing.
 pub(crate) fn progress_from_truth(
     probe: Option<&crate::truth_probe::TruthProbe>,
+    batch: crate::truth_probe::BatchOutcome,
     harness: &str,
     route_settings_path: Option<&str>,
 ) -> (&'static str, &'static str) {
-    match probe.and_then(|p| p.reachability.as_deref()) {
-        Some("unreachable") | None => return ("unknown", "no-evidence"),
-        _ => {}
+    // The probe's own absence splits by the batch outcome (x-6d16): a handle
+    // missing from a batch that ran clean is the measured `no-evidence`
+    // verdict; a handle missing because the batch itself timed out is
+    // `unmeasured`, a different fact the row may not publish as a verdict. A
+    // probe that ANSWERED renders exactly as before whatever the batch did -
+    // this handle was measured.
+    match probe {
+        None => {
+            return match batch {
+                crate::truth_probe::BatchOutcome::Measured => ("unknown", "no-evidence"),
+                crate::truth_probe::BatchOutcome::NotMeasured => ("unknown", "unmeasured"),
+            }
+        }
+        Some(p) => match p.reachability.as_deref() {
+            Some("unreachable") | None => return ("unknown", "no-evidence"),
+            _ => {}
+        },
     }
     let observed_model = probe.map(|p| &p.observed_model);
     if observed_model.is_some_and(|om| is_refused(om, harness, route_settings_path)) {
@@ -169,6 +188,7 @@ mod tests {
     // here to sit beside the functions they test, and a second copy of the
     // fixture is how two case tables start disagreeing.
     use crate::daemon::tests::{probe, probe_with_age, probe_with_verdict};
+    use crate::truth_probe::BatchOutcome::{self, Measured};
     use serde_json::json;
 
     /// The verdict OUTRANKS the transcript state, which is the whole point of
@@ -234,6 +254,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_with_verdict("done", "reachable").as_ref(),
+                Measured,
                 "claude",
                 None
             ),
@@ -242,6 +263,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_with_verdict("working", "reachable").as_ref(),
+                Measured,
                 "claude",
                 None
             ),
@@ -250,6 +272,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_with_verdict("your-move", "reachable").as_ref(),
+                Measured,
                 "claude",
                 None
             ),
@@ -263,6 +286,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_observed("working", "reachable", refused_model.clone()).as_ref(),
+                Measured,
                 "claude",
                 None
             ),
@@ -272,6 +296,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_observed("working", "reachable", refused_model).as_ref(),
+                Measured,
                 "claude",
                 Some("/x/route-settings/ab12.json")
             ),
@@ -290,6 +315,7 @@ mod tests {
         ] {
             let (verdict, _) = progress_from_truth(
                 probe_observed("working", "reachable", json!({"kind": kind})).as_ref(),
+                Measured,
                 "claude",
                 None,
             );
@@ -302,6 +328,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_with_verdict("stalled", "reachable").as_ref(),
+                Measured,
                 "claude",
                 None
             ),
@@ -318,7 +345,7 @@ mod tests {
             "the process and reachability axes still say present; the transcript has not moved"
         );
         assert_eq!(
-            progress_from_truth(probe.as_ref(), "claude", None),
+            progress_from_truth(probe.as_ref(), Measured, "claude", None),
             ("unknown", "silent"),
             "an open turn with no transcript advance past the window is not progressing"
         );
@@ -329,6 +356,7 @@ mod tests {
         assert_eq!(
             progress_from_truth(
                 probe_with_age("working", "reachable", None).as_ref(),
+                Measured,
                 "claude",
                 None,
             ),
@@ -342,6 +370,7 @@ mod tests {
             assert_eq!(
                 progress_from_truth(
                     probe_with_verdict(state, "unreachable").as_ref(),
+                    Measured,
                     "claude",
                     None
                 ),
@@ -358,12 +387,42 @@ mod tests {
         // progress state to report, so this must never panic and must never
         // read a stale `state` as an active truth-state arm.
         assert_eq!(
-            progress_from_truth(probe("working").as_ref(), "claude", None),
+            progress_from_truth(probe("working").as_ref(), Measured, "claude", None),
             ("unknown", "no-evidence")
         );
         assert_eq!(
-            progress_from_truth(None, "claude", None),
+            progress_from_truth(None, Measured, "claude", None),
             ("unknown", "no-evidence")
+        );
+    }
+
+    /// x-6d16's positive control, since the live fleet-wide timeout does not
+    /// reproduce on demand: the SAME missing-handle input, worded by the batch
+    /// outcome. `unmeasured` says the instrument did not run; `no-evidence`
+    /// stays the verdict a clean batch that resolved nothing earns. Assert the
+    /// word, never the absence of the other one.
+    #[test]
+    fn a_missing_handle_splits_by_the_batch_outcome() {
+        assert_eq!(
+            progress_from_truth(None, BatchOutcome::NotMeasured, "claude", None),
+            ("unknown", "unmeasured"),
+            "the instrument did not run: never publish that as the no-evidence verdict"
+        );
+        assert_eq!(
+            progress_from_truth(None, BatchOutcome::Measured, "claude", None),
+            ("unknown", "no-evidence"),
+            "a clean batch that resolved nothing keeps its verdict"
+        );
+        // A probe that ANSWERED is measured whatever the page-level outcome:
+        // the batch timing out must not re-word the handles it did reach.
+        assert_eq!(
+            progress_from_truth(
+                probe_with_verdict("working", "reachable").as_ref(),
+                BatchOutcome::NotMeasured,
+                "claude",
+                None
+            ),
+            ("advancing", "transcript-turn")
         );
     }
 
@@ -388,7 +447,7 @@ mod tests {
         let probe = refused_probe(Some("provider_4xx_quota"));
         assert_eq!(rendered_status_from_truth(probe.as_ref()), "refused");
         assert_eq!(
-            progress_from_truth(probe.as_ref(), "claude", None),
+            progress_from_truth(probe.as_ref(), Measured, "claude", None),
             ("refused", "provider-refused")
         );
     }
@@ -401,7 +460,7 @@ mod tests {
         probe.reachability = Some("unreachable".into());
         assert_eq!(rendered_status_from_truth(Some(&probe)), "orphaned");
         assert_eq!(
-            progress_from_truth(Some(&probe), "claude", None),
+            progress_from_truth(Some(&probe), Measured, "claude", None),
             ("unknown", "no-evidence")
         );
     }
@@ -412,7 +471,7 @@ mod tests {
         let probe = refused_probe(None);
         assert_eq!(rendered_status_from_truth(probe.as_ref()), "writing");
         assert_eq!(
-            progress_from_truth(probe.as_ref(), "claude", None),
+            progress_from_truth(probe.as_ref(), Measured, "claude", None),
             ("advancing", "transcript-turn")
         );
     }
@@ -424,7 +483,7 @@ mod tests {
         let mut probe = refused_probe(Some("provider_4xx_quota")).unwrap();
         probe.observed_model = json!({"kind": "observed", "model": "glm-5.2[1m]"});
         assert_eq!(
-            progress_from_truth(Some(&probe), "claude", None),
+            progress_from_truth(Some(&probe), Measured, "claude", None),
             ("refused", "model-refused")
         );
     }
@@ -439,6 +498,7 @@ mod tests {
             assert_eq!(
                 progress_from_truth(
                     probe_observed("working", "reachable", refused_model.clone()).as_ref(),
+                    Measured,
                     harness,
                     None
                 ),

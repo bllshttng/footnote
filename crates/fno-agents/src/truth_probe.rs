@@ -648,16 +648,29 @@ pub fn family1_truth_probe_many(
     family1_truth_probe_many_checked(handles).unwrap_or_default()
 }
 
-/// [`family1_truth_probe_many`] with the batch's failure made honest: a run
-/// that outlived its bound is `Err` naming the timeout, not an empty map a
-/// caller could misread as "every handle answered nothing". Every other
-/// outcome is `Ok` - a batch that answered (even empty), a Cache/Join flight
-/// that decoded shared bytes, and the one-probe-per-handle fallback after a
-/// double crash (that fallback measured each handle itself, so it is a real
-/// answer by construction).
-pub fn family1_truth_probe_many_checked(
+/// Whether the batch instrument completed for the handles it was handed
+/// ([`BatchOutcome::Measured`], including "ran clean and resolved nothing"),
+/// or outlived its bound and answered for the page as a whole
+/// ([`BatchOutcome::NotMeasured`]). A reader may not collapse the two:
+/// `no-evidence` is a verdict the instrument earned, `unmeasured` says the
+/// instrument did not run - the two facts x-6d16 exists to separate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchOutcome {
+    Measured,
+    NotMeasured,
+}
+
+/// The list seam's entry point (x-6d16): whatever the batch measured, PLUS
+/// whether it measured at all. [`family1_truth_probe_many_checked`] drops the
+/// map on a timeout, which is right for a caller that wants a verdict and
+/// wrong for the row projection, which must word a handle the instrument
+/// never reached differently from one it reached and found nothing for. The
+/// map is total for every handle it was handed either way: the
+/// unrepresentable handles ride their own probes even when the batch leg
+/// timed out, and those answers are real measurements.
+pub fn family1_truth_probe_many_measured(
     handles: &[String],
-) -> Result<std::collections::HashMap<String, TruthProbe>, String> {
+) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
     // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
     // put on the wire: the reader would split it into two handles that match
     // no row, and that row would go unanswered on every list, silently and
@@ -674,13 +687,32 @@ pub fn family1_truth_probe_many_checked(
             probes.insert(handle, probe);
         }
     }
-    if timed_out {
-        return Err(format!(
+    let outcome = if timed_out {
+        BatchOutcome::NotMeasured
+    } else {
+        BatchOutcome::Measured
+    };
+    (probes, outcome)
+}
+
+/// [`family1_truth_probe_many`] with the batch's failure made honest: a run
+/// that outlived its bound is `Err` naming the timeout, not an empty map a
+/// caller could misread as "every handle answered nothing". Every other
+/// outcome is `Ok` - a batch that answered (even empty), a Cache/Join flight
+/// that decoded shared bytes, and the one-probe-per-handle fallback after a
+/// double crash (that fallback measured each handle itself, so it is a real
+/// answer by construction).
+pub fn family1_truth_probe_many_checked(
+    handles: &[String],
+) -> Result<std::collections::HashMap<String, TruthProbe>, String> {
+    let (probes, outcome) = family1_truth_probe_many_measured(handles);
+    match outcome {
+        BatchOutcome::Measured => Ok(probes),
+        BatchOutcome::NotMeasured => Err(format!(
             "truth probe: batch of {} handles timed out",
-            batchable.len()
-        ));
+            handles.len()
+        )),
     }
-    Ok(probes)
 }
 
 /// The batchable leg's answer plus whether its run timed out (`false` when the
