@@ -1347,6 +1347,10 @@ case "${1:-status}" in
                 # guard. DIRTY is never touched by any automatic path.
                 if ! wt_reapable "$wt"; then
                     reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    if [[ "$reason" == "unborn" ]]; then
+                        echo "  SKIP: $wt (unborn: branch has no commit of its own inside the setup window)"
+                        continue
+                    fi
                     echo "  SKIP: $wt (holds uncommitted work: $reason)"
                     continue
                 fi
