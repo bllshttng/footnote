@@ -237,9 +237,8 @@ def parse_footprint(
     """Parse a file-backed ``ps -Ao pid,ppid,state,etime,%cpu,rss,command`` snapshot.
 
     The six-column shape without ``state`` and the legacy five-column shape are
-    accepted for callers with old fixtures. The legacy shape has no parentage,
-    so only directly attributable rows can be counted; without ``state`` the
-    runnable count reads zero, never a guess.
+    accepted for old fixtures; the legacy shape has no parentage, and without
+    ``state`` the runnable count reads zero, never a guess.
     """
     processes: dict[int, _Process] = {}
     unparsed_lines = 0
