@@ -1386,24 +1386,25 @@ def refresh_provider_default_tiers(
     *,
     settings: "Optional[SettingsModel]" = None,
 ) -> tuple[dict[str, str], Optional[str]]:
-    """Re-resolve a recorded route's provider-DEFAULT tier key, or say why not.
+    """Re-resolve a recorded route's provider-DEFAULT tier keys, or say why not.
 
     A recorded route-settings file pins two kinds of value with the same
     authority: what the operator CHOSE (endpoint, token, model) and what the
     provider registry defaulted to at launch (the haiku tier, a background
-    model the operator never named). Replayed verbatim on resume, a moved
-    default keeps serving the old tier forever - glm-4.5-air left the z.ai
-    coding-plan supported set, and every resume off a file recorded before
-    the change failed background calls with model-not-found while the main
-    model stayed healthy (x-5cc5).
+    model the operator never named, plus every ``tier_models`` entry declared
+    in config). Replayed verbatim on resume, a moved default keeps serving the
+    old tier forever - glm-4.5-air left the z.ai coding-plan supported set, and
+    every resume off a file recorded before the change failed background calls
+    with model-not-found while the main model stayed healthy (x-5cc5).
 
     The operator's 2026-08-17 rule decides the split: the recorded file pins
     what the operator chose, not what the provider happened to default to
-    that week. So the haiku tier re-resolves against TODAY'S registry
-    (built-in defaults overlaid by config, the same map
-    :func:`effective_providers` renders), and every other key replays
+    that week. So every tier in the provider's effective tier map re-resolves
+    against TODAY'S registry (built-in defaults overlaid by config, the same
+    map :func:`effective_providers` renders), and every other key replays
     verbatim. An extra_env tier pin does not survive a resume - pin the
-    provider's ``haiku_model`` in config to make a tier durable.
+    provider's ``tier_models`` (or ``haiku_model``) in config to make a tier
+    durable.
 
     Returns ``(route, note)``: a copy of the route (the caller's mapping is
     never mutated) plus a disclosure note naming the provider, the old value
@@ -1423,14 +1424,19 @@ def refresh_provider_default_tiers(
             "replaying recorded tiers verbatim"
         )
     record = providers[pname]
-    todays = record.get("haiku_model")
-    recorded = refreshed.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-    if not todays or not recorded or str(todays) == recorded:
+    moved: list[str] = []
+    for alias, todays in tier_models_for(record).items():
+        key = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
+        recorded = refreshed.get(key)
+        if not todays or not recorded or str(todays) == recorded:
+            continue
+        refreshed[key] = str(todays)
+        moved.append(f"{alias} {recorded} -> {todays}")
+    if not moved:
         return refreshed, None
-    refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = str(todays)
     return refreshed, (
-        f"provider {pname} haiku tier default moved {recorded} -> {todays}; "
-        "tier re-resolved, operator-chosen keys replay verbatim"
+        f"provider {pname} tier default moved {', '.join(moved)}; "
+        "tiers re-resolved, operator-chosen keys replay verbatim"
     )
 
 

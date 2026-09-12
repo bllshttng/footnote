@@ -967,6 +967,22 @@ def test_refresh_lands_on_a_config_pinned_default_not_the_builtin() -> None:
     assert note is not None and "glm-4.6" in note
 
 
+def test_refresh_moves_every_declared_tier_not_haiku_alone() -> None:
+    """AC4-HP: a tier declared in config between record and resume re-resolves
+    on resume like the haiku tier always has; the note names each tier that
+    moved, old and new, and undeclared keys replay verbatim."""
+    route = _recorded_route(haiku="glm-4.7")
+    route["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "glm-5.2"
+    route["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "glm-5.3"
+    settings = _settings(providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}})
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=settings)
+    assert refreshed["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
+    assert refreshed["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    assert note is not None
+    assert "opus glm-5.2 -> glm-5.3[1m]" in note
+
+
 def test_provider_name_for_route_returns_none_for_an_unknown_route() -> None:
     assert mr.provider_name_for_route({}, settings=_settings()) is None
     assert (
