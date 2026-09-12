@@ -21,6 +21,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
+use crate::king_termination::bound_breached;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11674,26 +11675,21 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     let history = crate::loop_king::king_fire_history(&project_events, &session_id);
     let dry = history.dry;
+    // The bounds every block below owes, in one place so a branch can no
+    // longer grow its own copy of either and sit above them.
+    let bounded = |dry: u64, waiting: &str| {
+        bound_breached(history.total, dry, manifest.max_iterations, waiting)
+    };
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
         Err(e) => {
-            // Blind is not clean. Block, but let the dry-fire counter below
-            // bound it: a board that never answers reaches the ceiling and
-            // terminates NoProgress rather than holding the king forever.
-            // Unlike the clean block at the bottom, exit 2 here marks the
-            // degraded path for log readers; no consumer acts on it (the shim
-            // keys on the decision field, never the code). The real bound is
-            // the dry-fire ceiling above, which terminates NoProgress when
-            // the board never answers.
-            if dry + 1 >= crate::loop_king::KING_DRY_FIRE_CEILING {
-                return terminate(
-                    TerminationReason::NoProgress,
-                    &format!("king board unreadable {} fires running: {e}", dry + 1),
-                    0,
-                    dry + 1,
-                    &[],
-                );
+            // Blind is not clean. Block on exit 2, but bounded: a board that
+            // never answers still reaches a ceiling and terminates. The exit
+            // code marks the degraded path; the shim keys on the decision
+            // field, never the code.
+            if let Some(b) = bounded(dry, &format!("king board unreadable: {e}")) {
+                return terminate(b.reason, &b.message, 0, b.fires, &[]);
             }
             emit(
                 "king_loop_check",
@@ -11717,6 +11713,20 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
+            // Bounded, and each blocking fire emits its row so the counters
+            // advance; the old return left both frozen and blocked forever.
+            if let Some(b) = bounded(dry, "outstanding operator questions are unreadable") {
+                return terminate(b.reason, &b.message, 0, b.fires, &[]);
+            }
+            emit(
+                "king_loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "actionable": 0,
+                    "actionable_ids": [],
+                    "cleared": false,
+                }),
+            );
             return (
                 0,
                 king_output(
@@ -11724,7 +11734,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                     None,
                     "board clean but outstanding operator questions are unreadable; blocking completion",
                     0,
-                    dry,
+                    dry + 1,
                 ),
             );
         }
@@ -11778,6 +11788,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             }
             None => format!("board quiet; {undelivered} scope nodes still undelivered"),
         };
+        let shrank = undelivered != i64::MAX
+            && history
+                .last_undelivered
+                .is_some_and(|prev| undelivered < prev);
+        let dry = if shrank { 0 } else { dry };
         emit(
             "king_loop_check",
             serde_json::json!({
@@ -11785,28 +11800,33 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 "actionable": 0,
                 "undelivered": undelivered,
                 "actionable_ids": [],
-                "cleared": false,
+                "cleared": shrank,
             }),
         );
+        if let Some(b) = bounded(dry, &message) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
         return (0, king_output("block", None, &message, 0, dry + 1));
     }
 
-    // The ceiling `fno agents king init --max-iterations` advertises. Before this it
-    // was parsed into the manifest and read by nothing, so the help string
-    // promised a bound that did not exist, which is worse than no flag. Checked
-    // AFTER NoWork so a clean board still exits clean, and before NoProgress so
-    // an exhausted king reports the reason that actually stopped it.
-    if history.total + 1 >= manifest.max_iterations {
+    // A row the previous fire called actionable and this one does not is work
+    // the king cleared. That is the progress signal, read back off the board
+    // rather than self-reported, so it needs no producer to exist. Applied
+    // BEFORE the bound: a clearing fire must be judged on its post-reset
+    // streak, never killed by the stale one.
+    let cleared = crate::loop_king::king_cleared_a_row(&history.last_ids, &board.actionable_ids);
+    let dry = if cleared { 0 } else { dry };
+
+    // The bounds `--max-iterations` advertises, checked after NoWork so a
+    // clean board still exits clean. Budget is reported before NoProgress, so
+    // an exhausted king names the reason that actually stopped it.
+    let waiting = format!("{} rows still actionable", board.actionable);
+    if let Some(b) = bounded(dry, &waiting) {
         return terminate(
-            TerminationReason::Budget,
-            &format!(
-                "{} fires reached the manifest ceiling of {}; {} rows still actionable",
-                history.total + 1,
-                manifest.max_iterations,
-                board.actionable
-            ),
+            b.reason,
+            &b.message,
             board.actionable,
-            dry,
+            b.fires,
             &board.actionable_ids,
         );
     }
@@ -11836,26 +11856,6 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             return (0, king_output("block", None, &message, actionable, fires));
         }
         None => {}
-    }
-
-    // A row the previous fire called actionable and this one does not is work
-    // the king cleared. That is the progress signal, read back off the board
-    // rather than self-reported, so it needs no producer to exist.
-    let cleared = crate::loop_king::king_cleared_a_row(&history.last_ids, &board.actionable_ids);
-    let dry = if cleared { 0 } else { dry };
-
-    if dry + 1 >= crate::loop_king::KING_DRY_FIRE_CEILING {
-        return terminate(
-            TerminationReason::NoProgress,
-            &format!(
-                "{} actionable rows unshrunk after {} fires with nothing cleared",
-                board.actionable,
-                dry + 1
-            ),
-            board.actionable,
-            dry + 1,
-            &board.actionable_ids,
-        );
     }
 
     emit(
