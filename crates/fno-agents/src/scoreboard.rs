@@ -147,7 +147,12 @@ fn survival(
         "available": true,
         "survived": survived,
         "shipped_nodes": mature.len(),
-        "rate_pct": if mature.is_empty() { 0 } else { (100 * survived) / mature.len() as i64 },
+        // Rounded like the _pct the Python fold used before this moved here.
+        "rate_pct": if mature.is_empty() {
+            0
+        } else {
+            ((100 * survived) as f64 / mature.len() as f64).round() as i64
+        },
         "pending": pending,
     })
 }
