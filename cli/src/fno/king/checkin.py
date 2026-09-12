@@ -617,9 +617,14 @@ def render_lines(
 
 
 def _faq_prompt_needed(scope: str, readers_failed: list[str]) -> bool:
-    from fno.king.king_faq import entries_for_scope
+    if readers_failed:
+        return True
+    try:
+        from fno.king.king_faq import entries_for_scope
 
-    return bool(readers_failed) or not entries_for_scope(scope)
+        return not entries_for_scope(scope)
+    except Exception:  # noqa: BLE001 - an unreadable store is unmeasured, never clean
+        return True
 
 
 # ---------------------------------------------------------------------------
