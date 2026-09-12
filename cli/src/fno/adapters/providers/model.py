@@ -135,6 +135,11 @@ class ProviderRecord(BaseModel):
 
     # Optional metadata
     account_id: str | None = None
+    # Declared quota-pool association (x-1afa): credentials known to share one
+    # provider budget name the same pool, so admission counts them together.
+    # Undeclared, records stay separate; the canonical managed Claude slot
+    # uses its observed principal as the budget identity instead of this key.
+    quota_pool: str | None = Field(default=None, min_length=1)
     tags: list[str] = Field(default_factory=list)
     description: str | None = None
 

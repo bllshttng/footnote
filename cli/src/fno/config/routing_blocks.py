@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from fno.config._routing_admission import RoutingAdmissionBlock
+
 
 class RoutingBlock(BaseModel):
     """Config-first model routing inventory (nested under 'config.routing').
@@ -31,6 +33,9 @@ class RoutingBlock(BaseModel):
     # The operator's access posture: local, remote, or unknown (filters like
     # remote). Declared through config, never inferred.
     operator_access: str = "unknown"
+    # Opt-in shared-account capacity reservations (x-1afa). A leaf of its own
+    # because this hub is shrink-only and the block carries its own ledger.
+    admission: RoutingAdmissionBlock = Field(default_factory=RoutingAdmissionBlock)
 
     @field_validator("objective", mode="before")
     @classmethod
