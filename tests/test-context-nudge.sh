@@ -91,8 +91,13 @@ export PATH="$BINDIR:$PATH"
 # already has on PATH - possibly a build that predates this verb's port.
 # Prepending the fresh debug build wins the PATH search either way.
 AGENTS_BIN_DIR="$REPO_ROOT/crates/fno-agents/target/debug"
-if [ ! -x "$AGENTS_BIN_DIR/fno-agents" ]; then
-  echo "FAIL: $AGENTS_BIN_DIR/fno-agents not built." >&2
+# Spell the binary path contiguously: the smoke runner greps this file for
+# `target/debug/fno-agents` to decide whether selecting this harness must
+# carry the cargo build step, and a split spelling selects the harness
+# without its build (the red this comment prevents).
+AGENTS_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents"
+if [ ! -x "$AGENTS_BIN" ]; then
+  echo "FAIL: $AGENTS_BIN not built." >&2
   echo "      registry-json has no Python leg left (x-1b75); this suite needs the real binary." >&2
   echo "      Fix: (cd crates/fno-agents && cargo build --bin fno-agents)" >&2
   exit 1
