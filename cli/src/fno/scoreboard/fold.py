@@ -434,7 +434,7 @@ def _autonomy(touch_events: list[dict], shipped_nodes: set, cutoff, now) -> dict
     if not touch_events:
         return {"available": False, "reason": "no human_touch signals (Wave 4 not shipped)"}
     if not shipped_nodes:
-        return {"available": False, "reason": "no shipped nodes in window"}
+        return {"available": False, "reason": "nothing shipped in the window"}
     in_window = [e for e in touch_events if _event_in_window(e, cutoff, now)]
     return {
         "available": True,

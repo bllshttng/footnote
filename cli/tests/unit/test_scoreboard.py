@@ -1288,6 +1288,33 @@ def test_scoreboard_cli_joins_canonical_project_context_journal(
         joined["context_outcome_trace"]["context"]["context_hash"]
         == event["data"]["context_hash"]
     )
+    _wait_subprocess_keeper_exit(tmp_path)
+
+
+def _wait_subprocess_keeper_exit(root: Path, timeout: float = 12.0) -> None:
+    """A CLI subprocess spawns a detached keeper that self-exits after its
+    idle window; the session reaper asserts nothing rooted under this tmp
+    tree survives teardown, so the test that owns the keeper waits it out."""
+    import time
+
+    import psutil
+
+    deadline = time.monotonic() + timeout
+    while True:
+        live = [
+            proc
+            for proc in psutil.process_iter(["cwd", "cmdline"], ad_value=None)
+            if str(proc.info["cwd"] or "").startswith(str(root))
+            and any("store-keeper" in part for part in (proc.info["cmdline"] or []))
+        ]
+        if not live:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"keeper still rooted under {root} after {timeout}s: "
+                f"{[p.pid for p in live]}"
+            )
+        time.sleep(0.2)
 
 
 @pytest.mark.parametrize("archive_second", [False, True])
@@ -1465,6 +1492,7 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
     if archived_first_path is not None:
         expected_paths.add(str(archived_first_path.resolve()))
     assert observed_paths == expected_paths
+    _wait_subprocess_keeper_exit(tmp_path)
 
 
 def test_evals_documentation_is_generated_from_the_trace_contract() -> None:
