@@ -2559,7 +2559,7 @@ def _intake_impl(
     `_intake.py` helpers can be exercised by tests without going through Typer.
     """
     from fno.graph._constants import PRIORITY_ORDER
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import (
         _prepare_intake,
         _build_intake_node,
@@ -3952,111 +3952,6 @@ def cmd_requeue(
 # -- next --
 
 
-def _starvation_receipts(
-    entries: list[dict],
-    project_filter: Optional[str],
-    all_: bool,
-    scope_ids: Optional[set],
-    claimed: set,
-    now,
-    staleness_days: int,
-    *,
-    mission: Optional[str] = None,
-    roadmap_id: Optional[str] = None,
-) -> list[tuple[str, str]]:
-    """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.backlog.advance import first_dead_ancestor, selection_guards
-    from fno.graph._intake import filter_by_project
-
-    container_ids = _container_ids(entries)
-    # One pass, guarding against a non-dict row (codebase convention: a malformed
-    # entry must not AttributeError the cold receipt path).
-    by_id: dict = {}
-    ready_ish_rows: list[dict] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("id"):
-            by_id[e["id"]] = e
-        # `design` rides along with ready/idea: it is buildable-looking work a
-        # human can still name explicitly, so a null `next` must explain it
-        # rather than drop it silently - the exact starvation this receipt
-        # exists to prevent (a backlog that is ALL design-stage would otherwise
-        # return null with nothing to say).
-        if e.get("status") not in ("ready", "design", "idea") or e.get("completed_at"):
-            continue
-        if roadmap_id and e.get("roadmap_id") != roadmap_id:
-            continue
-        if mission and e.get("mission_id") != mission:
-            continue
-        ready_ish_rows.append(e)
-    ready_ish = filter_by_project(ready_ish_rows, project_filter, all_)
-    if scope_ids is not None:
-        ready_ish = [e for e in ready_ish if e.get("id") in scope_ids]
-    out: list[tuple[str, str]] = []
-    for e in ready_ish:
-        nid = e.get("id")
-        if not nid:
-            continue
-        # A plan hold outranks structural exclusions: the owner may also be a
-        # container and a descendant may carry no plan of its own, but the
-        # actionable reason every dispatcher must report is the attributable
-        # hold on their shared delivery ancestry.
-        hold_guard = selection_guards(e, by_id, now, staleness_days=staleness_days)
-        if hold_guard and hold_guard.startswith("dispatch-hold"):
-            reason = hold_guard
-        elif first_dead_ancestor(
-            e, by_id, is_dead=lambda anc: not _is_live(anc)
-        ) and not (
-            e.get("contained_in") or _has_unmerged_open_pr(e) or _is_batched_member(e)
-        ):
-            # Terminal-ancestor arm (x-a31a): the structural cause outranks
-            # incidental attributes - a plan-less node under a dead parent
-            # reads here, not plan-less. Superseded/deferred are a subset of
-            # terminal, so this arm owns the old selection-guards
-            # dead-ancestor classification; contained, in-review, and batched
-            # nodes fall through so their classifications stand.
-            reason = "dead-ancestor"
-        elif not e.get("plan_path"):
-            reason = "plan-less"
-        elif nid in container_ids:
-            reason = "container"
-        elif nid in claimed:
-            reason = "claimed"
-        elif e.get("status") in ("design", "idea"):
-    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#starvation-receipts-4190
-            reason = e["status"]
-        elif e.get("status") == "ready" and (_has_unmerged_open_pr(e) or _is_batched_member(e)):
-            continue  # in review / batched - handled, not starved
-        else:
-            g = hold_guard
-            if not g:
-                continue  # no known exclusion (would have been selected)
-            if g.startswith("contained"):
-                # Not starvation either: the work IS being delivered, inside
-                # another node's PR. Left in the generic `quarantined` bucket it
-                # read as stale work needing attention, and a decomposed epic
-                # printed one bogus line per adopted node on every `next` until
-                # its unit merged - permanent noise the operator cannot act on.
-                reason = "contained"
-            elif g == "design-stage":
-                # Not starvation: planned but not blueprinted, so it reads as
-                # its own rung rather than the generic quarantine bucket.
-                reason = "design"
-            elif g == "idea-stage":
-                # Also not starvation: a linked-but-undesigned doc (a decompose
-                # scaffold, or a plan hand-edited back down). Named separately
-                # from `design` so the receipt says which pass it is waiting on.
-                reason = "idea"
-            else:
-                reason = "quarantined"
-        out.append((nid, reason))
-    return out
-
-
 def _external_open_status(*, pr_number: Optional[int], plan_path: Optional[str]) -> str:
     """Read-time status for an OPEN external item: in_review > ready > idea.
 
@@ -4217,7 +4112,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph, read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -4228,6 +4123,19 @@ def cmd_next(
     result: list = [None]
     project_filter = project
     _external = active_backend_name() != "graph"
+
+    def _read_entries() -> list[dict]:
+        """The graph, strictly: corruption refuses instead of answering [].
+
+        `read_graph` swallows a corrupt file and answers no rows; a selection
+        over no rows prints `null`, which `advance` reads as the benign
+        `no-work` skip. An unreadable graph is not an empty backlog.
+        """
+        try:
+            return read_graph_strict(_graph_path())
+        except Exception as exc:  # noqa: BLE001 - unknown graph state refuses
+            typer.echo(f"Error: graph unreadable: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
     # One read for the prelude AND selection: under an external backend the
     # transient joined model (list_open + sidecar join, fail-closed); under
     # the default backend the working graph, read at most once for project
@@ -4238,7 +4146,7 @@ def cmd_next(
         else:
             pre_entries = None
             if (not project_filter and not all_) or parent:
-                pre_entries = read_graph(_graph_path())
+                pre_entries = _read_entries()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
         raise typer.Exit(code=1)
@@ -4258,14 +4166,15 @@ def cmd_next(
         if not descendants_of(pre_entries, parent_target_id):
             typer.echo(f"no children under {parent_target_id}", err=True)
 
-    def _select(entries):
+    def _select(entries, occupancy):
         """One call into the native leg: survivors, in selection order.
 
         The admission set, the narrowing cascade, and the ranking are the
         keeper verb's (backlog_ready::select); `next` takes rows[0] of the
         same answer its sibling verb serves, so the two surfaces cannot
         drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock.
+        read the same instant under the graph lock; `occupancy` rides IN so the
+        keeper never re-reads claims this command already has.
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
@@ -4286,6 +4195,7 @@ def cmd_next(
                 include_deferred=include_deferred,
                 repo_root=repo_root(),
                 entries=entries,
+                occupancy=occupancy,
             )["rows"]
         except StoreUnavailable as exc:
             typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
@@ -4300,50 +4210,51 @@ def cmd_next(
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
-        classify_planned_unclaimed,
         prepend_missed_rows,
-        read_claim_snapshot,
-        read_planned_unclaimed,
         read_planned_unclaimed_from_entries,
     )
 
-    try:
-        if _external:
-            assert pre_entries is not None
-            read_planned_unclaimed_from_entries(
-                pre_entries,
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-        else:
-            read_planned_unclaimed(
-                graph_path=_graph_path(),
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-    except ObserverReadError as exc:
-        typer.echo(f"Error: {exc}; selection refused", err=True)
-        raise typer.Exit(code=1) from exc
+    # The claim set of the selection that actually ran, for the receipts below.
+    selection_claimed: list = [set()]
 
-    def _with_observer(candidates: list[dict], source_entries: list[dict]) -> list[dict]:
-        by_id = {entry.get("id"): entry for entry in source_entries}
+    def _prepare(entries: list[dict]) -> tuple[set, dict]:
+        """Dispatch occupancy plus the observer receipt, read ONCE per selection.
+
+        The claim verdict and the roster read are what this command costs, and
+        three layers each used to pay for them. A `--claim` transaction that
+        loses to an interleaved writer pays again on its retry, deliberately:
+        the entries it selects from are new, so its occupancy must be too.
+        """
         try:
-            current_observer = classify_planned_unclaimed(
-                source_entries,
-                read_claim_snapshot(),
+            claimed, worked = read_occupancy(entries, _live_claimed_node_ids)
+        except OccupancyUnavailable as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
+        try:
+            observer = read_planned_unclaimed_from_entries(
+                entries,
                 project=None if all_ else project_filter,
                 mission=mission,
                 roadmap_id=roadmap_id,
                 parent=parent_target_id,
+                worked=worked,
             )
+        except ObserverReadError as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
         except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
             typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
-        claimed = _require_live_claimed_node_ids("backlog next observer recovery")
+        selection_claimed[0] = claimed
+        return claimed | set(worked), observer
+
+    def _with_observer(
+        candidates: list[dict],
+        source_entries: list[dict],
+        occupied: set,
+        current_observer: dict,
+    ) -> list[dict]:
+        by_id = {entry.get("id"): entry for entry in source_entries}
         container_ids = _container_ids(source_entries)
         from fno.backlog.advance import _guard_staleness_days, selection_guards
 
@@ -4352,7 +4263,7 @@ def cmd_next(
         safe_rows = []
         for row in current_observer["rows"]:
             entry = by_id.get(row.get("id"))
-            if entry is None or row.get("id") in claimed:
+            if entry is None or row.get("id") in occupied:
                 continue
             if entry.get("completed_at") or _has_unmerged_open_pr(entry):
                 continue
@@ -4405,7 +4316,10 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            candidates = _with_observer(_select(pre_entries), pre_entries)
+            occupied, observer = _prepare(pre_entries)
+            candidates = _with_observer(
+                _select(pre_entries, occupied), pre_entries, occupied, observer
+            )
             for winner in candidates:
                 key = f"node:{winner['id']}"
     # Rationale (14 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4593
@@ -4423,7 +4337,10 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                candidates = _with_observer(_select(entries), entries)
+                occupied, observer = _prepare(entries)
+                candidates = _with_observer(
+                    _select(entries, occupied), entries, occupied, observer
+                )
                 if candidates:
                     winner = candidates[0]
                     # Rows are serialized summaries, not graph references:
@@ -4449,8 +4366,11 @@ def cmd_next(
             assert pre_entries is not None
             entries = pre_entries
         else:
-            entries = read_graph(_graph_path())
-        candidates = _with_observer(_select(entries), entries)
+            # The prelude may already hold this graph, and nothing mutates it
+            # on the read-only path: a second read buys the same rows.
+            entries = pre_entries if pre_entries is not None else _read_entries()
+        occupied, observer = _prepare(entries)
+        candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
@@ -4476,7 +4396,7 @@ def cmd_next(
             project_filter,
             all_,
             scope_ids,
-            _live_claimed_node_ids(),
+            selection_claimed[0],
             datetime.now(timezone.utc),
             _guard_staleness_days(),
             mission=mission,
@@ -7737,7 +7657,6 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 # In graph/strand.py: the terminal-parent strand family (moved with the
 # close guards, release twins, and self-heal that share its liveness predicate).
 from fno.graph.strand import (  # noqa: E402
-    _is_live,
     _live_child_ids,
     _release_contained_children,
     _release_parented_children,
@@ -7746,6 +7665,14 @@ from fno.graph.strand import (  # noqa: E402
     _strandable_orphan_ids,
     _stranded_next_receipts,
     _sweep_reparent_stranded_orphans,
+)
+
+# In graph/selection_evidence.py: the occupancy one `backlog next` selection
+# reads, and the receipts that explain what it passed over.
+from fno.graph.selection_evidence import (  # noqa: E402
+    OccupancyUnavailable,
+    _starvation_receipts,
+    read_occupancy,
 )
 
 # In graph/_closures.py: this file is over the source budget.

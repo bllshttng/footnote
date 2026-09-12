@@ -84,6 +84,90 @@ def test_next_skips_live_claimed_node(tmp_graph, tmp_path):
     assert out["id"] == "ab-bbbbbbbb"
 
 
+def test_next_reads_each_liveness_source_once(tmp_graph, tmp_path, monkeypatch):
+    """One selection, one claim verdict scan, one roster read.
+
+    Three layers used to rescan live occupancy inside a single `backlog next`
+    and got the same answer each time; the scans are what the command costs.
+    """
+    entries = _two_ready_entries() + [
+        {"id": "ab-cccccccc", "title": "C", "status": "ready", "priority": "p2",
+         "created_at": _RECENT_CREATED, "project": "p", "blocked_by": [], "plan_path": "c.md"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    acquire_claim(
+        key="node:ab-aaaaaaaa",
+        holder="target-session:other",
+        ttl_ms=3_600_000,
+        root=tmp_path,
+    )
+
+    import fno.graph.statuses as statuses
+
+    calls = {"claimed": 0, "worked": 0}
+    real_claimed = statuses.live_claimed_node_ids
+
+    def counting_claimed(**kwargs):
+        calls["claimed"] += 1
+        return real_claimed(**kwargs)
+
+    def counting_worked(**_kwargs):
+        calls["worked"] += 1
+        return {"ab-cccccccc": ["bp-worker"]}
+
+    monkeypatch.setattr(statuses, "live_claimed_node_ids", counting_claimed)
+    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", counting_claimed)
+    monkeypatch.setattr(statuses, "live_worked_node_ids", counting_worked)
+
+    result = _invoke("backlog", "next", "--all")
+
+    assert result.exit_code == 0, result.output
+    # The claimed node and the worked node are both occupied; only C is free.
+    assert json.loads(result.stdout)["id"] == "ab-bbbbbbbb"
+    assert calls == {"claimed": 1, "worked": 1}, result.output
+
+
+def test_next_refuses_when_worked_evidence_is_unreadable(tmp_graph, monkeypatch):
+    """An unreadable roster refuses selection; it never reads as unoccupied."""
+    entries = _two_ready_entries()
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    def unavailable(**_kwargs):
+        raise RuntimeError("roster timeout")
+
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", unavailable)
+
+    result = _invoke("backlog", "next", "--all")
+
+    assert result.exit_code == 1, result.output
+    assert "roster timeout" in result.output
+    assert "selection refused" in result.output
+    assert '"id"' not in result.output
+    assert json.loads(tmp_graph.read_text())["entries"] == entries
+
+
+def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
+    """A corrupt graph refuses selection; it never selects over zero rows.
+
+    `read_graph` swallows corruption and answers no rows, and a selection over
+    no rows prints `null`, which `advance` reads as the benign `no-work` skip.
+    """
+    entries = _two_ready_entries()
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    def unreadable(*_args, **_kwargs):
+        raise RuntimeError("graph.json is corrupt")
+
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", unreadable)
+
+    result = _invoke("backlog", "next", "--all")
+
+    assert result.exit_code == 1, result.output
+    assert "graph unreadable" in result.output
+    assert "graph.json is corrupt" in result.output
+    assert '"id"' not in result.output
+
+
 def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
     """`graph ready` omits a live-claimed node from the listing."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
