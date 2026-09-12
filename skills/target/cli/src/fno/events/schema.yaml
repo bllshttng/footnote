@@ -2318,6 +2318,27 @@ event_types:
           type: array
           items: { type: string }
 
+  - name: merge_cleanup_skipped
+    retention: durable
+    description: "A merged PR produced no cleanup request; the reason names which precondition was unmet. The merge mint is the only emitter; the rows ride the daemon's journal, so the Rust known-kind table carries the name for acceptance without emitting."
+    sources: [python, daemon]
+    data:
+      required: [repo, pr, reason]
+      properties:
+        repo:
+          type: string
+        project:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+          enum: [gh-unavailable, unparseable-pr-json, not-merged, no-branch, emit-failed]
+        branch:
+          type: [string, "null"]
+        detail:
+          type: string
+
   - name: merge_cleanup_completed
     retention: durable
     description: "A merge cleanup request passed all guards, pruned its worktree, and removed its session row."
