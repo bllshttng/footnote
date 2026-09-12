@@ -392,36 +392,6 @@ def build_scoreboard(
     delivery_classes = dict(
         Counter(deliveries[nid].get("class") for nid in delivered_nodes if nid in deliveries)
     )
-    window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
-    delivered_nodes = {
-        nid
-        for nid in set(deliveries) | window_node_ids
-        if (c := deliveries.get(nid))
-        and c.get("delivered")
-        and _in_window(c.get("ship_ts"))
-    }
-
-    if total == 0 and not delivered_nodes:
-        return {"state": "no_data", "since_days": since_days, "rows": 0}
-
-    with_tr = sum(1 for r in windowed if r.get("termination_reason"))
-    with_node = sum(1 for r in windowed if r.get("graph_node_id"))
-    coverage = {
-        "rows": total,
-        "termination_reason_pct": _pct(with_tr, total),
-        "node_linkage_pct": _pct(with_node, total),
-    }
-
-    stop_cause = dict(
-        Counter(r["termination_reason"] for r in windowed if r.get("termination_reason"))
-    )
-
-    ship_rows = [r for r in windowed if _row_shipped(r, deliveries)]
-    terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
-    shipped_nodes = delivered_nodes
-    delivery_classes = dict(
-        Counter(deliveries[nid].get("class") for nid in delivered_nodes if nid in deliveries)
-    )
 
     # Spend follows the node, not the reason: a run whose PR merged is ship
     # spend regardless of how its session stopped. A row with no node keeps
