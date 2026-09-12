@@ -829,10 +829,9 @@ def sync_canonical(
     hidden=True,
     help=(
         "Post a review verdict to GitHub as config.review.bot_identity "
-        "(--pr N required; --verdict defaults to the newest head-pinned "
-        "review_attestation for HEAD; --dry-run resolves and refuse-checks "
-        "but makes no POST). Prints one bot-review: receipt line; exit 0 "
-        "posted, 1 skipped|refused|failed, 2 no attestation to default from."
+        "(--pr-number N; --verdict defaults to the newest head-pinned "
+        "attestation for HEAD). One bot-review: receipt line; exit 0 posted,"
+        " 1 skipped|refused|failed, 2 no attestation to default from."
     ),
 )
 def publish_review_cmd(
