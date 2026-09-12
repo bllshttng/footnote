@@ -28,7 +28,7 @@ One binding per attempt. The file slot is `.fno/artifacts/handoff/task-context-<
 |---|---|---|
 | `prepared` | A binding was minted and digested by the native verifier | Nothing was sent, carried, or read |
 | `submitted` | A payload with the pointer was handed to a harness | Delivery happened, or the recipient read anything |
-| `observed` | x-175a accepted-turn evidence exists for the recipient | That the required sources were read. An injected pointer is not a read |
+| `observed` | Accepted-turn evidence exists for the recipient, from the keeper-mail verifier | That the required sources were read. An injected pointer is not a read |
 | `unavailable` | Observation capability is unknown or unsupported | Anything. It is an honesty label. It can never advance to `observed` |
 
 ## The doors
