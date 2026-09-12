@@ -55,7 +55,7 @@ case "$1 $2" in
         [[ "$previous" == "--node" ]] && node="$argument"
         previous="$argument"
       done
-      echo "node dispatch refused: node=$node verdict=already-running reason=$STUB_CLI_GUARD_REASON; no worker launched" >&2
+      echo "node dispatch refused: node=$node verdict=already-running reason=$STUB_CLI_GUARD_REASON${STUB_CLI_GUARD_WORKER:+ worker=$STUB_CLI_GUARD_WORKER}; no worker launched" >&2
       exit 2
     fi
     echo "LAUNCH: $*" >> "$STUB_LOG"
@@ -184,6 +184,28 @@ ok  'post-spawn unproven-claim exits 0' "$rc" '0'
 has 'post-spawn unproven-claim names the untested condition' "$out" 'no worker has reached target init'
 no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worker holds node'
 
+# --- worked-overlay: no claim holder, the worked overlay named the worker ----
+# x-a8b5 AC4. The block is real but the claim is not: the receipt must name
+# the worker and say nothing holds the claim, never "is held by unknown",
+# which sent the reader hunting a release remedy for a claim that does not
+# exist.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"worked-overlay","holder":"unknown","worker":"king-a792-control","truth_status":"unknown","init_reached":false}' \
+  run --name w2w --provider claude --message '/target x' --node "$NODE")"
+ok  'worked-overlay -> already-running' "$(field "$out")" 'already-running'
+has 'worked-overlay names the worker' "$out" 'king-a792-control'
+has 'worked-overlay asserts no claim holder' "$out" 'nothing holds the claim'
+no  'worked-overlay does NOT print is-held-by' "$out" 'is held by'
+no  'worked-overlay did NOT spawn' "$(calllog)" 'agents spawn --harness'
+
+# --- worked-overlay on the POST-SPAWN refusal, the path a real dispatch takes -
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=worked-overlay STUB_CLI_GUARD_WORKER=king-a792-control \
+  run --name w2wp --provider claude --message '/target x' --node "$NODE")"; rc=$?
+ok  'post-spawn worked-overlay -> already-running' "$(field "$out")" 'already-running'
+ok  'post-spawn worked-overlay exits 0' "$rc" '0'
+has 'post-spawn worked-overlay names the worker' "$out" 'king-a792-control'
+has 'post-spawn worked-overlay asserts no claim holder' "$out" 'nothing holds the claim'
+no  'post-spawn worked-overlay does NOT print is-held-by' "$out" 'is held by'
+
 # --- every guard reason has an arm in BOTH consumers -------------------------
 # One Python producer, two shell consumers, and neither case statement carries a
 # default: an unhandled reason falls through to a failure handler and turns a
@@ -202,7 +224,7 @@ no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worke
 # mentioned in neither path of a consumer. It does NOT catch a brand-new reason
 # nobody adds to this list, and it does not prove the arm it found does the
 # right thing - the behavioral tests above do that for `unproven-claim`.
-_GUARD_REASONS='live-claim unproven-claim suspect-claim reservation-held duplicate-claim auto-deferred defer-failed'
+_GUARD_REASONS='live-claim unproven-claim worked-overlay suspect-claim reservation-held duplicate-claim auto-deferred defer-failed'
 _SPAWN_SH_LOCAL="$(dirname "${BASH_SOURCE[0]}")/../scripts/spawn.sh"
 _CLI_PY="$(dirname "${BASH_SOURCE[0]}")/../../../cli/src/fno/agents/cli.py"
 _DISPATCH_SH="$(dirname "${BASH_SOURCE[0]}")/../../target/scripts/dispatch-node.sh"
