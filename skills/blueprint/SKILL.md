@@ -41,6 +41,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Answerer Enumeration Gate | the plan changes a read, write, or feed - step 2b-bis |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
+| Python tree allowance | a Files-to-Modify row targets `cli/src/fno/**.py` |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
 | Model Pin / Model Routing | the plan frontmatter sets `model:`, or always for `difficulty:` |
 | Blueprint Provenance Stamp | always, after `$NODE_ID` is minted (tiny, best-effort) |
