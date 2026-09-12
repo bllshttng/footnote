@@ -92,6 +92,42 @@ so a blocked row says what it waits on instead of only counting.
 The board's HTML section renders `claim` and `age` as their own columns,
 because the section and the JSON come from one fold.
 
+## The stuck verdict
+
+The counts say how much. `stuck` says whether anything needs a hand, which
+is the only part of the read worth a glance. It is computed in
+`court_fold.rs`, beside the rows it judges, so no second reader can
+disagree about what a row means. The fold returns it as `stuck`, plus a
+rendered `stuck_line` for the node half of the one-line answer.
+
+A node counts as stuck under exactly these rules, with the threshold at 60
+minutes:
+
+- `ready` or `in_progress`, not held, and older than the threshold.
+- `blocked`. The line names the ids in `blocked_by`, because a count that
+  never says what on is the gap this closes.
+- an unproven claim (`corrupted` or `unreadable`). An unproven claim blocks
+  a dispatch as hard as a held one does.
+- `in_review` with a `pr_number`, older than the threshold.
+
+A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold,
+so an overlapping node reaches the verdict once per crown covering it, and
+counting it twice would report more stuck work than exists. Several crowns
+failing the same way is one fault and prints one line.
+
+The caller adds only what the fold cannot see. `fno agents court` appends
+the spawn gate's refusal, and an unknown gate is itself a blind spot, so it
+lands in `blind` rather than being dropped. When nothing is stuck and the
+gate accepts, the line reads `stuck: nothing`. When the fold, the sweep or
+the gate could not answer, the line says which one could not answer. A
+clean line and a blind line must never look the same.
+
+Live PR state is deliberately out of scope. `merge_status` on a graph entry
+is a closure stamp that only ever reads `merged` or null, so it cannot say
+CONFLICTING or red, and the honest verdict needs a network read that
+`fno do pr status <n>` already performs. The row carries `pr_number` and an
+age, so an `in_review` node past the threshold surfaces without one.
+
 ## Session ids on a row
 
 A node row's `sessions` is the ordered de-duplicated union of

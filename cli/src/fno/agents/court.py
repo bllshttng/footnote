@@ -24,20 +24,6 @@ from fno.agents.crown import (
 )
 from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
-#: How long a node may sit ready or unclaimed before the court calls it stuck.
-#: One threshold, one default, and no knob until somebody asks for a different
-#: number.
-STUCK_AFTER_MINUTES = 60
-
-#: The claim verdicts that mean somebody holds the node. ``suspect`` is a
-#: respawned worker whose supervisor pid died: the TTL still protects it, so it
-#: is held, not free.
-_HELD_CLAIMS = ("live", "suspect")
-
-#: The claim verdicts that prove nothing either way. An unproven claim blocks a
-#: dispatch as hard as a held one does, so it is stuck rather than free.
-_UNPROVEN_CLAIMS = ("corrupted", "unreadable")
-
 
 def _agreement(
     level: Optional[int], scope: Optional[str], by_id: Optional[dict[str, dict]]
@@ -302,9 +288,14 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     }
 
 
-def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
+def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold each crown's scope onto its row via `fno-agents court-fold`; any
-    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md)."""
+    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md).
+
+    Returns the fold's own stuck verdict, computed beside the rows it judges
+    so no second reader can disagree about what a row means. A fault answers
+    ``{}``, and the unresolved crowns above carry the reason.
+    """
     import json as _json
     import subprocess
 
@@ -312,7 +303,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
     from fno.rust_binary import resolve_binary
 
     if not crowns:
-        return
+        return {}
     for crown in crowns:
         scope = crown.get("scope")
         if not (isinstance(scope, str) and scope.strip()) or crown.get("level") is None:
@@ -326,7 +317,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
         if "scope_nodes" not in c
     ]
     if not payload:
-        return
+        return {}
     try:
         binary = resolve_binary()
         if binary is None:
@@ -338,21 +329,19 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"exit {proc.returncode}")
-        scope_nodes = _json.loads(proc.stdout)["scope_nodes"]
-    except subprocess.TimeoutExpired:
-        # str() on this exception is the whole argv, which buries the fault it
-        # is reporting. Name the fault and its bound instead.
-        reason = "the fold timed out after 30s"
+        folded = _json.loads(proc.stdout)
+        scope_nodes = folded["scope_nodes"]
+    except Exception as exc:  # noqa: BLE001 - a failed fold is stated, never a crash
+        # A TimeoutExpired stringifies to its whole argv, which buries the fault
+        # it reports. Name that one and its bound instead.
+        reason = (
+            "the fold timed out after 30s"
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else f"the fold could not run: {exc}"
+        )
         for crown in crowns:
             crown.setdefault("scope_nodes", {"status": "unresolved", "reason": reason})
-        return
-    except Exception as exc:  # noqa: BLE001 - a failed fold is stated, never a crash
-        for crown in crowns:
-            crown.setdefault(
-                "scope_nodes",
-                {"status": "unresolved", "reason": f"the fold could not run: {exc}"},
-            )
-        return
+        return {}
     for crown in crowns:
         scope = crown.get("scope")
         crown["scope_nodes"] = scope_nodes.get(
@@ -362,12 +351,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
 
 
 def _gate_read() -> dict[str, Any]:
-    """The spawn gate's own verdict on whether a dispatch would be admitted.
-
-    ``probe_capacity`` never raises by contract, but a read that cannot even
-    reach it must answer ``unknown`` with its reason. An empty dict would read
-    as "nothing refused", which is the healthy default this must never invent.
-    """
+    """The spawn gate's verdict: `unknown` with a reason, never a healthy default."""
     try:
         from fno.agents.spawn_gate import probe_capacity
 
@@ -379,141 +363,56 @@ def _gate_read() -> dict[str, Any]:
     return verdict
 
 
-def _session_liveness_index() -> tuple[dict[str, str], bool]:
-    """``harness_session_id`` -> its registry row status, and whether the read ran.
-
-    A session id the registry does not carry is absent from the map, which is a
-    different answer from a terminal row and must render as ``None``.
-    """
-    try:
-        from fno.agents.registry import load_registry
-
-        rows = load_registry()
-    except Exception:  # noqa: BLE001 - an unreadable registry judges nothing
-        return {}, False
-    index: dict[str, str] = {}
-    for row in rows:
-        sid = getattr(row, "harness_session_id", None)
-        if sid:
-            index[sid] = row.status
-    return index, True
-
-
 def _annotate_sessions(crowns: list[dict[str, Any]]) -> bool:
-    """Replace each bare session uuid on a node row with a judged entry.
+    """Judge each node row's session ids against the registry; returns whether it read.
 
-    A uuid a reader cannot judge is worse than no field, because it invites a
-    confident wrong inference in both directions. Returns whether the registry
-    answered; an unreadable one leaves every entry ``live: None``.
+    A uuid a reader cannot judge invites a confident wrong inference in both
+    directions. Absent from the registry answers ``live: None``, never ``False``.
     """
-    from fno.agents.registry import TERMINAL_STATUSES
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
-    index, readable = _session_liveness_index()
+    try:
+        rows, readable = load_registry(), True
+    except Exception:  # noqa: BLE001 - an unreadable registry judges nothing
+        rows, readable = [], False
+    status = {
+        sid: r.status for r in rows if (sid := getattr(r, "harness_session_id", None))
+    }
     for crown in crowns:
         fold = crown.get("scope_nodes")
         if not isinstance(fold, dict):
             continue
         for node in fold.get("nodes") or []:
-            judged = []
-            for sid in node.get("sessions") or []:
-                if not isinstance(sid, str):
-                    continue
-                status = index.get(sid) if readable else None
-                judged.append(
-                    {
-                        "id": sid,
-                        "live": None if status is None else status not in TERMINAL_STATUSES,
-                        "status": status,
-                    }
-                )
-            node["sessions"] = judged
+            node["sessions"] = [
+                {
+                    "id": sid,
+                    "live": None if sid not in status else status[sid] not in TERMINAL_STATUSES,
+                    "status": status.get(sid),
+                }
+                for sid in (node.get("sessions") or [])
+                if isinstance(sid, str)
+            ]
     return readable
 
 
-def _stuck_verdict(crowns: list[dict[str, Any]], gate: dict[str, Any]) -> dict[str, Any]:
-    """What is stuck right now, or an honest statement that nothing answered.
-
-    The counts say how much. This says whether anything needs a hand, which is
-    the only part of the read worth a glance.
-    """
-    threshold = STUCK_AFTER_MINUTES / 60.0
-    stale: list[str] = []
-    blocked: list[dict[str, Any]] = []
-    unproven: list[str] = []
-    in_review: list[str] = []
-    blind: list[str] = []
-    # An L1 crown contains the nodes its L2 epics also fold, so one node
-    # reaches this loop once per crown that covers it. Counting it twice would
-    # report more stuck work than exists.
-    seen: set[str] = set()
-    for crown in crowns:
-        fold = crown.get("scope_nodes")
-        if not isinstance(fold, dict):
-            continue
-        if fold.get("status") != "ok":
-            reason = str(fold.get("reason") or "a crown's scope fold did not run")
-            # One cause, one line: five crowns failing the same way is one
-            # fault, and repeating it five times buries the verdict.
-            reason = reason[:160]
-            if reason not in blind:
-                blind.append(reason)
-            continue
-        for node in fold.get("nodes") or []:
-            nid = str(node.get("id"))
-            if nid in seen:
-                continue
-            seen.add(nid)
-            claim = node.get("claim_state")
-            age = node.get("age_hours")
-            old = isinstance(age, (int, float)) and age > threshold
-            if claim in _UNPROVEN_CLAIMS:
-                unproven.append(nid)
-                continue
-            held = claim in _HELD_CLAIMS
-            status = node.get("status")
-            if status == "blocked":
-                blocked.append({"id": nid, "blocked_by": node.get("blocked_by")})
-            elif status in ("ready", "in_progress") and not held and old:
-                stale.append(nid)
-            elif status == "in_review" and node.get("pr_number") and old:
-                in_review.append(nid)
-    if gate.get("verdict") == "unknown":
-        blind.append(f"the spawn gate answered unknown: {gate.get('reason')}")
+def _blind_stuck(reason: str) -> dict[str, Any]:
+    """The verdict when the fold itself could not answer, with the reason."""
     return {
-        "unclaimed": stale,
-        "blocked": blocked,
-        "unproven_claim": unproven,
-        "in_review": in_review,
-        "blind": blind,
-        "threshold_minutes": STUCK_AFTER_MINUTES,
+        "unclaimed": [], "blocked": [], "unproven_claim": [], "in_review": [],
+        "blind": [reason], "threshold_minutes": None,
     }
 
 
-def _stuck_line(stuck: dict[str, Any], gate: dict[str, Any]) -> str:
+def _stuck_render(summary: dict[str, Any], gate: dict[str, Any]) -> str:
     """One line. A clean read and a blind read must never look the same."""
-    parts: list[str] = []
-    if stuck["unclaimed"]:
-        parts.append(
-            f"{len(stuck['unclaimed'])} ready over {STUCK_AFTER_MINUTES}m with no worker "
-            f"({', '.join(stuck['unclaimed'])})"
-        )
-    if stuck["blocked"]:
-        on = sorted({b for e in stuck["blocked"] for b in (e.get("blocked_by") or [])})
-        tail = f" (on {', '.join(on)})" if on else " (on nothing named)"
-        parts.append(f"{len(stuck['blocked'])} blocked{tail}")
-    if stuck["unproven_claim"]:
-        parts.append(f"{len(stuck['unproven_claim'])} with an unproven claim "
-                     f"({', '.join(stuck['unproven_claim'])})")
-    if stuck["in_review"]:
-        parts.append(f"{len(stuck['in_review'])} in review over {STUCK_AFTER_MINUTES}m "
-                     f"({', '.join(stuck['in_review'])})")
+    line = summary.get("stuck_line") or ""
+    parts = [line] if line else []
     if gate.get("verdict") == "refused":
         parts.append(f"gate refused {gate.get('reason')}")
-    for reason in stuck["blind"]:
-        parts.append(f"could not answer: {reason}")
-    if not parts:
-        return "stuck: nothing"
-    return "stuck: " + ", ".join(parts)
+    # The fold already rendered its own blind reasons into `line`; only the
+    # ones this caller added still need a clause.
+    parts += [f"could not answer: {r}" for r in summary["stuck"]["blind"] if r not in line]
+    return "stuck: " + (", ".join(parts) if parts else "nothing")
 
 
 def crowned_sessions(rows: list) -> set[str]:
@@ -561,10 +460,24 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
         # types, and a stuck line it cannot compute is the gap this read
         # exists to close. The rows are dropped again below unless -n asked
         # for them, so a bare --json keeps the contract its callers pin.
-        fold_scope_nodes(court["crowns"])
+        folded = fold_scope_nodes(court["crowns"])
         court["sessions_readable"] = _annotate_sessions(court["crowns"])
         court["gate"] = _gate_read()
-        court["summary"]["stuck"] = _stuck_verdict(court["crowns"], court["gate"])
+        # The fold judges its own rows; only the gate half is the caller's. A
+        # fold that answered rows but no verdict is a binary older than this
+        # court, a different fault from one that never ran.
+        stuck = folded.get("stuck") or _blind_stuck(
+            "the scope fold did not run"
+            if not folded
+            else "the fno-agents binary predates this court and returned no "
+            "stuck verdict; run fno doctor --fix"
+        )
+        if court["gate"].get("verdict") == "unknown":
+            stuck["blind"].append(
+                f"the spawn gate answered unknown: {court['gate'].get('reason')}"
+            )
+        court["summary"]["stuck"] = stuck
+        court["summary"]["stuck_line"] = folded.get("stuck_line", "")
         if not nodes:
             for crown in court["crowns"]:
                 crown.pop("scope_nodes", None)
@@ -593,7 +506,7 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
     if s.get("sweep_ran") is False:
         lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
     if isinstance(s.get("stuck"), dict):
-        lines.append(_stuck_line(s["stuck"], court.get("gate") or {}))
+        lines.append(_stuck_render(s, court.get("gate") or {}))
     return "\n".join(lines)
 
 

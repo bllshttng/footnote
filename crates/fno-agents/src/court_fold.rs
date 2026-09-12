@@ -33,6 +33,20 @@ const COUNT_ORDER: [&str; 9] = [
     "superseded",
 ];
 
+/// How long a node may sit ready or unclaimed before the court calls it stuck.
+/// One threshold, one default, and no knob until somebody asks for a different
+/// number.
+const STUCK_AFTER_MINUTES: f64 = 60.0;
+
+/// The claim verdicts that mean somebody holds the node. `suspect` is a
+/// respawned worker whose supervisor pid died: the TTL still protects it, so it
+/// is held, not free.
+const HELD_CLAIMS: [&str; 2] = ["live", "suspect"];
+
+/// The claim verdicts that prove nothing either way. An unproven claim blocks a
+/// dispatch as hard as a held one does, so it is stuck rather than free.
+const UNPROVEN_CLAIMS: [&str; 2] = ["corrupted", "unreadable"];
+
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
@@ -421,6 +435,166 @@ fn crown_html(crown: &Value, fold: &Value) -> String {
     out
 }
 
+/// What is stuck across every crown, and what could not be answered.
+///
+/// The counts say how much. This says whether anything needs a hand, which is
+/// the only part of the read worth a glance. It lives here, beside the rows it
+/// judges, so no second reader can disagree about what a row means.
+///
+/// A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold,
+/// so an overlapping node reaches this loop once per crown covering it, and
+/// counting it twice would report more stuck work than exists.
+fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
+    let threshold = STUCK_AFTER_MINUTES / 60.0;
+    let mut unclaimed: Vec<String> = Vec::new();
+    let mut blocked: Vec<Value> = Vec::new();
+    let mut unproven: Vec<String> = Vec::new();
+    let mut in_review: Vec<String> = Vec::new();
+    let mut blind: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for fold in folds.values() {
+        if fold.get("status").and_then(|s| s.as_str()) != Some("ok") {
+            // One cause is one line: several crowns failing the same way is one
+            // fault, and repeating it buries the verdict.
+            let reason = s_str(fold, "reason")
+                .unwrap_or("a crown's scope fold did not run")
+                .to_string();
+            if !blind.contains(&reason) {
+                blind.push(reason);
+            }
+            continue;
+        }
+        let Some(nodes) = fold.get("nodes").and_then(|n| n.as_array()) else {
+            continue;
+        };
+        for node in nodes {
+            let Some(id) = s_str(node, "id") else {
+                continue;
+            };
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            let claim = s_str(node, "claim_state").unwrap_or("");
+            if UNPROVEN_CLAIMS.contains(&claim) {
+                unproven.push(id.to_string());
+                continue;
+            }
+            let held = HELD_CLAIMS.contains(&claim);
+            let old = node
+                .get("age_hours")
+                .and_then(|a| a.as_f64())
+                .map(|h| h > threshold)
+                .unwrap_or(false);
+            let has_pr = node.get("pr_number").map(|p| !p.is_null()).unwrap_or(false);
+            match s_str(node, "status") {
+                // A count that never says what on is the gap this closes.
+                Some("blocked") => blocked.push(json!({
+                    "id": id,
+                    "blocked_by": node.get("blocked_by").cloned().unwrap_or(Value::Null),
+                })),
+                Some("ready") | Some("in_progress") if !held && old => {
+                    unclaimed.push(id.to_string())
+                }
+                Some("in_review") if old && has_pr => in_review.push(id.to_string()),
+                _ => {}
+            }
+        }
+    }
+    json!({
+        "unclaimed": unclaimed,
+        "blocked": blocked,
+        "unproven_claim": unproven,
+        "in_review": in_review,
+        "blind": blind,
+        "threshold_minutes": STUCK_AFTER_MINUTES as i64,
+    })
+}
+
+/// The node half of the one-line verdict. The caller appends what only it can
+/// know, such as the spawn gate's refusal.
+///
+/// An empty string means the rows answered and nothing was stuck. A blind read
+/// never returns empty, because a clean line and a blind line must not look the
+/// same.
+fn stuck_line(stuck: &Value) -> String {
+    /// How many ids a clause names before it counts the rest. The line exists
+    /// to be glanced at, and a live court put 40 ids in one clause. The full
+    /// list is always in the JSON.
+    const NAMED: usize = 5;
+    fn named(ids: &[String]) -> String {
+        if ids.len() <= NAMED {
+            return ids.join(", ");
+        }
+        format!("{}, +{} more", ids[..NAMED].join(", "), ids.len() - NAMED)
+    }
+    let ids = |key: &str| -> Vec<String> {
+        stuck
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let unclaimed = ids("unclaimed");
+    if !unclaimed.is_empty() {
+        parts.push(format!(
+            "{} ready over {}m with no worker ({})",
+            unclaimed.len(),
+            STUCK_AFTER_MINUTES as i64,
+            named(&unclaimed)
+        ));
+    }
+    if let Some(rows) = stuck.get("blocked").and_then(|v| v.as_array()) {
+        if !rows.is_empty() {
+            let mut on: BTreeSet<String> = BTreeSet::new();
+            for row in rows {
+                for b in row
+                    .get("blocked_by")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(b) = b.as_str() {
+                        on.insert(b.to_string());
+                    }
+                }
+            }
+            let tail = if on.is_empty() {
+                " (on nothing named)".to_string()
+            } else {
+                format!(" (on {})", named(&on.into_iter().collect::<Vec<_>>()))
+            };
+            parts.push(format!("{} blocked{tail}", rows.len()));
+        }
+    }
+    let unproven = ids("unproven_claim");
+    if !unproven.is_empty() {
+        parts.push(format!(
+            "{} with an unproven claim ({})",
+            unproven.len(),
+            named(&unproven)
+        ));
+    }
+    let in_review = ids("in_review");
+    if !in_review.is_empty() {
+        parts.push(format!(
+            "{} in review over {}m ({})",
+            in_review.len(),
+            STUCK_AFTER_MINUTES as i64,
+            named(&in_review)
+        ));
+    }
+    for reason in ids("blind") {
+        parts.push(format!("could not answer: {reason}"));
+    }
+    parts.join(", ")
+}
+
 /// The board section: the styles ride with the markup so the fragment is
 /// self-contained and `_DASHBOARD_CSS` never needs to know the section
 /// exists.
@@ -518,7 +692,9 @@ pub fn court_fold(
         html.push_str("</section>");
         return Ok(json!({"section": html}));
     }
-    Ok(json!({"scope_nodes": folds}))
+    let stuck = stuck_verdict(&folds);
+    let line = stuck_line(&stuck);
+    Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
 }
 
 /// `fno-agents court-fold`: print the fold JSON or the board section, exit 0.
@@ -840,6 +1016,130 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(bare["age_hours"], Value::Null);
+    }
+
+    /// One crown's fold, shaped as `fold_one` returns it.
+    fn folds(rows: &[Value]) -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
+        out.insert(
+            "alpha".to_string(),
+            json!({"status": "ok", "total": rows.len(), "counts": {},
+                   "nodes": rows, "omitted": 0}),
+        );
+        out
+    }
+
+    fn row(id: &str, status: &str, claim: &str, age: f64) -> Value {
+        json!({
+            "id": id, "slug": "s", "status": status, "worker": Value::Null,
+            "claim_state": claim, "claim_basis": Value::Null,
+            "pr_number": Value::Null, "sessions": [], "age_hours": age,
+            "blocked_by": Value::Null, "blocked_reason": Value::Null,
+        })
+    }
+
+    #[test]
+    fn an_old_unclaimed_ready_node_is_stuck_and_a_held_one_never_is() {
+        let v = stuck_verdict(&folds(&[
+            row("x-1", "ready", "no-record", 2.0),
+            row("x-2", "in_progress", "free", 5.5),
+            // Held is not stuck however old it is.
+            row("x-3", "ready", "live", 99.0),
+            // Young is not stuck however unclaimed it is.
+            row("x-4", "ready", "no-record", 0.2),
+        ]));
+        assert_eq!(v["unclaimed"], json!(["x-1", "x-2"]));
+        let line = stuck_line(&v);
+        assert!(line.contains("2 ready over 60m with no worker"));
+        assert!(!line.contains("x-3") && !line.contains("x-4"));
+    }
+
+    #[test]
+    fn a_blocked_node_names_what_it_waits_on() {
+        let mut r = row("x-1", "blocked", "no-record", 0.1);
+        r["blocked_by"] = json!(["x-9", "x-8"]);
+        let v = stuck_verdict(&folds(&[r]));
+        assert_eq!(v["blocked"][0]["id"], "x-1");
+        let line = stuck_line(&v);
+        // A count that never says what on is the gap this closes.
+        assert!(line.contains("1 blocked"));
+        assert!(line.contains("x-8") && line.contains("x-9"));
+    }
+
+    #[test]
+    fn an_unproven_claim_is_stuck_whatever_its_age() {
+        let v = stuck_verdict(&folds(&[
+            row("x-1", "ready", "unreadable", 0.1),
+            row("x-2", "ready", "corrupted", 0.1),
+        ]));
+        assert_eq!(v["unproven_claim"], json!(["x-1", "x-2"]));
+        assert_eq!(v["unclaimed"], json!([]));
+        assert!(stuck_line(&v).contains("2 with an unproven claim"));
+    }
+
+    #[test]
+    fn an_old_review_needs_a_pr_to_count() {
+        let mut with_pr = row("x-1", "in_review", "no-record", 4.0);
+        with_pr["pr_number"] = json!(12);
+        let v = stuck_verdict(&folds(&[
+            with_pr,
+            row("x-2", "in_review", "no-record", 4.0),
+        ]));
+        assert_eq!(v["in_review"], json!(["x-1"]));
+    }
+
+    #[test]
+    fn a_long_clause_names_a_few_and_counts_the_rest() {
+        let rows: Vec<Value> = (0..12)
+            .map(|i| row(&format!("x-{i:02}"), "ready", "no-record", 4.0))
+            .collect();
+        let v = stuck_verdict(&folds(&rows));
+        // The full list stays in the JSON; only the line is capped.
+        assert_eq!(v["unclaimed"].as_array().unwrap().len(), 12);
+        let line = stuck_line(&v);
+        assert!(line.contains("12 ready over 60m with no worker"));
+        assert!(line.contains("x-00, x-01, x-02, x-03, x-04, +7 more"));
+        assert!(!line.contains("x-11"));
+    }
+
+    #[test]
+    fn a_quiet_scope_renders_an_empty_line_never_a_blind_one() {
+        let v = stuck_verdict(&folds(&[
+            row("x-1", "ready", "live", 99.0),
+            row("x-2", "ready", "no-record", 0.2),
+        ]));
+        assert_eq!(stuck_line(&v), "");
+        assert_eq!(v["blind"], json!([]));
+    }
+
+    #[test]
+    fn a_node_two_crowns_both_cover_is_counted_once() {
+        // An L1 crown folds the nodes its L2 epics also fold.
+        let node = row("x-1", "ready", "no-record", 3.0);
+        let mut two = folds(&[node.clone()]);
+        two.insert(
+            "beta".to_string(),
+            json!({"status": "ok", "total": 1, "counts": {}, "nodes": [node], "omitted": 0}),
+        );
+        let v = stuck_verdict(&two);
+        assert_eq!(v["unclaimed"], json!(["x-1"]));
+    }
+
+    #[test]
+    fn one_fault_across_every_crown_is_one_line() {
+        let mut two = BTreeMap::new();
+        for scope in ["alpha", "beta", "gamma"] {
+            two.insert(
+                scope.to_string(),
+                json!({"status": "unresolved", "reason": "the fold timed out after 30s"}),
+            );
+        }
+        let v = stuck_verdict(&two);
+        assert_eq!(v["blind"].as_array().unwrap().len(), 1);
+        let line = stuck_line(&v);
+        assert!(line.contains("could not answer: the fold timed out after 30s"));
+        // A blind read must never render as a clean one.
+        assert_ne!(line, "");
     }
 
     #[test]

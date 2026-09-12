@@ -476,7 +476,8 @@ def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> 
     # fails here.
     assert rendered.pop("gate")["verdict"]
     assert rendered.pop("sessions_readable") is True
-    assert rendered["summary"].pop("stuck")["threshold_minutes"] == 60
+    assert "blind" in rendered["summary"].pop("stuck")
+    assert rendered["summary"].pop("stuck_line") == ""
     assert rendered == gather_court()
 
 
