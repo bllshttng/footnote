@@ -763,13 +763,16 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
 
 
 def request_scoreboard_classify(
-    entries: list[dict], rows: list[dict], project: str | None = None
+    entries: list[dict],
+    rows: list[dict],
+    project: str | None = None,
+    now=None,
 ) -> dict:
     """The delivery classifier (scoreboard.rs) over client-shipped rows.
 
     The terminal vocabulary stays owned by ``fno.terminals`` on this side; the
-    keeper owns the decision and the project scope. Raises like every store op
-    when the worker is unavailable."""
+    keeper owns the decision, the project scope and the survival cohort.
+    ``now`` rides as ISO text for the survival window."""
     from fno.terminals import DELIVERED_TERMINALS
 
     return _client_for(GRAPH_JSON).request(
@@ -781,6 +784,7 @@ def request_scoreboard_classify(
             "delivery_terminals": ["DoneDelivery"],
             "ship_terminals": sorted(DELIVERED_TERMINALS - {"DoneAdvisory", "DoneDelivery"}),
             "project": project,
+            "now": now.isoformat() if now is not None else None,
         },
     )
 

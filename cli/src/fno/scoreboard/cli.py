@@ -332,7 +332,7 @@ def scoreboard_command(
         graph_nodes,
         since_days=since,
         now=datetime.now(),
-        deliveries=(classified or {}).get("by_node"),
+        classified=classified,
     )
 
     sb["event_coverage"] = touch_read["coverage"]

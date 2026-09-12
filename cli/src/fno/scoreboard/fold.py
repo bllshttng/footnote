@@ -47,16 +47,20 @@ def _is_shipped_reason(termination_reason: str | None) -> bool:
     return tr in _SHIPPED_TERMINALS
 
 
-def classify_deliveries(graph_nodes: list[dict], rows: list[dict], project: str | None = None) -> dict:
+def classify_deliveries(
+    graph_nodes: list[dict],
+    rows: list[dict],
+    project: str | None = None,
+    now=None,
+) -> dict:
     """The one delivery classification, answered by the Rust keeper
-    (scoreboard.rs via the graph store): the full payload with ``by_node``
-    (node id -> {class, delivered, confirmed, evidence, ship_ts,
-    cost_known}), ``coverage``, and - with a project - the scoped
+    (scoreboard.rs via the graph store): the full payload with ``by_node``,
+    ``coverage``, ``survival``, and - with a project - the scoped
     ``entries``/``rows``/``node_ids``. Test seam: monkeypatch this name to
     keep a fold test hermetic."""
     from fno.graph.store import request_scoreboard_classify
 
-    return request_scoreboard_classify(graph_nodes, rows, project)
+    return request_scoreboard_classify(graph_nodes, rows, project, now)
 
 
 def emission_failures_snapshot() -> dict:
@@ -348,14 +352,15 @@ def build_scoreboard(
     *,
     since_days: int,
     now: datetime,
-    deliveries: dict | None = None,
+    classified: dict | None = None,
 ) -> dict:
     """Fold the three sources into a render-ready dict. Pure when
-    ``deliveries`` is passed; otherwise the keeper answers one classifier call.
+    ``classified`` is passed; otherwise the keeper answers one classifier call.
 
-    Delivery is the one classifier's answer (``deliveries``), not a union:
-    a merge delivers with no ledger row, and a session terminal on a known
-    unmerged node records evidence without shipping anything."""
+    Delivery is the one classifier's answer (``classified["by_node"]``), not a
+    union: a merge delivers with no ledger row, and a session terminal on a
+    known unmerged node records evidence without shipping anything. Survival
+    (the 14-day quality cohort) rides the same payload."""
     cutoff = now - timedelta(days=since_days)
 
     def _in_window(ts_raw) -> bool:
@@ -365,7 +370,42 @@ def build_scoreboard(
     windowed = [r for r in rows if _in_window(r.get("completed"))]
     total = len(windowed)
 
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
+    classified = classified if classified is not None else classify_deliveries(graph_nodes, rows, now=now)
+    deliveries = classified["by_node"]
+    survival = classified.get("survival") or {
+        "available": False,
+        "reason": "classifier gave no survival",
+    }
+    window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
+    delivered_nodes = {
+        nid
+        for nid in set(deliveries) | window_node_ids
+        if (c := deliveries.get(nid))
+        and c.get("delivered")
+        and _in_window(c.get("ship_ts"))
+    }
+
+    if total == 0 and not delivered_nodes:
+        return {"state": "no_data", "since_days": since_days, "rows": 0}
+
+    with_tr = sum(1 for r in windowed if r.get("termination_reason"))
+    with_node = sum(1 for r in windowed if r.get("graph_node_id"))
+    coverage = {
+        "rows": total,
+        "termination_reason_pct": _pct(with_tr, total),
+        "node_linkage_pct": _pct(with_node, total),
+    }
+
+    stop_cause = dict(
+        Counter(r["termination_reason"] for r in windowed if r.get("termination_reason"))
+    )
+
+    ship_rows = [r for r in windowed if _row_shipped(r, deliveries)]
+    terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
+    shipped_nodes = delivered_nodes
+    delivery_classes = dict(
+        Counter(deliveries[nid].get("class") for nid in delivered_nodes if nid in deliveries)
+    )
     window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
     delivered_nodes = {
         nid
@@ -425,7 +465,6 @@ def build_scoreboard(
     }
 
     autonomy = _autonomy(touch_events, shipped_nodes, cutoff, now)
-    survival = _survival(shipped_nodes, ship_rows, graph_nodes, now)
 
     full = coverage["termination_reason_pct"] == 100 and autonomy["available"] and survival["available"]
     return {
@@ -460,71 +499,6 @@ def _autonomy(touch_events: list[dict], shipped_nodes: set, cutoff, now) -> dict
         "touches": len(in_window),
         "shipped_nodes": len(shipped_nodes),
         "touches_per_shipped_node": round(len(in_window) / len(shipped_nodes), 2),
-    }
-
-
-def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict], now) -> dict:
-    """Shipped nodes with no `reverted` flag and no caused_by fix-node created
-    within the follow-up window. Degrades to n/a until any node carries a Wave 4
-    causal field. Only deliveries that completed the observation period are
-    judged; younger ones are reported pending, never in the denominator."""
-    w4 = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
-    if not w4:
-        return {"available": False, "reason": "no causal telemetry (Wave 4 not shipped)"}
-    if not shipped_nodes:
-        return {"available": False, "reason": "no shipped nodes in window"}
-
-    by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
-    ship_ts = {r["graph_node_id"]: _parse_ts(r.get("completed")) for r in ship_rows if r.get("graph_node_id")}
-    # A node that shipped by merge has no ship row, so the graph's completed_at
-    # wins when present; the row's completed is the fallback (x-b6bd).
-    for nid in shipped_nodes:
-        node_ts = _parse_ts(by_id.get(nid, {}).get("completed_at"))
-        if node_ts:
-            ship_ts[nid] = node_ts
-    # Fix-nodes grouped by the node they blame.
-    fixes: dict[str, list[dict]] = {}
-    for gn in graph_nodes:
-        origin = gn.get("caused_by")
-        if origin:
-            fixes.setdefault(origin, []).append(gn)
-
-    # A delivery younger than the observation window has no quality yet.
-    mature = {
-        nid
-        for nid in shipped_nodes
-        if (ts := ship_ts.get(nid)) is not None
-        and now - ts >= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS)
-    }
-    pending = len(shipped_nodes) - len(mature)
-
-    survived = 0
-    for nid in mature:
-        node = by_id.get(nid, {})
-        if node.get("reverted"):
-            continue
-        shipped_at = ship_ts.get(nid)
-        followed = False
-        for fx in fixes.get(nid, []):
-            fx_at = _parse_ts(fx.get("created_at"))
-            # A follow-up is a fix created AFTER the ship, within the window. A
-            # fix pre-dating the ship (negative delta) is not a follow-up to it.
-            if shipped_at and fx_at and timedelta(0) <= (fx_at - shipped_at) <= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS):
-                followed = True
-                break
-            if not shipped_at or not fx_at:
-                followed = True  # can't time-bound it; count conservatively against survival
-                break
-        if not followed:
-            survived += 1
-
-    n = len(mature)
-    return {
-        "available": True,
-        "survived": survived,
-        "shipped_nodes": n,
-        "rate_pct": _pct(survived, n),
-        "pending": pending,
     }
 
 

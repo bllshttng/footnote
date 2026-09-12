@@ -12,11 +12,19 @@ the keeper disagree.
 from __future__ import annotations
 
 
-def reference_deliveries(graph_nodes: list[dict], rows: list[dict], project: str | None = None) -> dict:
+def reference_deliveries(
+    graph_nodes: list[dict],
+    rows: list[dict],
+    project: str | None = None,
+    now=None,
+) -> dict:
+    from datetime import datetime
+
     from fno.terminals import DELIVERED_TERMINALS
 
     doc = {"DoneAdvisory"}
     delivery = {"DoneDelivery"}
+    followup_days = 14
 
     all_nodes = [n for n in graph_nodes or [] if isinstance(n, dict) and n.get("id")]
     all_rows = [r for r in rows or [] if isinstance(r, dict)]
@@ -95,6 +103,61 @@ def reference_deliveries(graph_nodes: list[dict], rows: list[dict], project: str
             "inferred_nodes": sum(1 for c in by_node.values() if c["class"] == "inferred"),
         },
     }
+
+    # The 14-day quality cohort, mirroring the keeper: only deliveries that
+    # completed the observation window are judged; the rest are pending.
+    by_id = {n["id"]: n for n in nodes}
+    w4 = any(("reverted" in n) or n.get("caused_by") for n in nodes)
+    if not w4:
+        result["survival"] = {
+            "available": False,
+            "reason": "no causal telemetry (Wave 4 not shipped)",
+        }
+    elif not any(c["delivered"] for c in by_node.values()):
+        result["survival"] = {
+            "available": False,
+            "reason": "no shipped nodes in window",
+        }
+    else:
+        mature = {}
+        for nid, c in by_node.items():
+            if not c["delivered"]:
+                continue
+            raw = c.get("ship_ts")
+            if isinstance(raw, str) and raw.endswith("Z"):
+                raw = raw[:-1]
+            ts = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+            if ts is not None and now is not None and (now - ts).total_seconds() >= followup_days * 86400:
+                mature[nid] = ts
+        survived = 0
+        for nid, shipped_at in mature.items():
+            if by_id.get(nid, {}).get("reverted"):
+                continue
+            for fix in nodes:
+                if fix.get("caused_by") != nid:
+                    continue
+                fx_raw = fix.get("created_at")
+                if isinstance(fx_raw, str) and fx_raw.endswith("Z"):
+                    fx_raw = fx_raw[:-1]
+                fx_at = datetime.fromisoformat(fx_raw) if isinstance(fx_raw, str) else None
+                if fx_at is None:
+                    followed = True
+                elif shipped_at and fx_at >= shipped_at and (fx_at - shipped_at).total_seconds() <= followup_days * 86400:
+                    followed = True
+                else:
+                    followed = False
+                if followed:
+                    break
+            else:
+                survived += 1
+        result["survival"] = {
+            "available": True,
+            "survived": survived,
+            "shipped_nodes": len(mature),
+            "rate_pct": round(100 * survived / len(mature)) if mature else 0,
+            "pending": sum(1 for c in by_node.values() if c["delivered"]) - len(mature),
+        }
+
     if scope is not None:
         result["coverage"]["project_scope"] = scope
         result["scoped"] = {
