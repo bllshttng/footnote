@@ -872,6 +872,23 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
 
     if worker_verdicts is None:
         engaged, unmeasurable, worker_verdicts = classify_workers(workers)
+        if any(w.get("closed_own_row") for w in workers):
+            # The closed-own-row stamp outranks the transcript: the session
+            # closed its own phase row on this node, so it is finished HERE
+            # whatever it wrote afterwards (x-c08a).
+            from fno.agents.reachability import REACHABLE, UNREACHABLE, UNKNOWN
+
+            for w in workers:
+                if w.get("closed_own_row"):
+                    worker_verdicts[w.get("name") or ""] = UNREACHABLE
+            engaged = [
+                w for w in workers
+                if worker_verdicts.get(w.get("name") or "") == REACHABLE
+            ]
+            unmeasurable = [
+                w for w in workers
+                if worker_verdicts.get(w.get("name") or "") == UNKNOWN
+            ]
     else:
         from fno.agents.reachability import REACHABLE, UNKNOWN
 
@@ -989,7 +1006,20 @@ def status(
             from fno.graph.store import read_nodes_by_ids
             from fno.paths import graph_json
 
-            reply = read_nodes_by_ids(graph_json(), [node_id]) or {}
+            reply = read_nodes_by_ids(graph_json(), [node_id])
+            if reply is None:
+                # The fast path cannot answer (no keeper, a keeper that predates
+                # read_ids); the seam documents a full-read fallback so a stale
+                # keeper never reads as "no entry" and skips the closed-session
+                # filter below.
+                from fno.graph.store import read_graph_strict
+
+                reply = {
+                    "entries": [
+                        e for e in read_graph_strict(graph_json())
+                        if isinstance(e, dict) and e.get("id") == node_id
+                    ],
+                }
             entry = next(iter(reply.get("entries") or []), None)
         except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
             entry = None
@@ -1002,14 +1032,15 @@ def status(
                 worked = live_worked_node_ids(
                     strict=True, entries=[entry], reading=reading
                 )
-                # The display field drops the same rows the overlay's
+                # The display field stamps the same rows the overlay's
                 # worked_by excludes: a session whose own phase row closed
-                # never renders here as an occupancy candidate.
+                # never renders here as an occupancy candidate, but stays on
+                # `roster_workers` so the verdict line can name it under its
+                # finished-sessions outcome.
                 closed = closed_worker_session_ids(entry)
-                info["roster_workers"] = [
-                    w for w in info.get("roster_workers") or []
-                    if str(w.get("row_id") or "") not in closed
-                ]
+                for w in info.get("roster_workers") or []:
+                    if str(w.get("row_id") or "") in closed:
+                        w["closed_own_row"] = True
             except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
                 typer.echo(f"worked overlay degraded: {exc}", err=True)
                 worked = {}

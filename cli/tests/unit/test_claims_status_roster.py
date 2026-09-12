@@ -238,3 +238,116 @@ def test_degraded_coverage_hedges_the_basis(cwd_tmp, roster, monkeypatch):
     r = runner.invoke(cli, ["status", NODE])
     assert "UNCLAIMED but a live worker" in r.output
     assert "coverage degraded: 31 of 53 rows unresolved" in r.output
+
+
+# --- x-c08a: the close receipt reaches the claim-status verdict ---------------
+
+
+def _pin_closed_entry(monkeypatch) -> None:
+    """Pin the graph read to this node whose only session row (a blueprint
+    window for session bp-x) is CLOSED, so the closed-session filter is what
+    drops the roster worker."""
+    entry = {
+        "id": NODE.removeprefix("node:"),
+        "status": "ready",
+        "sessions": [
+            {
+                "phase": "blueprint",
+                "harness": "claude",
+                "session_id": "bp-x",
+                "started_at": "2026-09-11T15:00:00Z",
+                "ended_at": "2026-09-11T16:00:54Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.graph.store.read_nodes_by_ids",
+        lambda *_a, **_kw: {"entries": [entry]},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids", _real_live_worked_node_ids
+    )
+
+
+def _undatable_transcript(monkeypatch) -> None:
+    """An unreadable transcript leaves the supervisor word as the only
+    evidence; a `done` word then positively ends the row instead of reading
+    live-by-default."""
+    def _raise(*_a, **_kw):
+        raise RuntimeError("no transcript on disk")
+
+    monkeypatch.setattr("fno.agents.watchdog.tail_facts", _raise)
+
+
+def test_a_closed_session_frees_the_claim_status_verdict(
+    cwd_tmp, roster, monkeypatch
+):
+    """AC2-HP: the only roster worker closed its own row on this node. It
+    renders no worked_by, and the stderr line reaches its finished-sessions
+    outcome instead of the live-worker alarm."""
+    _pin_closed_entry(monkeypatch)
+    _undatable_transcript(monkeypatch)
+    roster(_workers({"name": "bp-x", "state": "done", "cwd": "/wt/ac1-node",
+                     "row_id": "bp-x"}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    assert info["state"] == "free"
+    r = runner.invoke(cli, ["status", NODE])
+    assert "1 finished session(s) resolved to it: bp-x" in r.output
+
+
+def test_a_graph_read_failure_keeps_todays_verdict(cwd_tmp, roster, monkeypatch):
+    """AC2-HP error arm: when the graph read raises, nothing is skipped and
+    the verdict matches today's output (the worker renders finished, since a
+    `done` word with a silent tail is positive evidence of the end)."""
+    def _boom(*_a, **_kw):
+        raise RuntimeError("graph down")
+
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", _boom)
+    _undatable_transcript(monkeypatch)
+    roster(_workers({"name": "bp-x", "state": "done", "cwd": "/wt/ac1-node",
+                     "row_id": "bp-x"}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    r = runner.invoke(cli, ["status", NODE])
+    assert "1 finished session(s) resolved to it: bp-x" in r.output
+
+
+def test_a_stale_keeper_falls_back_to_the_full_read(cwd_tmp, roster, monkeypatch):
+    """The by-id fast path answers None when it cannot (a stale keeper); the
+    documented fallback is the full read, so the closed-session filter still
+    applies instead of reading as 'no entry'."""
+    closed_entry = {
+        "id": NODE.removeprefix("node:"),
+        "status": "ready",
+        "sessions": [
+            {
+                "phase": "blueprint",
+                "harness": "claude",
+                "session_id": "bp-x",
+                "started_at": "2026-09-11T15:00:00Z",
+                "ended_at": "2026-09-11T16:00:54Z",
+            }
+        ],
+    }
+    monkeypatch.setattr("fno.graph.store.read_nodes_by_ids", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict",
+        lambda *_a, **_kw: [closed_entry],
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids", _real_live_worked_node_ids
+    )
+    _undatable_transcript(monkeypatch)
+    roster(_workers({"name": "bp-x", "state": "done", "cwd": "/wt/ac1-node",
+                     "row_id": "bp-x"}))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert "worked_by" not in info
+    r = runner.invoke(cli, ["status", NODE])
+    assert "1 finished session(s) resolved to it: bp-x" in r.output
