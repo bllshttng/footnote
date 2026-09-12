@@ -2422,6 +2422,12 @@ fn now_iso() -> String {
     epoch_to_iso(now_secs())
 }
 
+/// Public twin for cross-module callers that need the same UTC stamp shape
+/// (the mux stats answer carries the counter's measurement window).
+pub fn epoch_to_iso_public(secs: u64) -> String {
+    epoch_to_iso(secs)
+}
+
 fn epoch_to_iso(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;

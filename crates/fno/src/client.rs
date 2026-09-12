@@ -10383,7 +10383,10 @@ async fn attach_and_run(
                 // client. (v71) The prune reload is the same one-shot shape.
                 // (v75) The exact-session retirement, same one-shot shape.
                 | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. },
+                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                // (v78) ServerStats answers a one-shot `fno mux stats` control
+                // connection, never an attached client.
+                | ServerMsg::ServerStats { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10887,7 +10890,10 @@ async fn attach_and_run(
                     // connection only. (v71) The prune reload is the same shape.
                     // (v75) The exact-session retirement, same one-shot shape.
                     | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }) => {}
+                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                    // (v78) ServerStats answers a one-shot `fno mux stats`
+                    // control connection only.
+                    | ServerMsg::ServerStats { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback

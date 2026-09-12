@@ -46,6 +46,13 @@ fn str_field<'a>(node: &'a Map<String, Value>, key: &'a str) -> Option<&'a str> 
         .filter(|s| !s.is_empty())
 }
 
+fn project_of(obj: &Map<String, Value>, project: &str) -> bool {
+    obj.get("project")
+        .and_then(Value::as_str)
+        .map(|p| p == project)
+        .unwrap_or(false)
+}
+
 /// Classify one node from its graph row and its ledger rows.
 /// The returned shape is the wire contract the Python views consume.
 pub fn classify_node(
@@ -125,14 +132,72 @@ pub fn classify_node(
 /// Returns `{"by_node": {...}, "coverage": {...}}`. Pure; no file I/O.
 pub fn classify(params: &Value) -> Result<Value, String> {
     let empty = Vec::new();
-    let entries = params
+    let all_entries = params
         .get("entries")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    let rows = params
+    let all_rows = params
         .get("rows")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
+    // Optional project scope: the denominator is scoped once, here, so no
+    // view re-filters. Rows with no project stay unattributed - counted in
+    // the scope, never copied into the project.
+    let project = params
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let mut scope: Option<Value> = None;
+    let mut node_ids: Vec<String> = Vec::new();
+    let (entries, rows): (Vec<Value>, Vec<Value>) = match project {
+        Some(project) => {
+            let of = |v: &Value, key: &str| -> bool {
+                v.get(key)
+                    .and_then(Value::as_str)
+                    .map(|p| p == project)
+                    .unwrap_or(false)
+            };
+            let of_obj = |n: &Map<String, Value>| project_of(n, project);
+            node_ids = all_entries
+                .iter()
+                .filter_map(Value::as_object)
+                .filter(|n| of_obj(n))
+                .filter_map(|n| str_field(n, "id"))
+                .map(str::to_string)
+                .collect();
+            let entries: Vec<Value> = all_entries
+                .iter()
+                .filter(|n| n.as_object().map(of_obj).unwrap_or(false))
+                .cloned()
+                .collect();
+            let rows: Vec<Value> = all_rows
+                .iter()
+                .filter(|r| r.as_object().map(of_obj).unwrap_or(false))
+                .cloned()
+                .collect();
+            let unattributed = all_rows
+                .iter()
+                .filter(|r| {
+                    r.get("project")
+                        .and_then(Value::as_str)
+                        .map(str::is_empty)
+                        .unwrap_or(true)
+                })
+                .count();
+            let in_project = rows.len();
+            scope = Some(json!({
+                "project": project,
+                "nodes": node_ids.len(),
+                "unattributed_rows": unattributed,
+                "other_project_rows": all_rows.len() - in_project - unattributed,
+            }));
+            (entries, rows)
+        }
+        None => (
+            all_entries.clone(),
+            all_rows.iter().filter(|r| r.is_object()).cloned().collect(),
+        ),
+    };
     let list = |key: &str| -> Vec<String> {
         params
             .get(key)
@@ -155,7 +220,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
     };
 
     let mut by_id: BTreeMap<String, &Map<String, Value>> = BTreeMap::new();
-    for entry in entries {
+    for entry in &entries {
         let Some(obj) = entry.as_object() else {
             continue;
         };
@@ -167,7 +232,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
 
     let mut rows_by_node: BTreeMap<String, Vec<&Map<String, Value>>> = BTreeMap::new();
     let mut rowless: Vec<&Map<String, Value>> = Vec::new();
-    for row in rows {
+    for row in &rows {
         let Some(obj) = row.as_object() else {
             continue;
         };
@@ -194,7 +259,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
         .values()
         .filter(|c| c["class"] == "inferred")
         .count();
-    Ok(json!({
+    let mut result = json!({
         "by_node": by_node,
         "coverage": {
             "nodes": by_id.len(),
@@ -202,7 +267,17 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             "rows_without_node": rowless.len(),
             "inferred_nodes": inferred,
         },
-    }))
+    });
+    if let Some(scope) = scope {
+        result["coverage"]["project_scope"] = scope.clone();
+        result["scoped"] = json!({
+            "entries": entries,
+            "rows": rows,
+            "node_ids": node_ids,
+            "scope": scope,
+        });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -316,6 +391,33 @@ mod tests {
             assert_eq!(out["class"], "merged");
             assert_eq!(out["confirmed"], true);
         });
+    }
+
+    #[test]
+    fn project_scope_filters_and_reports_unattributed() {
+        let params = json!({
+            "entries": [
+                {"id": "x-1", "project": "p1", "merge_status": "merged"},
+                {"id": "x-2", "project": "p2", "merge_status": "merged"}
+            ],
+            "rows": [
+                {"graph_node_id": "x-1", "termination_reason": "DonePRGreen", "cost_usd": 1.0, "project": "p1"},
+                {"graph_node_id": "x-2", "termination_reason": "DonePRGreen", "cost_usd": 9.0, "project": "p2"},
+                {"completed": "2026-09-10T00:00:00Z", "termination_reason": "DonePRGreen", "cost_usd": 5.0}
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "project": "p1"
+        });
+        let out = classify(&params).unwrap();
+        assert_eq!(out["coverage"]["project_scope"]["project"], "p1");
+        assert_eq!(out["coverage"]["project_scope"]["unattributed_rows"], 1);
+        assert_eq!(out["coverage"]["project_scope"]["other_project_rows"], 1);
+        let scoped = &out["scoped"];
+        assert_eq!(scoped["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["node_ids"].as_array().unwrap().len(), 1);
     }
 
     #[test]

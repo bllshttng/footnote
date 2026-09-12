@@ -318,7 +318,7 @@ fn default_true() -> bool {
 /// v77 : `AgentRow.liveness_age_s` (a per-second server-computed age) is
 /// replaced by `liveness_measured_at`, the measurement instant; the client
 /// derives the age at render. Same decode both ways; floor stays 58.
-pub const PROTO_VERSION: u32 = 77;
+pub const PROTO_VERSION: u32 = 78;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -569,6 +569,9 @@ pub struct RestoreRow {
 pub enum ControlVerb {
     /// Every pane across every squad -> [`ServerMsg::PaneList`].
     PaneLs,
+    /// (v78) Server-instance telemetry -> [`ServerMsg::ServerStats`]. Read
+    /// only; touches no steering state and never resets the counter.
+    ServerStats,
     /// One pane's text -> [`ServerMsg::PaneText`]. Without `block`, `lines`
     /// selects the last N logical rows and (v6) reaches into scrollback history
     /// (full visible grid when `None`; AC5-UI keeps the no-flag behavior). With
@@ -2108,6 +2111,16 @@ pub enum ServerMsg {
     // -- v4 control-verb replies (one per Control connection, then close) --
     /// Answer to [`ControlVerb::PaneLs`].
     PaneList { panes: Vec<PaneInfo> },
+    /// (v78) Answer to [`ControlVerb::ServerStats`]: server-instance telemetry
+    /// the scoreboard reads. The counter is the in-memory human_touch
+    /// emission-failure count; it lives and dies with this instance, so the
+    /// answer carries its own measurement time and the instance start time
+    /// instead of posing as an all-time fact.
+    ServerStats {
+        touch_emit_failures: u64,
+        started_at: String,
+        measured_at: String,
+    },
     /// Answer to [`ControlVerb::PaneRead`]: the pane's text (matches
     /// [`crate::vt::frame_text`]). `block` (v6) carries the command-block
     /// metadata when the request selected a block; `None` for a plain grid/
@@ -4134,7 +4147,9 @@ mod tests {
         // v76  took 76; floor stays 58.
         // v77  took 77: AgentRow carries liveness_measured_at (the instant)
         // instead of a per-second age; floor stays 58.
-        assert_eq!(PROTO_VERSION, 77);
+        // v78  took 78: ControlVerb::ServerStats + ServerMsg::ServerStats (the
+        // scoreboard's read-only emission-failure counter); floor stays 58.
+        assert_eq!(PROTO_VERSION, 78);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

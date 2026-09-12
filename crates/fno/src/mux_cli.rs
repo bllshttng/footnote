@@ -1659,6 +1659,51 @@ pub fn doctor(json: bool) -> i32 {
     render_doctor(&gather_checks(), json)
 }
 
+/// `fno mux stats [--json]` (v78): server-instance telemetry over one control
+/// roundtrip. Read-only; the counter is never reset by reading it.
+pub fn stats(json: bool) -> i32 {
+    let env_session = std::env::var("FNO_MUX_SESSION").ok();
+    let session = resolve_session(None, env_session.as_deref());
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux stats: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    match control_roundtrip(&sock, &session, ControlVerb::ServerStats) {
+        Ok(ServerMsg::ServerStats {
+            touch_emit_failures,
+            started_at,
+            measured_at,
+        }) => {
+            if json {
+                let payload = serde_json::json!({
+                    "session": session,
+                    "touch_emit_failures": touch_emit_failures,
+                    "started_at": started_at,
+                    "measured_at": measured_at,
+                });
+                println!("{payload}");
+                EXIT_OK
+            } else {
+                println!(
+                    "touch emission failures: {touch_emit_failures} (server instance since {started_at}; measured {measured_at})"
+                );
+                EXIT_OK
+            }
+        }
+        Ok(other) => {
+            eprintln!("fno mux stats: unexpected reply {other:?}");
+            EXIT_ERROR
+        }
+        Err(e) => {
+            eprintln!("fno mux stats: {e}");
+            EXIT_ERROR
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `fno mux workspace prune` - reap dead-origin residue (x-a572)
 // ---------------------------------------------------------------------------
