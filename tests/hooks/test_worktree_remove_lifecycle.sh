@@ -143,6 +143,12 @@ echo "== 3. archive-worktree.sh declines cleanly without a tty =="
 S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
 WT="$S/wt"
+# The tty-decline test needs a finished-candidate tree: a fresh worktree on an
+# unmoved branch is refused by the reapable gate (reason=unborn) before the
+# confirmation prompt, which is the unborn bucket's job, not this test's.
+( cd "$WT" && printf 'x = 1\n' > f.py \
+  && git -c user.email=t@t -c user.name=t add f.py \
+  && git -c user.email=t@t -c user.name=t commit -qm work ) >/dev/null 2>&1
 ( cd "$WT" && exec sleep 300 ) & HOLD=$!
 disown "$HOLD" 2>/dev/null || true
 sleep 0.6
@@ -158,6 +164,27 @@ else
     echo "  SKIP: perl unavailable (needed for setsid)"
 fi
 kill "$HOLD" 2>/dev/null
+rm -rf "$S"
+
+echo "== 3b. archive: an unborn tree named by a human goes, named by a sweep it stays =="
+
+# Orphan recovery: `target init` advertises a plain `worktree archive` for a
+# tree that outlived its session, and that tree is often still unborn. A
+# manual archive names ONE tree a human decided about, so the setup-window
+# refusal must not stand in front of it; an automatic leg (the sweep or the
+# ritual passes FNO_WT_REMOVE_CALLER) keeps the refusal.
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$WT" ]]; then pass "manual archive removes an unborn tree"; else fail "manual unborn archive" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
+rm -rf "$S"
+
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 2 && -d "$WT" ]] && echo "$out" | grep -q 'reason=unborn'; then pass "sweep-caller archive still refuses an unborn tree"; else fail "sweep unborn refuse" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
 rm -rf "$S"
 
 echo "== 4. sweep reaps dead bg-job records =="

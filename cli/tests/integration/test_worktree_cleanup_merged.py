@@ -1197,6 +1197,14 @@ def _wire_real_reapable(canon: Path) -> None:
     `cli/` carrying src plus the venv have to sit under the fixture root.
     """
     venv = REPO_ROOT / "cli" / ".venv" / "bin" / "python3"
+    if not venv.exists():
+        # A linked worktree carries cli/src but no cli/.venv; the canonical
+        # checkout is what fno-python.sh resolves in the same spot. The
+        # interpreter is only the runner: canon/cli/src stays symlinked to
+        # THIS checkout, so PYTHONPATH pins the source under test either way.
+        first = _git(REPO_ROOT, "worktree", "list", "--porcelain").stdout.splitlines()[0]
+        canonical = Path(first.removeprefix("worktree "))
+        venv = canonical / "cli" / ".venv" / "bin" / "python3"
     # Named, because without it wt_reapable falls through to whatever `fno` is
     # installed, which may predate this change and answers `reapable=no`. The
     # test would then fail as "kept (dirty)" and read as a code defect.
@@ -1239,3 +1247,33 @@ def test_a_real_untracked_file_beside_setup_symlinks_keeps_the_tree(repo: Path):
 
     assert wt.exists(), "a tree holding real untracked work must be kept" + diag
     assert (wt / "cli" / "scratch.py").exists(), diag
+
+
+# ── an unborn worktree is not a merged worktree ─────────────────────────────
+#
+# A fresh `git worktree add -b <name> main` branch has zero commits of its
+# own, so it is a literal ancestor of origin/main: the exact clean-and-merged
+# bucket this sweep prunes. Measured 2026-09-12, 29 trees were eaten that way
+# in one night, three of them live dispatches mid-setup.
+
+
+def test_unborn_worktree_survives_the_sweep_and_is_named(repo: Path):
+    """The node's own acceptance: a fresh tree survives `cleanup --merged --apply`.
+
+    Asserting only that a tree WITH commits survives passes today and misses
+    the defect entirely, so the fixture here is deliberately commitless. The
+    real classifier is wired in (`_wire_real_reapable`): the sweep must hear
+    the refusal from the gate, not from a stub's blanket `dirty`.
+    """
+    _wire_real_reapable(repo)
+    wt = repo / "wt-unborn"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/unborn", "main")
+    assert not _git(wt, "status", "--porcelain").stdout.strip(), "the tree must read clean"
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (unborn)" in r.stdout, diag
+    assert wt.exists(), "the sweep ate a worker's tree during its setup window" + diag
+    assert "1 unborn" in r.stdout, f"the Summary must name the new bucket: {diag}"

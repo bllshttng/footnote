@@ -60,9 +60,15 @@ wt_reapable() {
     fi
 
     local out="" rc=0 verdict=2
+    # WT_REAPABLE_ALLOW_UNBORN=1 lifts the setup-window refusal for a tree a
+    # human NAMED (the orphan-recovery path). Bulk sweeps and daemon probes
+    # never set it: for an automatic caller an unborn tree stays a refusal.
+    local unborn_flag=""
+    [[ "${WT_REAPABLE_ALLOW_UNBORN:-0}" == "1" ]] && unborn_flag="--allow-unborn"
     if [[ -n "${FNO_PYTHON:-}" && -d "${root}/cli/src" ]]; then
+        # shellcheck disable=SC2086  # empty flag must vanish, not arrive empty
         out="$(PYTHONPATH="${root}/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$FNO_PYTHON" -m fno.cli worktree reapable "$target" 2>/dev/null)" || rc=$?
+            "$FNO_PYTHON" -m fno.cli worktree reapable $unborn_flag "$target" 2>/dev/null)" || rc=$?
         verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
     fi
 

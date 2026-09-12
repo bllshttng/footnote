@@ -541,6 +541,10 @@ def _worktree_ensure(
 @app.command()
 def reapable(
     path: str = typer.Argument(..., help="Worktree path to classify."),
+    allow_unborn: bool = typer.Option(
+        False, "--allow-unborn",
+        help="Lift the setup-window refusal for a tree a human named.",
+    ),
 ) -> None:
     """Say whether removing <path> can destroy anything. Read-only.
 
@@ -553,10 +557,13 @@ def reapable(
     loses nothing. Nor do the symlinks setup-worktree.sh writes, which
     `reason=setup-links` and `detail` name. Modified tracked content, other
     untracked files, unmerged conflicts and an unanswerable probe do block.
+    A worktree inside its 30-minute setup window on a branch that never
+    moved blocks too (`reason=unborn`); `--allow-unborn` lifts exactly that,
+    for the one-tree orphan recovery, never for a bulk sweep.
     """
     from fno.worktree_reapable import reapable as _classify
 
-    verdict = _classify(path)
+    verdict = _classify(path, allow_unborn=allow_unborn)
     typer.echo(verdict.line())
     raise typer.Exit(code=0 if verdict.reapable else 1)
 

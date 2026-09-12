@@ -73,6 +73,12 @@ Every removal emits one `worktree_removed` event row (path, caller, claim read, 
 
 The merge reaper removes a done-and-merged node's tree whatever its git status, keeps the branch, and holds only unpushed work: a HEAD that is not an ancestor of origin/main is not dirt, and an unreadable origin holds too. The recoverability argument is the ruling: the branch is pushed, the transcript persists, the node records the PR, so removal is cheap and reversible and hoarding is not. An OPEN node's tree keeps the old boundary, report only; setup's own symlinks into canonical are the one discounted case (`reason=setup-links`). While a request's tree is held (unpushed, or a removal that failed) the request stays pending and echoes the hold at most once an hour, so a later pass takes the tree once the hold clears instead of tombstoning it forever.
 
+### The unborn bucket
+
+A worktree added on a new branch off `origin/main` has zero commits of its own until its first commit. The branch is then a literal ancestor of main, so the gate read it clean plus merged: exactly the bucket the sweep prunes. Measured 2026-09-12: 29 `worktree_removed` rows in one night carried that read. Three of them were live dispatches mid-setup. A worker whose cwd vanishes goes quiet with no error anyone can read. The gate now refuses such a tree (`reapable=no reason=unborn`, row `kept (unborn)`) inside a 30-minute setup window. The window is measured from the `.git` file's mtime, which git writes once at `worktree add` and never rewrites.
+
+Neither reading alone is safe. Bare zero-commits-ahead also reads a branch whose work landed and was then rebased. Refusing that bricks the reaper for every merged tree. The branch reflog is the discriminator: creation writes one entry, and any commit, reset or rebase writes more. The reflog read alone can also hold a landed tree whose reflog expired (90 days by default). So the tree's age is the second reading, and an old unborn tree is still reclaimable. A detached HEAD answers not-unborn: content judges those, and the sweep counts their unpushed commits. An unanswerable probe answers unborn: a probe that cannot read never authorizes a removal. One carve-out: an archive that names a single tree is a human decision, so the manual archive lifts the refusal. The bulk reapers keep it.
+
 ### Who occupies a worktree
 
 The process table plus the lsof cwd snapshot (`_wt_pids`) is the only truthful occupancy source. Every classification reads that enumeration. None invents a second one.

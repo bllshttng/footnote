@@ -403,6 +403,12 @@ if [[ "$FORCE" -eq 0 ]]; then
     exit 2
   fi
   _REAPABLE_LIB="$_CHECK_REAPABLE_LIB"
+  # A tree a human NAMED is the orphan-recovery path target init advertises
+  # when a worktree outlives its session; the setup-window refusal exists for
+  # automatic reapers, so a manual archive may proceed on an unborn tree.
+  # Content checks are unchanged. An automatic leg (FNO_WT_REMOVE_CALLER
+  # names its sweep or ritual) keeps the refusal.
+  [[ -z "${FNO_WT_REMOVE_CALLER:-}" ]] && WT_REAPABLE_ALLOW_UNBORN=1
   if [[ -f "$_REAPABLE_LIB" ]]; then
     if ! wt_reapable "$TARGET"; then
       echo "archive-worktree: $WT_REAPABLE_LINE at $TARGET" >&2

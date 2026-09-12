@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
@@ -46,6 +47,12 @@ _UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 # What `setup-worktree.sh` links, canonical-relative: these five roots, and
 # anything one level under `.claude/`. A shape, not a list: the script's grows.
 _SETUP_LINK_ROOTS = frozenset({"internal", ".agents", ".codex", ".codex-plugin", ".gemini"})
+
+# A tree git created minutes ago is not a finished tree. Measured 2026-09-12:
+# a worktree on a new branch off origin/main reads `reapable=yes reason=clean`
+# before its first commit, because a zero-commit branch is a literal ancestor
+# of main. 29 removals in one night were that read, three of them live.
+_SETUP_WINDOW_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -147,6 +154,61 @@ def is_linked_worktree(path: Union[str, Path]) -> bool:
         return False
 
 
+def _inside_setup_window(path: Union[str, Path]) -> bool:
+    """Was this worktree's `.git` file written within the setup window?
+
+    Git writes the `.git` file once at `worktree add` and does not rewrite it
+    in normal use, so its mtime is the tree's creation time (measured across
+    seven live trees against the admin gitdir's). A stat that fails reads as
+    inside the window: an unanswerable probe never shortens the keep.
+    """
+    try:
+        mtime = (Path(path) / ".git").stat().st_mtime
+    except OSError:
+        return True
+    return (time.time() - mtime) < _SETUP_WINDOW_SECONDS
+
+
+def branch_unborn(path: Union[str, Path]) -> bool:
+    """Has this worktree's branch never moved since `git worktree add` made it?
+
+    The reflog is the discriminator the merge status cannot supply: creation
+    writes one entry, any commit, reset or rebase writes more. Read alone it
+    would also hold a landed branch whose reflog has expired, so the caller
+    pairs it with the tree's age. A detached HEAD answers False: content, not
+    a branch name, judges those, and the sweep already counts their unpushed
+    commits. Any git read that fails answers True - a probe that cannot
+    answer must not authorize a removal.
+    """
+    target = Path(path)
+    try:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        if branch.returncode != 0:
+            return True
+        name = branch.stdout.strip()
+        if not name:
+            return False
+        log = subprocess.run(
+            ["git", "reflog", "show", name, "--format=%gs"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if log.returncode != 0:
+        return True
+    entries = [line for line in log.stdout.splitlines() if line.strip()]
+    return len(entries) <= 1
+
+
 def branch_merged(path: Union[str, Path]) -> Optional[bool]:
     """Is the worktree's branch merged into the repo's main line?
 
@@ -243,11 +305,16 @@ def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -
     return Verdict(True, "clean", "", deletions)
 
 
-def reapable(path: Union[str, Path]) -> Verdict:
+def reapable(path: Union[str, Path], allow_unborn: bool = False) -> Verdict:
     """Classify a worktree on disk. Fails CLOSED on any probe it cannot trust.
 
     A probe that cannot answer must not read as "safe to remove": an absence of
     reported dirt has two explanations, and only one of them is a clean tree.
+
+    `allow_unborn` lifts the setup-window refusal for one tree a human NAMED -
+    the orphan-recovery path `target init` advertises when a worktree outlives
+    its session. Automatic callers (the bulk sweeps, the daemon probes) never
+    pass it: for them an unborn tree stays a refusal.
     """
     target = Path(path)
     if not target.is_dir():
@@ -280,4 +347,14 @@ def reapable(path: Union[str, Path]) -> Verdict:
         root = canonical[0]
         return root is not None and _is_setup_link(target / rel, target, root)
 
-    return classify(r.stdout, _discount)
+    verdict = classify(r.stdout, _discount)
+    # Cheapest reads first: an aged tree pays one stat and no git subprocess.
+    if (
+        not allow_unborn
+        and verdict.reapable
+        and is_linked_worktree(target)
+        and _inside_setup_window(target)
+        and branch_unborn(target)
+    ):
+        return Verdict(False, "unborn", "branch has no commit of its own and the tree is inside the setup window")
+    return verdict
