@@ -1812,16 +1812,11 @@ def init(
         raise typer.Exit(code=2)
 
     # Task-context gate (x-59b0): a DECLARED required binding revalidates
-    # natively BEFORE the init script acquires the node claim or a seed is
-    # submitted. Refusal names its reason and exits 2 with no state written,
-    # so the existing owner (if any) is preserved. Undeclared -> no gate.
+    # natively BEFORE the init script acquires the node claim. Undeclared -> no gate.
     from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
 
     try:
-        gate_declared_task_context(
-            str((_dispatch_node or {}).get("id") or ""),
-            str(Path.cwd()),
-        )
+        gate_declared_task_context(str((_dispatch_node or {}).get("id") or ""), str(Path.cwd()))
     except TaskContextGateRefused as exc:
         typer.echo(
             f"fno do target init: task-context gate refused: {exc.reason}"
