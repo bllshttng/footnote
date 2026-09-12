@@ -85,6 +85,13 @@ TITLE_MATCH_MIN_LEN = 20
 _PUNCT_RE = re.compile(r"[^a-z0-9 ]+")
 _WS_RE = re.compile(r"\s+")
 
+# Node-id-shaped tokens; a token only matters when it RESOLVES against the
+# node store, so cv-/fu- ledger ids and stale ids fall out for free.
+_NODE_ID_RE = re.compile(r"\b([a-z][a-z0-9]{0,9}-[0-9a-f]{4,16})\b")
+
+# A named owner in one of these proves the row is already covered.
+_TERMINAL_STATUSES = ("done", "superseded")
+
 
 @dataclass
 class SweepItem:
@@ -98,6 +105,9 @@ class SweepItem:
     node_id: Optional[str] = None
     match_reason: Optional[str] = None
     error: Optional[str] = None
+    # file only: a live node the carveout text names as the parent of this
+    # work; the applied run links the minted node to it.
+    link_to: Optional[str] = None
 
     @property
     def carveout_id(self) -> str:
@@ -137,18 +147,46 @@ def _node_text(node: dict) -> str:
     return f"{node.get('title') or ''}\n{node.get('details') or ''}"
 
 
+def _named_owner(rec: dict, nodes: list[dict]) -> "tuple[Optional[str], Optional[str], bool]":
+    """A node id the carve-out TEXT names as where the work lives.
+
+    Returns ``(node_id, reason, terminal)``. ``terminal`` True: the named
+    owner is done/superseded, the row is already covered. False with a
+    node_id: a live owner - file, but link.
+    """
+    by_id = {str(n.get("id") or ""): n for n in nodes if isinstance(n, dict)}
+    text = f"{rec.get('description') or ''}\n{rec.get('need') or ''}"
+    live_id: Optional[str] = None
+    live_reason: Optional[str] = None
+    for tok in _NODE_ID_RE.findall(text):
+        node = by_id.get(tok)
+        if node is None:
+            continue
+        status = str(node.get("status") or "")
+        if status in _TERMINAL_STATUSES or node.get("superseded_by"):
+            label = status or "superseded"
+            return tok, f"carve-out names owner {tok}, which is {label}", True
+        if live_id is None:
+            live_id = tok
+            live_reason = f"carve-out names live owner {tok}"
+    return live_id, live_reason, False
+
+
 def find_tracking_node(
     rec: dict, nodes: list[dict]
-) -> "tuple[Optional[str], Optional[str], bool]":
+) -> "tuple[Optional[str], Optional[str], bool, Optional[str]]":
     """Find a node that already tracks this carve-out.
 
-    Returns ``(node_id, reason, exact)``. ``exact`` is True only for a
+    Returns ``(node_id, reason, exact, link_to)``. ``exact`` is True only for a
     provable match (the structured ``source `cv-...`` ` cite a filing
-    writes, via :func:`fno.retro.dedup.cv_cite_needle`); a bare cv-id
-    MENTION returns ``exact=False`` naming the mentioning node, so a node
-    that merely describes a carve-out (x-6c67's specimens) parks the row
-    for review instead of letting ``--apply`` consume it on a citation.
-    A fuzzy subject match likewise returns ``exact=False``.
+    writes, via :func:`fno.retro.dedup.cv_cite_needle`, or a done/superseded
+    owner the carve-out text names); a bare cv-id MENTION returns
+    ``exact=False`` naming the mentioning node, so a node that merely
+    describes a carve-out (x-6c67's specimens) parks the row for review
+    instead of letting ``--apply`` consume it on a citation. A fuzzy subject
+    match likewise returns ``exact=False``. ``link_to`` is set only when the
+    carve-out text names a LIVE owner node: nothing tracks the work yet, but
+    the minted node should carry a related edge to it.
 
     Done nodes count: a carve-out whose work already shipped is tracked, and
     re-filing it would be the duplicate this sweep exists to avoid.
@@ -160,7 +198,7 @@ def find_tracking_node(
         for node in nodes:
             text = _node_text(node)
             if needle in text:
-                return str(node.get("id") or ""), f"cv-id cited in {node.get('id')}", True
+                return str(node.get("id") or ""), f"cv-id cited in {node.get('id')}", True, None
             if cv_id in text and mention_node is None:
                 mention_node = node
         if mention_node is not None:
@@ -169,7 +207,14 @@ def find_tracking_node(
                 f"cv-id mentioned in {mention_node.get('id')} "
                 f"(citation is not ownership)",
                 False,
+                None,
             )
+
+    owner_id, owner_reason, terminal = _named_owner(rec, nodes)
+    if owner_id and terminal:
+        return owner_id, owner_reason, True, None
+    if owner_id:
+        return None, owner_reason, False, owner_id
 
     # An earlier harvest writes `finding_hash=<h>` into the node's details.
     # Match on the hash alone, ignoring the trailer's source_pr, since this
@@ -192,6 +237,7 @@ def find_tracking_node(
                     f"same description hash as {node.get('id')} "
                     f"(kind/need/scope not compared)",
                     False,
+                    None,
                 )
 
     # Compare on the SAME string the node would be titled with. Matching on
@@ -208,9 +254,9 @@ def find_tracking_node(
             if ratio > best_ratio:
                 best_id, best_ratio = str(node.get("id") or ""), ratio
         if best_id and best_ratio >= TITLE_MATCH_THRESHOLD:
-            return best_id, f"subject {best_ratio:.2f} similar to {best_id}", False
+            return best_id, f"subject {best_ratio:.2f} similar to {best_id}", False, None
 
-    return None, None, False
+    return None, None, False, None
 
 
 def _raw_item(rec: dict) -> RawItem:
@@ -252,7 +298,7 @@ def plan_sweep(carveouts: list[dict], nodes: list[dict]) -> list[SweepItem]:
                 )
             )
             continue
-        node_id, reason, exact = find_tracking_node(rec, nodes)
+        node_id, reason, exact, link_to = find_tracking_node(rec, nodes)
         if node_id and exact:
             items.append(
                 SweepItem(rec, DISPOSITION_RESOLVE, node_id=node_id, match_reason=reason)
@@ -285,8 +331,30 @@ def plan_sweep(carveouts: list[dict], nodes: list[dict]) -> list[SweepItem]:
             )
             continue
         seen_hashes[candidate.content_hash] = cv_id
-        items.append(SweepItem(rec, DISPOSITION_FILE, candidate=candidate))
+        items.append(SweepItem(rec, DISPOSITION_FILE, candidate=candidate, link_to=link_to))
     return items
+
+
+def _default_link(node_id: str, owner_id: str) -> None:
+    """Related edge from a just-minted node to its named live owner.
+
+    One locked mutation, so both halves of the symmetric edge land together;
+    a missing endpoint skips rather than dangles.
+    """
+    from fno.graph.cli import _graph_path
+    from fno.graph.store import locked_mutate_graph, set_related
+
+    def mutator(es: list[dict]) -> list[dict]:
+        if not any(e.get("id") == owner_id for e in es):
+            return es
+        me = next((e for e in es if e.get("id") == node_id), None)
+        if me is None:
+            return es
+        desired = list(dict.fromkeys(list(me.get("related") or []) + [owner_id]))
+        set_related(es, node_id, desired)
+        return es
+
+    locked_mutate_graph(_graph_path(), mutator)
 
 
 def sweep_carveouts(
@@ -303,6 +371,7 @@ def sweep_carveouts(
     create_fn: Optional[Callable] = None,
     inbox_fn: Optional[Callable] = None,
     consume_fn: Optional[Callable] = None,
+    link_fn: Optional[Callable[[str, str], None]] = None,
 ) -> SweepReport:
     """Plan (and optionally apply) a sweep of the whole carve-out ledger.
 
@@ -326,6 +395,7 @@ def sweep_carveouts(
         return report
 
     consume = consume_fn or consume_carveouts
+    link = link_fn or _default_link
     to_consume: list[str] = []
     for item in report.items:
         if item.disposition == DISPOSITION_REVIEW:
@@ -357,6 +427,32 @@ def sweep_carveouts(
             item.error = result.error or "land failed"
             continue
         item.node_id = result.node_id
+        if item.node_id and item.link_to:
+            try:
+                link(item.node_id, item.link_to)
+            except Exception as exc:
+                # The node landed; the edge is metadata. Warn, never block.
+                report.warnings.append(
+                    f"could not link {item.node_id} to {item.link_to}: {exc}"
+                )
+        # The filing-time dedup net every other birth path runs; print its
+        # offer rather than swallowing it.
+        if item.node_id:
+            try:
+                from fno.graph._intake import _warn_similar_nodes
+
+                _warn_similar_nodes(
+                    {
+                        "id": item.node_id,
+                        "title": item.candidate.title if item.candidate else "",
+                        "details": item.candidate.body if item.candidate else "",
+                        "domain": "code",
+                    },
+                    nodes,
+                    intake_hint=False,
+                )
+            except Exception as exc:
+                report.warnings.append(f"dedup net failed for {item.node_id}: {exc}")
         # An inbox line carries no node id but IS a durable record of the work,
         # so the row is still consumed.
         to_consume.append(item.carveout_id)
@@ -412,7 +508,8 @@ def render_sweep(report: SweepReport) -> list[str]:
                 priority = item.candidate.priority if item.candidate else "?"
                 tier = item.candidate.tier if item.candidate else "?"
                 landed = f" -> {item.node_id}" if item.node_id else ""
-                lines.append(f"{head} {priority} {tier}: {title}{landed}")
+                linked = f" (links {item.link_to})" if item.link_to else ""
+                lines.append(f"{head} {priority} {tier}: {title}{landed}{linked}")
             else:
                 lines.append(f"{head} {item.match_reason}")
             if item.error:

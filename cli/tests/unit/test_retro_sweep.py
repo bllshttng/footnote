@@ -357,3 +357,135 @@ def test_an_unreadable_ledger_is_not_an_empty_one():
 
     assert report.items == []
     assert report.warnings
+
+
+# -- the x-2d34 shape: the carveout text names the node that owns the work --
+
+
+def test_a_done_owner_named_in_the_text_resolves_instead_of_filing():
+    """The false-filing shape: the sweep minted a live p1 for work its own
+    carveout text said was carried by a node that had already shipped. The
+    evidence was inside the text being read. Resolving on the named owner
+    consumes the row and names the covering node instead of spending a
+    dispatch lane."""
+    cv = _cv("cv-f0f00001", "re-rank the board columns; carried by x-87fb")
+    nodes = [{"id": "x-87fb", "title": "board rank suffix", "status": "done"}]
+
+    (item,) = plan_sweep([cv], nodes)
+
+    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.node_id == "x-87fb"
+    assert "x-87fb" in (item.match_reason or "")
+
+
+def test_a_superseded_owner_named_in_the_text_resolves():
+    cv = _cv("cv-f0f00002", "the spawn seam work owns this: x-2e1f")
+    nodes = [{"id": "x-2e1f", "title": "spawn seam", "status": "superseded"}]
+
+    (item,) = plan_sweep([cv], nodes)
+
+    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.node_id == "x-2e1f"
+
+
+def test_a_superseded_by_pointer_resolves_even_while_status_lags():
+    cv = _cv("cv-f0f00003", "the rank work filed as x-01d9 moved to its successor")
+    nodes = [
+        {"id": "x-01d9", "title": "old row", "status": "ready", "superseded_by": "x-4e4e"},
+    ]
+
+    (item,) = plan_sweep([cv], nodes)
+
+    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.node_id == "x-01d9"
+
+
+def test_a_live_owner_named_in_the_text_files_but_links():
+    """The carveout splits work OUT of a live node: file it, but the minted
+    node carries the related edge so the two stay joined on the graph."""
+    cv = _cv("cv-f0f00004", "split out of x-2222, which is still open")
+    nodes = [{"id": "x-2222", "title": "parent epic", "status": "in_progress"}]
+
+    (item,) = plan_sweep([cv], nodes)
+    assert item.disposition == DISPOSITION_FILE
+    assert item.link_to == "x-2222"
+
+    links: list = []
+    consumed: list = []
+    report = sweep_carveouts(
+        repo_root=Path("/nonexistent"),
+        carveout_root=Path("/nonexistent"),
+        nodes=nodes,
+        apply=True,
+        read_fn=lambda root, kind=None: [cv],
+        create_fn=lambda **kw: "x-new1",
+        consume_fn=lambda root, ids: consumed.extend(ids) or len(ids),
+        link_fn=lambda node_id, owner: links.append((node_id, owner)),
+    )
+
+    assert links == [("x-new1", "x-2222")]
+    assert consumed == ["cv-f0f00004"]
+    assert not report.failed
+
+
+def test_a_link_failure_warns_but_never_blocks_the_consume():
+    cv = _cv("cv-f0f00005", "split out of x-3333, which is still open")
+    consumed: list = []
+
+    def _boom(node_id, owner):
+        raise RuntimeError("graph lock timeout")
+
+    report = sweep_carveouts(
+        repo_root=Path("/nonexistent"),
+        carveout_root=Path("/nonexistent"),
+        nodes=[{"id": "x-3333", "title": "parent", "status": "ready"}],
+        apply=True,
+        read_fn=lambda root, kind=None: [cv],
+        create_fn=lambda **kw: "x-new2",
+        consume_fn=lambda root, ids: consumed.extend(ids) or len(ids),
+        link_fn=_boom,
+    )
+
+    assert consumed == ["cv-f0f00005"]
+    assert not report.failed
+    assert any("x-new2" in w and "x-3333" in w for w in report.warnings)
+
+
+def test_a_named_id_that_resolves_to_nothing_is_ignored():
+    """A node-id-shaped token with no node behind it (stale id, a cv- row, a
+    typo) changes nothing: resolution, not the token shape, is the check."""
+    cv = _cv("cv-f0f00006", "like cv-abcd1234 but for zz-9999, which never existed")
+
+    (item,) = plan_sweep([cv], [])
+
+    assert item.disposition == DISPOSITION_FILE
+    assert item.link_to is None
+
+
+def test_apply_prints_the_dedup_net_offer_for_filed_rows(capsys):
+    """Every other birth path runs _warn_similar_nodes at filing time; the
+    sweep minted without it. The offer must print, not be swallowed. The row
+    still files: the net is warn-only."""
+    cv = _cv(
+        "cv-f0f00007",
+        "the loop-check verb never sees the stop hook shim payload",
+    )
+    nodes = [
+        {"id": "x-4444", "title": "loop-check verb and stop hook shim", "status": "triage"}
+    ]
+    consumed: list = []
+
+    report = sweep_carveouts(
+        repo_root=Path("/nonexistent"),
+        carveout_root=Path("/nonexistent"),
+        nodes=nodes,
+        apply=True,
+        read_fn=lambda root, kind=None: [cv],
+        create_fn=lambda **kw: "x-new3",
+        consume_fn=lambda root, ids: consumed.extend(ids) or len(ids),
+    )
+
+    assert report.by_disposition(DISPOSITION_FILE)
+    err = capsys.readouterr().err
+    assert "dedup:" in err
+    assert "x-4444" in err
