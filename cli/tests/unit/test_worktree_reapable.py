@@ -12,8 +12,11 @@ one class of dirt that cannot cause data loss.
 The tests drive real temp git repos, not mocked porcelain strings, because the
 classifier's job is to be right about what git actually prints.
 """
+import os
 import re
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -298,6 +301,9 @@ def test_setup_links_only_is_reapable_and_names_what_it_discounted(
     canonical: Path, tmp_path: Path
 ) -> None:
     wt = _linked_wt(tmp_path, canonical, "setup", "feature/setup")
+    # An aged tree: this test pins the setup-link discount, not the unborn
+    # refusal, and a fresh worktree is refused by that gate first (x-d135).
+    _age_wt(wt)
     _setup_links(wt, canonical)
 
     v = reapable(wt)
@@ -463,3 +469,100 @@ def test_a_setup_target_linked_from_the_wrong_place_still_blocks(
     assert v.reapable is False
     assert v.reason == "untracked"
     assert "vault" in v.detail
+
+
+# -- x-d135: an unborn worktree is not a finished tree ------------------------
+#
+# A fresh `git worktree add -b <name> <base>` branch has zero commits of its
+# own, so it is a literal ancestor of main and the gate read it clean plus
+# merged: exactly the bucket the contract prunes. Measured 2026-09-12, 29
+# trees were eaten that way in one night, three of them live dispatches. The
+# discriminator is the branch reflog (creation writes one entry; any commit,
+# reset or rebase writes more), paired with the tree's age so a landed tree
+# whose reflog has expired still reaps.
+
+
+def _age_wt(wt: Path, hours: float = 2.0) -> None:
+    """Backdate the worktree's `.git` file past the setup window."""
+    old = time.time() - hours * 3600
+    os.utime(wt / ".git", (old, old))
+
+
+def test_an_unborn_linked_worktree_refuses_inside_the_setup_window(
+    repo: Path, tmp_path: Path
+) -> None:
+    # AC1-HP: the defect itself. A tree minutes old with no commit of its own
+    # is a worker mid-setup, and the sweep ate those.
+    wt = _linked_wt(tmp_path, repo, "unborn", "feature/unborn")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "unborn"
+    assert "no commit of its own" in v.detail
+
+
+def test_a_rebased_and_landed_branch_inside_the_window_still_reaps(
+    repo: Path, tmp_path: Path
+) -> None:
+    # AC3-EDGE: the case the filer warned about. Bare zero-commits-ahead also
+    # reads a branch whose work landed and was then rebased, so the reflog is
+    # the discriminator: this branch carries a commit, and the gate must not
+    # refuse it. This passes against TODAY'S code on purpose: it is the
+    # positive control that the fixture is a real linked worktree really asked.
+    wt = _linked_wt(tmp_path, repo, "landed", "feature/landed")
+    (wt / "new.py").write_text("n = 1\n")
+    _git(wt, "add", "-A")
+    _git(wt, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "work")
+    _git(repo, "merge", "-q", "feature/landed")
+
+    v = reapable(wt)
+
+    assert v.reapable is True
+
+
+def test_an_old_unborn_worktree_past_the_window_is_reclaimable(
+    repo: Path, tmp_path: Path
+) -> None:
+    # AC4-EDGE: reflogs expire, so the reflog read alone would one day hold a
+    # landed tree. Age is the second reading: an abandoned setup from before
+    # the window is still reclaimable.
+    wt = _linked_wt(tmp_path, repo, "old", "feature/old")
+    _age_wt(wt)
+
+    v = reapable(wt)
+
+    assert v.reapable is True
+    assert v.reason == "clean"
+
+
+def test_an_unreadable_reflog_never_authorizes_removal(
+    repo: Path, tmp_path: Path
+) -> None:
+    # AC5-ERR: a probe that cannot answer must not read as permission. The
+    # failure mode is real, not mocked: a gone reflog file (gc, a clone,
+    # logAllRefUpdates=off) makes git answer rc=0 with zero entries, and zero
+    # entries is not evidence of a finished tree.
+    wt = _linked_wt(tmp_path, repo, "nolog", "feature/nolog")
+    common = Path(_git(wt, "rev-parse", "--git-common-dir").strip())
+    if not common.is_absolute():
+        common = wt / common
+    shutil.rmtree(common / "logs" / "refs" / "heads" / "feature")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "unborn"
+
+
+def test_a_detached_head_is_not_judged_by_the_branch_reflog(
+    repo: Path, tmp_path: Path
+) -> None:
+    # Detached scratch trees are judged by content: the sweep counts their
+    # unpushed commits, and no branch name exists for the reflog to speak for.
+    wt = _linked_wt(tmp_path, repo, "detached", "scratch")
+    _git(wt, "checkout", "-q", "--detach")
+
+    v = reapable(wt)
+
+    assert v.reapable is True

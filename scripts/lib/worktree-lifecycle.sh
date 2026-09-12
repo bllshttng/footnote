@@ -1130,7 +1130,7 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0
 
             _wt_refresh_cwd_snapshot || true
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
@@ -1170,6 +1170,12 @@ case "${1:-status}" in
                     # alone cannot tell an untracked scratch file from a probe
                     # that never answered.
                     reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    # An unborn tree is not dirty: it is a worker mid-setup,
+                    # and the night 29 trees were eaten this is the row three
+                    # kings needed (x-d135).
+                    if [[ "$reason" == "unborn" ]]; then
+                        printf '%-18s %-34s %s\n' "kept (unborn)" "$branch" "$wt"; N_UNBORN=$((N_UNBORN + 1)); continue
+                    fi
                     printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
                 # 2. merged into origin/main? A detached HEAD is judged by
@@ -1273,7 +1279,7 @@ case "${1:-status}" in
                 _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
             fi
 
-            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED + N_PERM))
+            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED + N_PERM + N_UNBORN))
             echo ""
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
@@ -1281,8 +1287,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
             fi
             exit 0
         fi

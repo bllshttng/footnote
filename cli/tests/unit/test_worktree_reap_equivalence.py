@@ -16,7 +16,9 @@ The Rust probe is covered by parsing contract rather than by running the
 daemon: it consumes the same `fno worktree reapable` receipt, so the assertion
 that matters is that the receipt grammar it parses is what the verb emits.
 """
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,11 @@ def _make_repo(root: Path) -> Path:
     _git(parent, "add", "-A")
     _git(parent, "commit", "-qm", "seed")
     _git(parent, "worktree", "add", "-q", str(root), "-b", "feature/fixture")
+    # Backdate past the setup window: every corpus row but `unborn` describes
+    # an ESTABLISHED tree, and a fresh linked worktree is refused by the
+    # unborn gate before its dirt is ever classified (x-d135).
+    old = time.time() - 7200
+    os.utime(root / ".git", (old, old))
     return root
 
 
@@ -77,12 +84,20 @@ def _mixed(p: Path) -> None:
     (p / "b.py").write_text("b = 999\n")
 
 
+def _unborn(p: Path) -> None:
+    # A tree git created moments ago, branch never moved: `_make_repo` aged the
+    # `.git` file so the other rows describe established trees; this row makes
+    # it fresh again, which is the shape of every worker mid-setup (x-d135).
+    os.utime(p / ".git", None)
+
+
 CORPUS = [
     ("clean", _clean, True),
     ("deletions-only", _deletions_only, True),
     ("one-modification", _one_modification, False),
     ("untracked", _untracked, False),
     ("deletion-plus-modification", _mixed, False),
+    ("unborn", _unborn, False),
 ]
 
 
