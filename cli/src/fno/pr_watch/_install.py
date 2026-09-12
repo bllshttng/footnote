@@ -84,7 +84,9 @@ _PLIST_TEMPLATE = """\
   <key>ProgramArguments</key>
   <array>
     <string>{fno_binary}</string>
-    <string>pr-watch</string>
+    <string>do</string>
+    <string>pr</string>
+    <string>watch</string>
     <string>tick</string>
   </array>
 
@@ -662,7 +664,8 @@ def status(
     if isinstance(scan, dict):
         typer.echo(
             f"Merge scan:   completed_at={scan.get('completed_at')} "
-            f"eligible={scan.get('eligible')} attempted={scan.get('attempted')}"
+            f"scanned={scan.get('scanned')} eligible={scan.get('eligible')} "
+            f"attempted={scan.get('attempted')}"
         )
     else:
         typer.echo("Merge scan:   (no scan receipt from a merge_scan-capable tick)")

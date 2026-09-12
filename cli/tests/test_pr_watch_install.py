@@ -76,8 +76,15 @@ def test_ac3hp_render_plist_contains_required_keys(tmp_home, plist_kwargs):
 
     assert "sh.fno.pr-watcher" in rendered
     assert "fno" in rendered
-    assert "pr-watch" in rendered
-    assert "tick" in rendered
+    # AC4-HP: the argv carries the current verb spelling; the retired
+    # pr-watch token must not appear as a bare argv string.
+    assert (
+        "<string>do</string>\n"
+        "    <string>pr</string>\n"
+        "    <string>watch</string>\n"
+        "    <string>tick</string>"
+    ) in rendered
+    assert "<string>pr-watch</string>" not in rendered
     assert "<false/>" in rendered  # RunAtLoad false
     # ProcessType Standard (x-c79d): the positive read is the control for the
     # negative one below.
