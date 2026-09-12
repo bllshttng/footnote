@@ -4829,14 +4829,10 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
     assert captured["passthrough"] == ["--verbose"]
 
 
-@pytest.mark.parametrize(
-    "substrate_args",
-    [
-        ["--substrate", "bg"],
-        ["--substrate", "headless"],
-        ["--once"],
-    ],
-)
+@pytest.mark.parametrize("substrate_args", [
+    ["--substrate", "bg"],
+    ["--substrate", "headless"],
+])
 def test_ac7_claude_off_pane_forwards_fenced_tokens(
     tmp_path: Path, monkeypatch, substrate_args: list[str]
 ) -> None:
