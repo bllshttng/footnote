@@ -17,7 +17,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import typer
 
-from fno.footprint import Admission, Footprint, parse_footprint
+from fno.footprint import Admission, Footprint, parse_footprint, top_consumers
 
 
 #: The sustained-CPU threshold derives from measured capacity at this fraction
@@ -817,6 +817,23 @@ def _compute_admission(reading: Footprint, load_snapshot: Any) -> Admission:
     )
 
 
+def _top_holder(reading: Footprint) -> str | None:
+    """The single largest fleet program, short enough for a refusal line."""
+    ranked = top_consumers(reading.top, 1)
+    if not ranked:
+        return None
+    c = ranked[0]
+    # The tree is named only when it accounts for every proc in the cluster:
+    # the totals span worktrees, so naming a partial tree would point the
+    # reader at a place that does not own the stated load.
+    where = (
+        f" in {c['worktree']}"
+        if c["worktree"] and c["worktree_procs"] == c["procs"] >= 2
+        else ""
+    )
+    return f"{c['name']} {c['procs']} procs {c['cpu_pct'] / 100:.2f} cores{where}"
+
+
 def cpu_admission(
     reading: Footprint,
     *,
@@ -833,6 +850,8 @@ def cpu_admission(
     The 15-minute load is the absolute backstop and refuses first; disabled
     or unreadable passes onward. Pure: no clocks, no subprocesses, no config."""
     backstop = hard_max_load_per_cpu * cpus
+    holder = _top_holder(reading)
+    holder_clause = f"; top holder {holder}" if holder else ""
     if load_15m is not None and hard_max_load_per_cpu > 0 and load_15m > backstop:
         return Admission(
             verdict="refuse",
@@ -840,7 +859,7 @@ def cpu_admission(
             reason=(
                 f"spawn-gate: 15-minute load {load_15m:.1f} against backstop "
                 f"{backstop:.1f} (hard_max_load_per_cpu "
-                f"{hard_max_load_per_cpu:g} x {cpus} cpus); refusing "
+                f"{hard_max_load_per_cpu:g} x {cpus} cpus){holder_clause}; refusing "
                 f"(--force to bypass)"
             ),
             share_low=0.0,
@@ -853,6 +872,7 @@ def cpu_admission(
             gap=reading.attribution_gap,
             load_15m=load_15m,
             backstop=backstop,
+            top_holder=holder,
         )
     capacity = float(capacity_cores)
     share_low = reading.fleet_cpu_cores / capacity if capacity > 0 else 0.0
@@ -873,6 +893,7 @@ def cpu_admission(
         gap=gap,
         load_15m=load_15m,
         backstop=backstop,
+        top_holder=holder,
     )
     if share_high <= share_ceiling:
         return Admission(
@@ -892,8 +913,9 @@ def cpu_admission(
             reason=(
                 f"spawn held: the fleet holds {reading.fleet_cpu_cores:.2f}/"
                 f"{capacity:.2f} cores ({share_low * 100:.1f}%) over "
-                f"max_fleet_cpu_share {ceil_pct:.1f}%; waiting for the fleet's "
-                f"own work to drain (--no-wait to fail fast, --force to bypass)"
+                f"max_fleet_cpu_share {ceil_pct:.1f}%{holder_clause}; waiting "
+                f"for the fleet's own work to drain (--no-wait to fail fast, "
+                f"--force to bypass)"
             ),
             **fields,
         )
@@ -905,7 +927,7 @@ def cpu_admission(
             f"{share_low * 100:.1f}% of capacity, up to "
             f"{share_high * 100:.1f}% with rows unattributed, and "
             f"max_fleet_cpu_share {ceil_pct:.1f}% falls inside that band; "
-            f"{gap}; close the attribution gap or lower foreign load "
+            f"{gap}{holder_clause}; close the attribution gap or lower foreign load "
             f"(--force to bypass)"
         ),
         **fields,

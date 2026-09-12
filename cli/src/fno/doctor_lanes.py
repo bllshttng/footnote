@@ -191,6 +191,10 @@ def _cpu_admission_arm() -> ArmReading:
     from fno.agents.spawn_gate import _cpu_axis
 
     admission = _cpu_axis()
+    if admission.axis == "cpu_instrument":
+        # Zeros the instrument never measured are not a reading; the
+        # admission's own words name why the arm is dark.
+        return ArmReading("cpu admission", DARK, reason=admission.reason)
     load_1m = load_5m = None
     try:
         load_1m, load_5m, _ = os.getloadavg()
@@ -448,16 +452,20 @@ def read_lanes(
     mem_fits = available_gb / per_gb
     answer = int(max(0.0, min(cpu_fits, mem_fits, float(LANE_ANSWER_CAP))))
 
-    if (
+    if load_arm.state == DARK or (
         isinstance(load_arm.value, dict)
         and load_arm.value.get("verdict") in ("hold", "undecidable", "refuse")
     ):
-        # The CPU axis is not admitting: no advisory headroom on top of a
-        # hold, an undecidable band, or a refusal (x-7783 AC12).
+        # The CPU axis is not admitting, or never answered: a dark sensor is
+        # never headroom, and neither is a hold, an undecidable band, or a
+        # refusal (x-7783 AC12).
         answer = 0
-        cost_source += (
-            f"; cpu admission {load_arm.value.get('verdict')}, answer capped at 0"
+        cap_why = (
+            "dark"
+            if load_arm.state == DARK
+            else str(load_arm.value.get("verdict"))
         )
+        cost_source += f"; cpu admission {cap_why}, answer capped at 0"
 
     reading.lane_count = answer
     reading.per_lane_cpu_cores = round(per_cpu, 3)

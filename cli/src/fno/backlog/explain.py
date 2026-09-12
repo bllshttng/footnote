@@ -310,13 +310,17 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
                                key="agents.max_fleet_cpu_share"))
         return out
     verdict = admission.verdict
+    # An instrument that never answered has no figures to show: render the
+    # row unmeasured, never a fabricated 0.00/0.00.
+    unreadable = admission.axis == "cpu_instrument"
     # Same decision function the real gate runs, so the dry run cannot pass a
     # box the spawn would refuse or hold.
     out.append(
         Gate(
             "cpu-share",
-            f"{admission.fleet_cores:.2f}/{admission.capacity_cores:.2f} cores",
-            f"{admission.ceiling * 100:.0f}%",
+            "unreadable" if unreadable
+            else f"{admission.fleet_cores:.2f}/{admission.capacity_cores:.2f} cores",
+            "-" if unreadable else f"{admission.ceiling * 100:.0f}%",
             "refuse" if verdict in ("refuse", "undecidable")
             else ("hold" if verdict == "hold" else "pass"),
             key="agents.max_fleet_cpu_share",
@@ -327,7 +331,7 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
         Gate(
             "load-backstop",
             "-" if admission.load_15m is None else f"{admission.load_15m:.1f}",
-            f"{admission.backstop:.1f}",
+            "-" if unreadable else f"{admission.backstop:.1f}",
             "refuse" if (admission.axis == "load_15m" and verdict == "refuse")
             else ("pass" if admission.load_15m is not None
                   else "skipped: load unreadable"),
