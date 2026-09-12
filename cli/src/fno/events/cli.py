@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -619,6 +618,8 @@ def emit(
     # emit. The producer lives in the Rust binary behind publish_review_call.
     if type_ in PUBLISH_REVIEW_TYPES:
         try:
+            import os
+
             from fno.pr._publish_review import publish_review_call
 
             _data = event.get("data", {})
