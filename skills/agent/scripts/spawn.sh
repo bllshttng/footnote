@@ -255,7 +255,14 @@ if [[ -n "$NODE" ]]; then
         # sent the caller after a release that frees nothing; peeking the row
         # and stopping it if its run is finished is what frees the node.
         worker="$(printf '%s' "$guard_json" | jq -r '.worker // empty' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${worker:-unmeasured}" "$NODE"
+        # An unmeasured row blocks dispatch without proving anything is running,
+        # so the receipt says which of the two it is; peek can come back empty
+        # for the unmeasured one.
+        if [[ "$(printf '%s' "$guard_json" | jq -r '.worker_unmeasured // empty' 2>/dev/null)" == "true" ]]; then
+          printf 'result=already-running name=%s reason="worker row %s is on node:%s with liveness never measured; peek it, read fno agents claim status node:%s, and stop it if its run is finished"\n' "$NAME" "${worker:-unmeasured}" "$NODE" "$NODE"
+        else
+          printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${worker:-unmeasured}" "$NODE"
+        fi
       else
         # NO suspect-claim arm here, and the omission is load-bearing. This call
         # is a probe, a probe reports every wedge as recovery not-attempted, and
@@ -517,7 +524,11 @@ if [[ "$spawn_rc" -ne 0 ]]; then
         exit 0 ;;
       worker-row)
         guard_worker="$(printf '%s' "$spawn_err" | sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q')"
-        printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${guard_worker:-unmeasured}" "$NODE"
+        if printf '%s' "$spawn_err" | grep -qF 'worker_unmeasured=true'; then
+          printf 'result=already-running name=%s reason="worker row %s is on node:%s with liveness never measured; peek it, read fno agents claim status node:%s, and stop it if its run is finished"\n' "$NAME" "${guard_worker:-unmeasured}" "$NODE" "$NODE"
+        else
+          printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${guard_worker:-unmeasured}" "$NODE"
+        fi
         exit 0 ;;
       suspect-claim)
         # THE wedge, and this is the arm that fires on one. Recovery ran here,

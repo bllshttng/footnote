@@ -870,18 +870,7 @@ def _roster_verdict_line(info: dict) -> str:
             line += f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
         return line
 
-    engaged, unmeasurable, verdicts = classify_workers(workers)
-    if any(w.get("closed_own_row") for w in workers):
-        # The closed-own-row stamp outranks the transcript: the session closed
-        # its own phase row on this node, so it is finished HERE whatever it
-        # wrote afterwards.
-        from fno.agents.reachability import REACHABLE, UNKNOWN, UNREACHABLE
-
-        for w in workers:
-            if w.get("closed_own_row"):
-                verdicts[w.get("name") or ""] = UNREACHABLE
-        engaged = [w for w in workers if verdicts.get(w.get("name") or "") == REACHABLE]
-        unmeasurable = [w for w in workers if verdicts.get(w.get("name") or "") == UNKNOWN]
+    engaged, unmeasurable, _verdicts = classify_workers(workers)
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         line = f"UNCLAIMED but a live worker is on this node: {rendered}"
@@ -918,9 +907,14 @@ def _roster_verdict_line(info: dict) -> str:
         # the roster was complete", which both used to render as plain free.
         return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
-    if workers:
-        rendered = ", ".join(w["name"] for w in workers)
-        return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"
+    # Two ways a row reads finished: the predicate said so (it is still in
+    # `workers`), or the session closed its own phase row on this node and the
+    # display field dropped it. Both are named, so a node whose only row closed
+    # says so instead of reporting nothing at all.
+    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
+    if finished:
+        rendered = ", ".join(finished)
+        return f"{scanned}; {len(finished)} finished session(s) resolved to it: {rendered}"
     return scanned
 
 
@@ -1018,15 +1012,22 @@ def status(
                 worked = live_worked_node_ids(
                     strict=True, entries=[entry], reading=reading
                 )
-                # The display field stamps the same rows the overlay's
+                # The display field drops the same rows the overlay's
                 # worked_by excludes: a session whose own phase row closed
-                # never renders here as an occupancy candidate, but stays on
-                # `roster_workers` so the verdict line can name it under its
-                # finished-sessions outcome.
+                # never renders as an occupancy candidate, and the array is
+                # the field the FAQ tells an operator to trust. The dropped
+                # names ride their own field so the verdict line can still
+                # name them as finished rather than reporting nothing.
                 closed = closed_worker_session_ids(entry)
+                kept: list[dict] = []
+                finished: list[dict] = []
                 for w in info.get("roster_workers") or []:
-                    if str(w.get("row_id") or "") in closed:
-                        w["closed_own_row"] = True
+                    (finished if str(w.get("row_id") or "") in closed else kept).append(w)
+                info["roster_workers"] = kept
+                if finished:
+                    info["roster_closed_workers"] = [
+                        w.get("name") or "unknown" for w in finished
+                    ]
             except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
                 typer.echo(f"worked overlay degraded: {exc}", err=True)
                 worked = {}

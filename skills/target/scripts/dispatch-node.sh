@@ -466,7 +466,11 @@ for id in "${NODES[@]}"; do
         # claim, sent the reader hunting a release remedy for a claim nobody
         # holds, and hid the one actionable field: who is on the node.
         worker="$(printf '%s' "$guard_json" | jq -r '.worker // empty' 2>/dev/null)"
-        echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+        if [[ "$(printf '%s' "$guard_json" | jq -r '.worker_unmeasured // empty' 2>/dev/null)" == "true" ]]; then
+          echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id with liveness never measured; peek it, read fno agents claim status node:$id, and stop it if its run is finished\""
+        else
+          echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+        fi
         n_already=$((n_already + 1))
       elif [[ "$reason" == "suspect-claim" ]]; then
         # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
@@ -895,7 +899,11 @@ for id in "${NODES[@]}"; do
           continue ;;
         worker-row)
           guard_worker="$(printf '%s' "$spawn_err" | sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q')"
-          echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+          if printf '%s' "$spawn_err" | grep -qF 'worker_unmeasured=true'; then
+            echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id with liveness never measured; peek it, read fno agents claim status node:$id, and stop it if its run is finished\""
+          else
+            echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+          fi
           n_already=$((n_already + 1))
           continue ;;
         reservation-held|duplicate-claim)

@@ -466,15 +466,30 @@ def _spawn_guard_decision(
                 and observation.worker
                 and observation.verdict not in ("ours", "foreign_live")
             ):
+                from fno.graph.statuses import UNMEASURABLE_LABEL_MARK
+
                 first = _worker_token(observation.worker).split(",")[0]
+                # The overlay admits a row whose liveness it could NOT measure,
+                # marked. That mark is the only thing saying so, and the bare
+                # machine token drops it, so it rides its own field: a receipt
+                # that reads the same for a measured and an unmeasured row
+                # asserts more than anything observed, and peek can come back
+                # showing nothing at all for the unmeasured one.
+                unmeasured = UNMEASURABLE_LABEL_MARK in observation.worker
                 return {
                     "verdict": "already-running",
                     "reason": "worker-row",
                     "worker": observation.worker,
                     "truth_status": observation.truth_status,
+                    **({"worker_unmeasured": True} if unmeasured else {}),
                     "remedy": (
                         f"fno agents peek {first}; if its run is finished, "
                         f"fno agents stop {first}"
+                        + (
+                            f"; liveness was never measured for this row, so read "
+                            f"fno agents claim status node:{node_id} too"
+                            if unmeasured else ""
+                        )
                     ),
                 }, 0
             reason = (
@@ -2078,6 +2093,11 @@ def cmd_spawn(
                 f" worker={_worker_token(str(guard['worker']))}"
                 if guard.get("worker") else ""
             )
+            # The post-spawn consumers read tokens, not the JSON, so the
+            # unmeasured qualifier has to travel as one or the two receipts
+            # disagree about the same row.
+            if guard.get("worker_unmeasured"):
+                worker += " worker_unmeasured=true"
             detail = f" detail={guard['detail']!r}" if guard.get("detail") else ""
             print(
                 f"node dispatch refused: node={guarded_node} "

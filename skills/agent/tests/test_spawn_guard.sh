@@ -55,7 +55,7 @@ case "$1 $2" in
         [[ "$previous" == "--node" ]] && node="$argument"
         previous="$argument"
       done
-      echo "node dispatch refused: node=$node verdict=already-running reason=$STUB_CLI_GUARD_REASON${STUB_CLI_GUARD_WORKER:+ worker=$STUB_CLI_GUARD_WORKER}; no worker launched" >&2
+      echo "node dispatch refused: node=$node verdict=already-running reason=$STUB_CLI_GUARD_REASON${STUB_CLI_GUARD_WORKER:+ worker=$STUB_CLI_GUARD_WORKER}${STUB_CLI_GUARD_EXTRA:+ $STUB_CLI_GUARD_EXTRA}; no worker launched" >&2
       exit 2
     fi
     echo "LAUNCH: $*" >> "$STUB_LOG"
@@ -204,6 +204,23 @@ ok  'post-spawn worker-row exits 0' "$rc" '0'
 has 'post-spawn worker-row names the worker row' "$out" 'worker row king-a792-control'
 has 'post-spawn worker-row names the peek-and-stop way out' "$out" 'stop it if its run is finished'
 no  'post-spawn worker-row does NOT print is-held-by' "$out" 'is held by'
+
+# --- an UNMEASURED row says so, on both paths --------------------------------
+# The overlay admits a row whose liveness it could not measure. A receipt that
+# reads the same for a measured and an unmeasured row asserts more than anything
+# observed, and the two paths must not disagree about one row.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"worker-row","worker":"w1 (unmeasurable: no harness session id)","worker_unmeasured":true}' \
+  run --name w2u --provider claude --message '/target x' --node "$NODE")"
+ok  'unmeasured worker-row -> already-running' "$(field "$out")" 'already-running'
+has 'unmeasured worker-row names the missing measurement' "$out" 'liveness never measured'
+has 'unmeasured worker-row sends the reader to the claim too' "$out" 'claim status'
+
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=worker-row STUB_CLI_GUARD_WORKER=w1 \
+  STUB_CLI_GUARD_EXTRA='worker_unmeasured=true' \
+  run --name w2up --provider claude --message '/target x' --node "$NODE")"; rc=$?
+ok  'post-spawn unmeasured worker-row -> already-running' "$(field "$out")" 'already-running'
+ok  'post-spawn unmeasured worker-row exits 0' "$rc" '0'
+has 'post-spawn unmeasured worker-row names the missing measurement' "$out" 'liveness never measured'
 
 # --- every guard reason has an arm in BOTH consumers -------------------------
 # One Python producer, two shell consumers, and neither case statement carries a
