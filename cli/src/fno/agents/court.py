@@ -409,7 +409,8 @@ def _stuck_render(summary: dict[str, Any], gate: dict[str, Any]) -> str:
         parts.append(f"gate refused {gate.get('reason')}")
     # The fold already rendered its own blind reasons into `line`; only the
     # ones this caller added still need a clause.
-    parts += [f"could not answer: {r}" for r in summary["stuck"]["blind"] if r not in line]
+    blind = summary["stuck"].get("blind") or []  # a cross-process payload, so read it soft
+    parts += [f"could not answer: {r}" for r in blind if r not in line]
     return "stuck: " + (", ".join(parts) if parts else "nothing")
 
 
