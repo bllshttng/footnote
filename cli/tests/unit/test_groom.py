@@ -6,6 +6,7 @@ the skill brief's lever contract.
 from __future__ import annotations
 
 import os
+import subprocess as _subprocess
 import time
 from datetime import date
 from pathlib import Path
@@ -13,6 +14,9 @@ from pathlib import Path
 import pytest
 
 from fno.backlog import groom as G
+
+# The mint is a real pre-spawn subprocess (x-84b2); fakes route it here.
+_REAL_SUBPROCESS_RUN = _subprocess.run
 
 SKILL = Path(__file__).resolve().parents[3] / "skills" / "groom" / "SKILL.md"
 
@@ -176,6 +180,10 @@ def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
         stderr = ""
 
     def _fake_run(cmd, **kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
+        # real binary; the fake stands in for the spawn only.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         captured["cmd"] = cmd
         return _Proc()
 
