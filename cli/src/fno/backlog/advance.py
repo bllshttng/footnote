@@ -1336,9 +1336,8 @@ def _spawn_worker(
     (x-ebd2, law d-834b6ff1). ``source`` (x-84b2) stamps the worker name;
     the reconcile pass is always ``rd`` (an impossible pair refuses).
     """
-    # x-e53e change 2: the preference half is ONE resolver every
-    # node-dispatching caller shares. This function keeps the launch: argv,
-    # reservation handover, subprocess, receipt and event vocabulary.
+    # x-e53e change 2: the preference half is ONE resolver; this function
+    # keeps the launch: argv, reservation handover, subprocess, receipts.
     args = resolve_node_spawn(
         node_id,
         node_cwd,

@@ -22,7 +22,7 @@ class NodeSpawnArgs:
     ``resolved_harness`` is the resolver's answer, the one the claude-only argv
     gates read. ``route`` is the grid lane's pick, ``resolved_route`` the stage
     table's verb lane. ``env`` is the subprocess env: base minus a stale
-    ``TARGET_NO_MERGE``, plus the resolver's answer and caller ``extra_env``.
+    ``TARGET_NO_MERGE``, plus the resolver's answer and ``extra_env``.
     """
 
     node_id: str
@@ -291,8 +291,8 @@ def node_spawn_argv(
 ) -> list[str]:
     """The ``fno agents spawn`` flags for resolved args: ONE builder for every
     node-dispatching caller (x-e53e), so the claude-only gates cannot drift.
-    Callers prepend the binary + verb and pass placement flags via ``extra``;
-    ``cwd`` rides before the model axis, the order the advance suite pins.
+    Callers prepend the binary + verb; ``cwd`` rides before the model axis,
+    the order the advance suite pins.
     """
     cmd = [
         "--harness", args.harness,

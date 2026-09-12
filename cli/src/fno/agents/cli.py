@@ -1562,7 +1562,6 @@ def cmd_spawn(
         seed_rec: Optional[dict] = None
         try:
             from fno.graph.load import load_graph
-
             for candidate in load_graph():
                 if candidate.get("id") == node or candidate.get("slug") == node:
                     seed_rec = candidate
@@ -1599,7 +1598,6 @@ def cmd_spawn(
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=2) from exc
         message = resolved_seed["command"]
-        # The provenance pass below reuses this read instead of a second one.
         seed_slug = seed_rec.get("slug")
         seed_plan = seed_rec.get("plan_path")
         node_seed_env = resolved_seed.get("env") or {}
@@ -2047,8 +2045,7 @@ def cmd_spawn(
     if node_seed_env and prov_env is not None:
         prov_env.update(node_seed_env)
     # (x-c914) The pane's birth account rides the provenance env (FNO_ACCOUNT)
-    # for the sideline glyph: the account this launch bills, claude-gated like
-    # the minted row's axis.
+    # for the sideline glyph, claude-gated like the minted row's axis.
     if prov_env is not None and harness == "claude":
         launch_account_label = dispatch_account or account
         if launch_account_label:

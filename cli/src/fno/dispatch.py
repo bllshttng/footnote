@@ -657,9 +657,8 @@ def _dispatch_one(
                 "retry_at": route.retry_at,
             }
 
-    # 2. Resolve every launch preference through the ONE resolver (x-e53e
-    #    change 3). The pane substrate and THIS mux session are this file's
-    #    two deliberate pins; nothing else is pinned here.
+    # 2. Resolve every launch preference through the ONE resolver (x-e53e);
+    #    the pane substrate and THIS mux session are the only pins here.
     from fno.agents.harness_map import DispatchResolveError
     from fno.agents.node_dispatch import node_spawn_argv, resolve_node_spawn
     from fno.backlog.advance import (
