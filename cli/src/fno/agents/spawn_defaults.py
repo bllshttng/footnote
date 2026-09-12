@@ -747,14 +747,18 @@ def _verb_token(seed: Optional[str]) -> Optional[str]:
     return None
 
 
-def _known_verb_keys(profiles: object, settings: object) -> Set[str]:
-    """The vocabulary a verb seed must name: configured profile rows, the
-    shipped verb roster, and the dispatch-verb registry."""
+def _known_verb_keys(profiles: object, settings: object) -> Tuple[Set[str], bool]:
+    """The vocabulary a verb seed must name, plus whether the shipped roster
+    actually RESOLVED. An unresolvable roster proves nothing about which
+    verbs exist, so the caller degrades open instead of refusing on it."""
     known = {str(k) for k in profiles} if isinstance(profiles, Mapping) else set()
+    roster_ok = False
     try:
         from fno.agents.harness_map import footnote_verbs
 
-        known |= set(footnote_verbs())
+        verbs = footnote_verbs()
+        known |= set(verbs)
+        roster_ok = bool(verbs)
     except Exception:  # noqa: BLE001 - an unreadable roster must not brick spawning
         pass
     registry = getattr(getattr(settings, "dispatch", None), "verbs", None)
@@ -768,7 +772,7 @@ def _known_verb_keys(profiles: object, settings: object) -> Set[str]:
                     known.add(canon)
         except Exception:  # noqa: BLE001
             pass
-    return known
+    return known, roster_ok
 
 
 def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
@@ -1146,7 +1150,8 @@ def inject_spawn_defaults(
     # unknown-provider refusal all run once, on the merged fields.
     seed = _seed_of(out[1:])
     profiles = getattr(agents, "profiles", None) or {}
-    verb = _profile_key(seed, _known_verb_keys(profiles, settings))
+    known, roster_ok = _known_verb_keys(profiles, settings)
+    verb = _profile_key(seed, known if roster_ok else None)
     if verb is None:
         # x-413d: an unknown namespaced verb used to resolve crown silently.
         print(

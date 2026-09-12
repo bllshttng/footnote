@@ -434,12 +434,33 @@ def test_unresolvable_verb_token_is_the_third_outcome():
     assert _profile_key("king: shrink the board", known=known) == "crown"
 
 
-def test_unknown_verb_seed_refuses_naming_the_token():
+def test_unknown_verb_seed_refuses_naming_the_token(monkeypatch):
+    import fno.agents.harness_map as hm
+
+    monkeypatch.setattr(
+        hm, "footnote_verbs", lambda: frozenset({"target", "blueprint", "think", "review"})
+    )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         _inject(["spawn", "--name", "w", "/fno:taget x-caf8"], err=err)
     assert exc.value.code == 2
     assert "taget" in err.getvalue()
+
+
+def test_unresolvable_roster_degrades_open(monkeypatch):
+    """An unresolvable verb roster proves nothing about which verbs exist, so
+    the namespaced refusal stands down: the spawn proceeds on the pre-fix
+    fallback instead of refusing a good verb the environment cannot resolve
+    (the CI smoke shape: bare checkout, fixture profiles, /fno:target seed)."""
+    import fno.agents.harness_map as hm
+
+    monkeypatch.setattr(hm, "footnote_verbs", lambda: frozenset())
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-81ad"],
+        profiles={"crown": {"model": "crown-model"}},
+    )
+    assert "/fno:target x-81ad" in out
+    assert "--permission-mode" in out  # still a fire-and-forget verb command
 
 
 def test_bare_foreign_verb_seed_spawns_without_a_profile():
