@@ -599,11 +599,9 @@ def _live_shared_serve_root_pids(
 
 def _unparsed_sample_evidence(reading: Footprint) -> str:
     """Render the capped masked samples for a refusal message."""
-    parts = [
-        f"row {s.row} pid {s.pid if s.pid is not None else '?'} {s.reason}: {s.masked}"
-        for s in reading.unparsed_samples
-    ]
-    return ("; " + "; ".join(parts)) if parts else ""
+    parts = [f"row {s.row} pid {s.pid if s.pid is not None else '?'} {s.reason}: {s.masked}" for s in reading.unparsed_samples]
+    # Only reached when unparsed_lines > 0, so at least one sample exists.
+    return "; " + "; ".join(parts)
 
 
 def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None]:
@@ -1227,8 +1225,7 @@ def _emit_result(
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
             for sample in reading.unparsed_samples:
-                pid_text = f"pid {sample.pid}" if sample.pid is not None else "no pid"
-                typer.echo(f"  row {sample.row} ({pid_text}, {sample.reason}): {sample.masked}")
+                typer.echo(f"  row {sample.row} (pid {sample.pid if sample.pid is not None else '?'}, {sample.reason}): {sample.masked}")
         if note is not None:
             typer.echo(f"degraded: {note}")
         if exit_code != 0 or cause_only:

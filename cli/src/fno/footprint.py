@@ -265,22 +265,28 @@ def _mask_row(line: str) -> str:
     return " ".join(pieces)
 
 
-def _unparsed_reason(line: str, new_format: bool) -> str:
+def _unparsed_reason(line: str, new_format: bool, new_state_format: bool) -> str:
     """Name the first failed field, in parse order; a bad ppid reports as pid."""
-    fields = line.split(None, 5 if new_format else 4)
-    if len(fields) != (6 if new_format else 5):
-        return "field-count"
-    words = ("pid", "pid", "etime", "cpu", "rss") if new_format else ("pid", "etime", "cpu", "rss")
-    for word, value in zip(words, fields):
-        try:
-            if word == "etime":
-                _elapsed_seconds(value)
-                continue
-            number = int(value) if word in ("pid", "rss") else float(value)
-        except (TypeError, ValueError):
-            return word
-        if number < 0:
-            return word
+    shapes = [(6, True, True)] if new_format and new_state_format else [(5, False, True)]
+    if not new_format:
+        shapes = [(6, True, True)] + shapes + [(4, False, False)]
+    for maxsplit, has_state, has_ppid in shapes:
+        fields = line.split(None, maxsplit)
+        if len(fields) != maxsplit + 1:
+            continue
+        start = (2 if has_ppid else 1) + (1 if has_state else 0)
+        # The parse's own cast order at this shape; state never fails a cast.
+        probes = [("pid", fields[0])] + ([("pid", fields[1])] if has_ppid else []) + [("etime", fields[start]), ("cpu", fields[start + 1]), ("rss", fields[start + 2])]
+        for word, value in probes:
+            try:
+                if word == "etime":
+                    _elapsed_seconds(value)
+                    continue
+                number = int(value) if word in ("pid", "rss") else float(value)
+            except (TypeError, ValueError):
+                return word
+            if number < 0:
+                return word
     return "field-count"
 
 
@@ -348,14 +354,11 @@ def parse_footprint(
                 raise ValueError("invalid process fields")
         except (TypeError, ValueError):
             unparsed_lines += 1
-            try:
-                salvaged: int | None = int(line.split(None, 1)[0])
-            except (TypeError, ValueError):
-                salvaged = None
+            salvaged = int(f) if (f := line.split(None, 1)[0]).isdigit() else None
             if salvaged is not None:
                 salvaged_pids.add(salvaged)
             if len(samples) < _MAX_UNPARSED_SAMPLES:
-                samples.append(UnparsedRow(row_number, salvaged, _unparsed_reason(line, new_format), _mask_row(line)))
+                samples.append(UnparsedRow(row_number, salvaged, _unparsed_reason(line, new_format, new_state_format), _mask_row(line)))
             continue
         processes[pid] = _Process(pid, ppid, elapsed, cpu_percent, rss, command, state)
 
