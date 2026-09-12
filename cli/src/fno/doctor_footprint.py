@@ -597,6 +597,13 @@ def _live_shared_serve_root_pids(
     return roots, None
 
 
+def _unparsed_sample_evidence(reading: Footprint) -> str:
+    """Render the capped masked samples for a refusal message."""
+    parts = [f"row {s.row} pid {s.pid if s.pid is not None else '?'} {s.reason}: {s.masked}" for s in reading.unparsed_samples]
+    # Only reached when unparsed_lines > 0, so at least one sample exists.
+    return "; " + "; ".join(parts)
+
+
 def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None]:
     """One CPU-only fleet reading shared by `--cause-only` and the spawn gate.
 
@@ -641,9 +648,24 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         threshold_excluded_root_pids=shared_serve_pids | codex_roots,
     )
     if reading.unparsed_lines:
-        return None, (
-            f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed"
-        )
+        # Three arms replace any-count-refuses (x-46cb): no ratio is
+        # defensible (the measured event is 4 of 1163 rows) and a count arm
+        # took the fleet's dispatch offline over rows nobody read. Relevance
+        # and total failure refuse; anything else keeps the reading.
+        discovered = root_pids | shared_serve_pids | codex_roots
+        if root_hits := sorted(reading.unparsed_pids & discovered):
+            # A bad root row reads its subtree as zero CPU: blind, not noisy.
+            return None, (
+                f"footprint unavailable: unparsable ps row carries discovered fleet root pid {root_hits[0]}"
+                + _unparsed_sample_evidence(reading)
+            )
+        # Floor, not ceiling: every data row failing is an unreadable ps.
+        rows = sum(1 for raw in ps_output.splitlines() if (ln := raw.strip()) and not ln.startswith("PID "))
+        if reading.unparsed_lines >= rows:
+            return None, (
+                f"footprint unavailable: all {reading.unparsed_lines} ps row(s) "
+                "failed to parse" + _unparsed_sample_evidence(reading)
+            )
     if attribution_gap is not None:
         reading = reading._replace(attribution_gap=attribution_gap)
     return reading, None
@@ -1054,6 +1076,7 @@ def _payload(
             )
         ],
         "unparsed_lines": reading.unparsed_lines,
+        "unparsed_samples": [sample._asdict() for sample in reading.unparsed_samples],
         "exit_code": exit_code,
     }
     if reading.attribution_gap is not None:
@@ -1201,6 +1224,8 @@ def _emit_result(
             )
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
+            for sample in reading.unparsed_samples:
+                typer.echo(f"  row {sample.row} (pid {sample.pid if sample.pid is not None else '?'}, {sample.reason}): {sample.masked}")
         if note is not None:
             typer.echo(f"degraded: {note}")
         if exit_code != 0 or cause_only:
