@@ -1300,7 +1300,12 @@ def _merge_request_repo_and_project(cwd: str) -> tuple[str, str]:
 
 
 def _emit_merge_cleanup_skip(
-    pr_number: int, cwd: str, state_file: str, reason: str, detail: str = ""
+    pr_number: int,
+    cwd: str,
+    state_file: str,
+    reason: str,
+    detail: str = "",
+    branch: Optional[str] = None,
 ) -> None:
     """Say that this merge minted no cleanup request, and why. Joined to the
     merge the same way a request row is, so one reader answers both."""
@@ -1313,6 +1318,7 @@ def _emit_merge_cleanup_skip(
         pr=pr_number,
         reason=reason,
         detail=detail,
+        branch=branch,
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
     )
@@ -1341,7 +1347,11 @@ def _emit_merge_cleanup_request(
         return
     try:
         meta = json.loads(res.stdout or "{}")
-    except json.JSONDecodeError as exc:
+        if not isinstance(meta, dict):
+            # `null` and a bare array parse fine and then break `.get`, which
+            # would read as emit-failed rather than as the bad payload it is.
+            raise ValueError("pr json is not an object")
+    except ValueError as exc:  # JSONDecodeError is a ValueError
         _emit_merge_cleanup_skip(
             pr_number, cwd, state_file, "unparseable-pr-json",
             detail=type(exc).__name__,
@@ -1351,6 +1361,7 @@ def _emit_merge_cleanup_request(
         _emit_merge_cleanup_skip(
             pr_number, cwd, state_file, "not-merged",
             detail=f"state={meta.get('state')}",
+            branch=meta.get("headRefName") or None,
         )
         return
     if not meta.get("headRefName"):

@@ -60,36 +60,43 @@ def _rows(log, kind):
 
 MERGED = json.dumps({"state": "MERGED", "headRefName": "feature/x", "url": ""})
 
-# (case name, gh ok, gh stdout, gh stderr, expected reason, expected detail)
+# (case name, gh ok, gh stdout, gh stderr, reason, detail, branch)
 SKIP_CASES = [
-    ("gh read failed", False, "", "gh: not found", "gh-unavailable", "gh: not found"),
-    ("unparseable json", True, "{not json", "", "unparseable-pr-json", "JSONDecodeError"),
+    (
+        "gh read failed",
+        False, "", "gh: not found",
+        "gh-unavailable", "gh: not found", None,
+    ),
+    (
+        "unparseable json",
+        True, "{not json", "",
+        "unparseable-pr-json", "JSONDecodeError", None,
+    ),
+    (
+        "json that is not an object",
+        True, "null", "",
+        "unparseable-pr-json", "ValueError", None,
+    ),
     (
         "still open",
-        True,
-        json.dumps({"state": "OPEN", "headRefName": "feature/x"}),
-        "",
-        "not-merged",
-        "state=OPEN",
+        True, json.dumps({"state": "OPEN", "headRefName": "feature/x"}), "",
+        "not-merged", "state=OPEN", "feature/x",
     ),
     (
         "merged with no head ref",
-        True,
-        json.dumps({"state": "MERGED", "headRefName": ""}),
-        "",
-        "no-branch",
-        "",
+        True, json.dumps({"state": "MERGED", "headRefName": ""}), "",
+        "no-branch", "", None,
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "name,ok,stdout,stderr,reason,detail",
+    "name,ok,stdout,stderr,reason,detail,branch",
     SKIP_CASES,
     ids=[c[0] for c in SKIP_CASES],
 )
 def test_every_unmet_precondition_speaks_its_reason(
-    tmp_path, monkeypatch, name, ok, stdout, stderr, reason, detail
+    tmp_path, monkeypatch, name, ok, stdout, stderr, reason, detail, branch
 ):
     import fno.pr._merge as M
 
@@ -107,6 +114,7 @@ def test_every_unmet_precondition_speaks_its_reason(
     data = skipped[0]["data"]
     assert data["reason"] == reason
     assert data["detail"] == detail
+    assert data["branch"] == branch
     assert data["pr"] == 11
     assert data["session_id"] == "sess-skip"
     assert data["harness"] == "claude"
