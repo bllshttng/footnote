@@ -916,8 +916,7 @@ def machine_pressure(
     failure: str | None = None,
 ) -> MachinePressure:
     """The one whole-machine decider (x-d6ad LD2/LD4). A ``None`` reading is
-    ``unreadable`` with the failure text as the reason - an unreadable sensor
-    never reads as calm. Pure: no clocks, no subprocesses, no config."""
+    ``unreadable``, never calm. Pure: no clocks, no subprocesses, no config."""
     if reading is None:
         busy = None
         verdict, reason = "unreadable", failure or "machine reading unavailable"
@@ -955,9 +954,8 @@ def machine_pressure(
 
 
 def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> MachinePressure:
-    """Feed :func:`machine_pressure` from one snapshot; the seam every reader
-    of the ``machine`` object shares. Band and throttle come from
-    ``config.resource_meter``, degraded to the registry defaults."""
+    """Feed :func:`machine_pressure` from one snapshot; band and throttle
+    come from ``config.resource_meter``, degraded to the registry defaults."""
     try:
         from fno.config import load_settings
 

@@ -413,9 +413,7 @@ def read_lanes(
     reading = LaneReading()
     load_arm = _cpu_admission_arm()
     # One fleet read serves the census, the per-lane divisor, and the machine
-    # arm's runnable/process counts (x-d6ad AC10). Taken BEFORE the refusal
-    # branch: a refused lane number is exactly when a person most wants to see
-    # what the machine is holding.
+    # arm's counts (x-d6ad AC10); taken before the refusal branch.
     footprint, rows, rows_error, read_ms = _fleet_snapshot()
     cpu_arm = _machine_cpu_arm(sample, macmon_reason, footprint)
     mem_arm = _memory_arm(sample, macmon_reason)
