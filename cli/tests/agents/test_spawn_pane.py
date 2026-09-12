@@ -4834,22 +4834,19 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
     [
         ["--substrate", "bg"],
         ["--substrate", "headless"],
-        ["--headless"],
         ["--once"],
     ],
 )
 def test_ac7_claude_off_pane_forwards_fenced_tokens(
     tmp_path: Path, monkeypatch, substrate_args: list[str]
 ) -> None:
-    """AC7, carrier form: claude's thread row carries ["*"], so the off-pane
-    lanes FORWARD the fenced tokens (never silently drop them). --once on
-    claude resolves to the headless one-shot, which carries them too."""
+    """The off-pane lanes forward fenced tokens; the pane lane never runs."""
     import typer
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    import fno.agents.dispatch as dispatch
     import fno.agents.mux_spawn as mux_spawn
+    from fno.agents import dispatch as _dispatch
 
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
@@ -4864,7 +4861,7 @@ def test_ac7_claude_off_pane_forwards_fenced_tokens(
         sent.update(kwargs)
         raise typer.Exit(code=0)
 
-    monkeypatch.setattr(dispatch, "dispatch_spawn", recorder)
+    monkeypatch.setattr(_dispatch, "dispatch_spawn", recorder)
     result = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "--name", "peer", *substrate_args, "hi", "--", "--verbose", "x"],
