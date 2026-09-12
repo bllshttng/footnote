@@ -169,6 +169,10 @@ RUST_CLIENT_VERBS = frozenset(
         # Registry-label rename: `agent.rename` over the daemon RPC, the same
         # transport as rm/stop. The old label rides home as a persisted alias.
         "rename",
+        # The canonical agent-name bridge (`fno agents name`): the binary owns
+        # the vocabulary (naming.rs), so the CLI verb routes there and Python
+        # keeps only the thin in-process import for producer seams.
+        "name",
         # Inside-leg state push (inside-out E3.2): a per-turn hook calls
         # `fno agents report --session-id <uuid> --seq <n> --state <s>` and the
         # Rust client sends the agent.report RPC to an already-running daemon
@@ -327,13 +331,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
     "spawn-guard",
-    # x-3218: the canonical agent-name bridge, the shell twin of the Python
-    # dispatchers' direct `fno.agents.naming` import. Pure Python and purely
-    # computational (no daemon state); there is NO `name` on the Rust client, so
-    # it must never auto-route. The daemon stays the name VALIDATOR at the spawn
-    # boundary and must not become the generator - truncating there would make
-    # the name a caller reasons about differ from the one the runtime registers.
-    "name",
     # Pane retasking remains Python-owned orchestration. Label rename went the
     # other way: the Rust client carries it over the daemon RPC.
     "retask",
@@ -469,6 +466,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
     "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
+    "name": "Mechanical agent-name bridge for shell dispatchers: [prefix] <node-id> [--slug S] [--qualifier Q] [--discriminator D] [--source S] [--verb V]; prints one name, exit 3 is the naming refusal.",
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",

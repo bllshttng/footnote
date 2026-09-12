@@ -22,7 +22,7 @@ projects, sleeping between drains. Config-gated, default-off, fail-safe.
 > `ab-<verb>-<node>-<slug>`. The `ab` source says the active-backlog drain
 > launched them. The full vocabulary lives in
 > [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md).
-> `fno agents autonomy provenance` prints the ratcheted inventory.
+> the fno-agents binary's `name-codes --check` prints the ratcheted inventory.
 
 ## Why
 

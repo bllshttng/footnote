@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import AgentNameError, dispatch_agent_name, verb_code_for
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env
@@ -1146,11 +1146,10 @@ def _worker_agent_name(
     node_slug: Optional[str],
     *,
     source: Optional[str] = None,
-    verb_code: str = "t",
+    verb: str = "target",
 ) -> str:
-    """Provenance-carrying bg worker name ``[<source>-]<verb>-<node>-<slug>``;
-    raises AgentNameError when the identity cannot be represented."""
-    return dispatch_agent_name(source, verb_code, node_id, slug=node_slug)
+    """Provenance-carrying bg worker name; raises AgentNameError when unrepresentable."""
+    return dispatch_agent_name(source, verb, node_id, slug=node_slug)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -1298,16 +1297,15 @@ def _spawn_worker(
     """Dispatch a fire-and-forget autonomous worker.
 
     The workflow verb is DERIVED from the node's plan rung and difficulty
-    (x-ebd2, law d-834b6ff1). ``source`` (x-84b2) stamps the worker name;
-    the reconcile pass is always ``rd`` (an impossible pair refuses).
+    (x-ebd2, law d-834b6ff1). ``source`` stamps the worker name; the
+    reconcile pass is always ``rd`` (an impossible pair refuses).
     """
     is_reconcile = bool(reconcile_manifest)
     if is_reconcile:
         if source is not None and source != "rd":
             raise SpawnError(
                 f"refusing to dispatch {node_id}: source {source!r} with a "
-                "reconcile manifest is an impossible pair; the de-stub pass "
-                "is always rd (x-84b2)."
+                "reconcile manifest is an impossible pair; de-stub is always rd."
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
@@ -1338,14 +1336,14 @@ def _spawn_worker(
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
-    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver, and
-    # the name mints ONCE here, before spawn, riding the receipt.
-    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
+    # The verb word rides to the binary, which maps it and refuses unknowns
+    # BEFORE the resolver runs; the name mints once, before spawn.
+    verb_word = "t" if is_reconcile else (effective_verb or node_verb or "target")
     agent_name = _worker_agent_name(
         node_id,
         node_slug,
         source=source,
-        verb_code=verb_code,
+        verb=verb_word,
     )
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
@@ -1653,10 +1651,8 @@ def _spawn_worker(
     )
     if receipt is not None:
         # Filled from the same values the EVENT_SPAWNED row carries, so the
-        # row and the receipt cannot disagree (the row has no harness-
-        # independent form; prov is what it records). agent_name (x-84b2) is
-        # the exact registered name: callers copy it into their dispatched
-        # events instead of re-minting a lookalike.
+        # row and the receipt cannot disagree. agent_name is the exact
+        # registered name: callers copy it, never re-mint.
         receipt.update(
             {
                 "short_id": launch_identity,
@@ -1955,8 +1951,8 @@ def dispatch_lanes(
 
     Dispatch-time ``model``/``harness``/``vendor`` values apply to every lane
     spawned this run and outrank each node's own annotation (Locked Decision 1).
-    ``source`` (x-84b2) stamps the workers' names: the active-backlog daemon
-    passes ``ab``; an attended manual run passes nothing.
+    ``source`` stamps the workers' names: the daemon passes ``ab``; an
+    attended manual run passes nothing.
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -2155,8 +2151,7 @@ def dispatch_lanes(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    # The exact registered name from the spawn receipt (x-84b2);
-                    # never a re-mint that can disagree with the registry.
+                    # The exact registered name from the spawn receipt.
                     "agent_name": lane_receipt.get("agent_name", ""),
                     "lane": True,
                     "worktree": str(worktree),
@@ -2806,9 +2801,7 @@ def _join_node(
     # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
-        # x-84b2: joiner names are minted once through the canonical bridge -
-        # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
-        # is distinguishable from an autonomous dispatch.
+        # Joiner names mint once through the bridge: jn-t-<node>-<ordinal>.
         try:
             joiner_names = {
                 k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
@@ -3567,7 +3560,6 @@ def advance(
         {
             "node_id": node_id,
             "short_id": short_id,
-            # The exact registered name from the spawn receipt (x-84b2).
             "agent_name": next_receipt.get("agent_name", ""),
             "verb": next_receipt.get("verb", "builtin"),
             "verb_source": next_receipt.get("verb_source", "field-absent"),
@@ -3899,7 +3891,6 @@ def _converge_one(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    # The exact registered name from the spawn receipt (x-84b2).
                     "agent_name": spawn_receipt.get("agent_name", ""),
                     "cross_project": cross_project,
                     "verb": spawn_receipt.get("verb", "builtin"),

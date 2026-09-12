@@ -275,14 +275,10 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
     groom source, the think verb, and the typed non-node ``backlog`` identity.
     """
     from fno import _subprocess_util
-    from fno.agents.naming import AgentNameError, dispatch_agent_name
+    from fno.agents.naming import mint_or_none
 
-    # A naming refusal (stale binary) degrades to the legacy literal rather
-    # than aborting the pass the worker exists to run.
-    try:
-        worker_name = dispatch_agent_name("gr", "th", "backlog", slug=day)
-    except AgentNameError:
-        worker_name = f"groom-{day}"
+    # A naming refusal degrades to the legacy literal, never aborts the pass.
+    worker_name = mint_or_none("gr", "th", "backlog", slug=day) or f"groom-{day}"
 
     cmd = [
         *_subprocess_util.fno_py_cmd(), "agents", "spawn",

@@ -194,14 +194,14 @@ async fn run(args: Vec<String>) -> i32 {
     // vocabulary tables, mint, and parse own exactly one implementation.
     // Matched with `matches!` like `reentry-plan` - they are not `fno agents`
     // verbs, so the routable-verb parity sets never see them.
-    if matches!(verb, "name-mint") {
+    if matches!(verb, "name-mint" | "name") {
         return fno_agents::naming::run_name_mint(&args[1..]);
     }
     if matches!(verb, "name-parse") {
         return fno_agents::naming::run_name_parse();
     }
     if matches!(verb, "name-codes") {
-        return fno_agents::naming::run_name_codes();
+        return fno_agents::naming::run_name_codes(&args[1..]);
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:

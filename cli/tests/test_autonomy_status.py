@@ -16,7 +16,6 @@ from fno.autonomy_cli import (
     SpawnerStatus,
     autonomy_app,
     collect_status,
-    dispatch_provenance,
     format_table,
 )
 
@@ -225,59 +224,25 @@ def test_status_command_always_exits_0_even_on_resolver_error(
 
 
 # ---------------------------------------------------------------------------
-# x-84b2: dispatch provenance codes
+# The dispatch provenance audit (vocabulary served by the fno-agents binary)
 # ---------------------------------------------------------------------------
 
 
-def test_status_rows_carry_source_and_verb_codes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
-    _write_settings(tmp_path, "schema_version: 1\n")
+def test_name_codes_check_prints_rows_and_marker() -> None:
+    import subprocess
 
-    rows = collect_status(tmp_path)
-    by_name = {r.name: r for r in rows}
-    assert by_name["dispatch_lanes (parallel fill)"].source == "ab"
-    assert by_name["epic converge (mission drain)"].source == "ab"
-    assert by_name["advance (node-walk)"].source == "ac"
-    assert by_name["reconcile_dispatch (G4 de-stub)"].verb == "t"
-    # The master switch is not a dispatch path: no provenance codes.
-    assert by_name["autonomy (master switch)"].source is None
+    from fno import rust_binary
 
-
-def test_format_table_renders_source_verb_columns() -> None:
-    rows = [
-        SpawnerStatus("a", "trigger-a", "config.a.enabled", True, "config", "ab", "t"),
-        SpawnerStatus("b", "trigger-b", "(none)", None, "ungated"),
-    ]
-    table = format_table(rows)
-    assert "SOURCE" in table and "VERB" in table
-    assert "ab" in table and "ungated" in table
-
-
-def test_provenance_inventory_is_complete() -> None:
-    rows = dispatch_provenance()
+    binary = rust_binary.resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents binary on this lane")
+    proc = subprocess.run(
+        [str(binary), "name-codes", "--check"], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = [line for line in proc.stdout.splitlines() if "\t" in line]
     assert len(rows) == 18
-    sites = [row[0] for row in rows]
-    assert len(set(sites)) == len(sites)
-    sources = {row[1] for row in rows}
+    sources = {row.split("\t")[1] for row in rows}
     assert {"sob", "ac"} <= sources, "sob and ac must be distinct rows"
-    assert sum(1 for row in rows if row[1] == "ab") == 2
-
-
-def test_provenance_audit_prints_marker_and_exits_zero(tmp_path: Path) -> None:
-    result = runner.invoke(_cli(), ["provenance"])
-    assert result.exit_code == 0
-    assert "dispatch provenance: 18/18 coded" in result.stdout
-
-
-def test_provenance_audit_fails_on_a_broken_inventory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import fno.autonomy_cli as autonomy_cli
-
-    broken = autonomy_cli.dispatch_provenance()[:-1]  # 17 rows: short one path
-    monkeypatch.setattr(autonomy_cli, "dispatch_provenance", lambda: broken)
-    result = runner.invoke(_cli(), ["provenance"])
-    assert result.exit_code == 1
-    assert "dispatch provenance: 18/18 coded" not in result.stdout
+    assert sum(1 for row in rows if row.split("\t")[1] == "ab") == 2
+    assert "dispatch provenance: 18/18 coded" in proc.stdout

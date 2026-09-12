@@ -1026,14 +1026,9 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
             # completion from them would re-open the very suppression this fixes,
             # so they read unverifiable until an ownership lease can date them.
             name_str = candidate.name or ""
-            if name_str.startswith(f"think-{node_id}-"):
-                tail = name_str[len(f"think-{node_id}-"):]
-            else:
-                # x-84b2 canonical shape: the reason opens the parsed tail.
-                from fno.agents.naming import parse_dispatch_agent_name
-
-                dname = parse_dispatch_agent_name(name_str)
-                tail = dname.tail if dname and dname.node == node_id else ""
+            from fno.agents.naming import parse_dispatch_agent_name
+            dname = parse_dispatch_agent_name(name_str)
+            tail = dname.tail if dname and dname.node == node_id else ""
             if any(tail == r or tail.startswith(f"{r}-")
                    for r in _NON_BIRTH_THINK_REASONS):
                 return None
@@ -1107,7 +1102,6 @@ def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None
         return
     try:
         from fno.agents.registry import append_row_alias
-
         append_row_alias(new_name, old_name)
     except Exception:  # noqa: BLE001 - aliasing is best-effort
         pass
@@ -1115,14 +1109,13 @@ def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None
 
 def _recovery_agent_name(
     predecessor: Optional[str], node_or_session: str, short: str
-) -> str:
-    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
-    parses from the predecessor (legacy spellings still resolve, else t)."""
-    from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
+) -> Optional[str]:
+    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name."""
+    from fno.agents.naming import mint_or_none, parse_dispatch_agent_name
 
     parsed = parse_dispatch_agent_name(predecessor or "")
-    verb = parsed.verb if parsed else (legacy_verb_code(predecessor) or "t")
-    return dispatch_agent_name("rec", verb, node_or_session, slug=short)
+    verb = parsed.verb if parsed else "t"
+    return mint_or_none("rec", verb, node_or_session, slug=short)
 
 
 def _redispatch(
@@ -1180,14 +1173,9 @@ def _redispatch(
         # Raced to completion: nothing to continue, so do not re-dispatch.
         return _Failed("node-done")
     name = getattr(candidate, "name", None)
-    from fno.agents.naming import AgentNameError
-
-    try:
-        agent = _recovery_agent_name(name, node, candidate.short_id)
-    except AgentNameError as exc:
-        # A stale/missing binary unmints this candidate; report it as the
-        # candidate's failure, never crash the sweep.
-        return _Failed(f"name-unmintable: {exc}")
+    agent = _recovery_agent_name(name, node, candidate.short_id)
+    if agent is None:
+        return _Failed("name-unmintable")
     old_worker_stopped = False
     try:
         if name:
@@ -1549,12 +1537,8 @@ def _respawn_bg_resume(
     cwd = getattr(candidate, "cwd", None)
     name = getattr(candidate, "name", None)
     # Nodeless resume: a typed session identity, never a fabricated node.
-    from fno.agents.naming import AgentNameError
-
-    try:
-        agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
-    except AgentNameError:
-        # A stale/missing binary unmints the resume; the caller notifies.
+    agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
+    if agent is None:
         return False
     if not name:
         # No name to stop the dead thread by. The node-less path has no claim +

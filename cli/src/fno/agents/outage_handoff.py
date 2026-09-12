@@ -281,7 +281,7 @@ def spawn_successor_exact(
     proved account env is REFUSED here: spawning against credentials nothing
     proved is the failure the canary exists to prevent."""
     from fno import _subprocess_util
-    from fno.agents.naming import AgentNameError, dispatch_agent_name
+    from fno.agents.naming import mint_or_none
 
     if not request.destination_account_env:
         raise UnprovenCredentialsRefused(
@@ -291,14 +291,9 @@ def spawn_successor_exact(
             f"{request.destination_account!r}"
         )
 
-    # x-84b2: the handoff source is stamped, not left to the --node mint's
-    # manual t- shape (which would hide that an outage moved this worker). An
-    # unrepresentable node id drops the stamp and keeps the failover alive
-    # under the --node auto-name - the move outranks the label.
-    try:
-        _name_flag = ["--name", dispatch_agent_name("oh", "t", request.node)]
-    except AgentNameError:
-        _name_flag = []
+    # The handoff source is stamped; an unrepresentable node drops the stamp
+    # and keeps the failover alive under the --node auto-name.
+    _name_flag = [] if not (minted := mint_or_none("oh", "t", request.node)) else ["--name", minted]
 
     command = [
         *_subprocess_util.fno_py_cmd(),
@@ -313,10 +308,6 @@ def spawn_successor_exact(
         snapshot.owner_cwd,
         "--node",
         request.node,
-        # x-84b2: the handoff source is stamped, not left to the --node mint's
-        # manual t- shape (which would hide that an outage moved this worker).
-        # An unrepresentable node id drops the stamp and keeps the failover
-        # alive under the --node auto-name - the move outranks the label.
         *_name_flag,
         f"--recorded-provider={request.destination_provider}",
         "--model",

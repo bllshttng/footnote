@@ -148,7 +148,7 @@ Every dispatch path mints its worker name through one contract in `cli/src/fno/a
 
 Legacy names (`target-<node>-*`, `think-<node>-*`, `reconcile-*`, `j-*`) still resolve through the read-side fallbacks in `parse_node_id` / `parse_worker_mission` and the reaper's legacy prefix path. This is the legacy-read window. Recovery and restart preserve the predecessor name as a registry alias on the new row.
 
-The inventory is ratcheted. `fno agents autonomy provenance` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`. `scripts/ci/check-autonomy-registry.sh` fails CI when a registered path loses its code.
+The inventory is ratcheted. The fno-agents binary's `name-codes --check` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`. `scripts/ci/check-autonomy-registry.sh` runs it and fails CI when a registered path loses its code.
 
 ## Events
 

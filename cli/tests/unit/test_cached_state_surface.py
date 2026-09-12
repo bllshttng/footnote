@@ -20,7 +20,6 @@ _NON_STATE_CACHE_REASONS = {
     ("fno.agents.harness_map", "_shipped_verbs"): "cache key is the shipped plugin surface, not fno state",
     ("fno.agents.harness_map", "_carrier_vocab"): "cache key is the shipped package-data table, not fno state",
     ("fno.agents.naming", "_codes"): "cache key is the binary-served vocabulary table (name-codes), not fno state",
-    ("fno.autonomy_cli", "_provenance_by_spawner"): "cache key is the binary-served vocabulary table, not fno state",
     ("fno.config._loader", "_load_settings_at"): "cache key is the full declaration plus a stat fingerprint of the settings candidates (_settings_key), which carries the state root and the file contents",
 }
 
