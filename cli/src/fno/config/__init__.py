@@ -1237,8 +1237,9 @@ class WordCapBlock(BaseModel):
 
     mail: int = 80
     encounter: int = 80
+    ask: int = 40
 
-    @field_validator("mail", "encounter")
+    @field_validator("mail", "encounter", "ask")
     @classmethod
     def cap_is_positive(cls, v: int) -> int:
         """A cap below one refuses every message, including its own refusal."""

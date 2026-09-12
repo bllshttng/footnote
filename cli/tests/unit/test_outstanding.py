@@ -117,8 +117,8 @@ def test_both_legs_report_a_count_each(root: Path):
             _carveout("cv-3", "deferred"),
         ],
     )
-    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?"]).exit_code == 0
-    assert runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"]).exit_code == 0
+    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?", "--node", "x-7d94"]).exit_code == 0
+    assert runner.invoke(outstanding_app, ["ask", "which base do we rebase on?", "--node", "x-7d94"]).exit_code == 0
 
     result = runner.invoke(outstanding_app, [])
     assert result.exit_code == 0, result.output
@@ -185,7 +185,7 @@ def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
 
 
 def test_ask_clear_round_trip_and_idempotence(root: Path):
-    asked = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
+    asked = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?", "--node", "x-7d94"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1].strip()
     assert qid, "ask must print the new question id on stdout"
@@ -214,7 +214,7 @@ def test_ask_clear_round_trip_and_idempotence(root: Path):
 
 
 def test_ask_records_the_answer_text_on_clear(root: Path):
-    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"]).stdout.strip().splitlines()[-1]
     runner.invoke(outstanding_app, ["clear", qid, "--answer", "the codex lane"])
     lines = [
         json.loads(line)
@@ -252,9 +252,9 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
             "--option",
             "journal",
             "--blocks",
-            "x-one",
+            "x-0000000a",
             "--blocks",
-            "x-two",
+            "x-0000000b",
         ],
     )
 
@@ -263,7 +263,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     assert event["data"]["asker"] == "01234567"
     assert event["data"]["ask"] == "pick one"
     assert event["data"]["options"] == ["index", "journal"]
-    assert event["data"]["blocks"] == ["x-one", "x-two"]
+    assert event["data"]["blocks"] == ["x-0000000a", "x-0000000b"]
     assert event["data"]["session_id"] == "ledger-run-id"
     assert "live" not in event["data"], "liveness is computed, never stored"
 
@@ -282,7 +282,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "asker": "01234567",
         "ask": "pick one",
         "options": ["index", "journal"],
-        "blocks": ["x-one", "x-two"],
+        "blocks": ["x-0000000a", "x-0000000b"],
         "live": True,
         "rank": 1,
     }
@@ -330,11 +330,11 @@ class TestAskRefusedWhenLiveLawRules:
         monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
         # Positive control: a plain ask on a different subject records a row,
         # so the absence below is the gate's doing and not a broken journal.
-        plain = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        plain = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?", "--node", "x-7d94"])
         assert plain.exit_code == 0, plain.output
         assert len(_question_rows(root)) == 1
 
-        refused = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        refused = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION, "--node", "x-7d94"])
         assert refused.exit_code == 2, refused.output
         assert "d-0fa92eb9" in refused.output
         assert "review-coverage" in refused.output
@@ -365,7 +365,7 @@ class TestAskRefusedWhenLiveLawRules:
         monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
         allowed = runner.invoke(
             outstanding_app,
-            ["ask", _PR1717_QUESTION, "--subject", "pr-heal"],
+            ["ask", _PR1717_QUESTION, "--subject", "pr-heal", "--node", "x-7d94"],
         )
         assert allowed.exit_code == 0, allowed.output
         rows = _question_rows(root)
@@ -376,7 +376,7 @@ class TestAskRefusedWhenLiveLawRules:
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
-        allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
+        allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?", "--node", "x-7d94"])
         assert allowed.exit_code == 0, allowed.output
 
     def test_a_failing_law_lookup_fails_open_and_records(
@@ -386,11 +386,98 @@ class TestAskRefusedWhenLiveLawRules:
             raise RuntimeError("index unreadable")
 
         monkeypatch.setattr("fno.decide.list_decisions", broken)
-        allowed = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        allowed = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION, "--node", "x-7d94"])
         assert allowed.exit_code == 0, allowed.output
         assert "live-law lookup failed" in allowed.output
         rows = _question_rows(root)
         assert len(rows) == 1, "a broken index must not eat the question"
+
+
+# --- the ask gate: law d-59af3235 at the shared write path --------------------
+
+
+def _ask_settings(tmp_path: Path, ask_cap: int) -> str:
+    settings_dir = tmp_path / ".fno-settings"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_file = settings_dir / "settings.yaml"
+    settings_file.write_text(
+        "schema_version: 1\nconfig:\n  style:\n    word_cap:\n"
+        f"      ask: {ask_cap}\n",
+        encoding="utf-8",
+    )
+    return str(settings_file)
+
+
+def _journal_has_questions(root: Path) -> bool:
+    journal = project_log("events.jsonl", project_root=root)
+    return journal.exists() and bool(_question_rows(root))
+
+
+class TestAskLawGate:
+    """AC1-AC5: one gate on append_question_event, the pointer rule at the verb."""
+
+    def test_a_long_one_line_ask_refuses_and_records_nothing(self, root: Path):
+        long_q = " ".join(["word"] * 92)
+        refused = runner.invoke(outstanding_app, ["ask", long_q, "--node", "x-14c8"])
+        assert refused.exit_code == 2, refused.output
+        assert "d-59af3235" in refused.output
+        assert "92 words" in refused.output
+        assert "config.style.word_cap.ask" in refused.output
+        assert not _journal_has_questions(root)
+        assert not (root / "questions.jsonl").exists(), "the index gains no line"
+
+    def test_a_pointer_less_ask_names_the_missing_node_and_a_node_ask_records(
+        self, root: Path
+    ):
+        refused = runner.invoke(outstanding_app, ["ask", "which lane?"])
+        assert refused.exit_code == 2, refused.output
+        assert "names no node" in refused.output
+        assert not _journal_has_questions(root)
+        allowed = runner.invoke(
+            outstanding_app, ["ask", "which lane?", "--node", "x-14c8"]
+        )
+        assert allowed.exit_code == 0, allowed.output
+        assert _journal_has_questions(root), "the compliant ask recorded"
+
+    def test_blocks_that_name_a_node_satisfy_the_pointer_rule(self, root: Path):
+        allowed = runner.invoke(
+            outstanding_app, ["ask", "which lane?", "--blocks", "x-0000000c"]
+        )
+        assert allowed.exit_code == 0, allowed.output
+
+    def test_a_two_line_ask_names_the_one_line_rule(self, root: Path):
+        refused = runner.invoke(
+            outstanding_app, ["ask", "line one\nline two", "--node", "x-14c8"]
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "one line" in refused.output
+
+    def test_a_configured_cap_of_60_permits_a_50_word_ask(
+        self, root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("FNO_CONFIG", _ask_settings(tmp_path, 60))
+        asked = runner.invoke(
+            outstanding_app, ["ask", " ".join(["word"] * 50), "--node", "x-14c8"]
+        )
+        assert asked.exit_code == 0, asked.output
+
+    def test_the_default_cap_of_40_refuses_a_50_word_ask(self, root: Path):
+        refused = runner.invoke(
+            outstanding_app, ["ask", " ".join(["word"] * 50), "--node", "x-14c8"]
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "50 words" in refused.output
+
+    def test_a_closed_event_is_never_checked(self, root: Path):
+        from fno.events import operator_question_closed
+        from fno.outstanding.core import append_question_event
+
+        append_question_event(
+            operator_question_closed(
+                question_id="q-0000000d", answer=" ".join(["word"] * 300)
+            ),
+            root,
+        )
 
 
 def test_live_is_computed_for_json_and_missing_asker_is_stale(
@@ -739,7 +826,7 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
             "89abcdef-full-session", "codex", (), "single"
         ),
     )
-    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"]).stdout.strip().splitlines()[-1]
     recorded: dict[str, object] = {}
 
     def record_decision(**kwargs):
@@ -791,7 +878,7 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
 
     # A withdrawal (no --answer) decides nothing: positive control is the
     # closed event itself, the decision count stays at one from the ask above.
-    qid2 = runner.invoke(outstanding_app, ["ask", "second question?"]).stdout.strip().splitlines()[-1]
+    qid2 = runner.invoke(outstanding_app, ["ask", "second question?", "--node", "x-7d94"]).stdout.strip().splitlines()[-1]
     runner.invoke(outstanding_app, ["clear", qid2])
     lines = [
         json.loads(line)
@@ -949,7 +1036,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     "nothing outstanding". Asserts the positive outcome (the question is still
     found among 20k unrelated rows) plus a wall-clock ceiling.
     """
-    qid = runner.invoke(outstanding_app, ["ask", "buried under noise?"]).stdout.strip().splitlines()[-1]
+    qid = runner.invoke(outstanding_app, ["ask", "buried under noise?", "--node", "x-7d94"]).stdout.strip().splitlines()[-1]
     events = project_log("events.jsonl", project_root=root)
     noise = json.dumps(
         {"ts": "2026-08-01T00:00:00Z", "type": "phase_transition", "source": "target",
@@ -969,7 +1056,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
 
 
 def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
-    qid = runner.invoke(outstanding_app, ["ask", "still readable?"]).stdout.strip().splitlines()[-1]
+    qid = runner.invoke(outstanding_app, ["ask", "still readable?", "--node", "x-7d94"]).stdout.strip().splitlines()[-1]
     events = project_log("events.jsonl", project_root=root)
     with events.open("a", encoding="utf-8") as fh:
         fh.write("{not json at all\n")
@@ -983,7 +1070,7 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
 
 
 def test_question_index_dual_writes_ask_and_close(root: Path):
-    asked = runner.invoke(outstanding_app, ["ask", "which lane ships first?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane ships first?", "--node", "x-7d94"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -1016,7 +1103,7 @@ def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: py
         return real_append_event(event, events_path=events_path)
 
     monkeypatch.setattr("fno.events.append_event", fail_index)
-    result = runner.invoke(outstanding_app, ["ask", "which index?"])
+    result = runner.invoke(outstanding_app, ["ask", "which index?", "--node", "x-7d94"])
 
     assert result.exit_code == 1
     assert "q-feedface" in result.output
@@ -1033,7 +1120,7 @@ def test_question_close_index_failure_names_id_and_reindex(
     from fno import paths
     from fno.events import append_event as real_append_event
 
-    asked = runner.invoke(outstanding_app, ["ask", "which close path?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which close path?", "--node", "x-7d94"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
     index_path = paths.questions_jsonl()
@@ -1609,7 +1696,7 @@ def test_lane_alone_is_enough_to_break_silence():
 
 def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
     _write_carveouts(root, [_carveout("cv-1", "deferred")])
-    runner.invoke(outstanding_app, ["ask", "a question"])
+    runner.invoke(outstanding_app, ["ask", "a question", "--node", "x-7d94"])
     payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert payload["carveouts"]["total"] == 1
     assert payload["carveouts"]["by_kind"]["deferred"] == 1
@@ -1621,9 +1708,9 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 
 def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
-    runner.invoke(outstanding_app, ["ask", "MINE: do we ship the fold arm?"])
+    runner.invoke(outstanding_app, ["ask", "MINE: do we ship the fold arm?", "--node", "x-7d94"])
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
-    runner.invoke(outstanding_app, ["ask", "THEIRS: which base branch?"])
+    runner.invoke(outstanding_app, ["ask", "THEIRS: which base branch?", "--node", "x-7d94"])
 
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
     out = runner.invoke(outstanding_app, []).stdout
@@ -1647,7 +1734,7 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     """
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
     for i in range(6):
-        runner.invoke(outstanding_app, ["ask", f"question number {i}"])
+        runner.invoke(outstanding_app, ["ask", f"question number {i}", "--node", "x-7d94"])
 
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-quiet")
     monkeypatch.setenv("FNO_AGENT_SELF", "worker-quiet")
@@ -1671,7 +1758,7 @@ def test_an_attended_session_does_see_other_sessions_questions(
     """
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
     for i in range(6):
-        runner.invoke(outstanding_app, ["ask", f"question number {i}"])
+        runner.invoke(outstanding_app, ["ask", f"question number {i}", "--node", "x-7d94"])
 
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-operator")
     monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
@@ -1684,7 +1771,7 @@ def test_an_attended_session_does_see_other_sessions_questions(
 
 def test_render_caps_rows_and_states_the_drop_count(root: Path):
     for i in range(11):
-        runner.invoke(outstanding_app, ["ask", f"q{i}"])
+        runner.invoke(outstanding_app, ["ask", f"q{i}", "--node", "x-7d94"])
     out = runner.invoke(outstanding_app, []).stdout
     assert "11 open question" in out
     assert "Showing 10 of 11 open questions" in out
@@ -1708,7 +1795,7 @@ def _asked_question_with_asker(root: Path, monkeypatch: pytest.MonkeyPatch) -> s
             "89abcdef-full-session", "codex", (), "single"
         ),
     )
-    asked = runner.invoke(outstanding_app, ["ask", "which lane?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"])
     return asked.stdout.strip().splitlines()[-1]
 
 
@@ -1951,11 +2038,21 @@ def test_a_long_question_renders_whole_never_sliced(root: Path):
 
     A king escalation cut mid-node-id read as 'nothing is clearing: stalled',
     which is a different sentence about a different board. The full id list
-    must survive the render.
+    must survive the render. Written through the store directly: since the law
+    gate, a verb ask this long refuses at the write, so the verb is the wrong
+    instrument for a read-side pin.
     """
+    from fno.events import append_event, operator_question
+    from fno.outstanding.core import questions_path
+
     ids = "stalled_holder:x-5c59, " * 30
     long_q = f"nothing is clearing: {ids}decide"
-    runner.invoke(outstanding_app, ["ask", long_q])
+    append_event(
+        operator_question(
+            question_id="q-00000abc", question=long_q, session_id="s-render", cwd=str(root)
+        ),
+        events_path=questions_path(),
+    )
 
     out = runner.invoke(outstanding_app, []).stdout
 
@@ -1966,7 +2063,7 @@ def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
     from fno.events import QUESTION_CAP
 
     long_answer = "a" * (QUESTION_CAP + 50)
-    asked = runner.invoke(outstanding_app, ["ask", "short question?"])
+    asked = runner.invoke(outstanding_app, ["ask", "short question?", "--node", "x-7d94"])
     qid = asked.stdout.strip().splitlines()[-1]
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", long_answer])
@@ -1988,7 +2085,7 @@ def test_operator_authority_refusal_names_the_chat_door(
     from types import SimpleNamespace
 
     qid = (
-        runner.invoke(outstanding_app, ["ask", "close PR 1157?"])
+        runner.invoke(outstanding_app, ["ask", "close PR 1157?", "--node", "x-7d94"])
         .stdout.strip()
         .splitlines()[-1]
     )
@@ -2042,7 +2139,7 @@ def test_origin_floor_refusal_names_the_flag_that_actually_fixes_it(
     from types import SimpleNamespace
 
     qid = (
-        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"])
         .stdout.strip()
         .splitlines()[-1]
     )
@@ -2075,7 +2172,7 @@ def test_unattributed_caller_is_not_sent_to_chat(
     from types import SimpleNamespace
 
     qid = (
-        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"])
         .stdout.strip()
         .splitlines()[-1]
     )
@@ -2103,7 +2200,7 @@ def test_bad_origin_is_not_told_to_go_write_law(root: Path):
     they never passed, and would never name the value that actually failed.
     """
     qid = (
-        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        runner.invoke(outstanding_app, ["ask", "which lane?", "--node", "x-7d94"])
         .stdout.strip()
         .splitlines()[-1]
     )

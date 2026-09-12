@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
 
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
@@ -43,6 +43,9 @@ QUESTION_MARKER = "operator_question"
 # explicit unknown for anything that cannot finish in time.
 LIVENESS_BUDGET_SECONDS = 0.05
 
+# Law d-59af3235: an ask is one line plus a node pointer. ask_refusal is its gate.
+ASK_LAW = "d-59af3235"
+
 
 class OutstandingError(Exception):
     """A store exists but could not be read.
@@ -51,6 +54,10 @@ class OutstandingError(Exception):
     one is the absence-as-success trap, and here it would tell an operator the
     queue is clear when it is merely unreadable.
     """
+
+
+class AskRefused(OutstandingError):
+    """An ask violates law d-59af3235 (one line, capped words, node pointer)."""
 
 
 class QuestionIndexWriteError(OutstandingError, RuntimeError):
@@ -215,14 +222,85 @@ def questions_path() -> Path:
     return paths.questions_jsonl()
 
 
-def append_question_event(event: dict[str, Any], root: Path) -> None:
-    """Write one event to project durability first, then machine-wide recall."""
+def ask_refusal(
+    question: str,
+    *,
+    node: str | None,
+    blocks: "Sequence[str]",
+    cap: int,
+    require_pointer: bool,
+) -> "str | None":
+    """None when the ask complies with law d-59af3235; otherwise ONE refusal line.
+
+    Shape only, never existence: a graph read costs seconds, and the pointer
+    rule is about the ask carrying an address, not about the node being live.
+    """
+    import re
+
+    from fno.graph._constants import NODE_ID_BODY
+    from fno.style import word_count
+
+    problems: "list[str]" = []
+    if "\n" in question.strip():
+        problems.append("it spans more than one line")
+    words = word_count(question)
+    if words > cap:
+        problems.append(f"it runs {words} words; the cap is {cap} (config.style.word_cap.ask)")
+    pointer = bool(node and re.fullmatch(NODE_ID_BODY, node)) or any(
+        re.fullmatch(NODE_ID_BODY, str(b)) for b in blocks
+    )
+    if require_pointer and not pointer:
+        problems.append("it names no node (--node, or a node id in --blocks)")
+    if not problems:
+        return None
+    return (
+        f"outstanding: refused: law {ASK_LAW}: an ask is one line plus a node pointer. "
+        + "; ".join(problems)
+        + ". Put the mechanism, options and evidence on the node with "
+        'fno backlog note <node> "...", then ask one line with --node <node>.'
+    )
+
+
+def _ask_cap() -> int:
+    """The configured ask cap; the built-in default when settings cannot load.
+
+    Losing an escalation to a config typo is worse than enforcing the default,
+    so the fallback enforces ``WordCapBlock()``'s default rather than skipping
+    the gate.
+    """
+    try:
+        from fno.config import load_settings
+
+        return load_settings().style.word_cap.ask
+    except Exception:  # noqa: BLE001 - an unloadable config must not open the gate
+        from fno.config import WordCapBlock
+
+        return WordCapBlock().ask
+
+
+def append_question_event(event: dict[str, Any], root: Path, *, require_pointer: bool = False) -> None:
+    """Write one event to project durability first, then machine-wide recall.
+
+    Every ``operator_question`` passes the law gate before anything is written;
+    closed and decision events are never checked. ``require_pointer`` adds the
+    node-pointer rule; the verb is its only caller.
+    """
     from fno.events import append_event
 
     data = event.get("data")
     question_id = data.get("question_id") if isinstance(data, dict) else None
     if not question_id:
         raise ValueError("question event has no question_id")
+    if event.get("type") == QUESTION_EVENT and isinstance(data, dict):
+        refusal = ask_refusal(
+            str(data.get("question") or ""),
+            node=data.get("node"),
+            blocks=data.get("blocks") or (),
+            cap=_ask_cap(),
+            require_pointer=require_pointer,
+        )
+        if refusal:
+            raise AskRefused(refusal)
     try:
         append_event(event, events_path=events_path(root))
     except Exception as exc:

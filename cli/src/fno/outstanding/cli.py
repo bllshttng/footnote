@@ -184,7 +184,11 @@ def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict
 @outstanding_app.command("ask")
 def ask(
     question: str | None = typer.Argument(
-        None, help="What you need the operator to decide or answer."
+        None,
+        help=(
+            "One line, at most config.style.word_cap.ask words (law d-59af3235); "
+            "put detail on the node."
+        ),
     ),
     question_file: Path | None = typer.Option(
         None,
@@ -199,7 +203,9 @@ def ask(
         [], "--blocks", help="A backlog node blocked by the question; repeatable."
     ),
     node: str = typer.Option(
-        None, "--node", help="Backlog node the question is about, when there is one."
+        None,
+        "--node",
+        help="Backlog node the question is about. Required unless --blocks names a node.",
     ),
     subject: str = typer.Option(
         None,
@@ -216,7 +222,11 @@ def ask(
     from fno.claims.self_identity import resolve_self_identity
     from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle
-    from fno.outstanding.core import QuestionIndexWriteError, append_question_event
+    from fno.outstanding.core import (
+        AskRefused,
+        QuestionIndexWriteError,
+        append_question_event,
+    )
     from fno.text_or_file import read_text_arg
 
     question = read_text_arg(question, question_file, what="the question")
@@ -226,12 +236,6 @@ def ask(
         )
         raise typer.Exit(code=2)
 
-    if len(question) > QUESTION_CAP:
-        typer.echo(
-            f"outstanding: recorded truncated: the question is {len(question)} "
-            f"characters, the event stores {QUESTION_CAP}.",
-            err=True,
-        )
     try:
         hits = _live_law_hits(question, subject, node)
     except Exception as exc:  # noqa: BLE001 - fail open: record the question
@@ -270,7 +274,10 @@ def ask(
             blocks=blocks or None,
             subject=subject,
         )
-        append_question_event(event, _storage_root())
+        append_question_event(event, _storage_root(), require_pointer=True)
+    except AskRefused as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2)
     except QuestionIndexWriteError as exc:
         typer.echo(
             f"outstanding: recorded {exc.question_id} in the project journal, "
@@ -284,6 +291,13 @@ def ask(
         typer.echo(f"outstanding: failed to record question: {exc}", err=True)
         raise typer.Exit(1)
 
+    # After the record, never before: a refused ask must not claim it recorded.
+    if len(question) > QUESTION_CAP:
+        typer.echo(
+            f"outstanding: recorded truncated: the question is {len(question)} "
+            f"characters, the event stores {QUESTION_CAP}.",
+            err=True,
+        )
     typer.echo(
         f"outstanding: recorded {qid}. Clear it once answered: "
         f'fno inbox outstanding clear {qid} --answer "..."',

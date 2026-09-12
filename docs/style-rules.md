@@ -54,7 +54,9 @@ Operational control has its own lane. When the pair window is spent, a stop, a r
 
 ### Which surfaces take the cap, and why progress notes do not
 
-The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
+The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. An operator ask (`fno inbox outstanding ask`) is read mid-turn, off a report of dozens of rows, and is capped by law d-59af3235 at `config.style.word_cap.ask` (default 40) plus the one-line and node-pointer rules. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
+
+The ask gate has no escape: it honors no `style-exception:` marker and no `FNO_STYLE_ENFORCE=0`. Its authority is law d-59af3235, not style. Config moves the number and nothing else.
 
 `progress_notes` is deliberately UNCAPPED, and the reason is worth stating rather than rediscovering. When a person opens a node, they read its notes deliberately. That is not mid-turn. A note is also an agent's only append-only surface on a node, because `update --details` replaces rather than appends. A refusal there leaves measured evidence nowhere to land that does not overwrite somebody else's writing. The 76,346 words of notes measured on 2026-08-29 are a volume problem on an artifact surface. A refusal that destroys evidence is the wrong instrument for a volume problem. `fno backlog note` therefore prints one advisory line naming the word count and the cheaper alternative, and appends the note.
 
