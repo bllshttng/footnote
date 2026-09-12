@@ -535,6 +535,35 @@ fi
 # failure (fno unavailable, identity already written) must NOT abort the
 # handoff - the brief + `delegated` event remain the primary succession path.
 # The receipt reuses the event-journal reducers, so it stores no second copy.
+#
+# Task-context binding (x-59b0): when the attempt carries a declared binding,
+# revalidate its required sources natively BEFORE the bound receipt is
+# prepared (the parent still holds authority here) and embed it in the
+# receipt. A refusal parks the handoff BEFORE any delegation commits: required
+# context changed under the binding, so the successor must not inherit it
+# silently. An authorized task revision mints a new binding; nothing here
+# overrides changed constraints.
+_TASK_CONTEXT_FILE=".fno/artifacts/handoff/task-context-${NODE_ID}.json"
+_TC_EMBED=""
+if [ -f "$_TASK_CONTEXT_FILE" ]; then
+  _TC_BINDING="$(cat "$_TASK_CONTEXT_FILE" 2>/dev/null || true)"
+  _TC_ANSWER="$(printf '{"binding":%s,"expect":{"node":"%s"},"root":"%s"}' \
+    "$_TC_BINDING" "$NODE_ID" "$PWD" \
+    | fno-agents task-context-revalidate 2>/dev/null || true)"
+  case "$_TC_ANSWER" in
+    *'"ok":true'*)
+      _TC_EMBED=1
+      ;;
+    *)
+      _TC_DETAIL="$(printf '%s' "${_TC_ANSWER:-native verifier unavailable}" | tr '\n' ' ' | cut -c1-300)"
+      _emit_event "handoff_failed" \
+        "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"context_revalidation\",\"detail\":\"$_TC_DETAIL\"}"
+      echo "parked $NODE_ID reason=\"context_revalidation: $_TC_DETAIL\""
+      exit "$_EXIT_PARKED"
+      ;;
+  esac
+fi
+
 _RECEIPT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
 _RECEIPT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 _RECEIPT_REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)"
@@ -550,6 +579,7 @@ if fno do resume receipt write \
       --head "${_RECEIPT_HEAD:-}" \
       --next-verb "/fno:target" \
       --next-target "$NODE_ID" \
+      ${_TC_EMBED:+"--task-context" "$_TASK_CONTEXT_FILE"} \
       >/dev/null 2>"$_TMP_RECEIPT_ERR"; then
   :
 else

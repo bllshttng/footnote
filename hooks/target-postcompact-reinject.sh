@@ -101,14 +101,14 @@ elif [[ -n "$PLAN_PATH" && -f "$PLAN_PATH" ]]; then
 fi
 
 # Task-context binding pointer (x-59b0): the current attempt's bound binding
-# lives under the existing handoff artifact root, named by node + attempt
-# (attempt = the manifest's minted fno_id). The pointer and its declared
+# lives under the existing handoff artifact root, one slot per node
+# (task-context-<node>.json); each attempt's binding is immutable through its
+# digest, and receipts embed their own copies. The pointer and its declared
 # constraints ride once; source CONTENTS never ride. A pointer in context is
 # not a read - the stage field stays the only honest observation record.
-FNO_ID=$(grep '^fno_id:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^fno_id: *//' | tr -d '"')
 BINDING_FILE=""
-if [[ -n "$NODE" && -n "$FNO_ID" ]]; then
-    CANDID=".fno/artifacts/handoff/task-context-${NODE}-${FNO_ID}.json"
+if [[ -n "$NODE" ]]; then
+    CANDID=".fno/artifacts/handoff/task-context-${NODE}.json"
     [[ -f "$CANDID" ]] && BINDING_FILE="$CANDID"
 fi
 if [[ -n "$BINDING_FILE" ]]; then

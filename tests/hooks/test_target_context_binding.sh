@@ -30,7 +30,6 @@ TMP="$(mktemp -d -t target-context-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 NODE="x-59b0"
-ATTEMPT="20260912T055500Z-test99-abc123"
 SID="sess-context-worker"
 
 # A minimal session repo: manifest owned by $SID, a single-FILE plan, and the
@@ -39,7 +38,7 @@ setup_repo() { # $1 = plan_path_kind (file|dir|missing)
     local repo="$1"
     mkdir -p "$repo/.fno/artifacts/handoff"
     {
-        echo 'fno_id: '"$ATTEMPT"
+        echo 'fno_id: 20260912T055500Z-test99-abc123'
         echo 'input: "bind task context"'
         echo 'harness_session_id: '"$SID"
         echo 'graph_node_id: '"$NODE"
@@ -56,12 +55,12 @@ count_occurrences() { # $1 = haystack, $2 = needle -> count on stdout
     printf '%s' "$1" | grep -o -F "$2" | wc -l | tr -d ' '
 }
 
-write_binding() { # $1 = repo, $2 = extra json body fields
-    local f="$1/.fno/artifacts/handoff/task-context-${NODE}-${ATTEMPT}.json"
+write_binding() { # $1 = repo - write the node-keyed binding slot
+    local f="$1/.fno/artifacts/handoff/task-context-${NODE}.json"
     {
         echo '{'
         echo '  "node": "'"${NODE}"'",'
-        echo '  "attempt": "'"${ATTEMPT}"'",'
+        echo '  "attempt": "20260912T055500Z-test99-abc123",'
         echo '  "binding_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",'
         echo '  "stage": "prepared",'
         echo '  "required_constraints": ['
@@ -140,7 +139,7 @@ MAL="$TMP/malformed"
 mkdir -p "$MAL"
 printf '# plan\n' > "$MAL/PLAN.md"
 setup_repo "$MAL" "$MAL/PLAN.md"
-printf '{not json' > "$MAL/.fno/artifacts/handoff/task-context-${NODE}-${ATTEMPT}.json"
+printf '{not json' > "$MAL/.fno/artifacts/handoff/task-context-${NODE}.json"
 OUT="$(run_hook "$MAL")"
 if [[ "$OUT" != *"Task context:"* ]]; then
     pass "malformed binding degrades to absent (no fabricated pointer)"
@@ -150,7 +149,7 @@ fi
 
 # ── 3. One payload-preparation entry for both substrates ──────────────────
 
-PAYLOAD_CHECK="$(REPO_ROOT="$REPO_ROOT" FNO_TASK_CONTEXT_FILE="$BOUND/.fno/artifacts/handoff/task-context-${NODE}-${ATTEMPT}.json" \
+PAYLOAD_CHECK="$(REPO_ROOT="$REPO_ROOT" FNO_TASK_CONTEXT_FILE="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json" \
 PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND/PLAN.md" <<'PY'
 import json, sys
 from fno.agents.spawn_payload import (
