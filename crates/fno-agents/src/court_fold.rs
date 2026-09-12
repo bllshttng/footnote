@@ -475,9 +475,9 @@ fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
                 continue;
             }
             let claim = s_str(node, "claim_state").unwrap_or("");
-            if UNPROVEN_CLAIMS.contains(&claim) {
+            let unproven_claim = UNPROVEN_CLAIMS.contains(&claim);
+            if unproven_claim {
                 unproven.push(id.to_string());
-                continue;
             }
             let held = HELD_CLAIMS.contains(&claim);
             let old = node
@@ -486,16 +486,22 @@ fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
                 .map(|h| h > threshold)
                 .unwrap_or(false);
             let has_pr = node.get("pr_number").map(|p| !p.is_null()).unwrap_or(false);
+            // `blocked_by` is a graph field, so it is classified whatever the
+            // claim store said. An unreadable store must not erase a fact that
+            // never came from it. The other two buckets read the claim, so an
+            // unproven one is reported there and not counted twice here.
             match s_str(node, "status") {
                 // A count that never says what on is the gap this closes.
                 Some("blocked") => blocked.push(json!({
                     "id": id,
                     "blocked_by": node.get("blocked_by").cloned().unwrap_or(Value::Null),
                 })),
-                Some("ready") | Some("in_progress") if !held && old => {
+                Some("ready") | Some("in_progress") if !unproven_claim && !held && old => {
                     unclaimed.push(id.to_string())
                 }
-                Some("in_review") if old && has_pr => in_review.push(id.to_string()),
+                Some("in_review") if !unproven_claim && old && has_pr => {
+                    in_review.push(id.to_string())
+                }
                 _ => {}
             }
         }
@@ -1075,6 +1081,37 @@ mod tests {
         assert_eq!(v["unproven_claim"], json!(["x-1", "x-2"]));
         assert_eq!(v["unclaimed"], json!([]));
         assert!(stuck_line(&v).contains("2 with an unproven claim"));
+    }
+
+    #[test]
+    fn a_blind_claim_store_never_erases_what_a_node_is_blocked_on() {
+        // Measured 2026-09-12 against the live court: with the claims store
+        // unreadable, every row reads `unreadable`, and gating the whole
+        // classification on that reported 0 blocked while 12 were blocked in
+        // the same graph. `blocked_by` is a graph field and never came from
+        // the claim store.
+        let mut r = row("x-1", "blocked", "unreadable", 0.1);
+        r["blocked_by"] = json!(["x-9"]);
+        let v = stuck_verdict(&folds(&[r]));
+        assert_eq!(v["unproven_claim"], json!(["x-1"]));
+        assert_eq!(v["blocked"][0]["id"], "x-1");
+        assert_eq!(v["blocked"][0]["blocked_by"], json!(["x-9"]));
+        let line = stuck_line(&v);
+        assert!(line.contains("1 blocked"));
+        assert!(line.contains("x-9"));
+    }
+
+    #[test]
+    fn an_unproven_claim_is_never_counted_twice() {
+        // The other two buckets read the claim, so an unproven row belongs in
+        // `unproven_claim` alone.
+        let v = stuck_verdict(&folds(&[
+            row("x-1", "ready", "unreadable", 9.0),
+            row("x-2", "in_review", "corrupted", 9.0),
+        ]));
+        assert_eq!(v["unproven_claim"], json!(["x-1", "x-2"]));
+        assert_eq!(v["unclaimed"], json!([]));
+        assert_eq!(v["in_review"], json!([]));
     }
 
     #[test]
