@@ -893,6 +893,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_effort_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
+    "merge_cleanup_skipped",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
     // Merge reaper (daemon-emitted, x-07dc): a pending request was HELD (the

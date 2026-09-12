@@ -1299,25 +1299,68 @@ def _merge_request_repo_and_project(cwd: str) -> tuple[str, str]:
     return repo, project
 
 
+def _emit_merge_cleanup_skip(
+    pr_number: int, cwd: str, state_file: str, reason: str,
+    detail: str = "", branch: Optional[str] = None,
+) -> None:
+    """Say that this merge minted no cleanup request, and why. Joined to the
+    merge the same way a request row is, so one reader answers both."""
+    from fno.agents.events import emit_merge_cleanup_skipped
+
+    repo, project = _merge_request_repo_and_project(cwd)
+    emit_merge_cleanup_skipped(
+        repo=repo,
+        project=project,
+        pr=pr_number,
+        reason=reason,
+        detail=detail,
+        branch=branch,
+        session_id=_read_state_field(state_file, "session_id") or None,
+        harness=_read_state_field(state_file, "harness") or None,
+    )
+
+
 def _emit_merge_cleanup_request(
     pr_number: int, cwd: str, state_file: str, bound_node_ids: List[str]
 ) -> None:
     """Mint the machine's reap order - for EVERY confirmed merge, no agent
     in the path (the ritual needed an agent and ran for none of the six PRs
     merged 2026-09-06). Only against a gh-confirmed MERGED state, as the
-    ritual holds."""
+    ritual holds.
+
+    Every call writes exactly one journal row, a request or a skip. Silence
+    is not a legal outcome: a merge that mints nothing must say why."""
     from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
     from fno.graph._reconcile import repo_slug_from_url
     from fno.worktree_reapable import is_linked_worktree
 
     res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url"], cwd)
-    meta = {}
-    if res.ok:
-        try:
-            meta = json.loads(res.stdout or "{}")
-        except json.JSONDecodeError:
-            pass
-    if meta.get("state") != "MERGED" or not meta.get("headRefName"):
+    if not res.ok:
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "gh-unavailable",
+            detail=(res.stderr or "").strip()[:200],
+        )
+        return
+    try:
+        meta = json.loads(res.stdout or "{}")
+        if not isinstance(meta, dict):
+            # `null` and a bare array parse fine and then break `.get`.
+            raise ValueError("pr json is not an object")
+    except ValueError as exc:  # JSONDecodeError is a ValueError
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "unparseable-pr-json",
+            detail=type(exc).__name__,
+        )
+        return
+    if meta.get("state") != "MERGED":
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "not-merged",
+            detail=f"state={meta.get('state')}",
+            branch=meta.get("headRefName") or None,
+        )
+        return
+    if not meta.get("headRefName"):
+        _emit_merge_cleanup_skip(pr_number, cwd, state_file, "no-branch")
         return
     branch = meta["headRefName"]
     repo, project = _merge_request_repo_and_project(cwd)
@@ -1349,6 +1392,13 @@ def _run_post_merge_followups(
         _emit_merge_cleanup_request(pr_number, cwd, state_file, bound_node_ids or [])
     except Exception as exc:  # noqa: BLE001 - best-effort, merge outcome unaffected
         sys.stderr.write(f"pr-merge: merge-cleanup emit failed ({exc}); unaffected\n")
+        try:
+            _emit_merge_cleanup_skip(
+                pr_number, cwd, state_file, "emit-failed",
+                detail=type(exc).__name__,
+            )
+        except Exception:  # noqa: BLE001 - a failing journal write changes no merge
+            pass
 
     # Memory-pass sentinel.
     try:
