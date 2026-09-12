@@ -38,7 +38,10 @@ def _spawn(*args: str):
 
 
 def _refusing_run_gate(calls: list, reason: str):
-    def _fake(name, substrate, *, force=False, no_wait=False, route_provider=None):
+    def _fake(
+        name, substrate, *, force=False, no_wait=False, route_provider=None,
+        account=None,
+    ):
         calls.append(name)
         raise GateRefused(
             EXIT_LOAD_REFUSED,
