@@ -471,6 +471,60 @@ def test_all_done_epic_noop_deactivates(iso, tmp_path, monkeypatch):
     assert len(dm) == 1 and dm[0]["data"]["reason"] == "complete"
 
 
+def test_epic_whose_only_other_child_was_replaced_elsewhere_completes(iso, tmp_path, monkeypatch):
+    """Supersede stamps no completed_at: the mission still completes, and the
+    done-elsewhere shape does not re-arm an epic the close paths just closed."""
+    _write_graph(
+        tmp_path,
+        [
+            {"id": "x-EPIC", "title": "mission", "type": "epic", "project": "fno"},
+            {"id": "x-web", "title": "web child", "parent": "x-EPIC", "project": "web",
+             "slug": "web-child", "status": "ready",
+             "completed_at": "2026-07-18T00:00:00Z"},
+            {"id": "x-etl", "title": "etl child", "parent": "x-EPIC", "project": "etl",
+             "slug": "etl-child", "status": "superseded", "superseded_by": "x-other"},
+        ],
+        monkeypatch,
+    )
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: pytest.fail("must not enumerate a complete epic"))
+    monkeypatch.setattr(adv, "_spawn_worker",
+                        lambda *a, **k: pytest.fail("must not spawn"))
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert res.deactivated is True and res.all_done is True
+    dm = [e for e in _events(iso) if e["type"] == "mission_deactivated"]
+    assert len(dm) == 1 and dm[0]["data"]["reason"] == "complete"
+    assert _read_epic().get("mission_active") is None
+
+
+def test_a_closed_epic_never_re_arms_even_with_an_open_child(iso, tmp_path, monkeypatch):
+    """The epic's own completed_at is the close paths' ruling: advance must
+    deactivate, not re-activate a mission on a closed epic."""
+    _write_graph(
+        tmp_path,
+        [
+            {"id": "x-EPIC", "title": "mission", "type": "epic", "project": "fno",
+             "completed_at": "2026-07-18T00:00:00Z"},
+            {"id": "x-web", "title": "web child", "parent": "x-EPIC", "project": "web",
+             "slug": "web-child", "status": "ready"},
+        ],
+        monkeypatch,
+    )
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: pytest.fail("must not enumerate a closed epic"))
+    monkeypatch.setattr(adv, "_spawn_worker",
+                        lambda *a, **k: pytest.fail("must not spawn"))
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert res.deactivated is True and res.all_done is True
+    assert _read_epic().get("mission_active") is None
+
+
 # ---------------------------------------------------------------------------
 # Stop
 # ---------------------------------------------------------------------------

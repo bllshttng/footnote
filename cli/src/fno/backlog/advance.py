@@ -4410,11 +4410,20 @@ def advance_epic(
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
-    # least one child above.)
+    # least one child above.) Descendants read the shared closure rule the close
+    # paths apply (children_all_closed): supersede stamps no completed_at, so a
+    # raw completed_at read re-arms a mission whose every child was replaced
+    # elsewhere. A closed epic itself never re-arms either.
+    from fno.graph._reconcile import children_all_closed
+
     descendants = descendants_of(entries, canon)
     by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
-    all_done = bool(descendants) and all(
-        (by_id.get(d) or {}).get("completed_at") for d in descendants
+    epic = by_id.get(canon) or {}
+    all_done = bool(epic.get("completed_at")) or (
+        bool(descendants)
+        and children_all_closed(
+            epic, [d for d in (by_id.get(x) for x in descendants) if isinstance(d, dict)]
+        )
     )
     if all_done:
         _set_mission_active(canon, False)
