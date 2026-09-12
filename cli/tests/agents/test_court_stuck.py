@@ -255,6 +255,46 @@ def test_a_binary_older_than_this_court_says_so_not_that_the_fold_failed(
     assert "the scope fold did not run" not in line
 
 
+def test_the_real_fold_hands_its_verdict_back_to_the_caller(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The success path returns the payload, not None.
+
+    Every other test here stubs ``fold_scope_nodes``, so a stub returning a
+    dict hid a real function that fell off its end and returned None. The
+    caller read that as "the fold did not run" on every healthy read.
+    """
+    import json as _json
+    import subprocess
+
+    from fno.agents.court import fold_scope_nodes
+
+    _prepare(monkeypatch, tmp_path, [_king()], graph_entries=[])
+
+    payload = {
+        "scope_nodes": {"alpha": {"status": "ok", "total": 0, "counts": {},
+                                  "nodes": [], "omitted": 0}},
+        "stuck": {"unclaimed": ["x-1"], "blocked": [], "unproven_claim": [],
+                  "in_review": [], "blind": [], "threshold_minutes": 60},
+        "stuck_line": "1 ready over 60m with no worker (x-1)",
+    }
+
+    class Proc:
+        returncode = 0
+        stdout = _json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: Proc())
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: Path("/bin/true"))
+
+    crowns = [{"scope": "alpha", "level": 1}]
+    folded = fold_scope_nodes(crowns)
+
+    assert folded["stuck"]["unclaimed"] == ["x-1"]
+    assert folded["stuck_line"] == "1 ready over 60m with no worker (x-1)"
+    assert crowns[0]["scope_nodes"]["status"] == "ok"
+
+
 def test_a_bare_json_render_carries_no_scope_nodes(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.court import render_court
 

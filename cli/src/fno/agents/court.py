@@ -348,6 +348,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
             scope,
             {"status": "unresolved", "reason": "the fold answered no row for this scope"},
         )
+    return folded
 
 
 def _gate_read() -> dict[str, Any]:
