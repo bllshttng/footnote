@@ -2233,6 +2233,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
+    // Machine watch (x-d6ad): gate + throttle stamp + the arm's streak and
+    // throttle memory, the same one-in-flight discipline as the sweeps beside
+    // it (the probe shells out, so it never runs in the select arm).
+    let machine_watch_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut last_machine_watch = Instant::now();
+    let machine_watch_state = Arc::new(std::sync::Mutex::new(
+        crate::machine_watch::MachineWatchState::default(),
+    ));
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -2403,6 +2411,19 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &mut last_orphan_sweep,
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
+                );
+                // The machine gets an arm (x-d6ad): one watcher reads the
+                // whole box, bands it on the payload's machine verdict, and
+                // escalates on its own. It never gates: the spawn gate keeps
+                // deciding (LD1). The probe shells out (8s budget), so the
+                // body runs off-loop behind the one-in-flight gate, like the
+                // reaper beside it; the streak/throttle memory is this loop's.
+                crate::machine_watch::maybe_tick(
+                    &mut last_machine_watch,
+                    &machine_watch_in_flight,
+                    &machine_watch_state,
+                    ctx.home.clone(),
+                    Duration::from_secs(crate::machine_watch::MACHINE_WATCH_INTERVAL_S),
                 );
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with

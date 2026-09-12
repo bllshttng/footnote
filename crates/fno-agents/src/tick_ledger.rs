@@ -91,6 +91,11 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
     },
+    ArmSpec {
+        arm: "machine_watch",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token

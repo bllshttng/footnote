@@ -875,7 +875,7 @@ fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
 /// Python decider (`cpu_admission`) and consumed verbatim by this gate. The
 /// Rust gate computes no verdict of its own.
 #[derive(Debug, Clone, Deserialize)]
-struct AdmissionPayload {
+pub(crate) struct AdmissionPayload {
     verdict: String,
     axis: String,
     reason: String,
@@ -901,8 +901,8 @@ struct AdmissionPayload {
     backstop: f64,
 }
 
-#[derive(Debug, Deserialize)]
-struct FootprintCausePayload {
+#[derive(Debug, Default, Deserialize)]
+pub struct FootprintCausePayload {
     /// Kept only so an older admission-less payload still parses; the verdict
     /// comes from `admission` now, never from the gap's presence.
     #[serde(default)]
@@ -928,6 +928,67 @@ struct FootprintCausePayload {
     /// as `cpu_instrument_unreadable` rather than guessing (LD3).
     #[serde(default)]
     admission: Option<AdmissionPayload>,
+    /// The whole-machine band's verdict from the ONE Python decider
+    /// (`machine_pressure`); the machine_watch arm reads it verbatim (x-d6ad
+    /// LD3). Absent on a degraded payload: the arm reads that as
+    /// `machine_unreadable`, never as calm.
+    #[serde(default)]
+    pub(crate) machine: Option<MachinePressurePayload>,
+    /// Top fleet consumers by summed ps %cpu; the machine_watch escalation
+    /// names the first three by their own argv strings (x-d6ad AC7).
+    #[serde(default)]
+    pub(crate) top: Vec<TopConsumer>,
+}
+
+impl FootprintCausePayload {
+    /// The arm-and-test seam: a payload carrying only the machine verdict and
+    /// the top consumers; everything else defaults.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        machine: Option<MachinePressurePayload>,
+        top: Vec<TopConsumer>,
+    ) -> Self {
+        Self {
+            machine,
+            top,
+            ..Default::default()
+        }
+    }
+}
+
+/// One `top` row of the footprint payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopConsumer {
+    #[serde(default)]
+    pub(crate) cpu_percent: f64,
+    #[serde(default)]
+    pub(crate) command: String,
+}
+
+/// The payload's `machine` object (x-d6ad LD3/LD4): computed by
+/// `machine_pressure` in doctor_footprint.py, read verbatim here. This module
+/// computes no machine verdict of its own.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MachinePressurePayload {
+    pub(crate) verdict: String,
+    #[serde(default)]
+    pub(crate) reason: String,
+    #[serde(default)]
+    pub(crate) busy_fraction: Option<f64>,
+    #[serde(default)]
+    pub(crate) band: f64,
+    #[serde(default)]
+    pub(crate) machine_cores: Option<f64>,
+    #[serde(default)]
+    pub(crate) capacity_cores: f64,
+    #[serde(default)]
+    pub(crate) runnable: Option<u64>,
+    #[serde(default)]
+    pub(crate) processes: Option<u64>,
+    #[serde(default)]
+    pub(crate) load_15m: Option<f64>,
+    #[serde(default)]
+    pub(crate) throttle_minutes: u64,
 }
 
 /// The CPU axis's answer for THIS spawn: the admission to branch on plus the
@@ -1075,7 +1136,7 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
     ))
 }
 
-fn footprint_cause_raw() -> Result<String, String> {
+pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
