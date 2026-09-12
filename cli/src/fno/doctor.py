@@ -550,13 +550,13 @@ def _daemon_drift_warning() -> Optional[str]:
     """Return Rust's measured daemon-drift warning, or None on unknown state.
 
     ``fno-agents status`` owns the executable fingerprint comparison. The
-    verdict is read from the structured ``drift`` field of ``status --json``
-    (x-f188 change 4), never regex-parsed from prose. Bare ``status`` prints
-    the human arms table, so the old JSON gate over its stdout could never
-    pass and the relay stayed dead (x-538f): doctor printed an unqualified
-    fresh verdict while the daemon ran pre-fix code. The canonical stderr
-    sentence is still the relayed text; the daemon's measured process age is
-    appended beside it so a fresh artifact verdict carries the lag in view.
+    verdict is read from the structured ``drift`` field of ``status --json``,
+    never regex-parsed from prose. Bare ``status`` prints the human arms
+    table, so the old JSON gate over its stdout could never pass and the
+    relay stayed dead: doctor printed an unqualified fresh verdict while the
+    daemon ran pre-fix code. The canonical stderr sentence is still the
+    relayed text; the daemon's measured process age is appended beside it so
+    a fresh artifact verdict carries the lag in view.
     """
     try:
         from fno import rust_binary
@@ -2319,8 +2319,8 @@ def _emit_human(
     if components and not non_fresh:
         names = ", ".join(str(c.get("component")) for c in components)
         if result.get("daemon_drift"):
-            # x-538f: an all-fresh on-disk sweep is not a fleet verdict while
-            # the daemon keeps executing pre-fix code. Never print the bare
+            # An all-fresh on-disk sweep is not a fleet verdict while the
+            # daemon keeps executing pre-fix code. Never print the bare
             # "N/N fresh" form beside a measured drift; the note below carries
             # the canonical warning and the restart remedy.
             out(

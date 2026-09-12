@@ -670,8 +670,8 @@ def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
 def test_daemon_drift_probe_appends_measured_process_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """x-538f: process age rides beside the artifact verdict - a long-lived
-    daemon on pre-fix code must read as lag, not as an unqualified fresh."""
+    """Process age rides beside the artifact verdict - a long-lived daemon
+    on pre-fix code must read as lag, not as an unqualified fresh."""
     from fno import rust_binary
 
     warning = (
@@ -846,8 +846,8 @@ def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
 def test_daemon_drift_never_prints_unqualified_fresh_component_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """x-538f test clause: with an artifact newer than the running process,
-    doctor reports the lag AND the summary line stops reading as bare
+    """Test clause: with an artifact newer than the running process, doctor
+    reports the lag AND the summary line stops reading as bare
     "N/N fresh" - the exact false evidence the incident shipped."""
     warning = (
         "fno agents: the running daemon (pid 30324) is an older build than the installed "
