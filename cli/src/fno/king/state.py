@@ -78,29 +78,47 @@ def resolve_king_manifest_path(
     *,
     state_root: Optional[Path] = None,
     registry=None,
-) -> Optional[Path]:
-    """This live session's crowned manifest. The row, not file presence,
-    proves authority; any unreadable or terminal reading returns None."""
+) -> tuple[Optional[Path], str]:
+    """This live session's crowned manifest, and why there is none.
+
+    The row, not file presence, proves authority; any unreadable or terminal
+    reading returns None. The second element names WHICH reading, because
+    seven branches used to answer with one silence.
+    """
     if not harness_session_id:
-        return None
+        return None, "no harness session id was given"
     try:
         from fno.agents.registry import TERMINAL_STATUSES, load_registry
         from fno.agents.whoami import _find_by_session
 
         rows = load_registry() if registry is None else registry
         row = _find_by_session(rows, harness_session_id, harness or None)
-    except Exception:  # noqa: BLE001 - an unproved crown has no authority
-        return None
-    if row is None or getattr(row, "status", None) in TERMINAL_STATUSES:
-        return None
+    except Exception as exc:  # noqa: BLE001 - an unproved crown has no authority
+        return None, f"the agent registry could not be read: {exc}"
+    if row is None:
+        return None, (
+            f"no registry row names session {harness_session_id}"
+            + (f" under harness {harness}" if harness else "")
+        )
+    status = getattr(row, "status", None)
+    if status in TERMINAL_STATUSES:
+        return None, f"the registry row for {harness_session_id} is {status}, a terminal state"
     scope = getattr(row, "crown_scope", None)
     if not isinstance(scope, str) or not scope.strip():
-        return None
+        return None, (
+            f"the registry row for {harness_session_id} carries no crown_scope: "
+            "the row is unstamped, so no crown proves this session's authority"
+        )
     try:
         path = king_manifest_path(scope, state_root=state_root)
-    except ValueError:
-        return None
-    return path if path.is_file() else None
+    except ValueError as exc:
+        return None, str(exc)
+    if not path.is_file():
+        return None, (
+            f"crown scope {scope} is stamped but no manifest exists at {path}. "
+            "Manifests live under the space dir; omit --state-root to take it."
+        )
+    return path, ""
 
 
 def _transcript_matchable_session_id(value: str) -> bool:

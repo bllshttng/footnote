@@ -79,6 +79,10 @@ def test_manifest_path_resolves_a_live_crown(court) -> None:
 
     assert result.exit_code == 0, result.output
     assert str(manifest) in result.output
+    assert result.stdout.strip() == str(court / ".fno" / "kings" / f"{SCOPE}.md"), (
+        "stdout carries exactly the path, one line"
+    )
+    assert (result.stderr or "").strip() == "", "a clean resolve is silent on stderr"
 
 
 def test_manifest_path_frees_a_stranger(court) -> None:
@@ -90,6 +94,29 @@ def test_manifest_path_frees_a_stranger(court) -> None:
     )
 
     assert result.exit_code == 1, result.output
+    assert result.stdout.strip() == "", "no path prints on a miss"
+    assert "king manifest-path:" in (result.stderr or ""), (
+        "the reason lands on stderr; the old bare silence named no cause"
+    )
+
+
+def test_manifest_path_names_the_missing_file_on_a_wrong_state_root(court) -> None:
+    """A live crown with --state-root pointing nowhere used to exit 1 with
+    both streams empty, indistinguishable from an uncrowned row. The reason
+    names the path it looked for and the remedy."""
+    manifest = _seat_crown()
+    write_manifest(manifest, scope=SCOPE, harness_session_id=CALLER_SESSION)
+
+    result = _manifest_path(
+        "--harness-session-id", CALLER_SESSION,
+        "--state-root", str(court / "elsewhere"),
+    )
+
+    assert result.exit_code == 1
+    stderr = result.stderr or ""
+    assert str(court / "elsewhere" / "kings" / f"{SCOPE}.md") in stderr
+    assert "--state-root" in stderr
+    assert result.stdout.strip() == ""
 
 
 def test_deprecated_king_spelling_forwards_onto_the_agents_app(court) -> None:
