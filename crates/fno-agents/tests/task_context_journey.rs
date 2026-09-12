@@ -144,7 +144,7 @@ fn task_context_survives_the_execution_compaction_handoff_journey() {
         upgrade["reason"]
             .as_str()
             .unwrap()
-            .starts_with("stage_regression"),
+            .starts_with("stage_transition_invalid"),
         "unavailable cannot claim observed: {upgrade}"
     );
 
@@ -220,8 +220,8 @@ fn task_context_survives_the_execution_compaction_handoff_journey() {
         dead_child["reason"]
             .as_str()
             .unwrap()
-            .starts_with("missing_source"),
-        "failed-child root refused by name: {dead_child}"
+            .starts_with("wrong_worktree"),
+        "a dead/foreign child root is refused by name: {dead_child}"
     );
 
     // 7. REFUSAL RECOVERY: a required source changing under the binding

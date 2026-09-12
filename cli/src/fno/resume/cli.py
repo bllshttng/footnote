@@ -285,17 +285,19 @@ def validate_cmd(
     # Task-context gate (x-59b0): a receipt that carries a binding revalidates
     # it natively BEFORE the authority checks - a stale/foreign binding refuses
     # here with its own named reason, never as an ordinary receipt verdict.
-    # A missing --attempt is fail-closed: the native gate compares identities,
-    # and an unnamed attempt cannot match a binding's attempt.
+    # Identity expectations ride ONLY when the caller names them: a handoff
+    # receipt binds the PARENT's attempt/session (lineage evidence), so the
+    # successor validates sources here and derives authority from the receipt's
+    # own claim/manifest proof, never from a vacuous or parent-identity match.
     context_answer: Optional[dict] = None
     if receipt.task_context is not None:
         from fno.rust_binary import VerbUnavailable, verb_call
 
-        expect = {
-            "node": node,
-            "attempt": attempt or "",
-            "session": session or receipt.identity.session,
-        }
+        expect: dict = {"node": node}
+        if attempt:
+            expect["attempt"] = attempt
+        if session_id:
+            expect["session"] = session
         try:
             context_answer = verb_call(
                 "task-context-revalidate",

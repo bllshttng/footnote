@@ -205,24 +205,30 @@ impl TaskContextBinding {
         a == b
     }
 
-    /// Advance the observation stage. Forward-only (Observed is final);
-    /// Unavailable may follow Prepared/Submitted but is not an observation.
+    /// Advance the observation stage along the declared transition graph.
+    /// prepared -> submitted -> observed is the observation path; unavailable
+    /// is an honesty ceiling reachable from prepared or submitted. Observed
+    /// and unavailable are both final: no edge leaves either.
     pub fn advance_stage(&self, to: &Stage) -> BindResult<TaskContextBinding> {
         self.validate()?;
+        let allowed = matches!(
+            (&self.stage, to),
+            (Stage::Prepared, Stage::Submitted)
+                | (Stage::Prepared, Stage::Unavailable)
+                | (Stage::Submitted, Stage::Observed)
+                | (Stage::Submitted, Stage::Unavailable)
+        );
+        if !allowed {
+            return Err(format!(
+                "stage_transition_invalid: {} -> {}",
+                self.stage.as_str(),
+                to.as_str()
+            ));
+        }
         let mut next = self.clone();
         next.stage = to.clone();
         if !self.core_matches(&next) {
             return Err("malformed_binding: stage advance changed binding core".to_string());
-        }
-        if next.stage == Stage::Observed && self.stage == Stage::Unavailable {
-            return Err("stage_regression: unavailable cannot become observed".to_string());
-        }
-        if to.rank() < self.stage.rank() {
-            return Err(format!(
-                "stage_regression: {} -> {}",
-                self.stage.as_str(),
-                to.as_str()
-            ));
         }
         Ok(next)
     }
@@ -455,6 +461,22 @@ pub fn run_revalidate(args: &[String]) -> i32 {
     )
 }
 
+/// Worktree equality for the revalidation gate: exact string match first,
+/// then canonicalized paths so symlinked or differently spelled roots of the
+/// SAME directory still match.
+fn root_matches(root: &str, bound_worktree: &str) -> bool {
+    if root == bound_worktree {
+        return true;
+    }
+    match (
+        Path::new(root).canonicalize(),
+        Path::new(bound_worktree).canonicalize(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// The revalidation verdict table, shared by the binary verb and the unit
 /// tests. Returns the answer object (ok or a named refusal).
 pub fn revalidate_request(req: &Value) -> Value {
@@ -473,6 +495,14 @@ pub fn revalidate_request(req: &Value) -> Value {
                 .ok_or_else(|| "malformed_binding: missing binding".to_string())?,
         )?;
         let b = &bound.binding;
+        // The binding is bound to ONE worktree: revalidating it against a
+        // different root is a foreign attempt even when the bytes coincide.
+        if !root_matches(&root, &b.worktree) {
+            return Err(format!(
+                "wrong_worktree: binding is bound to {}, gate ran against {}",
+                b.worktree, root
+            ));
+        }
         for (field, want) in [
             ("node", b.node.as_str()),
             ("attempt", b.attempt.as_str()),
@@ -630,19 +660,39 @@ mod tests {
         assert!(submitted
             .advance_stage(&Stage::Prepared)
             .unwrap_err()
-            .starts_with("stage_regression"));
+            .starts_with("stage_transition_invalid"));
         let observed = submitted.advance_stage(&Stage::Observed).expect("advance");
         assert!(observed
             .advance_stage(&Stage::Submitted)
             .unwrap_err()
-            .starts_with("stage_regression"));
+            .starts_with("stage_transition_invalid"));
         let unavailable = submitted
             .advance_stage(&Stage::Unavailable)
             .expect("ceiling");
         assert!(unavailable
             .advance_stage(&Stage::Observed)
             .unwrap_err()
-            .starts_with("stage_regression"));
+            .starts_with("stage_transition_invalid"));
+    }
+
+    #[test]
+    fn stage_graph_rejects_skips_and_post_terminal_edges() {
+        // The declared transition graph, not a rank order: no skipping the
+        // submitted stage, and no edge leaves a terminal stage.
+        let b = binding(vec![]);
+        assert!(b
+            .advance_stage(&Stage::Observed)
+            .unwrap_err()
+            .starts_with("stage_transition_invalid"));
+        let observed = binding(vec![])
+            .advance_stage(&Stage::Submitted)
+            .expect("advance")
+            .advance_stage(&Stage::Observed)
+            .expect("advance");
+        assert!(observed
+            .advance_stage(&Stage::Unavailable)
+            .unwrap_err()
+            .starts_with("stage_transition_invalid"));
     }
 
     #[test]
@@ -718,11 +768,13 @@ mod tests {
     #[test]
     fn revalidate_names_wrong_attempt_and_foreign_session() {
         let dir = tempfile::tempdir().expect("tmp");
-        let b = binding(vec![]);
+        let root = dir.path().to_string_lossy().to_string();
+        let mut b = binding(vec![]);
+        b.worktree = root.clone();
         let wrong_attempt = json!({
             "binding": bound_value(&b),
             "expect": {"node": "x-59b0", "attempt": "OTHER", "session": b.session},
-            "root": dir.path().to_string_lossy(),
+            "root": root,
         });
         assert!(revalidate_request(&wrong_attempt)["reason"]
             .as_str()
@@ -731,12 +783,32 @@ mod tests {
         let foreign = json!({
             "binding": bound_value(&b),
             "expect": {"node": "x-59b0", "attempt": b.attempt, "session": "someone-else"},
-            "root": dir.path().to_string_lossy(),
+            "root": root,
         });
         assert!(revalidate_request(&foreign)["reason"]
             .as_str()
             .unwrap()
             .starts_with("foreign_session"));
+    }
+
+    #[test]
+    fn revalidate_refuses_a_foreign_worktree() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let other = tempfile::tempdir().expect("tmp");
+        write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
+        // Same bytes, same names - but staged in a DIFFERENT worktree root.
+        write_source(other.path(), "docs/PLAN.md", "plan bytes\n");
+        let mut b = binding(vec![source("docs/PLAN.md", "plan bytes\n")]);
+        b.worktree = dir.path().to_string_lossy().to_string();
+        let verdict = revalidate_request(&json!({
+            "binding": bound_value(&b),
+            "expect": {"node": "x-59b0"},
+            "root": other.path().to_string_lossy(),
+        }));
+        assert!(verdict["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("wrong_worktree"));
     }
 
     #[test]
