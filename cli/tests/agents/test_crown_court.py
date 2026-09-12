@@ -468,7 +468,16 @@ def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> 
         graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
     )
 
-    assert json.loads(render_court(as_json=True)) == gather_court()
+    rendered = json.loads(render_court(as_json=True))
+    # The render is the gather plus the reads only a render pays for: the
+    # spawn gate, the session-liveness judgement, and the stuck verdict
+    # computed from them. `gather_court` stays cheap for its three other
+    # callers. Popping them by name means a fourth key added silently still
+    # fails here.
+    assert rendered.pop("gate")["verdict"]
+    assert rendered.pop("sessions_readable") is True
+    assert rendered["summary"].pop("stuck")["threshold_minutes"] == 60
+    assert rendered == gather_court()
 
 
 def test_render_court_table_names_scope_holder_and_agreement(
