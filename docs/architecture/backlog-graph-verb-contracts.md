@@ -492,6 +492,12 @@ Find open nodes whose PR has merged outside the ship gate.
     at all - a session that died before the node<->PR stamp - by matching the
     node id against merged branch names. ``list_merged`` is injected in tests.
 
+    Cost bound: both listing scans group candidates by resolved git common dir, so the worktrees of one repo share one ``gh pr list`` call, and the run's shared ``_ListingCache`` makes it one open and one merged listing per repo per sweep; merge drift resolves a stamped number from those listings and pays the per-node query only for a number in neither.
+
+    Worst-case graph staleness is therefore the 900s reconcile throttle (``scripts/lib/reconcile-throttle.sh``), and it is a bound only while neither scan's 60s ``REVERSE_MAP_BUDGET_S`` fires: a firing budget defers the remaining repo groups to a later sweep, and nothing carries them forward until then.
+
+    A listing row only answers a ref whose pr_url parses to the listing's own repo, or a ref with no parseable url (the cwd's listing scopes it); a number collision in a foreign repo never closes a node from this listing.
+
 ## pr_url_for_repo
 
 The canonical PR url for the checkout at ``cwd``, or None.

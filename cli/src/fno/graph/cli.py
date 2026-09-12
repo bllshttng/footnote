@@ -9095,6 +9095,7 @@ def _reconcile_once(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        _ListingCache,
         _effective_reconcile_cwd,
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
@@ -9297,22 +9298,19 @@ def _reconcile_once(
                         err=True,
                     )
 
-    # Open-PR binding heal (): an open PR whose branch names an open,
-    # ref-less node leaves that node invisible to every graph-first reader
-    # until something fills pr_number. One bounded open-PR listing per repo
-    # BEFORE the scan, so the healed rows feed the forward scan and the status
-    # derivation below. Full and explicit-node runs only: a --pr-number call
-    # is bounded to its own PR and must not sweep unrelated repos.
+    # Open-PR binding heal (): an open PR whose branch names an open, ref-less
+    # node is invisible to every reader until something fills pr_number; one
+    # bounded open-PR listing per repo BEFORE the scan feeds the forward scan.
+    # Full and explicit-node runs only: a --pr-number call sweeps only its PR.
     open_bound: list[dict] = []
     open_binding_advisories: list[str] = []
+    listings = _ListingCache()
     if _full_sweep or node is not None:
-        from fno.graph._reconcile import (
-            bind_pr_rows,
-            collect_open_binding_heals,
-            node_pr_refs,
-        )
+        from fno.graph._reconcile import bind_pr_rows, collect_open_binding_heals, node_pr_refs
 
-        _open_heals, open_binding_advisories = collect_open_binding_heals(entries, node_id=node)
+        _open_heals, open_binding_advisories = collect_open_binding_heals(
+            entries, node_id=node, listings=listings
+        )
         if _open_heals:
 
             def _open_fill(_entries: list[dict]) -> list[dict]:
@@ -9389,7 +9387,7 @@ def _reconcile_once(
         _scan_scope = _pr_touch_ids(entries, pr_number, closure_claims, _our_repo)
     else:
         _scan_scope = None
-    records = scan_merge_drift(entries, node_id=_scan_scope)
+    records = scan_merge_drift(entries, node_id=_scan_scope, listings=listings)
 
     # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#reconcile-once-9753
     if _full_sweep:
@@ -9466,7 +9464,7 @@ def _reconcile_once(
         if auto_bound_any:
             if not dry_run:
                 entries = read_graph(_graph_path())  # real binds just persisted
-            records = scan_merge_drift(entries, node_id=node)
+            records = scan_merge_drift(entries, node_id=node, listings=listings)
 
     status_drift = _status_drift(_graph_path()) if _full_sweep else {}
     closeable = [r for r in records if r.closeable]

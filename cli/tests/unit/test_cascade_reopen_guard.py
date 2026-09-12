@@ -373,7 +373,7 @@ def _seed_merged_world(g: Path, tmp_path: Path, *, reopened_at) -> str:
 def _stub_scan(monkeypatch: pytest.MonkeyPatch, plan: str) -> None:
     import fno.graph._reconcile as rec
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [
             rec.MergeDriftRecord(
                 node_id="ab-reopen1",
