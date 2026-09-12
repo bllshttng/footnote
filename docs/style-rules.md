@@ -54,7 +54,7 @@ Operational control has its own lane. When the pair window is spent, a stop, a r
 
 ### Which surfaces take the cap, and why progress notes do not
 
-The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. An operator ask (`fno inbox outstanding ask`) is read mid-turn, off a report of dozens of rows, and is capped by law d-59af3235 at `config.style.word_cap.ask` (default 40) plus the one-line and node-pointer rules. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
+The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. An operator ask (`fno inbox outstanding ask`) is read mid-turn, off a report of dozens of rows. Law d-59af3235 caps it at `config.style.word_cap.ask` (default 40), plus the one-line and node-pointer rules. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
 
 The ask gate has no escape: it honors no `style-exception:` marker and no `FNO_STYLE_ENFORCE=0`. Its authority is law d-59af3235, not style. Config moves the number and nothing else.
 
