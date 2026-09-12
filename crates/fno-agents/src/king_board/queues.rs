@@ -368,7 +368,7 @@ pub(crate) struct BoardInputs {
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     let mut warnings = inputs.warnings.clone();
     let mut out_of_scope: Vec<Value> = Vec::new();
-    // x-2fde: on a scoped board a row whose node id cannot be resolved is
+    // On a scoped board a row whose node id cannot be resolved is
     // unknown, not mine. Work rows fail CLOSED - they land in no queue and
     // are named in one warning line below - because "in scope" would hand
     // every crown every unattributable PR, while out_of_scope would mislabel
@@ -1177,9 +1177,9 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }
     }
 
-    // x-2fde: the scoped board just dropped every row it could not attribute.
-    // Name the hole in one warning line (the x-db9c shape) so a quietly
-    // shorter queue reads as a measured drop, not as an empty world.
+    // The scoped board just dropped every row it could not attribute.
+    // Name the hole in one warning line, the same shape the holder-activity
+    // warning uses, so a quietly shorter queue reads as a measured drop.
     let unattributed = unattributed.into_inner();
     if !unattributed.is_empty() {
         let mut names = unattributed.clone();

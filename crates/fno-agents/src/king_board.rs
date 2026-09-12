@@ -1445,7 +1445,7 @@ mod tests {
 
     #[test]
     fn mergeable_pr_is_scoped_by_the_binding_node() {
-        // x-2fde: on a scoped board a PR whose node cannot be resolved fails
+        // On a scoped board a PR whose node cannot be resolved fails
         // CLOSED - unknown attribution is not every crown's work. PR 1494 is
         // attributed outside the crown (out_of_scope); PR 99 is bound by no
         // node at all, so it lands in no queue and the warning names the drop.
@@ -1491,7 +1491,7 @@ mod tests {
 
     #[test]
     fn unscoped_board_still_shows_a_pr_no_node_binds() {
-        // x-2fde: the fail-closed verdict is scoped-board only. The operator
+        // The fail-closed verdict is scoped-board only. The operator
         // board (no scope_ids) keeps showing every PR, unattributable or not.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.prs = ok_read(json!([
@@ -1516,7 +1516,7 @@ mod tests {
 
     #[test]
     fn scoped_board_keeps_report_only_signals_whose_node_is_none_by_design() {
-        // x-2fde companion: needs.rs mints node: None for mail_escalation,
+        // Companion pin: needs.rs mints node: None for mail_escalation,
         // carveout_stale, stale_claims and worker_refused on purpose - they
         // describe a worker, not a node. A report-only queue bypasses the
         // crown filter, so a scoped board still sees the distress signal and
