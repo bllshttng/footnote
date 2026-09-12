@@ -5080,7 +5080,12 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         if contradicted {
             json!(format!("contradicted-by-{incoming_basis}"))
         } else {
-            Value::Null
+            // (x-6d16) This projection never runs the claude live-status
+            // probe, so null here would read as "measured, nothing found".
+            // The lane that did not ask says so (d-d6cb1827: a blank is the
+            // one thing this pair may not be); the Python list surface, which
+            // does run it, keeps its own words.
+            json!("not-probed")
         },
     );
     row.remove("superseded_live_status");
@@ -13018,7 +13023,17 @@ done
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
             apply_row_contradiction(&mut row, now);
-            for (key, expected) in case["expected"].as_object().expect("expected is an object") {
+            // x-6d16: where the two lanes legitimately differ - the Rust
+            // projection never runs the claude live-status probe, so its
+            // no-contradiction basis reads `not-probed` where Python renders
+            // null - the case carries an `expected_rust` override. Absent,
+            // the lanes agree and `expected` binds both.
+            let expected = case
+                .get("expected_rust")
+                .unwrap_or(&case["expected"])
+                .as_object()
+                .expect("expected is an object");
+            for (key, expected) in expected {
                 assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
             }
         }
@@ -13618,6 +13633,11 @@ done
             );
             assert!(row["reachability"].is_null(), "row {}", row["name"]);
             assert!(row["last_activity_age_s"].is_null(), "row {}", row["name"]);
+            assert_eq!(
+                row["live_status_basis"], "not-probed",
+                "row {}",
+                row["name"]
+            );
             assert_eq!(row["status"], "unknown", "row {}", row["name"]);
         }
         std::fs::remove_dir_all(home.root()).ok();

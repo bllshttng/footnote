@@ -306,6 +306,9 @@
       },
       "expected": {
         "live_status_basis": null
+      },
+      "expected_rust": {
+        "live_status_basis": "not-probed"
       }
     },
     {
@@ -344,6 +347,9 @@
       },
       "expected": {
         "live_status_basis": null
+      },
+      "expected_rust": {
+        "live_status_basis": "not-probed"
       }
     },
     {
