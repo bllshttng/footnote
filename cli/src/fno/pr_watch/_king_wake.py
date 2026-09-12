@@ -431,9 +431,8 @@ def _dispatch_walk(
 
 
 #: A pass stops before a step it cannot finish: one truth read measured up to
-#: 10.4s (x-16e9), so under 15s left the crown is left for the next tick
-#: instead of being cut mid-read by the phase alarm and losing every crown
-#: before it.
+#: 10.4s, so under 15s left the crown is left for the next tick instead of
+#: being cut mid-read by the phase alarm and losing every crown before it.
 _KING_STEP_FLOOR_S = 15.0
 
 
@@ -555,7 +554,7 @@ def run_king_wake(
         wake_address: Optional[str] = None
         wake_detail: Optional[str] = None
         answered_cursor_to_store = ""
-        # Triggers are evaluated read-only, cheapest first (x-16e9): the truth
+        # Triggers are evaluated read-only, cheapest first: the truth
         # read costs seconds per crown and a quiet crown can never wake, so it
         # runs only for a trigger or a pending first-observation seed.
         pending_answer_seed = "answered_cursor" not in sidecar
@@ -627,7 +626,7 @@ def run_king_wake(
         # respawn budget, not only the wake ledger.
         holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
         # Seeds land only for a holder that is present, exactly as when the
-        # truth read came first: the write set is unchanged (x-16e9).
+        # truth read came first: the write set is unchanged.
         if pending_answer_seed:
             # Seed at birth, never the journal max: a max seed swallows an
             # answer closed before the first armed tick saw it.
@@ -661,6 +660,7 @@ def run_king_wake(
                 except Exception:  # noqa: BLE001 - a failed ask never blocks the lane
                     summary["note"] = "successor ceiling question could not be raised"
                 summary["refused"].append({"scope": target.scope, "refusal": "respawn-ceiling"})
+                summary["evaluated"] += 1
                 continue
         # Admit-and-bill in ONE lock: an answered escalation skips only the
         # debounce, never the ceiling.
@@ -687,6 +687,7 @@ def run_king_wake(
                 except Exception:  # noqa: BLE001 - a failed ask never blocks the wake lane
                     summary["note"] = "ceiling question could not be raised"
             summary["refused"].append({"scope": target.scope, "refusal": verdict.refusal})
+            summary["evaluated"] += 1
             continue
         window_count = verdict.count
         if dispatch_fn is not None:

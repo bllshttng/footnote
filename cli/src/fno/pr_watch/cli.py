@@ -177,8 +177,8 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
     root: launchd starts this daemon in ``/``, where a board read would read
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
-    out of the tick. ``roots`` rides the tick's one-scan memo (x-16e9); the
-    two tick phases are named apart so a cut says which half stalled.
+    out of the tick. ``roots`` rides the tick's one-scan memo; the two tick
+    phases are named apart so a cut says which half stalled.
     """
     from fno.pr_watch._dispatch import set_tick_phase
 
@@ -454,8 +454,8 @@ def tick() -> None:
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
     roots_box: dict[str, Optional[list]] = {"v": None}
 
-    # One sidecar scan per tick (x-16e9): notify_watch, heal, stranded and
-    # catchup each swept the same roots, four scans a tick.
+    # One sidecar scan per tick: notify_watch, heal, stranded and catchup
+    # each swept the same roots, four scans a tick.
     def _tick_roots() -> list:
         if roots_box["v"] is None:
             roots_box["v"] = _catchup_roots()
@@ -553,9 +553,8 @@ def tick() -> None:
                 cut.append(name)
                 cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
-                    # Name the sub-step the alarm caught (x-16e9): a phase
-                    # that reports its halves reads as one stall, not a
-                    # black box.
+                    # Name the sub-step the alarm caught: a phase that reports
+                    # its halves reads as one stall, not a black box.
                     step = current_tick_phase()
                     at = f" at {step}" if step.startswith(name + ":") else ""
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
@@ -1143,7 +1142,7 @@ def tick() -> None:
                         skip = None
                     elif wake_summary.get("budget_spent"):
                         # The watchdog's own token: a pass that ran out of
-                        # slice before it could act is not a failure (x-16e9).
+                        # slice before it could act is not a failure.
                         skip = "budget_spent"
                     else:
                         skip = "no_trigger"
