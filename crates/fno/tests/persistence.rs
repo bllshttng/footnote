@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::{
-    connect_with_retry, screen_has_line, spawn_server, ClientHarness, FakeClient, Scratch,
+    connect_with_retry, screen_has_line, sidecar_pid_field, spawn_server, ClientHarness,
+    FakeClient, Scratch,
 };
 use fno::proto::{
     read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ProtoError, ServerMsg,
@@ -30,10 +31,6 @@ static PTY_GATE: Mutex<()> = Mutex::new(());
 /// exactly the servers of this test's session (the path is unique per test,
 /// so no cross-talk). Each line is `pid args`, so a count failure names the
 /// extra process instead of reporting a bare `left: 2`.
-fn server_count(scratch: &Scratch) -> usize {
-    server_processes(scratch).len()
-}
-
 fn server_processes(scratch: &Scratch) -> Vec<String> {
     let out = std::process::Command::new("ps")
         .args(["-eo", "pid=,args="])
@@ -46,6 +43,60 @@ fn server_processes(scratch: &Scratch) -> Vec<String> {
         .map(str::trim)
         .map(str::to_string)
         .collect()
+}
+
+/// The loser's worst case before it gives up: WAIT_STARTUP_DEADLINE (10s)
+/// plus one last 3-attempt probe (1s connect, 1s write, 1s read), about
+/// 19.2s. A real second owner serves until the 60s FNO_E2E idle grace, so it
+/// cannot exit inside this bound.
+const LOSER_EXIT_BOUND: Duration = Duration::from_secs(25);
+
+/// Structural proof that exactly one server owns the session, read from the
+/// owner's own records instead of argv. A losing starter (marker create
+/// failed, parked by the test seam or just slow to give up, then exits 0)
+/// still shows a second `--server` process for up to ~19s, which is what the
+/// old one-sample process count read as a second server (8 of 1,261 stress
+/// trials). Ownership lives where the loser never writes: `main.pid` is
+/// written only by the bind winner, exactly one `fno mux: serving` line is
+/// printed once per won bind, and a lost bind logs `cannot bind`. Polls until
+/// one process remains or `bound` passes, so a normal run pays nothing (the
+/// loser is gone before the first poll) and a late loser still converges
+/// inside the bound.
+fn one_owner(scratch: &Scratch, bound: Duration) -> Result<u32, String> {
+    let started = std::time::Instant::now();
+    loop {
+        let processes = server_processes(scratch);
+        let sidecar = std::fs::read_to_string(scratch.0.join("main.pid"));
+        let log = std::fs::read_to_string(scratch.0.join("main.log"));
+        if processes.len() == 1 {
+            if let (Ok(sidecar), Ok(log)) = (&sidecar, &log) {
+                if let Some(owner_pid) = sidecar_pid_field(sidecar) {
+                    let serving = log
+                        .lines()
+                        .filter(|l| l.starts_with("fno mux: serving "))
+                        .count();
+                    let refused = log.lines().any(|l| l.contains("cannot bind"));
+                    let lone_pid = processes[0]
+                        .split_whitespace()
+                        .next()
+                        .and_then(|p| p.parse::<i32>().ok());
+                    if serving == 1 && !refused && lone_pid == Some(owner_pid) {
+                        return Ok(owner_pid as u32);
+                    }
+                }
+            }
+        }
+        if started.elapsed() >= bound {
+            let sidecar_text = sidecar.unwrap_or_else(|e| format!("unreadable: {e}"));
+            let log_text = log.unwrap_or_else(|e| format!("unreadable: {e}"));
+            return Err(format!(
+                "one owner never proved out after {}ms; processes: {:?}; main.pid: {sidecar_text:?}; main.log:\n{log_text}",
+                started.elapsed().as_millis(),
+                processes
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn kill_server(scratch: &Scratch) {
@@ -275,8 +326,9 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
 fn persistence_two_cold_clients_converge_on_one_server() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC4-EDGE / exit criterion 5: two clients launch simultaneously from a
-    // cold start. Exactly one server may exist, and both clients must be
-    // attached to it - proven structurally (process count) and semantically
+    // cold start. Exactly one server may own the session, and both clients
+    // must be attached to it - proven structurally (the owner's pid sidecar
+    // and its single serving line, not an argv count) and semantically
     // (input typed in one client renders in the other).
     let scratch = Scratch::new("race");
     let mut a = ClientHarness::spawn(&scratch);
@@ -288,12 +340,99 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
     b.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
 
+    let owner = one_owner(&scratch, LOSER_EXIT_BOUND)
+        .unwrap_or_else(|e| panic!("exactly one server must own the session: {e}"));
+    assert!(owner > 0);
+}
+
+#[test]
+fn persistence_late_loser_is_not_a_second_owner() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    // The CI shape (8 of 1,261 stress trials): a slow client forks its server
+    // AFTER the other client already attached, so the old one-sample argv
+    // count reads the losing starter as a second server while it waits out
+    // its 10s startup deadline. FNO_TEST_MARKER_HOLD_MS parks only the loser
+    // (after its marker create fails AlreadyExists), for 3s - the
+    // deterministic version of that window.
+    let scratch = Scratch::new("lateloser");
+    let envs = [("FNO_TEST_MARKER_HOLD_MS", "3000")];
+    let mut a = ClientHarness::spawn_with(&scratch, &envs);
+    let mut b = ClientHarness::spawn_with(&scratch, &envs);
+    a.wait_prompt(15);
+    b.wait_screen(15, |s| !s.trim().is_empty());
+
+    a.type_bytes(b"echo shared-pane-proof\r");
+    a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
+    b.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
+
+    let owner = one_owner(&scratch, LOSER_EXIT_BOUND)
+        .unwrap_or_else(|e| panic!("exactly one server must own the session: {e}"));
+    // Positive marker: a loser really ran and converged. Without this the
+    // test could pass on a run where no loser existed at all.
+    let log = std::fs::read_to_string(scratch.0.join("main.log")).unwrap();
     assert_eq!(
-        server_count(&scratch),
+        log.lines()
+            .filter(|l| l.contains("a server is already running"))
+            .count(),
         1,
-        "exactly one server may own the session; matching processes: {:?}",
-        server_processes(&scratch)
+        "exactly one loser must have converged; main.log:\n{log}"
     );
+    assert!(owner > 0);
+}
+
+#[test]
+fn persistence_one_owner_catches_a_real_second_owner() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("secondowner");
+    let mut a = ClientHarness::spawn(&scratch);
+    a.wait_prompt(15);
+    let sidecar = std::fs::read_to_string(scratch.0.join("main.pid")).unwrap();
+    let first_pid = sidecar_pid_field(&sidecar).expect("first server pid");
+
+    // Dismantle the session files. The first server keeps serving on its
+    // open listener; the second starter sees no marker and binds fresh.
+    std::fs::remove_file(scratch.main_sock()).unwrap();
+    std::fs::remove_file(scratch.0.join("main.start")).unwrap();
+    std::fs::remove_file(scratch.0.join("main.pid")).unwrap();
+
+    // `--server <path>` with a `/` in it is the internal server role.
+    let mut second = scratch.command();
+    second.args(["--server"]).arg(scratch.main_sock());
+    second.stdin(std::process::Stdio::null());
+    second.stdout(std::process::Stdio::null());
+    let log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.0.join("main.log"))
+        .unwrap();
+    second.stderr(log);
+    let mut second_child = second.spawn().unwrap();
+
+    // The new owner must recreate the socket before the check can mean anything.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !scratch.main_sock().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second server never bound main.sock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let err = one_owner(&scratch, Duration::from_secs(2))
+        .expect_err("one_owner must refuse a session with a real second owner");
+    assert_eq!(
+        err.matches("fno mux: serving").count(),
+        2,
+        "the refusal must name both serving lines: {err}"
+    );
+
+    // Cleanup: second child first, then the first server's SIGTERM. The
+    // scratch Drop handles the rest.
+    let _ = second_child.kill();
+    let _ = second_child.wait();
+    let _ = std::process::Command::new("kill")
+        .arg(first_pid.to_string())
+        .status();
+    let _ = std::fs::remove_file(scratch.main_sock());
 }
 
 #[test]
