@@ -94,7 +94,9 @@ run_window() { # run_window <uv-args...> <probe-cmd> <rows-out>
   local probe_cmd="${@:$penult:1}"
   local uv_args=("${@:1:$#-2}")
   now > "$SCRATCH/win_start"
-  uv tool install "${uv_args[@]}" >"$SCRATCH/win_install.log" 2>&1 &
+  # --compile-bytecode hoisted here so the gate can see it on the run line;
+  # the call-site args carry only the reinstall/refresh form.
+  uv tool install --compile-bytecode "${uv_args[@]}" >"$SCRATCH/win_install.log" 2>&1 &
   local install_pid=$!
   python3 "$SCRATCH/probe.py" "$VENV_PY" "$install_pid" "$rows_out" 240 "$probe_cmd"
   local probe_rc=$?
@@ -182,7 +184,7 @@ except Exception as exc:
                       'meta_path': [type(f).__name__ for f in sys.meta_path]}), file=sys.stderr)
     sys.exit(1)
 "
-run_window --reinstall-package fno --refresh-package fno --compile-bytecode "$CLI_SRC" \
+run_window --reinstall-package fno --refresh-package fno "$CLI_SRC" \
   "$NARROW_PROBE_CMD" "$SCRATCH/narrow.json"
 analyze "$SCRATCH/narrow.json" narrow
 ANALYZE_RC=$?
@@ -193,7 +195,7 @@ ANALYZE_RC=$?
   || fail "post-install probe failed: the narrow reinstall left the env broken"
 
 # --- 2. Negative control: the wide reinstall must open the window.
-run_window --reinstall --refresh --compile-bytecode "$CLI_SRC" "$PROBE_MODULE" "$SCRATCH/wide.json"
+run_window --reinstall --refresh "$CLI_SRC" "$PROBE_MODULE" "$SCRATCH/wide.json"
 analyze "$SCRATCH/wide.json" wide
 ANALYZE_RC=$?
 [[ "$ANALYZE_RC" -ne 0 ]] && exit "$ANALYZE_RC"

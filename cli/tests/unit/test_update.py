@@ -481,13 +481,18 @@ def test_install_then_mark_gates_marker_on_install_success(tmp_path: Path) -> No
     """The shell line writes the marker ONLY after a zero install exit (&&)."""
     marker = tmp_path / "state" / "installed-rev"
     line = update._install_then_mark(
-        ["uv", "tool", "install", "--reinstall", "--compile-bytecode", "/some src"],
+        [
+            "uv", "tool", "install",
+            "--reinstall-package", "fno", "--compile-bytecode", "/some src",
+        ],
         "abc123",
         marker=marker,
         pid=4242,
     )
-    # Install runs first, gated by && before the marker write.
-    assert "uv tool install --reinstall" in line
+    # Install runs first, gated by && before the marker write. Narrow form:
+    # the wide --reinstall strips every package from the shared tool venv.
+    assert "uv tool install --reinstall-package fno" in line
+    assert "--reinstall " not in line
     assert " && " in line
     assert line.index("uv tool install") < line.index("printf")
     # Atomic: write a temp then mv into place (never write the marker directly).
