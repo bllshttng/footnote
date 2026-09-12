@@ -528,16 +528,20 @@ def test_the_cpu_admission_arm_goes_dark_when_the_instrument_never_answered(
 
 def test_a_dark_cpu_admission_arm_never_refuses_the_lane_answer(monkeypatch) -> None:
     """read_lanes gates on the whole-machine cpu and memory arms only; the
-    admission arm going dark leaves the lane answer standing."""
+    admission arm going dark leaves the lane ANSWER standing - but a dark
+    sensor is never headroom, so the count caps at 0 rather than advising
+    lanes on top of an axis that never answered."""
     from fno.agents import spawn_gate
 
     _healthy_reading(monkeypatch)
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: _instrument_admission())
     reading = dl.read_lanes()
     assert not reading.refused
-    assert reading.lane_count is not None
+    assert reading.lane_count == 0
     assert reading.refusal_reason == ""
-    assert reading.arm("cpu admission").state == dl.DARK
+    arm = reading.arm("cpu admission")
+    assert arm.state == dl.DARK
+    assert "capped at 0" in reading.cost_source
 
 
 def test_the_census_carries_top_consumers_from_the_ps_read(monkeypatch) -> None:
