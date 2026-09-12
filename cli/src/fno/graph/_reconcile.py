@@ -1849,7 +1849,7 @@ def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
         try:
             probe = subprocess.run(
                 ["git", "rev-parse", "--git-common-dir"], capture_output=True,
-                text=True, check=False, timeout=10, cwd=cwd,
+                text=True, check=False, timeout=3, cwd=cwd,
             )
         except (subprocess.TimeoutExpired, OSError):
             probe = None
@@ -1897,17 +1897,18 @@ def _group_refless_by_repo(
     entries: list[dict],
     *,
     node_id: Optional[Union[str, Iterable[str]]] = None,
+    memo: dict[str, str],
 ) -> "tuple[dict[str, list[dict]], dict[str, str], list[str]]":
     """Group open ref-less candidates by repo: (by_repo, cwd_by_nid, skipped).
 
     Shared eligibility of both listing scans; the first member's cwd runs the
-    gh call so gh still resolves the repo from that dir's origin remote.
+    gh call so gh still resolves the repo from that dir's origin remote. Pass
+    the run cache's ``_repo_keys`` so both scans probe each cwd once per run.
     """
     _scope = _node_id_scope(node_id)
     by_repo: dict[str, list[dict]] = {}
     cwd_by_nid: dict[str, str] = {}
     skipped: list[str] = []
-    memo: dict[str, str] = {}
     for node in entries:
         nid = node.get("id")
         if not isinstance(nid, str):
@@ -1951,7 +1952,9 @@ def collect_open_binding_heals(
         list_open = list_open_pr_branches
     cache = listings if listings is not None else _ListingCache()
 
-    by_repo, cwd_by_nid, _skipped = _group_refless_by_repo(entries, node_id=node_id)
+    by_repo, cwd_by_nid, _skipped = _group_refless_by_repo(
+        entries, node_id=node_id, memo=cache._repo_keys
+    )
 
     heals: list[OpenPrBinding] = []
     advisories: list[str] = []
@@ -2035,7 +2038,7 @@ def reverse_map_unstamped(
     # Open, ref-less, cwd-resolvable candidates grouped by repo so we make
     # ONE gh call per repo, not per node or per worktree cwd (x-6283).
     by_repo, cwd_by_nid, skipped_dead_cwd = _group_refless_by_repo(
-        entries, node_id=node_id
+        entries, node_id=node_id, memo=cache._repo_keys
     )
 
     if skipped_dead_cwd:
@@ -2194,6 +2197,15 @@ def scan_merge_drift(
         query = query_pr_merge_state
     _scope = _node_id_scope(node_id)
 
+    # Successors of a pending supersession must close with changed-file
+    # evidence, which a listing row never carries: route those to the
+    # per-node query so verification lands in this sweep, not a later one.
+    pending_supersede = {
+        e.get("superseded_by")
+        for e in entries
+        if isinstance(e.get("supersession"), dict) and not e["supersession"].get("verified_at")
+    }
+
     records: list[MergeDriftRecord] = []
 
     for node in entries:
@@ -2222,10 +2234,11 @@ def scan_merge_drift(
         else:
             cwd = None
 
-        # No shared cache or no live dir: degrade to the per-node query.
+        # No shared cache, no live dir, or a supersession awaiting this
+        # node's changed-file evidence: degrade to the per-node query.
         merged_rows: list[dict] = []
         open_rows: list[dict] = []
-        if listings is not None and cwd is not None:
+        if listings is not None and cwd is not None and nid not in pending_supersede:
             try:
                 merged_rows = listings.rows_for("merged", cwd, list_merged)
                 open_rows = listings.rows_for("open", cwd)

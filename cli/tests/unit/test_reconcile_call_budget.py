@@ -169,6 +169,36 @@ def test_number_in_neither_listing_fires_the_query_exactly_once(tmp_path, monkey
     assert not [r for r in records if r.node_id == stray["id"]]
 
 
+def test_pending_supersession_successor_takes_the_query_not_the_listing(
+    tmp_path, monkeypatch
+):
+    """A supersession awaiting the successor's changed-file evidence can never
+    verify off a listing row (it carries none): that node must take the
+    per-node query, whose default reader fetches the changed files."""
+    dirs = _repo_tree(tmp_path)
+    entries = _entries(dirs)
+    successor = next(e for e in entries if e.get("pr_number") == STAMPED[0])
+    entries.append({
+        "id": "ab-pred", "status": "ready", "cwd": str(dirs[0]),
+        "superseded_by": successor["id"],
+        "supersession": {"cause": "old bug", "surfaces": ["src/a.py"]},
+    })
+    calls, open_seam, merged_seam = _install_fake_gh(
+        monkeypatch, merged_rows=_merged_rows(STAMPED), open_rows=[]
+    )
+
+    listings = _ListingCache()
+    collect_open_binding_heals(entries, list_open=open_seam, listings=listings)
+    counter: list[int] = []
+    scan_merge_drift(
+        entries, list_merged=merged_seam, listings=listings,
+        query=_closed_query(counter),
+    )
+
+    assert counter == [successor["pr_number"]], "successor resolved by query, not listing"
+    assert _gh_calls(calls), "listing fetches still happened for the rest"
+
+
 def test_cwd_outside_any_repo_groups_under_itself(tmp_path):
     plain = [tmp_path / "not-a-repo-a", tmp_path / "not-a-repo-b"]
     for d in plain:
