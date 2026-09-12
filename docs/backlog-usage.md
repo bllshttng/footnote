@@ -120,7 +120,7 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 ### Progress notes reach the people building the node
 
-`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader: the node's live claim holder, then the node's graph sessions, then workers named on the node in the registry; the same chain runs for the owner node; then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node would be told, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
+`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
 Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
 
