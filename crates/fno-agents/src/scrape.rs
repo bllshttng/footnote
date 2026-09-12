@@ -185,7 +185,7 @@ pub fn fno_bin() -> std::ffi::OsString {
 /// installed elsewhere. Bare `fno-py` last, so a genuinely missing install
 /// surfaces a real NotFound instead of a silent no-op.
 pub fn fno_py() -> std::ffi::OsString {
-    if let Some(p) = std::env::var_os("FNO_PY") {
+    if let Some(p) = std::env::var_os("FNO_PY").filter(|v| !v.is_empty()) {
         return p;
     }
     if let Some(p) = std::env::current_exe()
