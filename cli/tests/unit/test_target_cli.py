@@ -778,20 +778,50 @@ def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
 
 
 def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
-    """x-6390: `start` no-ops inside a linked worktree and returns before it can
-    forward --beastmode, so the grant is dropped. Same silent-drop class as the init
-    path; it must say so rather than print a normal-looking receipt."""
+    """x-6390, updated for the bind branch: with no manifest the isolated
+    `start` FORWARDS --beastmode to init, so nothing is dropped and no warning
+    prints; with an existing manifest (write-once) the flag cannot land, and
+    the bind path must still say it did NOT take rather than print a
+    normal-looking receipt."""
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    manifest = fake_root / ".fno" / "target-state.md"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text("---\nattended: true\n---\n")
 
     monkeypatch.chdir(fake_root)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda _p: True)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
+    monkeypatch.setattr(target_cli, "_remote_base_ref", lambda _p: "origin/main")
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_truthful_base", lambda cwd, b, **k: b)
+    monkeypatch.setattr(
+        target_cli, "_resolve_node_model",
+        lambda node, explicit=None, provider=None, include_difficulty=False: (None, ""),
+    )
+    init_args = []
+
+    def fake_run(args, **kwargs):
+        if "init" in args:
+            init_args.append(list(args))
+            return target_cli.subprocess.CompletedProcess(args, 0)
+        return target_cli.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
+
+    result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
+    assert result.exit_code == 0, result.output
+    assert "already isolated" in result.output
+    assert "--beastmode" in init_args[0]
+    assert "did NOT take" not in result.output
+
+    manifest = fake_root / ".fno" / "target-state.md"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("---\nattended: true\n---\n")
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim",
+        lambda node: ("ours", {"holder": "s1", "state": "live"}),
+    )
 
     result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
     assert result.exit_code == 0, result.output

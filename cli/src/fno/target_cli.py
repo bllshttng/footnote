@@ -3630,7 +3630,13 @@ def _start_body(
             )
             raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
-        base_label = _remote_base_ref(cwd)
+        try:
+            base_label = _remote_base_ref(cwd)
+        except typer.Exit:
+            # Receipt-only here: nothing branches off the base on this path,
+            # so an unresolvable remote degrades to the unmeasured spelling
+            # instead of refusing a bind the tree does not need the ref for.
+            base_label = "in-place"
         if _bind_worktree(node_id, cwd, base_label=base_label, in_place=False,
                           node_match_guaranteed=False, beastmode=beastmode,
                           no_merge=no_merge):
