@@ -592,10 +592,13 @@ pub(crate) fn session_witness_primed_for<'a>(
     }
     let index: std::cell::RefCell<Option<SessionRegistryIndex>> = std::cell::RefCell::new(None);
     load_session_registry_index(&index);
-    let subjects: std::collections::BTreeSet<String> = records
-        .into_iter()
-        .filter_map(|rec| resolve_subject_session(rec, &index))
-        .collect();
+    let mut subjects: std::collections::BTreeMap<String, Vec<&crate::claims::ClaimRecord>> =
+        std::collections::BTreeMap::new();
+    for rec in &records {
+        if let Some(session) = resolve_subject_session(rec, &index) {
+            subjects.entry(session).or_default().push(rec);
+        }
+    }
     let wire: Vec<String> = {
         let borrowed = index.borrow();
         let registry = borrowed
@@ -603,12 +606,14 @@ pub(crate) fn session_witness_primed_for<'a>(
             .expect("session registry index initialized");
         subjects
             .into_iter()
-            .filter(|session| {
+            .filter(|(session, group)| {
                 !registry
                     .by_session
                     .get(session)
                     .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+                    && group.iter().any(|rec| may_consult_transcript(rec))
             })
+            .map(|(session, _)| session)
             .collect()
     };
     let memo = std::cell::RefCell::new(std::collections::HashMap::new());
@@ -650,6 +655,22 @@ fn resolve_subject_session(
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
+}
+
+/// Whether this record's classification can still reach the transcript leg: a
+/// same-machine record whose pid is provably alive classifies live off the
+/// pid alone, so its witness answer would be seeded into the memo and never
+/// read. Conservative by construction: a session dropped here that the
+/// classifier does consult still probes lazily on its first witness call, so
+/// a policy change in the classifier costs perf, never a verdict.
+fn may_consult_transcript(rec: &crate::claims::ClaimRecord) -> bool {
+    !(crate::claims::is_same_machine(&rec.host, rec.machine_id.as_deref())
+        && rec.pid.is_some_and(|pid| {
+            matches!(
+                crate::claims::probe_pid(pid),
+                crate::claims::PidProbe::Created(_)
+            )
+        }))
 }
 
 /// The witness's answer for one record: registry row first, then transcript.
