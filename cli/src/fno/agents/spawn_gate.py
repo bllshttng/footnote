@@ -1760,18 +1760,21 @@ def run_gate(
                     "ok" if admission.load_15m is not None else "unavailable"
                 )
                 axes_read["cpu"] = verdict
+            # Figures an unreadable instrument never measured print as null,
+            # never as a 0.0 a reader would take for a reading.
+            unreadable = admission.axis == "cpu_instrument"
             receipt_fields: dict[str, object] = dict(
                 axis=admission.axis,
                 detail=admission.reason,
-                share_low=admission.share_low,
-                share_high=admission.share_high,
+                share_low=None if unreadable else admission.share_low,
+                share_high=None if unreadable else admission.share_high,
                 bound=admission.bound,
-                fleet_cores=admission.fleet_cores,
-                machine_cores=admission.machine_cores,
-                capacity_cores=admission.capacity_cores,
-                ceiling=admission.ceiling,
+                fleet_cores=None if unreadable else admission.fleet_cores,
+                machine_cores=None if unreadable else admission.machine_cores,
+                capacity_cores=None if unreadable else admission.capacity_cores,
+                ceiling=None if unreadable else admission.ceiling,
                 load_15m=admission.load_15m,
-                backstop=admission.backstop,
+                backstop=None if unreadable else admission.backstop,
             )
             if verdict in ("refuse", "undecidable"):
                 guard.release()
@@ -1821,9 +1824,17 @@ def run_gate(
                     announced = True
                     last_progress = now
                 elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
+                    # The holder clause is the payload's own words, so the
+                    # reprint and the reason cannot drift.
+                    holder = (
+                        f"; top holder {admission.top_holder}"
+                        if admission.top_holder
+                        else ""
+                    )
                     _warn(
                         f"still held: fleet {admission.share_low * 100:.1f}% over "
                         f"{admission.ceiling * 100:.1f}%, waited {int(now - started)}s"
+                        f"{holder}"
                     )
                     last_progress = now
                 pause_s = CPU_HOLD_POLL_S

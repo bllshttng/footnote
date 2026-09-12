@@ -642,19 +642,7 @@ pub fn run_gate(
                 );
                 axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
             }
-            let receipt_fields = serde_json::json!({
-                "axis": admission.axis,
-                "detail": admission.reason,
-                "share_low": admission.share_low,
-                "share_high": admission.share_high,
-                "bound": admission.bound,
-                "fleet_cores": admission.fleet_cores,
-                "machine_cores": admission.machine_cores,
-                "capacity_cores": admission.capacity_cores,
-                "ceiling": admission.ceiling,
-                "load_15m": admission.load_15m,
-                "backstop": admission.backstop,
-            });
+            let receipt_fields = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
                     // The refusal is decided; drop the mutex BEFORE printing
@@ -705,10 +693,8 @@ pub fn run_gate(
                         last_progress = Instant::now();
                     } else if last_progress.elapsed() >= QUEUE_PROGRESS_EVERY {
                         eprintln!(
-                            "still held: fleet {:.1}% over {:.1}%, waited {}s",
-                            admission.share_low * 100.0,
-                            admission.ceiling * 100.0,
-                            started.elapsed().as_secs()
+                            "{}",
+                            held_progress_line(admission, started.elapsed().as_secs())
                         );
                         last_progress = Instant::now();
                     }
@@ -937,6 +923,54 @@ pub(crate) struct AdmissionPayload {
     load_15m: Option<f64>,
     #[serde(default)]
     backstop: f64,
+    /// The Python decider's short form of the fleet's largest program; absent
+    /// on an older wheel and whenever no attributed row exists.
+    #[serde(default)]
+    top_holder: Option<String>,
+}
+
+/// The receipt's figure block. An axis of `cpu_instrument` measured nothing,
+/// so every figure is JSON null - never a 0.0 a reader would take for a
+/// reading. `axis`, `detail` and `bound` are words, not figures, and stay.
+fn receipt_fields(admission: &AdmissionPayload) -> serde_json::Value {
+    let unreadable = admission.axis == "cpu_instrument";
+    let fig = |v: f64| {
+        if unreadable {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(v)
+        }
+    };
+    serde_json::json!({
+        "axis": admission.axis,
+        "detail": admission.reason,
+        "share_low": fig(admission.share_low),
+        "share_high": fig(admission.share_high),
+        "bound": admission.bound,
+        "fleet_cores": fig(admission.fleet_cores),
+        "machine_cores": fig(admission.machine_cores),
+        "capacity_cores": fig(admission.capacity_cores),
+        "ceiling": fig(admission.ceiling),
+        "load_15m": admission.load_15m,
+        "backstop": fig(admission.backstop),
+    })
+}
+
+/// The periodic held line. The holder clause is the payload's own words, so
+/// this reprint and the Python reason cannot drift.
+fn held_progress_line(admission: &AdmissionPayload, waited_secs: u64) -> String {
+    let holder = admission
+        .top_holder
+        .as_deref()
+        .map(|h| format!("; top holder {h}"))
+        .unwrap_or_default();
+    format!(
+        "still held: fleet {:.1}% over {:.1}%, waited {}s{}",
+        admission.share_low * 100.0,
+        admission.ceiling * 100.0,
+        waited_secs,
+        holder
+    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1068,6 +1102,7 @@ fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) -> CpuAdmis
                 gap: None,
                 load_15m: None,
                 backstop: 0.0,
+                top_holder: None,
             },
             token: "cpu_instrument_unreadable",
         }
@@ -1691,6 +1726,46 @@ MemAvailable:    8000000 kB\n";
                 "{payload:?}"
             );
         }
+    }
+
+    /// The receipt's figure block: an unreadable instrument leaves every
+    /// figure JSON null - never a 0.0 a reader would take for a reading -
+    /// while the words (axis, detail, bound) survive intact.
+    #[test]
+    fn receipt_figures_are_null_when_the_instrument_never_answered() {
+        let cpu = check_cpu_axis(None, Some("ps unavailable: timed out after 5.0s"));
+        let fields = receipt_fields(&cpu.payload);
+        assert_eq!(fields["axis"], "cpu_instrument");
+        for key in [
+            "share_low",
+            "share_high",
+            "fleet_cores",
+            "machine_cores",
+            "capacity_cores",
+            "ceiling",
+            "backstop",
+        ] {
+            assert!(fields[key].is_null(), "{key} must be null");
+        }
+        assert_eq!(fields["detail"], cpu.payload.reason);
+        assert_eq!(fields["bound"], "exact");
+    }
+
+    /// The periodic held reprint prints the payload's holder clause
+    /// verbatim; an absent holder leaves the line exactly as before.
+    #[test]
+    fn held_progress_line_prints_the_payloads_holder_verbatim() {
+        let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null,"load_15m":45.0,"backstop":480.0}"#;
+        let mut admission: AdmissionPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            held_progress_line(&admission, 40),
+            "still held: fleet 62.5% over 50.0%, waited 40s"
+        );
+        admission.top_holder = Some("yes 16 procs 5.13 cores".to_string());
+        assert_eq!(
+            held_progress_line(&admission, 60),
+            "still held: fleet 62.5% over 50.0%, waited 60s; top holder yes 16 procs 5.13 cores"
+        );
     }
 
     /// Mirrors `test_no_wait_refuses_fast_when_the_mutex_is_contended` on the

@@ -38,6 +38,7 @@ def _adm(verdict: str, *, axis: str = "fleet_cpu_share", **kw) -> Admission:
         gap=kw.pop("gap", None),
         load_15m=kw.pop("load_15m", 1.0),
         backstop=kw.pop("backstop", HARD * 12),
+        top_holder=kw.pop("top_holder", None),
     )
     assert not kw, f"unexpected overrides: {kw}"
     return Admission(**fields)
@@ -214,6 +215,42 @@ def test_unreadable_instrument_refuses_and_names_the_failure(tmp_path, monkeypat
     assert receipt["reason"] == "cpu_instrument_unreadable"
     assert receipt["axis"] == "cpu_instrument"
     assert "ps unavailable: timed out" in capsys.readouterr().err
+    # Figures the instrument never measured are null, never 0.0 dressed as a
+    # reading (x-5f0b defect 2, receipt seam).
+    for key in (
+        "share_low",
+        "share_high",
+        "fleet_cores",
+        "machine_cores",
+        "capacity_cores",
+        "ceiling",
+        "backstop",
+    ):
+        assert receipt[key] is None, key
+
+
+def test_still_held_progress_names_the_top_holder(tmp_path, monkeypatch, capsys):
+    """The periodic reprint carries the payload's holder clause, the same
+    words the reason carries."""
+    _isolate(tmp_path, monkeypatch)
+    hold = _adm(
+        "hold",
+        share_low=0.625,
+        fleet_cores=7.5,
+        reason="spawn held: the fleet holds 7.50/12.00 cores",
+        top_holder="yes 16 procs 5.13 cores",
+    )
+    backstop = _adm("refuse", axis="load_15m", load_15m=500.0)
+    seq = iter([hold, hold, backstop])
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: next(seq))
+    monkeypatch.setattr(spawn_gate, "QUEUE_PROGRESS_EVERY_S", 0.0)
+    monkeypatch.setattr(spawn_gate, "CPU_HOLD_POLL_S", 0.01)
+    with pytest.raises(SystemExit) as exc:
+        spawn_gate.run_gate("w2", "bg")
+    assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+    err = capsys.readouterr().err
+    assert "still held" in err
+    assert "; top holder yes 16 procs 5.13 cores" in err
 
 
 def test_backstop_on_load_15m_refuses_at_the_gate(tmp_path, monkeypatch):
