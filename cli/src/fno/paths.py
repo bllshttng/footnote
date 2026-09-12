@@ -1333,6 +1333,33 @@ def handoffs_dir(project_root: Optional[Path] = None) -> Path:
     return state_dir() / "handoffs" / project_name
 
 
+def crown_handoff_doc(scope: str) -> Path:
+    """The crown-keyed handoff doc for one scope, newest existing file first.
+
+    The key scheme and the newest-by-mtime pick are the ONE definition: the
+    precompact writer's save path (`config paths handoff --scope`) and the
+    check-in's reader both resolve through here, so the two cannot drift.
+    When no doc exists yet, today's name is returned as the save path.
+    """
+    import datetime as _dt
+
+    key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
+    directory = handoffs_dir()
+
+    def _mtime(path: Path) -> float:
+        # A concurrent refresh can unlink between glob and stat; a vanished
+        # candidate sorts oldest and the writer recreates the file anyway.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
+    if existing:
+        return existing[-1]
+    return directory / f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
+
+
 def briefs_dir() -> Path:
     """Return the briefs directory."""
     settings = _settings()

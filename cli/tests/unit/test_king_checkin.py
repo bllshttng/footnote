@@ -21,7 +21,7 @@ def _fake_readers(*, overrides: dict | None = None):
             "",
         ),
         "blocked_child": lambda scope: (
-            [{"node": "x-eb79", "session": "cx-run-1", "age_minutes": 45, "reason": "worktree-init-blocked"}],
+            {"rows": [{"node": "x-eb79", "session": "cx-run-1", "age_minutes": 45, "reason": "worktree-init-blocked"}], "total": 1},
             "",
         ),
         "court": lambda scope: (

@@ -36,6 +36,11 @@ NUMERIC_DIFF_KEYS = [
 #: payload stays whole, only the rendered rows are cut, as the board does).
 MAX_COURT_ROWS = 25
 
+#: Cap on blocked_child rows carried in BOTH the printout and the row, so a
+#: fleet-on-fire beat cannot overflow the event data cap and lose the journal
+#: row. The total travels beside the list, so nothing is silently dropped.
+BLOCKED_CHILD_CAP = 50
+
 
 class ReaderError(Exception):
     """One reading could not be taken; the beat continues without it."""
@@ -75,26 +80,15 @@ def _marker_lib() -> Path:
 
 
 def _handoff_doc(scope: str) -> Path:
-    # Mirrors `fno config paths handoff --scope` (paths_cli.handoff): the
-    # crown-keyed doc is the newest existing one, and the check-in body
-    # refreshes it before this verb reads it.
-    from fno.paths import handoffs_dir
+    # The crown-keyed doc is the newest existing one; the check-in body
+    # refreshes it before this verb reads it. Resolution is paths.py's one
+    # definition, shared with the writer's save path.
+    from fno.paths import crown_handoff_doc
 
-    key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
-    if key == "crown-":
-        raise ReaderError("empty scope names no canon doc")
-    directory = handoffs_dir()
-
-    def _mtime(path: Path) -> float:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
-    if not existing:
+    doc = crown_handoff_doc(scope)
+    if not doc.exists():
         raise ReaderError(f"no canon handoff doc for scope {scope}")
-    return existing[-1]
+    return doc
 
 
 def _r_user_notes(scope: str) -> tuple[Any, str]:
@@ -192,15 +186,16 @@ def _r_board(scope: str, board_fn: Callable, court_fn: Callable) -> tuple[Any, s
 
 def _r_blocked_child(scope: str, board_fn: Callable) -> tuple[Any, str]:
     rows = _queue(board_fn(scope), "blocked_child").get("rows") or []
-    return [
+    bounded = [
         {
             "node": row.get("id"),
             "session": row.get("session"),
             "age_minutes": row.get("age_minutes"),
             "reason": row.get("reason"),
         }
-        for row in rows
-    ], ""
+        for row in rows[:BLOCKED_CHILD_CAP]
+    ]
+    return {"rows": bounded, "total": len(rows)}, ""
 
 
 def _fetch_court(scope: str) -> dict:
@@ -428,7 +423,8 @@ def build_data(readings: list[Reading], scope: str) -> dict[str, Any]:
         data["free_claim_no_driver"] = board["free_claim_no_driver"]
         data["blocked"] = board["blocked"]
     if "blocked_child" in values:
-        data["blocked_children"] = values["blocked_child"]
+        data["blocked_children"] = values["blocked_child"]["rows"]
+        data["blocked_children_total"] = values["blocked_child"]["total"]
     if "court" in values:
         data["active_nodes"] = values["court"]["active_nodes"]
     if "workers" in values:
@@ -551,10 +547,13 @@ def render_lines(
         lines.append(f"READER FAILED blocked_child: {failed['blocked_child']}")
     else:
         rows = data.get("blocked_children") or []
-        lines.append(f"blocked_child: {len(rows)}")
+        total = data.get("blocked_children_total") or len(rows)
+        lines.append(f"blocked_child: {total}")
         for row in rows:
             lines.append(f"  {row.get('node')}, session {row.get('session')}, age {row.get('age_minutes')}m"
                          + (f" ({row.get('reason')})" if row.get("reason") else ""))
+        if total > len(rows):
+            lines.append(f"  ... and {total - len(rows)} more not shown")
 
     court = by_name["court"]
     if court.ok:

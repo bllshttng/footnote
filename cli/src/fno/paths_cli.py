@@ -170,22 +170,10 @@ def handoff(
     if scope:
         if session_id or slug:
             raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")
-        key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
-        if key == "crown-":
-            raise typer.BadParameter("a crown scope is required (--scope)")
-        directory = handoffs_dir()
+        from fno.paths import crown_handoff_doc
 
-        def _mtime(path: Path) -> float:
-            # A concurrent refresh can unlink between glob and stat; a vanished
-            # candidate sorts oldest and the writer recreates the file anyway.
-            try:
-                return path.stat().st_mtime
-            except OSError:
-                return 0.0
-
-        existing = sorted(directory.glob(f"*-{key}.md"), key=_mtime)
-        filename = existing[-1].name if existing else f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
-        typer.echo(filename if name_only else str(directory / filename))
+        path = crown_handoff_doc(scope)
+        typer.echo(path.name if name_only else str(path))
         return
     if not session_id:
         raise typer.BadParameter("a session id is required (--session-id), or a crown scope (--scope)")
