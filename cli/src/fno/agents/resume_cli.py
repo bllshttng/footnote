@@ -998,6 +998,7 @@ def resume_logic(
         else "interactive_attach"
     )
     is_opencode_serve = harness == "opencode" and getattr(entry, "substrate", None) == "thread"
+    argv: Optional[list[str]] = None
     if is_opencode_serve:
         argv = _build_opencode_steer_argv(name, message, cwd)
         resume_supported = True
