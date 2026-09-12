@@ -20,6 +20,23 @@
 
 use super::PaneProbe;
 use crate::pane_stop::PanePrecheck;
+use crate::state::RegistryEntry;
+
+/// Probe the row's pane, then run the shared pane-stop precheck when the pane
+/// is already gone. Each read is a blocking subprocess, so each runs through
+/// `off_executor` like handle_rm_with's chain; a present pane never pays for
+/// the lsof/holder read.
+pub(crate) fn pane_verdict(entry: &RegistryEntry) -> (PaneProbe, Option<PanePrecheck>) {
+    let Some(mux) = entry.mux.as_ref() else {
+        return (PaneProbe::Unknown, None);
+    };
+    let probe = super::off_executor(|| super::run_mux_pane_probe(&mux.session, mux.pane_id));
+    let precheck = (probe == PaneProbe::Absent).then(|| {
+        let owned = entry.clone();
+        super::off_executor(move || crate::pane_stop::precheck_pane_stop(&owned))
+    });
+    (probe, precheck)
+}
 
 /// Build the InvalidParams detail for a pane-hosted row's stop refusal.
 /// `pane` is the probe verdict over the row's mux ref; `precheck` is the

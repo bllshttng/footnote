@@ -5809,14 +5809,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     // instead, which kills the process inside the pane and leaves the pane
     // itself.
     if let Some(mux) = entry.mux.as_ref() {
-        // Both reads are blocking subprocesses: run them off the executor like
-        // handle_rm_with's chain. The precheck pays its lsof/holder read only
-        // when the pane is already gone.
-        let probe = off_executor(|| run_mux_pane_probe(&mux.session, mux.pane_id));
-        let precheck = (probe == PaneProbe::Absent).then(|| {
-            let owned = entry.clone();
-            off_executor(move || crate::pane_stop::precheck_pane_stop(&owned))
-        });
+        let (probe, precheck) = stop_refusal_detail::pane_verdict(&entry);
         return Response::err(
             req.id,
             ErrorCode::InvalidParams,
