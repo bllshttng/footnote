@@ -430,6 +430,32 @@ mod tests {
     }
 
     #[test]
+    fn ambient_present_pid_prints_no_pid_segment() {
+        // The pid rule's other arm, pinned at the renderer so no live-pid
+        // probe is involved: a live ambient pid is ordinary context, not
+        // holder evidence, so the line carries no pid segment at all.
+        let row = LongHoldRow {
+            key: "flight:direct".into(),
+            holder: "single-flight:s".into(),
+            pid: Some(1),
+            pid_provenance: None,
+            pid_observed: "present".into(),
+            state: "live".into(),
+            basis: "live".into(),
+            expired: false,
+            held_s: 900,
+            requests: 0,
+        };
+        let lines = render_lines(&[row], DEFAULT_MIN_HOLD_S);
+        assert!(lines[1].contains("live (live)"), "{}", lines[1]);
+        assert!(
+            !lines[1].contains(" pid "),
+            "ambient pid never prints: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
     fn off_host_hold_never_probes_a_foreign_pid() {
         let td = TempDir::new().unwrap();
         let claims_dir = td.path().join("claims");
