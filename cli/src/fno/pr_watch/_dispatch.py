@@ -269,22 +269,14 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 _TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0}
 _DEFAULT_FIRE_TIMEOUT = 300.0
 _SPAWN_TIMEOUT_GRACE = 30.0
-# Leave enough cadence budget for one bounded ritual and the post-dispatch legs.
-# A later action can retry on the next tick; starting it with less time would
-# turn a completed sweep into the same global deadline timeout this daemon is
-# meant to avoid.
-_DISPATCH_RESERVE_S = 360.0
-_DISPATCH_RESERVE_FRACTION = 0.75
-
-
-def _dispatch_reserve_seconds(tick_budget_seconds: Optional[float]) -> float:
-    """Reserve a scaled fraction of short ticks, capped at the normal budget."""
-    if tick_budget_seconds is None:
-        return _DISPATCH_RESERVE_S
-    return min(
-        _DISPATCH_RESERVE_S,
-        max(1.0, float(tick_budget_seconds) * _DISPATCH_RESERVE_FRACTION),
-    )
+# The dispatch loop's two costs are different orders: a rich read (gh pr view,
+# seconds) and a fire (a bounded spawn). The read floor leaves room for one
+# more read plus the final store.persist(), so the loop stops on its own terms
+# rather than under the phase alarm mid-persist. The fire floor gates the
+# spawn arm against the live phase clock via _ritual_timeout(): below it, skip
+# the dispatch (never the scan) and let the next tick re-decide.
+_READ_FLOOR_S = 15.0
+_FIRE_FLOOR_S = 30.0
 
 
 def fire_skill(
@@ -522,7 +514,6 @@ def tick(
     graphql_remaining_fn: Optional[Callable] = None,
     graphql_min_remaining: int = 200,
     dispatch_deadline: Optional[float] = None,
-    dispatch_budget_seconds: Optional[float] = None,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -633,7 +624,6 @@ def tick(
             graphql_remaining_fn=_graphql_remaining,
             graphql_min_remaining=graphql_min_remaining,
             dispatch_deadline=dispatch_deadline,
-            dispatch_budget_seconds=dispatch_budget_seconds,
             holder=holder,
         )
     finally:
@@ -663,7 +653,6 @@ def _run_tick(
     graphql_remaining_fn,
     graphql_min_remaining,
     dispatch_deadline,
-    dispatch_budget_seconds,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -806,6 +795,9 @@ def _run_tick(
     # needs and a bare absence cannot prove.
     merge_scan_eligible = 0
     merge_scan_attempted = 0
+    # Rich reads completed: separates "the scan reached nothing" from "the
+    # scan found nothing granted" (eligible=0 alone cannot).
+    merge_scan_scanned = 0
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -857,8 +849,7 @@ def _run_tick(
         # x-d211: only a candidate owing the rich read may break the tick.
         if (
             dispatch_deadline is not None
-            and dispatch_deadline - time.monotonic()
-            < _dispatch_reserve_seconds(dispatch_budget_seconds)
+            and dispatch_deadline - time.monotonic() < _READ_FLOOR_S
         ):
             emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
             skipped += 1
@@ -879,6 +870,7 @@ def _run_tick(
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
+                merge_scan_scanned += 1
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
@@ -994,7 +986,7 @@ def _run_tick(
                     store.set(key, entry)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
-            elif decision.kind in ("merge", "review"):
+            elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
                 dispatch_ok = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
@@ -1101,6 +1093,14 @@ def _run_tick(
                             )
                         except Exception as exc:
                             log.warning("pr-watch: notify failed: %s", exc)
+
+            elif decision.kind in ("merge", "review"):
+                # No room for one bounded fire in the phase slice: skip the
+                # dispatch only. No break, no continue: the scan continues to
+                # the next candidate and last_seen_state still lands below,
+                # so the next tick re-decides with a fresh cursor.
+                emit("pr_watch_skipped", {"pr": pr, "reason": "fire-budget"})
+                skipped += 1
 
             elif decision.kind == "execute":
                 # The parked worker hands execution to the watcher: one
@@ -1216,6 +1216,7 @@ def _run_tick(
         # integer, and include zero).
         "merge_scan": {
             "completed": True,
+            "scanned": merge_scan_scanned,
             "eligible": merge_scan_eligible,
             "attempted": merge_scan_attempted,
         },

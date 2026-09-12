@@ -1036,7 +1036,6 @@ def tick() -> None:
                     graphql_min_remaining=cfg.graphql_min_remaining,
                     enabled=tick_enabled,
                     dispatch_deadline=time.monotonic() + slice_s,
-                    dispatch_budget_seconds=slice_s,
                 )
             except TickDeadlineExceeded:
                 raise

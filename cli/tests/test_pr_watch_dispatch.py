@@ -3685,14 +3685,10 @@ class TestQuotaPreflight:
         assert {event["data"].get("reason") for event in deps["events"]} >= {"tick-budget"}
         receipt = next(event["data"] for event in deps["events"] if event["type"] == "pr_watch_tick")
         assert receipt["swept_count"] == 1
-
-    def test_dispatch_reserve_scales_with_tick_budget(self):
-        """Short valid tick deadlines must not disable dispatch outright."""
-        from fno.pr_watch._dispatch import _dispatch_reserve_seconds
-
-        assert _dispatch_reserve_seconds(480) == 360
-        assert _dispatch_reserve_seconds(360) == 270
-        assert _dispatch_reserve_seconds(60) == 45
+        # AC3-EDGE: the break fired before any rich read, so scanned stays 0
+        # while completed stays true - "reached nothing", not "found nothing".
+        assert receipt["merge_scan"]["completed"] is True
+        assert receipt["merge_scan"]["scanned"] == 0
 
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
@@ -3882,7 +3878,9 @@ class TestDurableGrantExecution:
         assert entry["merge_dispatched"] is True
         assert entry["retries"] == 0
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
-        assert receipt["merge_scan"] == {"completed": True, "eligible": 1, "attempted": 1}
+        assert receipt["merge_scan"] == {
+            "completed": True, "scanned": 1, "eligible": 1, "attempted": 1,
+        }
 
     def test_held_consumes_no_failure_budget(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(
@@ -3955,6 +3953,36 @@ class TestDurableGrantExecution:
             e["type"] != "merge_grant_execution" for e in deps["events"]
         )
 
+    def test_execute_arm_ignores_fire_budget(self, tmp_path, monkeypatch):
+        """The fire floor gates the spawn arm only. A durable-grant execution
+        is the canonical merge core bounded by its own guards, so it still
+        runs - and the scan receipt still counts it - on a tick with no room
+        to fire a spawn."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        # 35s of phase left -> _ritual_timeout() = 25 < _FIRE_FLOOR_S.
+        monkeypatch.setattr(d, "_phase_deadline", clock["t"] + 35.0)
+        self._tick(tmp_path, deps, monkeypatch, 0)
+
+        executed = [
+            e for e in deps["events"]
+            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
+        ]
+        assert [e["data"]["pr"] for e in executed] == [1]
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["eligible"] == 1
+        assert receipt["merge_scan"]["attempted"] == 1
+
     def test_quiet_tick_still_proves_the_scan_ran(self, tmp_path, monkeypatch):
         """AC12-HP: a completed tick with zero eligible PRs carries the scan
         receipt with integer zeros - a scan that saw nothing is still a scan
@@ -3980,6 +4008,7 @@ class TestDurableGrantExecution:
         )
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["merge_scan"]["completed"] is True
+        assert receipt["merge_scan"]["scanned"] == 0
         assert receipt["merge_scan"]["eligible"] == 0
         assert receipt["merge_scan"]["attempted"] == 0
 
@@ -4037,7 +4066,6 @@ class TestScanResumesLeastRecentlyPolled:
             max_retries=2,
             graphql_remaining_fn=lambda: (4800, None),
             dispatch_deadline=deadline,
-            dispatch_budget_seconds=0,
         )
 
     def test_five_ticks_reach_pr_45_and_stamp_each_window(self, tmp_path, monkeypatch):
@@ -4088,7 +4116,9 @@ class TestScanResumesLeastRecentlyPolled:
         monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
 
         for _ in range(5):
-            deadline = clock["t"] + 10.0
+            # 10 reads per tick: the read floor is 15s, so the window is
+            # deadline - 15; each read costs 1s of the faked clock.
+            deadline = clock["t"] + 24.0
             res = self._tick(tmp_path, deps, monkeypatch, store_path, deadline=deadline)
             assert not res.quota_skip
 
@@ -4106,6 +4136,119 @@ class TestScanResumesLeastRecentlyPolled:
         assert state["owner/repo#45"].get("merge_dispatched") is True
         stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
         assert len(stamped) == 50, "every rich read stamped its cursor"
+
+    def test_production_slice_still_reaches_every_candidate(self, tmp_path, monkeypatch):
+        """AC1-HP + AC3-HP at the production numbers that broke on 2026-09-12:
+        a 150s sweep slice with 40s spent leaves 110s before the deadline. The
+        old fire-sized reserve (min(360, 150*0.75) = 112.5s) exceeded that and
+        broke the loop on its first state-backed candidate: 0 reads, 0 stamps,
+        eligible=0, acted=0. Every candidate must be rich-read and scanned."""
+        from types import SimpleNamespace
+
+        import fno.config as config_mod
+        import fno.pr_watch._dispatch as d
+        from fno.config import AutoMergeBlock
+        from fno.pr_watch._state import WatermarkStore
+
+        prs = list(range(1, 12))
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in prs
+        ]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs)
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads = self._counting_reads(deps, clock)
+
+        # PR 11 carries a positive durable grant: the scan counts it eligible
+        # and the execute arm acts on it (rc=0 stub).
+        g = tmp_path / "grant-graph.json"
+        receipt = {
+            "approved": True, "source": "config",
+            "recorded_by": "spawner-session", "recorded_at": "2026-08-24T12:00:00Z",
+        }
+        g.write_text(json.dumps({"entries": [{
+            "id": "x-00000011", "title": "t", "pr_number": 11,
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "w1",
+                          "merge_grant": receipt}],
+        }]}))
+        monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+        monkeypatch.setattr("fno.pr._coverage_gate._repo_slug", lambda repo: None)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, **kw: {"key": key, "state": "stale", "holder": "w1"},
+        )
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo",
+            lambda path: config_mod.load_settings().model_copy(
+                update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+            ),
+        )
+        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+
+        res = self._tick(tmp_path, deps, monkeypatch, store_path,
+                         deadline=clock["t"] + 110.0)
+
+        assert reads == prs, f"every state-backed candidate is rich-read: {reads}"
+        assert res.acted == 1
+        state = WatermarkStore(path=store_path).load()
+        stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
+        assert len(stamped) == 11, "every rich read stamped its cursor"
+        tick_receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert tick_receipt["merge_scan"] == {
+            "completed": True, "scanned": 11, "eligible": 1, "attempted": 1,
+        }
+        budget_events = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "tick-budget"
+        ]
+        assert budget_events == []
+
+    def test_fire_budget_skips_the_spawn_not_the_scan(self, tmp_path, monkeypatch):
+        """AC2-EDGE: a merge/review decision on a tick with less than
+        _FIRE_FLOOR_S of phase left emits fire-budget, fires nothing, and the
+        iteration still lands last_seen_state and the scan still counts the
+        candidate as scanned."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+        from fno.pr_watch._state import WatermarkStore
+
+        candidates = [_make_candidate(pr_number=7, repo_dir=tmp_path)]
+        deps = _make_tick_deps(
+            tmp_path, candidates=candidates,
+            obs_map={7: _make_obs(pr_number=7, state="OPEN",
+                                  latest_review_ts="2026-06-14T11:00:00Z")},
+        )
+        store_path = self._seed(tmp_path, [7])
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        # 35s of phase left -> _ritual_timeout() = 25 < _FIRE_FLOOR_S.
+        monkeypatch.setattr(d, "_phase_deadline", clock["t"] + 35.0)
+        reads = self._counting_reads(deps, clock)
+
+        res = self._tick(tmp_path, deps, monkeypatch, store_path,
+                         deadline=clock["t"] + 600.0)
+
+        assert reads == [7], "the scan still reaches the candidate"
+        assert res.acted == 0
+        assert deps["fired"] == [], "no spawn may fire without fire budget"
+        skipped = [
+            e["data"].get("reason") for e in deps["events"]
+            if e["type"] == "pr_watch_skipped"
+        ]
+        assert skipped == ["fire-budget"]
+        state = WatermarkStore(path=store_path).load()
+        entry = state["owner/repo#7"]
+        assert entry.get("last_seen_state") == "OPEN"
+        assert entry.get("last_polled_at"), "the cursor stamps even on a skipped fire"
+        tick_receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert tick_receipt["merge_scan"] == {
+            "completed": True, "scanned": 1, "eligible": 0, "attempted": 0,
+        }
 
     def test_parked_prefix_costs_no_rich_read(self, tmp_path, monkeypatch):
         """AC3-EDGE: parked PRs 1300 and 1597 precede an actionable candidate
