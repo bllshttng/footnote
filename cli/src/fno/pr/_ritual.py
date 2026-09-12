@@ -619,8 +619,14 @@ class Ritual:
     ) -> bool:
         if Path(worktree).exists():
             return False
+        names = rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
+        if not names:
+            # An empty candidate set is not a successful removal: True here
+            # would emit the daemon's completion and tombstone an order that
+            # removed nothing.
+            return False
         removed = True
-        for name in rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh):
+        for name in names:
             result = self._sh(
                 [
                     "agents",

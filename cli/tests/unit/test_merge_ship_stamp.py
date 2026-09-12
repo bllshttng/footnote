@@ -595,6 +595,61 @@ def test_ritual_mint_shares_request_id_with_merge_mint(tmp_path, monkeypatch):
     assert ids == [twin, twin]
 
 
+def test_remove_rows_after_archive_empty_list_is_not_success(monkeypatch, tmp_path):
+    # An empty candidate list is not a successful removal. The leg used to
+    # initialise removed=True and loop over nothing, so the archive leg
+    # emitted the daemon's completion under the pending request id and
+    # tombstoned an order that removed nothing.
+    import fno.pr._ritual as R
+
+    monkeypatch.setattr(
+        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
+    )
+    ritual = R.Ritual.__new__(R.Ritual)
+    ritual.cwd = tmp_path
+    ritual.ctx = R._Ctx(
+        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
+        project="proj", lane_project="", parking_lot=None, holder="",
+        node_ids=["x-07dc"],
+    )
+    assert (
+        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 0)
+        is False
+    )
+
+
+def test_remove_rows_after_archive_names_each_removal(monkeypatch, tmp_path):
+    # The non-empty arm: every candidate is rm'd under the request id, and a
+    # failed rm reads as not-removed (no completion tombstone).
+    import fno.pr._ritual as R
+    from types import SimpleNamespace
+
+    calls: list[list[str]] = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(
+        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: ["t-07dc-a1"]
+    )
+    ritual = R.Ritual.__new__(R.Ritual)
+    ritual.cwd = tmp_path
+    ritual.runner = fake_runner
+    ritual.ctx = R._Ctx(
+        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
+        project="proj", lane_project="", parking_lot=None, holder="",
+        node_ids=["x-07dc"],
+    )
+    assert (
+        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 123)
+        is True
+    )
+    assert len(calls) == 1
+    assert "agents" in calls[0] and "t-07dc-a1" in calls[0]
+    assert "req-1" in calls[0]
+
+
 def _patch_sidecar(monkeypatch, rows):
     from fno.tracker import sidecar as sidecar_store
     from fno.tracker.sidecar import Sidecar
