@@ -161,6 +161,7 @@ def serialize_entry(
     progress: Optional[str] = None,
     progress_basis: Optional[str] = None,
     last_activity_age_s: Optional[int] = None,
+    last_activity_basis: Optional[str] = None,
     last_event_at: Optional[str] = None,
     last_message: Optional[str] = None,
     status: Optional[str] = None,
@@ -324,7 +325,12 @@ def serialize_entry(
         "progress": progress,
         "progress_basis": progress_basis,
         "last_activity_age_s": last_activity_age_s,
-        # The absolute stamp of the newest transcript activity and the flattened
+        # (x-6d16) The instrument the age came from (`last-entry` | `mtime` |
+        # `opencode-db`), or the resolver's reason word (`not-found` |
+        # `no-records` | `resolver-error`) when it could not resolve the
+        # handle at all - never a bare null: those words separate "no
+        # transcript" from "the resolver crashed".
+        "last_activity_basis": last_activity_basis,
         # text of the LAST turn. Both come from the same truth probe as
         # the age above, so a reader can see WHAT the worker last did and WHEN -
         # a `working` row whose stamp is hours old is the wedged-worker signal

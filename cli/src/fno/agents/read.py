@@ -170,6 +170,14 @@ def list_agents(
         # The transcript stamp + last turn text, same single read.
         last_event_at = truth.get("last_event_at")
         last_message = truth.get("last_message")
+        # (x-6d16) The age's instrument, or the resolver's reason word on the
+        # unknown paths (`not-found` | `no-records` | `resolver-error`): the
+        # difference between "no transcript" and "the resolver crashed",
+        # rendered as the same blank before. Read off the SAME truth call,
+        # before `truth` is rebound below to the node-claim reading.
+        activity_basis = truth.get("last_activity_basis") or (
+            truth.get("reason") if truth_state == "unknown" else None
+        )
         # One shared derivation, reached from the truth reading already in hand
         # so no second transcript read is paid. `registry_falsifier` owns which
         # falsifier a row actually carries (a mux-pane row carries none); a row
@@ -270,6 +278,7 @@ def list_agents(
             progress=prog.verdict,
             progress_basis=prog.basis,
             last_activity_age_s=reach.age_s,
+            last_activity_basis=activity_basis,
             last_event_at=last_event_at,
             last_message=last_message,
             status=rendered_status,

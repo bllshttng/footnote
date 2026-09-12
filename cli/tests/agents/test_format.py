@@ -421,6 +421,28 @@ def test_serialize_entry_key_set_matches_shared_contract() -> None:
     assert set(row) == expected
 
 
+def test_serialize_entry_emits_last_activity_basis() -> None:
+    """x-6d16: the age's instrument rides the row on the Python lane too.
+
+    The contract test above pins the KEY on both serializers; this pins the
+    value lane: the resolver's instrument word when it answered, its reason
+    word when it could not resolve the handle.
+    """
+    answered = serialize_entry(
+        _claude_entry(),
+        live_status=None,
+        last_activity_age_s=30,
+        last_activity_basis="last-entry",
+    )
+    assert answered["last_activity_basis"] == "last-entry"
+    unresolvable = serialize_entry(
+        _claude_entry(),
+        live_status=None,
+        last_activity_basis="resolver-error",
+    )
+    assert unresolvable["last_activity_basis"] == "resolver-error"
+
+
 def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
     """The three keys whose absence made a bound pane worker read as unhosted
     and unidentified. Presence in the contract is not enough — assert the

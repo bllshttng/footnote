@@ -75,9 +75,10 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # granted_writable_roots (the codex thread lane's resolved posture vs
     # the sandbox_posture request), storage_only: 56 -> 58. v30 added
     # git_grant (the effective Git common-dir receipt), storage_only:
-    # 58 -> 59.
+    # 58 -> 59. x-6d16 added required last_activity_basis (the age's
+    # instrument word): 43 -> 44.
     assert payload["declared_count"] == 59
-    assert payload["required_count"] == 43
+    assert payload["required_count"] == 44
     assert payload["accounted_count"] == 59
     assert payload["known_gaps"] == {}
 
