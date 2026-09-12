@@ -369,6 +369,10 @@ dual_owner_kinds = {
     # them in schema.yaml for the validator and `doctor event find`.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    # merge_cleanup_skipped: the merge mint (Python) is the only emitter; the
+    # Rust known-kind table carries it so the daemon accepts the row, the way
+    # the evals pair above does.
+    "merge_cleanup_skipped",
 }
 collisions -= dual_owner_kinds
 if collisions:
