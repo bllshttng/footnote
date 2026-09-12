@@ -489,8 +489,7 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     RESOLVED=0
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
         KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
-            manifest-path --harness-session-id "$SESSION_ID" \
-            --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)
+            manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
         if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
             KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
             [[ "$KING_SHAPE" == "court" ]] && RESOLVED=1
