@@ -106,6 +106,7 @@ def note_readers(
     author_bound: Optional[str] = None
     seen: set[str] = set()
     self_key = session_identity_key(self_session) if self_session else None
+    self_sid = self_session or ""
 
     def add(address: Optional[str], why: str) -> bool:
         """True only when a live RECIPIENT joined; an author hit is never mailed."""
@@ -124,7 +125,7 @@ def note_readers(
             if isinstance(sid, str) and sid:
                 author = session_identity_key(sid) == self_key
             else:
-                author = resolved.endswith(self_session or "") or address.endswith(self_session)
+                author = resolved.endswith(self_sid) or address.endswith(self_sid)
             if author:
                 author_bound = author_bound or why
                 return False
