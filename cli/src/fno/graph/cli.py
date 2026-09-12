@@ -7646,7 +7646,6 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 # In graph/strand.py: the terminal-parent strand family (moved with the
 # close guards, release twins, and self-heal that share its liveness predicate).
 from fno.graph.strand import (  # noqa: E402
-    _is_live,
     _live_child_ids,
     _release_contained_children,
     _release_parented_children,
