@@ -2304,12 +2304,9 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
 
     The reactive half of quota survival: a snapshot can be up to
     ``probe_ttl_seconds`` stale, so without this the next pick would hand the
-    successor the account that just died. Thin caller over
-    ``quota_lock.record_quota_lock``, the one lock-decision site; this keeps
-    only the launch-time attribution (the overlay's record, falling back to
-    the active account because a launch-time death IS this process's
-    account). Best-effort - a telemetry write must never turn a worker's
-    death into a dispatch failure.
+    successor the account that just died. Thin caller over the one
+    lock-decision site; launch-time attribution stays here because a
+    launch-time death IS this process's account. Best-effort.
     """
     if not tail:
         return

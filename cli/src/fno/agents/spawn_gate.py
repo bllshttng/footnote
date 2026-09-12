@@ -1121,9 +1121,8 @@ def _refuse_gate_fault(
 
 def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
     """A vendor quota window on the caller-named account. NOT machine
-    busy-ness, so --force does not buy past it: forcing just mints the
-    next corpse. Keeps EXIT_PROVIDER_CAP so exit-code consumers are
-    unaffected, like _refuse_gate_fault."""
+    busy-ness, so --force does not buy past it. Keeps EXIT_PROVIDER_CAP
+    for exit-code consumers, like _refuse_gate_fault."""
     from datetime import datetime, timezone
 
     when = (

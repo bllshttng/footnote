@@ -18,12 +18,11 @@ def record_quota_lock(
     *,
     resets_at: Optional[float] = None,
 ) -> Optional[str]:
-    """Write the provider cooldown for a refusal already attributed to an account.
+    """Write the cooldown for a refusal already attributed to an account.
 
     Returns the account id written, or None when nothing was written. None
-    and ``"default"`` (the spawn positively pinned nothing) are refused
-    rather than resolved to the active account, so one dead worker's refusal
-    cannot read as a verdict on an account it never used.
+    and ``"default"`` (the spawn pinned nothing) are refused rather than
+    resolved to the active account.
     """
     if not account_id or account_id == "default" or not text:
         return None
