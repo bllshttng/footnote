@@ -12,7 +12,7 @@ from fno.events.log import normalize_event
 HEALTHY = frozenset({
     "pass", "found", "stamped", "graduated", "idempotent_noop", "allow",
     "DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneUnreviewed",
-    "DoneAwaitingMerge", "DoneAwaitingReview",
+    "DoneAwaitingMerge", "DoneAwaitingReview", "DoneBatched", "DonePlanned",
 })
 NOISE_TYPES = frozenset({"guard_decision", "control_plane_tick", "gh_probe"})
 _LABEL_KEYS = ("reason", "outcome", "verdict", "termination_reason")
@@ -26,11 +26,18 @@ def load_events(paths: list[Path], since: datetime | None = None) -> tuple[list[
         return result["events"], result["coverage"]
     cutoff = since if since.tzinfo is not None else since.replace(tzinfo=timezone.utc)
     rows = []
+    invalid_timestamps = 0
     for row in result["events"]:
         timestamp = _timestamp(row)
-        if timestamp is None or timestamp >= cutoff:
+        if timestamp is None:
+            invalid_timestamps += 1
+        elif timestamp >= cutoff:
             rows.append(row)
-    return rows, result["coverage"]
+    coverage = dict(result["coverage"])
+    if invalid_timestamps:
+        coverage["complete"] = False
+        coverage["invalid_timestamps"] = invalid_timestamps
+    return rows, coverage
 
 
 def label_of(row: dict) -> str | None:
@@ -99,9 +106,12 @@ def _suspects_for_pattern(rows: list[dict], target: str, *, window: int,
         if _pattern(row, include_all=include_all) == target
     ]
     target_sessions = {session for session, _ in occurrences}
-    total_pattern_rows = sum(
-        1 for row in rows if _pattern(row, include_all=include_all) is not None
-    )
+    global_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        pattern = _pattern(row, include_all=include_all)
+        if pattern is not None:
+            global_counts[pattern] += 1
+    total_pattern_rows = sum(global_counts.values())
     candidate_sessions: dict[str, set[str]] = defaultdict(set)
     candidate_counts: dict[str, int] = defaultdict(int)
     for session, index in occurrences:
@@ -117,7 +127,7 @@ def _suspects_for_pattern(rows: list[dict], target: str, *, window: int,
         if support < 2:
             continue
         conditional = support / len(target_sessions) if target_sessions else 0.0
-        global_prevalence = candidate_counts[pattern] / total_pattern_rows if total_pattern_rows else 0.0
+        global_prevalence = global_counts[pattern] / total_pattern_rows if total_pattern_rows else 0.0
         lift = conditional / global_prevalence if global_prevalence else 0.0
         suspects.append({
             "pattern": pattern,

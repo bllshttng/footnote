@@ -33,7 +33,7 @@ def test_leaderboard_ranks_upstream_suspect_for_repeated_failure() -> None:
     assert budget["count"] == 2
     assert budget["nodes"] == 2
     assert budget["suspects"][0]["pattern"] == "loop_check_watch_idle:ci"
-    assert budget["suspects"][0]["lift"] > 1
+    assert budget["suspects"][0]["lift"] == 1.6667
 
 
 def test_leaderboard_keeps_unassigned_rows_and_filters_noise() -> None:
@@ -41,6 +41,8 @@ def test_leaderboard_keeps_unassigned_rows_and_filters_noise() -> None:
         _event("2026-09-12T10:00:00Z", "termination", reason="Budget"),
         _event("2026-09-12T10:01:00Z", "guard_decision", session="s1", reason="allow"),
         _event("2026-09-12T10:02:00Z", "termination", session="s1", reason="DonePRGreen"),
+        _event("2026-09-12T10:03:00Z", "termination", session="s1", reason="DoneBatched"),
+        _event("2026-09-12T10:04:00Z", "termination", session="s1", reason="DonePlanned"),
     ]
 
     result = build_leaderboard(rows)
@@ -62,6 +64,8 @@ def test_load_events_reports_malformed_lines_and_returns_valid_rows(tmp_path) ->
         json.dumps(_event("2026-09-12T10:00:00Z", "termination", reason="Budget"))
         + "\nnot json\n"
         + json.dumps(_event("2026-09-12T10:01:00Z", "termination", reason="NoProgress"))
+        + "\n"
+        + json.dumps(_event("not-a-timestamp", "termination", reason="Interrupted"))
         + "\n",
         encoding="utf-8",
     )
@@ -70,4 +74,5 @@ def test_load_events_reports_malformed_lines_and_returns_valid_rows(tmp_path) ->
 
     assert len(rows) == 2
     assert coverage["malformed_lines"] == 1
+    assert coverage["invalid_timestamps"] == 1
     assert coverage["complete"] is False

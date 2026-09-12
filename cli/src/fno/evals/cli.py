@@ -290,10 +290,10 @@ def macro_command(
         typer.echo(json.dumps({"leaderboard": patterns, "coverage": coverage}, indent=2))
     else:
         if not coverage["complete"]:
-            typer.echo(
-                f"coverage: {len(coverage['paths'])} journals, "
-                f"{coverage['malformed_lines']} malformed lines skipped"
-            )
+            details = f"{coverage['malformed_lines']} malformed lines skipped"
+            if coverage.get("invalid_timestamps"):
+                details += f", {coverage['invalid_timestamps']} invalid timestamps skipped"
+            typer.echo(f"coverage: {len(coverage['paths'])} journals, {details}")
         if not rows:
             typer.echo(f"macro: no events since {since}")
             raise typer.Exit(code=0)
