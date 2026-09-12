@@ -365,10 +365,11 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     }
     // Operator questions rank newest-first, matching
     // outstanding/core.py::read_open_questions: an ask filed minutes ago is
-    // the one a human can still act on. Ordered here by (epoch, seq)
+    // the one a human can still act on. Pre-ordered here by (epoch, seq)
     // descending - the fold's own total order, exact across a same-second
-    // stream where a ts string compare is not - and tied on purpose in the
-    // comparator below, which the stable sort turns into this push order.
+    // stream where a ts string compare is not - so the comparator's
+    // same-(ts, session) ties below resolve through the stable sort into this
+    // push order instead of HashMap order.
     let mut open_questions: Vec<_> = questions
         .into_iter()
         .filter(|(qid, _)| !closed_questions.contains(qid))
@@ -387,15 +388,22 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     // process. That makes `needs --json` reorder run to run and anything
     // diffing it flaky.
     items.sort_by(|a, b| {
-        // Operator questions are pre-ordered newest-first above and tie here on
-        // purpose: the stable sort preserves their push order. Every other kind
-        // keeps stream order.
-        if a.kind == "operator_question" && b.kind == "operator_question" {
-            return std::cmp::Ordering::Equal;
+        // Operator questions rank newest-first among themselves; the
+        // direction flip is total only when BOTH sides are questions (mixing
+        // it into the cross-kind arm would break sort_by's total-order
+        // requirement). Every other pair keeps stream order.
+        let is_question = |i: &NeedItem| i.kind == "operator_question";
+        match (is_question(a), is_question(b)) {
+            (true, true) => {
+                b.ts.cmp(&a.ts)
+                    .then_with(|| b.session_id.cmp(&a.session_id))
+            }
+            _ => {
+                a.ts.cmp(&b.ts)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+                    .then_with(|| a.kind.cmp(&b.kind))
+            }
         }
-        a.ts.cmp(&b.ts)
-            .then_with(|| a.session_id.cmp(&b.session_id))
-            .then_with(|| a.kind.cmp(&b.kind))
     });
     items
 }
