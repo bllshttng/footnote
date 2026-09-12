@@ -587,16 +587,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .iter()
         .filter(|row| claim_is_dead(row, &inputs.holder_activity))
         .filter(|row| {
+            // A key that is not `node:`-prefixed is unattributable, not
+            // another crown's: feed Null so it fails closed with the other
+            // unknown-attribution rows instead of matching `""` out of scope.
             let node_id = s_str(row, "key")
                 .and_then(|k| k.strip_prefix("node:"))
-                .unwrap_or("");
-            in_scope(
-                "stale_claim",
-                false,
-                &json!(node_id),
-                row,
-                &mut out_of_scope,
-            )
+                .map(|id| json!(id))
+                .unwrap_or(Value::Null);
+            in_scope("stale_claim", false, &node_id, row, &mut out_of_scope)
         })
         .map(|row| {
             json!({
