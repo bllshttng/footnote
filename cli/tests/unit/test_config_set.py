@@ -39,9 +39,9 @@ def test_set_int_coercion(tmp_path):
 
 
 def test_set_repairs_stored_quoted_bool_in_union_field(tmp_path):
-    # x-afee: `enabled: bool | dict[str, bool]` stored a hand-quoted "true";
-    # setting the same logical value must rewrite it as a bare bool, not
-    # no-op on the unchanged literal while printing success.
+    # `enabled: bool | dict[str, bool]` stored a hand-quoted "true"; setting
+    # the same logical value must rewrite it as a bare bool, not no-op on
+    # the unchanged literal while printing success.
     fno_dir = tmp_path / ".fno"
     fno_dir.mkdir()
     (fno_dir / "config.toml").write_text('[active_backlog]\nenabled = "true"\n')
