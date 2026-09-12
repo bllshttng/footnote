@@ -235,6 +235,14 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
         rows = read_graph(graph_path)
         entry = _find_node(rows, task_id)
         if entry is None:
+            # The store's write path also accepts the exact slug; match it so
+            # a refusal never narrows what the append accepts.
+            slug = task_id.strip().lower()
+            entry = next(
+                (e for e in rows if isinstance(e.get("slug"), str) and e["slug"].lower() == slug),
+                None,
+            )
+        if entry is None:
             return Refused(f"Error: no node resolves to '{task_id}'", 1)
         index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
         readers = note_readers(

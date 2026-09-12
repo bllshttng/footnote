@@ -476,6 +476,15 @@ def test_an_unknown_node_refuses_with_the_verb_text(tmp_path) -> None:
     assert got.exit_code == 1
 
 
+def test_the_exact_slug_resolves_like_the_write_path(tmp_path) -> None:
+    """The store's by-id write path accepts the exact slug; so must the read."""
+    got = readers_before_append(
+        "Worker-Slug", _graph(tmp_path, [{"id": "x-0d08", "slug": "worker-slug"}])
+    )
+    assert isinstance(got, NoteReaders)
+    assert got.node_id == "x-0d08"
+
+
 def test_a_bound_author_alone_is_not_a_refusal(monkeypatch, tmp_path) -> None:
     """Decision 1: the author being the only bound reader still writes."""
     _free(monkeypatch)
