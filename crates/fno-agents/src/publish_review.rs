@@ -201,7 +201,7 @@ fn home_config() -> Option<PathBuf> {
 /// upward walk, so a publish invoked from a subdirectory must resolve the git
 /// toplevel first or it would silently see only the global layer and report
 /// the lane unconfigured.
-fn review_config(cwd: &Path) -> Result<(Option<String>, Option<String>), String> {
+fn review_config(cwd: &Path) -> (Option<String>, Option<String>) {
     let toplevel = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
@@ -227,7 +227,7 @@ fn review_config(cwd: &Path) -> Result<(Option<String>, Option<String>), String>
             merged.1 = token_env;
         }
     }
-    Ok(merged)
+    merged
 }
 
 /// The newest `review_attestation` whose head_sha equals `head`, last-wins on
@@ -361,10 +361,9 @@ pub fn publish(payload: &Value, gh: &dyn Gh, env: &dyn Fn(&str) -> Option<String
     // 1. Config + token. Missing either is a skip, not an error: an
     //    unconfigured lane must behave identically to today apart from the
     //    receipt line, and the config check sits BEFORE any gh call.
-    let (identity, token_env) = match review_config(cwd) {
-        Ok(pair) => pair,
-        Err(exc) => return Answer::done("skipped", format!("config unreadable: {exc}")),
-    };
+    // An unreadable or absent config layer reads as unconfigured (skipped),
+    // never an error: a garbage config.toml must not fail the emit.
+    let (identity, token_env) = review_config(cwd);
     let Some(identity) = identity else {
         return Answer::done("skipped", "review.bot_identity unset");
     };
