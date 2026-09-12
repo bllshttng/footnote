@@ -2003,29 +2003,24 @@ pub(crate) struct Core {
     /// `kill(pid, 0)` liveness probe (one syscall, never a subprocess); a
     /// dead holder releases lazily on the next contested keystroke (AC3-FR).
     claims: HashMap<u64, u32>,
-    /// Per-pane last `human_touch(inject)` emit time (W4 touch telemetry):
-    /// at most one emit per pane per [`TOUCH_COALESCE_WINDOW`], so a typing
-    /// burst is one steering action, not a per-keystroke fork storm. Purged
-    /// with the pane in [`Core::reap_pane`].
+    /// Per-pane last `human_touch(inject)` emit time: at most one emit per
+    /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
+    /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
     /// (x-9454) Per-pane wheel-passthrough rate gate: bounds how many wheel
-    /// ticks per window reach a mouse-owning pane's PTY, so a trackpad flood
-    /// stops scrolling when the finger stops. Purged with the pane in
-    /// [`Core::reap_pane`], the `touch_last_emit` pattern.
+    /// ticks per window reach a mouse-owning pane PTY; purged with the pane
+    /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path; read by the scoreboard stats answer (v78).
     touch_emit_failures: Arc<AtomicU64>,
-    /// (v78) When this server instance started: the stats answer's window.
+    /// (v78) Server boot instant: the stats answer measurement window.
     started_at: String,
-    /// Failed per-pane counter emits, same discipline as
-    /// [`Core::touch_emit_failures`].
+    /// Failed per-pane counter emits: same discipline as touch_emit_failures.
     pane_stats_emit_failures: Arc<AtomicU64>,
-    /// Attached-client count for the periodic readers (x-4e30). Published
-    /// from choke points (tail of `handle` + the main-loop tail), never per
-    /// mutation site: `clients` mutates in six places and per-site stores
-    /// drift on the next refactor. A `watch`, not an atomic: the readers
-    /// park in `tick().await` and need the `changed()` edge.
+    /// Attached-client count for the periodic readers (x-4e30), published
+    /// from choke points only: `clients` mutates in six places and per-site
+    /// stores drift. A `watch`: the readers need the `changed()` edge.
     client_count: watch::Sender<usize>,
     /// (x-4328) Pane ids the operator has focused while badged `Done`.
     /// Inserted by an actual focus action (`Command::FocusPane`, via
