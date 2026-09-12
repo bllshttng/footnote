@@ -537,9 +537,8 @@ fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, pristine_idle: bool
 }
 
 /// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
-/// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929); it must
-/// stay byte-identical to the daemon's so a region fingerprint hashes the
-/// same on both sides.
+/// of the daemon `Region::BottomNonEmptyLines` extraction (x-c929); byte-
+/// identical to the daemon so a region fingerprint hashes the same.
 fn bottom_non_empty_lines(text: &str, n: usize) -> String {
     let nonblank: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = nonblank.len().saturating_sub(n);
@@ -548,7 +547,7 @@ fn bottom_non_empty_lines(text: &str, n: usize) -> String {
 
 /// What connected clients register with the core loop.
 enum CoreMsg {
-    /// (v78) A stats request; only the Core owns the counter.
+    /// (v78) A stats request; the Core owns the counter.
     ServerStats {
         reply: oneshot::Sender<ServerMsg>,
     },
