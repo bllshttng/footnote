@@ -114,10 +114,10 @@ def resolve_king_manifest_path(
     except ValueError as exc:
         return None, str(exc)
     if not path.is_file():
-        return None, (
-            f"crown scope {scope} is stamped but no manifest exists at {path}. "
-            "Manifests live under the space dir; omit --state-root to take it."
-        )
+        reason = f"crown scope {scope} is stamped but no manifest exists at {path}."
+        if state_root is not None:
+            reason += " Manifests live under the space dir; omit --state-root to take it."
+        return None, reason
     return path, ""
 
 

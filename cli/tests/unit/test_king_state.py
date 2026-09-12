@@ -292,6 +292,30 @@ def test_a_wrong_state_root_names_the_path_it_looked_for(tmp_path):
     assert ok_reason == ""
 
 
+def test_a_missing_manifest_without_the_flag_skips_the_flag_advice(monkeypatch, tmp_path):
+    """The 'omit --state-root' remedy only makes sense when one was passed.
+    With the default root taken, the reason names the absent manifest and
+    stops there instead of advising a flag the caller never used."""
+    import fno.king.state as state
+
+    monkeypatch.setattr(state, "king_state_root", lambda: tmp_path)
+    row = SimpleNamespace(
+        status="live",
+        crown_scope="x-f3d0",
+        harness="claude",
+        harness_session_id="crowned-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+
+    resolved, reason = state.resolve_king_manifest_path(
+        "crowned-session", "claude", registry=[row]
+    )
+    assert resolved is None
+    assert "no manifest exists" in reason
+    assert "--state-root" not in reason
+
+
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
     path = tmp_path / "king-state.md"
     write_manifest(path, scope="board drain", harness_session_id="sess-1")
