@@ -113,7 +113,7 @@ pub fn tick_machine_watch(
             // Hot past the debounce. The throttle suppresses repeats while the
             // state stays hot (LD6); a state change to calm never notifies.
             if let Some(last) = state.last_notified {
-                let floor = Duration::from_secs(machine.throttle_minutes * 60);
+                let floor = Duration::from_secs(machine.throttle_minutes.saturating_mul(60));
                 if let Some(held) = now.checked_duration_since(last) {
                     if held < floor {
                         let remaining = (floor - held).as_secs();

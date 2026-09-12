@@ -1107,22 +1107,22 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
 /// - a machine whose footprint cannot be read yields `(None, None)`, never a
 /// stale or fabricated line.
 pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
-    let raw = footprint_cause_raw().ok();
-    let footer = raw.as_deref().and_then(format_machine_status_line);
-    let keeper = raw.as_deref().and_then(|raw| {
-        let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+    // ONE parse serves both notes; the raw string is never read twice.
+    let payload: Option<FootprintCausePayload> = footprint_cause_raw()
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let footer = payload.as_ref().and_then(|p| machine_footer_line(p));
+    let keeper = payload.as_ref().and_then(|payload| {
         let commands: Vec<String> = payload.top.iter().map(|c| c.command.clone()).collect();
         crate::drift::keeper_path_note(&commands, std::env::current_exe().ok().as_deref())
     });
     (footer, keeper)
 }
 
-/// The pure formatter behind the footer, split out so it is testable without
-/// shelling out to `fno doctor footprint`. It reads the payload's `machine`
-/// object - the ONE Python decider's verdict - and leads with the busy
-/// fraction against the band, never with a bare load figure (x-d6ad AC9/LD2).
-fn format_machine_status_line(raw: &str) -> Option<String> {
-    let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+/// The footer line from a parsed payload. It reads the `machine` object - the
+/// ONE Python decider's verdict - and leads with the busy fraction against
+/// the band, never with a bare load figure (x-d6ad AC9/LD2).
+fn machine_footer_line(payload: &FootprintCausePayload) -> Option<String> {
     let machine = payload.machine.as_ref()?;
     let load = machine
         .load_15m
@@ -1151,6 +1151,12 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
         )),
         None => Some(format!("{} · load_15m {load}{pool}", machine.verdict)),
     }
+}
+
+/// The test seam for the footer: the same formatter over a raw payload string.
+#[cfg(test)]
+fn format_machine_status_line(raw: &str) -> Option<String> {
+    machine_footer_line(&serde_json::from_str(raw).ok()?)
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
