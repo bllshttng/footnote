@@ -1,0 +1,17 @@
+---
+fno_id: 20260907T175130Z-kg80800-986262
+created_at: 2026-09-07T17:51:30Z
+scope: x-16b7
+shape: court
+harness: claude
+harness_session_id: af8e03f2-e896-4d17-8600-213fca3dfb55
+owner_pid: 80800
+owner_cwd: /Users/bb16/code/footnote/footnote
+budget_max_iterations: 40
+respawn_count: 0
+respawn_ceiling: 4
+wake_times: 
+crown_level: 2
+crown_scope: x-16b7
+crown_grantor: king-fno-g5
+---
