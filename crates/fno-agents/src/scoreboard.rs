@@ -148,8 +148,12 @@ fn flow(
     since_days: i64,
     vocab_terms: &[&str],
 ) -> Value {
-    let Some(now_secs) = now_raw.and_then(iso_secs) else {
-        return json!({"available": false, "reason": "no usable now"});
+    // A caller timestamp wins; otherwise the keeper host's wall clock IS the
+    // current instant - "open PR age" and "this week" mean now, so flow never
+    // degrades just because the transport omitted a timestamp.
+    let now_secs = match now_raw.filter(|s| !s.is_empty()).and_then(iso_secs) {
+        Some(secs) => secs,
+        None => chrono::Local::now().timestamp(),
     };
     if since_days <= 0 {
         return json!({"available": false, "reason": "non-positive window"});
@@ -1027,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_is_unavailable_without_a_usable_now() {
+    fn flow_defaults_to_wall_clock_when_now_is_absent() {
         let params = json!({
             "entries": [node("x-1", Some("merged"))],
             "rows": [],
@@ -1036,7 +1040,11 @@ mod tests {
             "ship_terminals": ["DonePRGreen", "DoneBatched"]
         });
         let out = classify(&params).unwrap();
-        assert_eq!(out["flow"]["available"], false);
-        assert!(out["flow"]["reason"].as_str().is_some());
+        assert_eq!(out["flow"]["available"], true);
+        assert_eq!(out["flow"]["window"]["since_days"], 28);
+        // A 28-day window touches 4 or 5 local Monday-weeks depending on the
+        // weekday the suite runs on.
+        let weeks = out["flow"]["deliveries"]["weeks"].as_array().unwrap().len();
+        assert!((4..=5).contains(&weeks));
     }
 }
