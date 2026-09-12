@@ -31,13 +31,15 @@ Append a timestamped progress note to a node, and DELIVER it.
 
 A worker reads its node ONCE, at dispatch. So a note appended after that lands in a store no consumer re-reads: the write succeeds, the author believes the finding is delivered, and nothing reports the gap. That pairing is the worst one, because a silent success is indistinguishable from delivery from where the author stands. Measured on 2026-09-08: of seven notes written across four nodes, six were hand-relayed by a separate mail send and one was not, and the missing one's later retraction WAS relayed - so a live worker received the retraction of a finding it had never received.
 
-So the verb mails what it wrote. Three recipient classes, in the order a finding matters:
+So the verb mails what it wrote. The worker chain runs for the node and again for its owner (``contained_in`` when set, else ``parent``), and the first arm that yields a live reader wins within a run:
 
 - the live claim holder of ``node:<id>``. ``suspect`` counts as owned (TTL-unexpired, dead pid), because a suspect claim still belongs to its session.
-- the holder of the OWNER node: ``contained_in`` when set, else ``parent``. A note on a contained node is material to whoever is building the owner's PR.
-- every session crowned over the epic, resolved at send time by ``resolve_to_king``. The epic is the owner's ``parent`` for a contained node, else the node's own.
+- the node's graph bindings: ``locked_by_harness_session``, ``session_id``, ``locked_by``, each resolved to an ownership-live registry row. A worker can be live and bound to the node in the graph while holding no claim row at all; the claim is the weakest of the bindings, not the only one.
+- every ownership-live registry row whose ``node`` field names the node, sorted by name.
 
-The author is dropped from that list, matching a bare session id against a role-prefixed claim holder (``target-session:<id>``) so a worker never mails itself its own note.
+The crown walk goes outward and stops at the first scope with a live crown: the node's own id when its ``type`` is ``epic``, then the epic (the owner's ``parent`` for a contained node, else the node's own), then the node's ``project``. Every scope resolves at send time by ``resolve_to_king``.
+
+The author is matched by identity, never by name shape: an address that names a registry row is the author when the row's ``harness_session_id`` matches the sender's under ``session_identity_key``; the bare ``endswith`` match stands only for role-prefixed holders that name no row. The author is named in the receipt but never mailed its own note.
 
 The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body spends the 80-word rolling pair budget on the first send, and several notes share one 10-minute window.
 
@@ -45,7 +47,7 @@ The delivery lives in the VERB, not in ``append_progress_note``. The status-fano
 
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 
-Every outcome prints. A delivery prints ``notified <address> (<why>): <transport> <msg-id>``, no reachable reader prints ``notify: no holder, owner or king to reach for <id>``, and a failed send - a budget refusal included - prints ``notify FAILED`` on stderr. Each send is bounded at 30 seconds because a live inject waits on the recipient's per-agent flock and one measured run wedged past 150; an unanswered recipient prints ``notify UNCONFIRMED`` on stderr, which says the delivery is unknown rather than done. Nothing here can cost the note: the append already happened, so a resolution or send fault degrades to a printed receipt and the exit code stays 0.
+Every outcome prints. A delivery prints ``notified <address> (<why>): <transport> <msg-id>``. When the author is the only bound reader, the note is written and one line names the binding: ``notify: you are the only reader bound to <id> (<why>); nobody else to tell``, exit 0. When nobody is bound, or a fault makes the bindings unreadable, the verb REFUSES BEFORE the append: nothing is written, stderr carries the refusal with every arm reading, and it exits 3 (a node that resolves to nothing stays exit 1). A resolution fault refuses for the same reason a vacant one does: neither can prove anyone would be told, and a note no reader would hear is a silent drop wearing a receipt. ``--quiet`` is the acknowledgment: it skips resolution, writes the note, and mails nobody. After the sends, exit 0 needs at least one ``notified`` receipt; when every receipt is ``notify FAILED`` or ``notify UNCONFIRMED``, the note stays written, one summary line goes to stderr, and the exit code is 4. A failed send - a budget refusal included - prints ``notify FAILED`` on stderr. Each send is bounded at 30 seconds because a live inject waits on the recipient's per-agent flock and one measured run wedged past 150; an unanswered recipient prints ``notify UNCONFIRMED`` on stderr, which says the delivery is unknown rather than done - so an UNCONFIRMED send is not a positive marker, and the exit-4 summary says to check before re-sending.
 
 ## cmd_encounter
 
