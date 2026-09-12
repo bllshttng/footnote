@@ -359,16 +359,20 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
 /// quota_skip pass through; timeout/error fail), the king-wake and notify
 /// emitters' failure tokens, and auto_continue's `next-error` (a non-zero,
-/// malformed or timed-out `backlog next`) and `spawn-failed` (the dispatch it
-/// fired exited non-zero): an arm that could not compute its input, or whose
+/// malformed or timed-out `backlog next`), `spawn-failed` (the dispatch it
+/// fired exited non-zero), and active_backlog's `env_broken` (the resolver
+/// shelled out and failed: no usable `fno`, non-zero exit, unreadable
+/// receipt - x-33b5): an arm that could not compute its input, or whose
 /// action failed, has not skipped - it has failed. `degraded` is
-/// deliberately absent: one transient gh read failure must not turn a fresh
-/// row red.
+/// deliberately absent: it is emitted by an arm that ran and acted while one
+/// read came back thin, and one transient gh read failure must not turn a
+/// fresh row red.
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
     "error",
     "next-error",
     "spawn-failed",
+    "env_broken",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -1031,6 +1035,76 @@ mod tests {
         let cause = stale_cause(&row, &DaemonFacts::Down, false).unwrap();
         assert_eq!(cause, "configured_off");
         assert!(cause_hint(&cause, &DaemonFacts::Down).contains("config"));
+    }
+
+    #[test]
+    fn env_broken_skip_fails_a_fresh_arm_row() {
+        // env_broken means the resolver never produced a reading: the arm
+        // could not have acted. That is a failure, not a skip (x-33b5) - the
+        // verdict must read FAIL and failing_for must age the break.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // ok tick 3600s ago, env_broken tick 120s ago (interval 300: fresh).
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "active_backlog",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-04T11:58:00Z",
+                    "active_backlog",
+                    SCHED_DAEMON,
+                    0,
+                    json!("env_broken"),
+                    300,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal], now);
+        let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
+        assert!(ab.failing, "env_broken must set failing");
+        assert_eq!(ab.failing_for_s, Some(3600));
+        let line = render_row(ab);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=env_broken"), "line: {line}");
+        assert!(line.contains("failing_for=3600s"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn degraded_skip_keeps_a_fresh_arm_row_ok() {
+        // The regression the doc comment protects: degraded is deliberately
+        // absent from FAILURE_SKIPS, so it must not turn a fresh row red.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:00Z",
+                "active_backlog",
+                SCHED_DAEMON,
+                3,
+                json!("degraded"),
+                300,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal], now);
+        let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
+        assert!(!ab.failing, "degraded must not set failing");
+        let line = render_row(ab);
+        assert!(line.contains(" ok"), "line: {line}");
+        assert!(line.contains("skip=degraded"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
