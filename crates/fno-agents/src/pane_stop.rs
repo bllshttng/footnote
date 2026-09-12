@@ -1038,10 +1038,12 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         let me = std::process::id();
         let read = super::lsof_holders(&path);
-        assert_eq!(
-            read,
-            LsofRead::Held(vec![me]),
-            "the open tempfile must name this test's pid {me}"
+        // The control proves lsof names THIS pid; it must not claim exclusive
+        // hold, because a parallel test's spawned child can still carry the
+        // inherited fd and appear beside us.
+        assert!(
+            matches!(&read, LsofRead::Held(pids) if pids.contains(&me)),
+            "the open tempfile must name this test's pid {me}, got {read:?}"
         );
         drop(file);
     }
