@@ -179,7 +179,7 @@ def test_the_mirror_set_is_small_and_named():
     )
 
 
-# --- bot-review mirror on the same chokepoint (x-93ea) ---
+# --- bot-review mirror on the same chokepoint ---
 
 
 def test_attestation_emit_fires_the_bot_review_mirror(tmp_path, monkeypatch):
