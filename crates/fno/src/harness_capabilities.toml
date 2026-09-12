@@ -549,12 +549,11 @@ clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-# Launch-only: `ask` refuses (no steering over the HTTP API yet). That gap
-# belongs to the attach and steer claims, not to the seat: the 2026-09-03
-# spawn measurement below (unattended launch, one full turn, clean stop -
-# opencode_serve_journey.rs) is what seats the thread lane now. Kill-survival,
-# cold resume and review remain unproven here and no claim above says
-# otherwise.
+# The serve lane is steerable through the same attach writer used at launch.
+# `POST /session` returns the full id, so this lane does not use opencode's
+# store-lookup identity path. The opencode_serve_journey.rs evidence covers
+# launch, readback steering, and session liveness. Server-kill survival, review,
+# and viewport selection remain separate environment checks and are not implied.
 autonomous_pane = false
 route_on_pane = false
 # opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
@@ -599,8 +598,8 @@ headless = "unmeasured"
 
 # The thread lane's carrier row (spawn flag passthrough; see claude's for the
 # vocabulary). opencode serve takes a model; every other flag demotes to the
-# pane until the serve lane maps it. Whether the lane is HONEST is a separate
-# question its own node owns; this row records only what it carries today.
+# pane until the serve lane maps it. Steering and readback are implemented by
+# the shared attach writer, and the journey names the evidence for this seat.
 [harness.opencode.thread]
 carries = ["model"]
 passthrough = []
@@ -647,10 +646,9 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
-# FEATURES. spawn: the thread/headless launch seam is wired and accepted -
-# the seam-arm evidence that seats opencode in the spawn roster. The serve
-# lane's steering gap is a mechanics question the pane keys above still
-# answer honestly; it does not demote the arm.
+# FEATURES. spawn: the thread/headless launch seam and the serve steering arm
+# are wired and accepted. `features.spawn = native` is the thread seat; the
+# journey is the positive evidence that a selected thread can be driven.
 [harness.opencode.features.spawn]
 state = "native"
 

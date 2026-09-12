@@ -81,6 +81,9 @@ pub struct ResumeContext {
 pub struct AgentEntry {
     pub name: String,
     pub provider: String,
+    /// The selected fno substrate. Serve-hosted opencode rows use HTTP
+    /// session reachability; other opencode rows retain the store probe.
+    pub substrate: Option<String>,
     /// `None` when no session id was ever recorded (e.g. a create that failed
     /// before the id was captured); reachability treats it as inconclusive.
     pub session_id: Option<String>,
@@ -1218,6 +1221,13 @@ impl Provider for OpencodeProvider {
         entry: &AgentEntry,
         timeout: Duration,
     ) -> Result<bool, ReachabilityProbeError> {
+        if entry.substrate.as_deref() == Some("thread") {
+            return crate::opencode_serve::serve_session_reachable(
+                entry.session_id.as_deref().unwrap_or(""),
+                timeout.max(OPENCODE_PROBE_MIN_BUDGET),
+            )
+            .map_err(|reason| ReachabilityProbeError::new("opencode", reason));
+        }
         opencode_reachable_with(
             entry,
             timeout.max(OPENCODE_PROBE_MIN_BUDGET),
@@ -2285,6 +2295,7 @@ mod tests {
         let entry = AgentEntry {
             name: "oc".into(),
             provider: "opencode".into(),
+            substrate: None,
             session_id: None,
             cwd: PathBuf::from("/x"),
         };
@@ -2498,6 +2509,7 @@ mod tests {
         let entry = AgentEntry {
             name: "a".into(),
             provider: "codex".into(),
+            substrate: None,
             session_id: None,
             cwd: PathBuf::from("/x"),
         };
@@ -2511,6 +2523,7 @@ mod tests {
         AgentEntry {
             name: "a".into(),
             provider: "codex".into(),
+            substrate: None,
             session_id: Some(session_id.into()),
             cwd: PathBuf::from("/x"),
         }
@@ -2526,6 +2539,7 @@ mod tests {
         AgentEntry {
             name: "o".into(),
             provider: "opencode".into(),
+            substrate: None,
             session_id: session_id.map(Into::into),
             cwd: PathBuf::from("/x"),
         }
@@ -2718,6 +2732,7 @@ mod tests {
         AgentEntry {
             name: "g".into(),
             provider: "gemini".into(),
+            substrate: None,
             session_id: Some(session_id.into()),
             cwd: PathBuf::from(cwd),
         }

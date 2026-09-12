@@ -131,6 +131,7 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 pub enum MailInjectProvider {
     Claude,
     Codex,
+    Opencode,
     Keeper,
 }
 
@@ -143,6 +144,7 @@ impl MailInjectProvider {
         match self {
             MailInjectProvider::Claude => "claude",
             MailInjectProvider::Codex => "codex",
+            MailInjectProvider::Opencode => "opencode",
             MailInjectProvider::Keeper => "keeper-hosted",
         }
     }
@@ -240,14 +242,15 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 provider = match value.as_str() {
                     "claude" => MailInjectProvider::Claude,
                     "codex" => MailInjectProvider::Codex,
+                    "opencode" => MailInjectProvider::Opencode,
                     name if keeper_lane_harness(name) => MailInjectProvider::Keeper,
                     _ => {
                         return Err((
                             2,
-                            "mail-inject: --harness must be claude, codex, or a \
+                            "mail-inject: --harness must be claude, codex, opencode, or a \
                              keeper-lane harness (interactive resume, no attach)"
                                 .to_string(),
-                        ))
+                        ));
                     }
                 };
                 harness_flag = Some(value);
@@ -388,6 +391,7 @@ pub fn emit_raw_inject_audit_with_origin(
     let (harness, lane) = match provider {
         MailInjectProvider::Claude => ("claude", "control.sock"),
         MailInjectProvider::Codex => ("codex", "codex-daemon"),
+        MailInjectProvider::Opencode => ("opencode", "serve-http"),
         // The audit records the LANE; the hosted harness's own row resolved
         // the settle delay and the confirm target at delivery time.
         MailInjectProvider::Keeper => ("keeper-hosted", "keeper-pty"),
@@ -827,7 +831,8 @@ pub fn deliver_via_keeper_socket_in(
 
 /// Run `mail-inject`. Reads the turn TEXT from STDIN and delivers it to the
 /// target harness (`--harness claude` over `control.sock`, default; `codex`
-/// over the app-server daemon, US8); emits the single JSON outcome line Python
+/// over the app-server daemon, or `opencode` over serve HTTP); emits the single
+/// JSON outcome line Python
 /// parses. Every `not-delivered` reason is a clean signal for Python to write
 /// the durable fallback. The claude delivery stays sync ([`deliver_via_control_sock`]);
 /// codex awaits [`crate::codex_inject::deliver_via_codex_daemon`] on the caller's
@@ -1347,6 +1352,12 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
                 .await
                 .map_err(|reason| reason.to_string())
         }
+        MailInjectProvider::Opencode => crate::opencode_serve::steer_registered_session(
+            &args.session,
+            &text,
+            Duration::from_secs(600),
+        )
+        .map(|_| ()),
         MailInjectProvider::Keeper => deliver_via_keeper_socket(
             &args.session,
             &text,
@@ -2270,6 +2281,19 @@ mod tests {
                 .0,
             2
         );
+    }
+
+    #[test]
+    fn parse_args_accepts_opencode_serve_harness() {
+        let args = parse_args(&argv(&[
+            "--session",
+            "ses_serve123",
+            "--harness",
+            "opencode",
+        ]))
+        .unwrap();
+        assert_eq!(args.provider, MailInjectProvider::Opencode);
+        assert_eq!(args.enter_delay_ms, 0);
     }
 
     #[test]
