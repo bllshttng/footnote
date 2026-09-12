@@ -91,6 +91,7 @@ cli.add_typer(_capture_cli, name="capture", hidden=True)
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
 from fno.backlog.batch import cli as _batch_cli  # noqa: E402
 from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source  # noqa: E402
+from fno.backlog import dispatch_overrides as _dispatch_overrides  # noqa: E402
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
@@ -3101,7 +3102,7 @@ def cmd_update(
     dispatch_brief: Optional[str] = typer.Option(
         None,
         "--dispatch-brief",
-        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Capped at 8 KB at dispatch. Pass 'null' to clear.",
+        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Warns at write and is refused at dispatch when over the 8 KB env budget. Pass 'null' to clear.",
     ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
     public: Optional[bool] = typer.Option(
@@ -3493,6 +3494,8 @@ def cmd_update(
         except Exception:
             linked_size = None
 
+    brief_warning_box = [None]
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
@@ -3631,12 +3634,7 @@ def cmd_update(
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
-        # Dispatch overrides (US3). Stored permissively; the resolver is the trust
-        # boundary (allowlist + 8 KB cap at dispatch time, not write time).
-        if dispatch_verb is not None:
-            node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
-        if dispatch_brief is not None:
-            node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
+        brief_warning_box[0] = _dispatch_overrides.apply(node, dispatch_verb, dispatch_brief)
         if priority is not None:
             node["priority"] = priority
         # --blocks-everything acknowledges p0. Standalone, it acknowledges an
@@ -3841,6 +3839,7 @@ def cmd_update(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+    _dispatch_overrides.emit(brief_warning_box[0])
 
     # Mutation receipts read the committed, recomputed row. Flags express the
     # caller's intent; only the reread can say whether ownership and dispatch

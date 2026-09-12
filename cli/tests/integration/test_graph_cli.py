@@ -2940,6 +2940,26 @@ def test_update_dispatch_verb_and_brief_write(tmp_graph):
     assert node["dispatch_brief"] == "brainstorm the retry design"
 
 
+def test_update_over_budget_dispatch_brief_warns_at_write(tmp_graph):
+    """A brief over the 8 KB env budget says so at write time, in the
+    spawn path's wording, and still lands (warn, not refuse)."""
+    over = "x" * 8193
+    r = _invoke("backlog", "add", "Over-budget node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-brief", over)
+    assert r2.exit_code == 0, r2.output
+    assert (
+        "dispatch brief is 8193 bytes, over the 8192-byte (8 KB) env budget; "
+        "shorten it (no silent truncation)" in r2.output
+    )
+    assert _read_graph(tmp_graph)[0]["dispatch_brief"] == over
+    # At exactly the budget the spawn gate accepts it, so nothing warns.
+    _invoke("backlog", "update", nid, "--dispatch-brief", "null")
+    r3 = _invoke("backlog", "update", nid, "--dispatch-brief", "x" * 8192)
+    assert r3.exit_code == 0, r3.output
+    assert "dispatch brief is" not in r3.output
+
+
 def test_update_dispatch_verb_null_clears(tmp_graph):
     r = _invoke("backlog", "add", "Verb node")
     nid = json.loads(r.output)["id"]
