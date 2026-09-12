@@ -1852,11 +1852,11 @@ mod tests {
 
     #[test]
     fn a_row_absent_from_candidates_is_never_removed() {
-        // x-84b2 AC4-EDGE: another node's row is outside the envelope; a
-        // prefix that would have matched the legacy fallback must not widen
-        // the removal.
+        // x-84b2 AC4-EDGE: the producer's candidate list is exact. A second
+        // row of the same node, unproposed, stays; the name leg does not
+        // fire either, because x-2 is not one of the closed nodes.
         let home = temp_home("absent-candidate");
-        write_registry(&home, &[claude_row("ab-bp-x-1-cargo", false)]);
+        write_registry(&home, &[claude_row("ab-bp-x-2-research", false)]);
         let mut request = settled_request("/repo/other-wt");
         request.candidate_row_names = vec!["ab-bp-x-2-cargo".to_string()];
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -1909,6 +1909,36 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 1, "the legacy fallback still selects: {acted}");
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn wrapped_row_joins_the_merge_cleanup_by_name() {
+        // x-a634: the widened name vocabulary joins wrapper-prefixed rows
+        // too - a king-spawned row for a closed node is reaped, not left.
+        let home = temp_home("wrapped-cleanup");
+        write_registry(&home, &[claude_row("k-bp-x-1-cargo", false)]);
+        let mut request = settled_request("/repo/other-wt");
+        request.candidate_row_names = Vec::new(); // force the name path only
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seams = RequestSeams {
+            finished: &|_entry| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let (acted, _held) = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 1, "the wrapped row still selects: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 }
