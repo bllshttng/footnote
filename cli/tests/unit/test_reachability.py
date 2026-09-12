@@ -35,11 +35,13 @@ from fno.agents.session_truth import STALLED_AFTER_S
 from fno.agents.reachability import (
     MODEL_REFUSED,
     NO_EVIDENCE,
+    NO_INFERENCE,
     PARKED,
     PROMISE,
     PROVIDER_REFUSED,
     REFUSED,
     REACHABLE,
+    TRANSCRIPT,
     TRANSCRIPT_TURN,
     UNKNOWN,
     UNREACHABLE,
@@ -691,3 +693,85 @@ def test_status_filter_enum_accepts_refused() -> None:
     from fno.agents.cli import AgentStatusFilter
 
     assert AgentStatusFilter("refused") is AgentStatusFilter.refused
+
+
+# ---------------------------------------------------------------------------
+# The inference-sample marker (x-e594, measured 2026-09-12)
+#
+# A worker killed by a provider 429 dies WRITING that error, so its transcript
+# is freshest at the instant it died. Age alone therefore reports the corpse as
+# reachable: `fno backlog requeue` refused one at 13 minutes quiet and accepted
+# the same dead worker at 23. `observed_model` is the marker that cannot be
+# faked, because only a vendor answering a turn writes the record it counts.
+# ---------------------------------------------------------------------------
+
+_CORPSE = {"kind": "no-model-yet"}
+_LIVE = {"kind": "observed", "model": "glm-5.3-flash", "samples": 31}
+
+
+def test_a_fresh_transcript_with_no_inference_stops_certifying_liveness() -> None:
+    """The measured corpse: state working, 13 minutes, zero vendor turns."""
+    got = classify_reachability(
+        truth_state="working", age_s=13 * 60, falsifier=None, observed_model=_CORPSE
+    )
+    assert (got.verdict, got.basis) == (UNKNOWN, NO_INFERENCE)
+    assert got.age_s == 13 * 60
+
+
+def test_a_climbing_sample_count_keeps_the_row_reachable() -> None:
+    """Same state and age, a real model with 31 samples: a worker, not a corpse."""
+    got = classify_reachability(
+        truth_state="working", age_s=13 * 60, falsifier=None, observed_model=_LIVE
+    )
+    assert (got.verdict, got.basis) == (REACHABLE, TRANSCRIPT)
+
+
+def test_zero_samples_never_condemns_a_row_to_unreachable() -> None:
+    """Rule 2 holds: a just-booted live worker reads the same zero, so the only
+    honest demotion is UNKNOWN. Only an affirmative falsifier condemns."""
+    got = classify_reachability(
+        truth_state="working", age_s=2, falsifier=None, observed_model=_CORPSE
+    )
+    assert got.verdict == UNKNOWN
+    assert got.verdict != UNREACHABLE
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        None,
+        {"kind": "no-transcript"},
+        {"kind": "not-file-backed"},
+        {"kind": "unreadable", "reason": "EIO"},
+        {"kind": "observed", "model": "claude-opus-5"},
+        "not-a-dict",
+    ],
+)
+def test_an_absent_sample_reading_lowers_nothing(observed) -> None:
+    """Every variant that is an ABSENCE leaves the verdict exactly as it was.
+    `not-file-backed` is the load-bearing one: opencode keeps no per-session
+    file, so counting it as zero would read every opencode worker as unknown."""
+    got = classify_reachability(
+        truth_state="working", age_s=13 * 60, falsifier=None, observed_model=observed
+    )
+    assert (got.verdict, got.basis) == (REACHABLE, TRANSCRIPT)
+
+
+def test_a_falsifier_still_outranks_the_sample_marker() -> None:
+    """Precedence unchanged: an affirmative falsifier is the only condemnation."""
+    got = classify_reachability(
+        truth_state="working", age_s=60, falsifier="process-gone", observed_model=_LIVE
+    )
+    assert got.verdict == UNREACHABLE
+
+
+def test_inference_samples_reports_the_count_or_absence() -> None:
+    """The receipt field: 0 names a corpse, a count names a worker, None is
+    'this harness cannot answer' and must never be rendered as a zero."""
+    from fno.agents.reachability import inference_samples
+
+    assert inference_samples(_LIVE) == 31
+    assert inference_samples(_CORPSE) == 0
+    assert inference_samples({"kind": "not-file-backed"}) is None
+    assert inference_samples({"kind": "observed", "model": "x"}) is None
+    assert inference_samples(None) is None

@@ -195,6 +195,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry) if entry is not None else None,
+            observed_model=truth.get("observed_model"),
         )
         activity = rendered_activity(
             truth_state=truth_state,
@@ -314,6 +315,7 @@ def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
             truth_state=truth.get("state"),
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(e),
+            observed_model=truth.get("observed_model"),
         )
         if reach.verdict == UNREACHABLE:
             continue

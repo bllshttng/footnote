@@ -3790,6 +3790,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
         truth_state=result.get("state"),
         age_s=result.get("last_activity_age_s"),
         falsifier=falsifier,
+        observed_model=result.get("observed_model"),
     )
     payload = {
         k: result.get(k)

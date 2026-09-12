@@ -1082,6 +1082,7 @@ class DiscoveredSession:
             # row has no usable pid of its own, and a scanned row has no registry
             # entry, so in practice at most one of these is ever present.
             falsifier=pid_falsifier(self.pid or None) or self.registry_falsifier,
+            observed_model=self.observed_model,
         )
 
     @property

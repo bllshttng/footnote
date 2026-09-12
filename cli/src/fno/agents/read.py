@@ -178,6 +178,7 @@ def list_agents(
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
+            observed_model=observed_model,
         )
         # The orthogonal axis, off the SAME truth reading already in hand: no
         # second transcript read is paid. reachability answers "can I reach
