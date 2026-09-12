@@ -47,7 +47,7 @@ def workdir_claude(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seed_row(name: str, short_id: str, uuid) -> None:
+def _seed_row(name: str, short_id: str, uuid, node: str | None = None) -> None:
     row = AgentEntry(
         name=name,
         harness="claude",
@@ -55,6 +55,7 @@ def _seed_row(name: str, short_id: str, uuid) -> None:
         log_path="/tmp/rev.log",
         short_id=short_id,
         harness_session_id=uuid,
+        node=node,
     )
     update_registry(lambda entries: entries + [row])
 
@@ -163,6 +164,169 @@ def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> 
         catch_exceptions=False,
     )
     assert result.exit_code == 2, result.output
+
+
+def test_spawn_resume_fork_carries_node_and_predecessor(
+    workdir_claude, monkeypatch
+) -> None:
+    """x-50d0: a --resume to a NEW name forks a fresh incarnation (the mail-wake
+    rung). The minted row carries the source row's node and records the resumed
+    uuid as a predecessor, so the node-to-session join survives the wake."""
+    from fno.agents.cli import agents_app
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
+    monkeypatch.setattr(
+        claude_mod, "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    _seed_row("ac-t-source", "deadbeef", DEAD_UUID, node="x-256c")
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "wake-f8b81903", "-H", "claude", "--resume", DEAD_UUID,
+         "--substrate", "bg", "hi"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    row = next((e for e in load_registry() if e.name == "wake-f8b81903"), None)
+    assert row is not None, "fork must register its own row"
+    assert row.node == "x-256c"  # the join a wake must not lose
+    assert DEAD_UUID in (row.predecessor_session_ids or [])
+
+
+def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> None:
+    """The caller's --node outranks the source-row carry on a resume fork."""
+    from fno.agents.cli import agents_app
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
+    monkeypatch.setattr(
+        claude_mod, "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    _seed_row("ac-t-source", "deadbeef", DEAD_UUID, node="x-256c")
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "wake-pinned", "-H", "claude", "--resume", DEAD_UUID,
+         "--node", "x-other", "--substrate", "bg", "hi"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    row = next((e for e in load_registry() if e.name == "wake-pinned"), None)
+    assert row is not None
+    assert row.node == "x-other"
+
+
+def test_spawn_resume_fork_carries_provider_and_model_axes(
+    workdir_claude, monkeypatch
+) -> None:
+    """x-50d0: the wake also dropped the provider and model axes - a zai row
+    woke reading anthropic with no requested model, so the session fell back.
+    The fork inherits every axis the caller left unstated."""
+    from fno.agents.cli import agents_app
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
+    monkeypatch.setattr(
+        claude_mod, "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    update_registry(
+        lambda entries: entries
+        + [
+            AgentEntry(
+                name="ac-t-source",
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/rev.log",
+                short_id="deadbeef",
+                harness_session_id=DEAD_UUID,
+                node="x-256c",
+                provider="zai",
+                model="glm-5.3-flash[1m]",
+                model_basis="verified",
+                requested_model="glm-5.3-flash[1m]",
+                requested_provider="zai",
+                route_provider_id="zai",
+            )
+        ]
+    )
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "wake-axes", "-H", "claude", "--resume", DEAD_UUID,
+         "--substrate", "bg", "hi"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    forked = next((e for e in load_registry() if e.name == "wake-axes"), None)
+    assert forked is not None
+    assert forked.node == "x-256c"
+    assert forked.provider == "zai"
+    assert forked.model == "glm-5.3-flash[1m]"
+    assert forked.model_basis == "verified"
+    assert forked.requested_model == "glm-5.3-flash[1m]"
+    assert forked.requested_provider == "zai"
+    assert forked.route_provider_id == "zai"
+
+
+def test_spawn_resume_fork_substitution_names_observed_model(
+    workdir_claude, monkeypatch
+) -> None:
+    """x-50d0: the inherited lineage request feeds the substitution probe, so a
+    fork that really came back on another model reads the OBSERVED model with
+    the requested one kept verbatim - not a None-vs-None non-detection."""
+    from fno.agents.cli import agents_app
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.provenance import observed as observed_mod
+
+    monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
+    monkeypatch.setattr(
+        claude_mod, "resolve_session_uuid",
+        lambda short_id: "beefface-2222-3333-4444-555555555555",
+    )
+    monkeypatch.setattr(
+        observed_mod,
+        "observed_model_for_session",
+        lambda agent, session_id, cwd: {
+            "kind": "observed", "model": "claude-opus-5", "samples": 3,
+        },
+    )
+    update_registry(
+        lambda entries: entries
+        + [
+            AgentEntry(
+                name="ac-t-source",
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/rev.log",
+                short_id="deadbeef",
+                harness_session_id=DEAD_UUID,
+                model="glm-5.3-flash[1m]",
+                model_basis="verified",
+                requested_model="glm-5.3-flash[1m]",
+            )
+        ]
+    )
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "wake-sub", "-H", "claude", "--resume", DEAD_UUID,
+         "--substrate", "bg", "hi"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    forked = next((e for e in load_registry() if e.name == "wake-sub"), None)
+    assert forked is not None
+    assert forked.model == "claude-opus-5"  # the observation wins the row
+    assert forked.model_basis == "verified"
+    assert forked.requested_model == "glm-5.3-flash[1m]"  # the request stays diffable
 
 
 def test_spawn_resume_refused_when_session_claim_held(

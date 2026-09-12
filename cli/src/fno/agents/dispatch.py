@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
 from fno import paths
 from fno.agents import events
+from fno.agents import fork_lineage
 from fno.agents.stop_release import stop_agent  # noqa: F401 - re-exported public verb
 from fno.agents.sender_provenance import (
     _proven_self_sender,
@@ -1446,6 +1447,9 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    # x-50d0: the row this resume forks FROM (fork_lineage.lineage_row_for);
+    # states every axis the caller left unstated.
+    lineage_row: object | None = None,
     # The model token the ROUTE named (-P vendor/model or --route
     # vendor,model). Recorded on the row beside an explicit --model; never fed
     # to the child argv, so launch behavior is untouched.
@@ -1669,7 +1673,11 @@ def _claude_create_path(
     # silent substitution is named, not remembered. A fresh spawn with no sample
     # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
     # verdict); a REVIVE reads history, so its answer is deterministic here.
-    requested_token = model or route_model
+    # x-50d0: an inherited lineage model is part of the request, so the probe
+    # sees it instead of reading a real substitution as no request at all.
+    src = lineage_row
+    lineage_model = fork_lineage.inherited_model(src, model, route_model)
+    requested_token = model or route_model or lineage_model
     substitution: Optional[dict] = None
     verified_model: Optional[str] = None
     if requested_token and session_uuid:
@@ -1747,26 +1755,22 @@ def _claude_create_path(
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
-        provider=lane_provider,
-        # The route's model is in hand at this mint and was dropped (the
-        # receipt named it while the row read None). Explicit --model wins the
-        # argv, so it wins the row; the route's token records otherwise.
-        # v23 (x-2019): a verified substitution beats the request on the
-        # observed axes - the row then carries BOTH readings, which is the
-        # whole point. No verified reading: the request stays (labeled).
-        model=verified_model or model or route_model,
-        model_basis=(
-            "verified"
-            if verified_model
-            else ("requested" if (model or route_model) else None)
+        # x-50d0: provider/model/requested axes and the predecessor edge come
+        # from fork_lineage.axis_overrides - lineage row where the caller was
+        # silent, byte-identical stamps where there is none.
+        **fork_lineage.axis_overrides(
+            src,
+            model=model,
+            route_model=route_model,
+            verified_model=verified_model,
+            route_provider=route_provider,
+            lane_provider=lane_provider,
+            effort=effort,
+            route_provider_id=route_provider_id,
+            model_name=model_name,
+            resume_session_id=resume_session_id,
+            revive=revive,
         ),
-        effort=effort,
-        # v23 (x-2019): the REQUEST verbatim beside the effect, including any
-        # [1m] suffix. `model` flips to a verified observation later; these
-        # three never do, so a silent substitution stays diffable.
-        requested_model=model or route_model,
-        requested_provider=route_provider or lane_provider,
-        requested_effort=effort,
         spawn_trigger=spawn_trigger,
         # The SAME stamp the pane path writes. Two Python paths mint a worker
         # row - pane and bg - and stamping only one would leave the reap lane
@@ -1795,8 +1799,6 @@ def _claude_create_path(
         # provenance pass - never this process's ambient value, which names
         # the SPAWNING session's node.
         node=node,
-        route_provider_id=route_provider_id,
-        model_name=model_name,
         account_record_id=account_record_id,
         crown_level=crown_level,
         crown_scope=crown_scope,
@@ -1867,16 +1869,6 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
-            # x-98ab: a revival replaces the row wholesale, and the fork caller
-            # passes no node - carry the replaced row's node forward so the
-            # continuation keeps pointing at the node it works.
-            if entry.node is None:
-                entry = replace(
-                    entry,
-                    node=next(
-                        (e.node for e in entries if e.name == name and e.node), None
-                    ),
-                )
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
 
@@ -2747,19 +2739,17 @@ def dispatch_spawn(
             # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
             row_launch_account_source = launch_account_source
+            # x-50d0: the row this resume forks FROM, matched by uuid alone.
+            lineage_row = fork_lineage.lineage_row_for(entries, resume_session_id)
+            if lineage_row is not None and node is None:
+                # A wake fork (new name, no caller node) carries the lineage
+                # row's node so the join survives the revive.
+                node = lineage_row.node
             if resume_session_id and row_launch_account is None:
-                account_source = existing if revive else next(
-                    (
-                        e
-                        for e in entries
-                        if getattr(e, "harness_session_id", None) == resume_session_id
-                    ),
-                    None,
-                )
-                row_launch_account = getattr(account_source, "launch_account", None)
+                row_launch_account = getattr(lineage_row, "launch_account", None)
                 # A revive inherits the source row's provenance; None is honest.
                 row_launch_account_source = getattr(
-                    account_source, "launch_account_source", None
+                    lineage_row, "launch_account_source", None
                 )
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
@@ -2945,6 +2935,7 @@ def dispatch_spawn(
                         effort=effort,
                         resume_session_id=resume_session_id,
                         revive=revive,
+                        lineage_row=lineage_row,
                         add_dir=add_dir,
                         agent=agent,
                         tools=tools,
