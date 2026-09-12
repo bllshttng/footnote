@@ -1081,6 +1081,36 @@ mod tests {
     }
 
     #[test]
+    fn a_blind_actionable_queue_makes_the_count_unknown_not_a_number() {
+        // x-c911: +1 per blind actionable queue read as one row; a king went
+        // hunting rows that never existed. Unknown means -1 with the failure
+        // named, never a count.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(Vec::new());
+        inputs.undispatched = SourceRead::err("exit 1: fno backlog undispatched failed");
+        let board = build_board(&inputs);
+        assert_eq!(board["actionable"], -1);
+        let warnings = board["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| {
+                w.as_str().unwrap().contains("undispatched")
+                    && w.as_str().unwrap().contains("actionable is unknown")
+            }),
+            "warnings must name the blind queue: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_blind_report_only_queue_leaves_the_count_a_count() {
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(Vec::new());
+        inputs.needs = SourceRead::err("exit 1: needs probe failed");
+        let board = build_board(&inputs);
+        assert_eq!(board["actionable"], 0);
+        assert_eq!(board["unreadable"], 1);
+    }
+
+    #[test]
     fn a_budget_kill_and_a_failed_exit_tally_apart_but_both_hold_exit_code_1() {
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         // entries: None reads as an unreadable queue of its own; an empty

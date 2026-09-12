@@ -374,6 +374,17 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_count_parses_and_carries_the_sentinel() {
+        // x-c911: the aggregate emits -1 when an actionable queue is blind;
+        // the termination read must round-trip it, never drop to a count.
+        let mut board = board_with_queues(json!([]));
+        board["actionable"] = json!(-1);
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert_eq!(parsed.actionable, -1);
+        assert!(parsed.actionable_ids.is_empty());
+    }
+
+    #[test]
     fn the_two_kinds_count_apart() {
         let board = board_with_queues(json!([
             {"name": "claims", "status": "unreadable", "error": "torn registry read",

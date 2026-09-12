@@ -11711,6 +11711,45 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         }
     };
 
+    if board.actionable < 0 {
+        // x-c911: a board with a blind ACTIONABLE queue reports actionable -1
+        // (count unknown), never a number that reads as rows. Block, bounded,
+        // naming the blind queue; a negative count must never render as rows.
+        if let Some(b) = bounded(
+            dry,
+            "actionable count unknown: an actionable queue is unreadable",
+        ) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
+        emit(
+            "king_loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "actionable": -1,
+                "actionable_ids": [],
+                "cleared": false,
+            }),
+        );
+        return (
+            0,
+            king_output(
+                "block",
+                None,
+                &format!(
+                    "board actionable count unknown ({} unreadable, {} over budget): {}",
+                    board.unreadable,
+                    board.over_budget,
+                    board
+                        .top_row
+                        .clone()
+                        .unwrap_or_else(|| { "the board named no failing queue".to_string() })
+                ),
+                -1,
+                dry + 1,
+            ),
+        );
+    }
+
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
             // Bounded, and each blocking fire emits its row so the counters
