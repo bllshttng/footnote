@@ -644,6 +644,40 @@ def test_unmeasurable_interdiff_fails_open(monkeypatch, tmp_path: Path) -> None:
     assert _review_hold.review_invocation_refusal("feature/x", moved, cwd=str(tmp_path)) == ""
 
 
+def _fail_event(head: str, base: str) -> dict:
+    event = _chain_event(head, base)
+    event["verdict"] = "fail"
+    return event
+
+
+def test_verify_round_names_the_round_behind_the_fix(monkeypatch, tmp_path: Path) -> None:
+    """One fail at head A, fix moved to head B: the verify pass verifies round 1."""
+    import fno.pr._coverage_gate as gate
+
+    chain = [_fail_event("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.scoped_verify_round("feature/x", "c" * 40, cwd=str(tmp_path)) == 1
+
+
+def test_verify_round_is_floored_at_one_on_an_empty_chain(monkeypatch, tmp_path: Path) -> None:
+    """A verify with no round behind it still names a round: a declared row can
+    never read the chain down to zero."""
+    import fno.pr._coverage_gate as gate
+
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [])
+    assert _review_hold.scoped_verify_round("feature/x", "a" * 40, cwd=str(tmp_path)) == 1
+
+
+def test_verify_round_follows_a_declared_round(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    second = _fail_event("b" * 40, "c" * 40)
+    second["review_round"] = 2
+    chain = [_fail_event("a" * 40, "b" * 40), second]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.scoped_verify_round("feature/x", "d" * 40, cwd=str(tmp_path)) == 2
+
+
 def test_interdiff_mirror_matches_the_rust_fixture_numbers(tmp_path: Path) -> None:
     """The Python interdiff is a mirror of review_freshness.rs, held to the
     same fixture the Rust tests use: a 5-then-8 line rewrite measures 13, a

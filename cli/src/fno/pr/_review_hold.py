@@ -250,6 +250,18 @@ def review_invocation_refusal(
     )
 
 
+def scoped_verify_round(branch: str, head: str, cwd: Optional[str] = None) -> int:
+    """The round a scoped fix-verification at ``head`` verifies.
+
+    Floored at 1: a verify with no round behind it still names a round, so a
+    declared row can never read the chain down to zero.
+    """
+    from fno.pr._coverage_gate import attestation_chain, rounds_since_last_pass
+
+    where = cwd or os.getcwd()
+    return max(1, rounds_since_last_pass(attestation_chain(where, head_branch=branch, head=head)))
+
+
 def release_review_hold(
     branch: str, *, holder: Optional[str] = None, root: Optional[Path] = None
 ) -> bool:
