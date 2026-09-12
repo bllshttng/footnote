@@ -1840,10 +1840,7 @@ def list_open_pr_branches(
 
 
 def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
-    """The git common dir of ``cwd``, or ``cwd`` when git can't say (x-6283).
-
-    Collapses same-repo worktrees to one gh listing; memoized per run.
-    """
+    """The git common dir of ``cwd``, or ``cwd`` when git can't say (x-6283)."""
     hit = memo.get(cwd)
     if hit is None:
         try:
@@ -1853,8 +1850,7 @@ def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
             )
         except (subprocess.TimeoutExpired, OSError):
             probe = None
-        # ``.git`` comes back relative on a main checkout; anchor it so main
-        # and worktree keys agree.
+        # ``.git`` comes back relative on a main checkout; anchor it so keys agree.
         hit = (
             str((Path(cwd) / probe.stdout.strip()).resolve())
             if probe is not None and probe.returncode == 0 and probe.stdout.strip()
@@ -1865,7 +1861,7 @@ def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
 
 
 class _ListingCache:
-    """One gh listing per repo, shared by one reconcile run's scans (x-6283).
+    """One gh listing per repo per run, shared by the scans (x-6283).
 
     A failed fetch caches the error so later asks re-raise, not re-hit gh.
     """
@@ -1903,7 +1899,7 @@ def _group_refless_by_repo(
 
     Shared eligibility of both listing scans; the first member's cwd runs the
     gh call so gh still resolves the repo from that dir's origin remote. Pass
-    the run cache's ``_repo_keys`` so both scans probe each cwd once per run.
+    the cache's ``_repo_keys`` so both scans probe each cwd once per run.
     """
     _scope = _node_id_scope(node_id)
     by_repo: dict[str, list[dict]] = {}
@@ -2197,9 +2193,8 @@ def scan_merge_drift(
         query = query_pr_merge_state
     _scope = _node_id_scope(node_id)
 
-    # Successors of a pending supersession must close with changed-file
-    # evidence, which a listing row never carries: route those to the
-    # per-node query so verification lands in this sweep, not a later one.
+    # Successors of a pending supersession need changed-file evidence, which
+    # only the per-node query fetches: route them around the listings.
     pending_supersede = {
         e.get("superseded_by")
         for e in entries
@@ -2234,8 +2229,7 @@ def scan_merge_drift(
         else:
             cwd = None
 
-        # No shared cache, no live dir, or a supersession awaiting this
-        # node's changed-file evidence: degrade to the per-node query.
+        # No cache, no live dir, or supersession evidence owed: query.
         merged_rows: list[dict] = []
         open_rows: list[dict] = []
         if listings is not None and cwd is not None and nid not in pending_supersede:
@@ -2257,8 +2251,8 @@ def scan_merge_drift(
             # cannot safely identify the repo: record a failure rather than
             # risk closing a node off a same-numbered PR elsewhere.
             repo = repo_slug_from_url(url)
-            # The listings carry this ref's answer (x-6283): a merged row
-            # closes it; only a number in NEITHER listing owes the query.
+            # A merged listing row closes this ref; only a number in NEITHER
+            # listing owes the query below (x-6283).
             hit = _listing_answer(merged_rows, number, repo)
             if hit is not None:
                 # No mergeCommit oid/files on a listing row - like a reverse-mapped record.
