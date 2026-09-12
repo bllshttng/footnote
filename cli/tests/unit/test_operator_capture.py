@@ -343,7 +343,7 @@ def test_operator_spelling_still_reaches_the_queue(tmp_path, tmp_ledger, monkeyp
     assert json.loads(result.stdout)["depth"] == 1
 
 
-# -- machine shapes never queue (x-4fc2) --
+# -- machine shapes never queue --
 
 
 def test_machine_shapes_never_queue_and_are_counted(tmp_path, tmp_ledger, monkeypatch):
