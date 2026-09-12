@@ -44,6 +44,10 @@ Every `reign_checkin` row carries the canonical keys `scope` and `change`, plus 
 
 `fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. It reads every journal ``paths.event_journals`` resolves: live files, rotations, mirrors. A zero-match answer still names every journal it read, with each file's scanned row count. An empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
 
+## The reign ledger page
+
+`fno agents king ledger` renders `<state_dir>/reign.html` (`--out` overrides). Each crowned territory gets a section: holder, grantor, agree verdict, status counts, and every member node with its title. Two more sections name what the folds omit: uncrowned epics, and orphan leaves (parentless, actionable, contained by no node). The data path is the court's own. `gather_court` and the native court-fold read run in Python. The page assembly runs in the native `reign-ledger` verb (the king-history split, so the Python-tree ratchet holds). The page renders that answer and never re-derives the scope join, so the ledger, `fno agents court -n`, and the fold cannot disagree about who holds a node. An empty court renders "no live crowns" as a measurement. An unreadable registry renders the named reason. An unresolved fold states why in place. Never a blank or falsely healthy page.
+
 ## The codex limit
 
 Codex exposes none of `/goal`, `/loop`, or Monitor. A codex reign has no self-injected beat. The wake arm's backstop is its only pulse. The skill names this in its first line.

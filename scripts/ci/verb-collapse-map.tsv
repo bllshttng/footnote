@@ -50,6 +50,7 @@ agents king faq list	T1	agents king faq list	2
 agents king history	T1	agents king history	0
 agents king init	T1	agents king init	7
 agents king manifest-path	T1	agents king manifest-path	3
+agents king ledger	T1	agents king ledger	0
 agents king-history	T1	agents king-history	0
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
@@ -89,6 +90,7 @@ agents probe-run	T1	agents probe-run	3
 agents reap	T1	agents reap	15
 agents reconcile	T1	agents reconcile	12
 agents recover	T1	agents recover	0
+agents reign-ledger	T1	agents reign-ledger	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents registry-repair	T1	agents registry-repair	4	

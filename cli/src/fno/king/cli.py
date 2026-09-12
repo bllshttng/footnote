@@ -527,6 +527,25 @@ def history_cmd(
     raise typer.Exit(code)
 
 
+def ledger_cmd(
+    out: Optional[Path] = typer.Option(
+        None, "--out", help="Write the page here instead of <state_dir>/reign.html."
+    ),
+) -> None:
+    """Render the reign ledger page: every crown, its territory, its nodes.
+
+    The page assembly is the native ``reign-ledger`` verb; this shell resolves
+    the court and the paths. Contract: docs/architecture/reign.md.
+    """
+    from fno.king.ledger import build_ledger_data, write_ledger
+
+    try:
+        path = write_ledger(build_ledger_data(), out)
+    except RuntimeError as exc:
+        _refuse(f"king: {exc}")
+    typer.echo(f"reign ledger: {path}")
+
+
 @king_app.command("board")
 def board_cmd(
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the board payload."),
@@ -749,6 +768,7 @@ agents_king_app.command("shape")(shape_cmd)
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 # Here only, like the faq typer: the retired bare `fno king` menu stays capped.
 agents_king_app.command("history")(history_cmd)
+agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
 

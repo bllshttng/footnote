@@ -17,11 +17,12 @@ use std::path::PathBuf;
 /// The statuses a reader means by "what is being worked on" (see
 /// docs/architecture/court-scope-fold.md): neither closed (done, superseded)
 /// nor unstarted (idea, deferred).
-const ACTIVE_STATUSES: [&str; 5] = ["in_progress", "in_review", "ready", "blocked", "design"];
+pub(crate) const ACTIVE_STATUSES: [&str; 5] =
+    ["in_progress", "in_review", "ready", "blocked", "design"];
 
 /// Counts render in lifecycle order; a status outside the vocabulary keeps
 /// its place at the end rather than vanishing from the line.
-const COUNT_ORDER: [&str; 9] = [
+pub(crate) const COUNT_ORDER: [&str; 9] = [
     "in_progress",
     "in_review",
     "ready",
@@ -40,7 +41,7 @@ fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// html.escape(quote=True) semantics: the section lands in a document the
 /// scripted board also writes into, and the same bytes must escape the same
 /// way on both sides.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -115,7 +116,7 @@ fn sessions_of(entry: &Value) -> Vec<String> {
 /// the crown row `gather_court` already adjudicated, never re-resolved from
 /// config (a row reading level=2 over a project must fold as epics and fail,
 /// not silently re-resolve into the project's nodes).
-fn compile_forced(
+pub(crate) fn compile_forced(
     scope: &str,
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
