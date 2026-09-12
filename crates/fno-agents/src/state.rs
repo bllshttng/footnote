@@ -1903,7 +1903,25 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
             return Some(parent.to_path_buf());
         }
     }
-    None
+    // Under build.build-dir the exe is an intermediate: it lives in the
+    // shared build base, outside any checkout, so the walk above finds no
+    // `.git`. A cargo marker on an ancestor proves the tree is a build tree
+    // (deployed binaries have none), and the compile-time manifest dir then
+    // names the crate it was built from, so the guard stays armed.
+    let build_tree = exe
+        .ancestors()
+        .skip(1)
+        .take(6)
+        .any(|p| p.join("CACHEDIR.TAG").is_file() || p.join(".rustc_info.json").is_file());
+    if !build_tree {
+        return None;
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.ancestors().nth(2).unwrap_or(manifest);
+    if home == Some(root) {
+        return None;
+    }
+    Some(root.to_path_buf())
 }
 
 /// Refuse to RAISE the shared registry's schema from a source-built binary.

@@ -2392,6 +2392,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::merge_reap::consume_merge_cleanup_requests(
                             &home, &roots, &emitter, grace_secs,
                         );
+                        // Daily janitor; gate and receipt in reclaim.rs.
+                        crate::reclaim::maybe_run_daily(&home);
                     });
                 }
                 // Orphaned-test-binary reap: the waitpid sweep above only ever
@@ -13781,14 +13783,12 @@ done
         sock
     }
 
-    /// Locate the cargo-built `fno-agents-worker` next to the test binary
-    /// (target/debug/deps/<test> -> target/debug/fno-agents-worker). `None` if it
-    /// is not built, so the e2e adopt test SKIPS rather than failing in an
-    /// environment where only the lib test target was compiled.
+    /// Locate the cargo-built `fno-agents-worker` via this crate's manifest
+    /// dir (final binaries stay in the checkout's target/ under
+    /// build.build-dir, and the manifest path is worktree-local). `None` if
+    /// it is not built, so the e2e adopt test SKIPS rather than failing.
     fn built_worker_bin() -> Option<PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?.parent()?; // deps -> debug
-        let cand = dir.join("fno-agents-worker");
+        let cand = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/fno-agents-worker");
         cand.exists().then_some(cand)
     }
 

@@ -67,6 +67,28 @@ def _write_state(path: Path, *, marketplaces: list[dict[str, object]], plugins: 
     )
 
 
+def _fake_claude(fake_bin: Path) -> None:
+    # The wizard-adapter test walks every adapter's availability probe; the
+    # claude one shells `claude plugin list --json`, which on a machine with
+    # the real claude on PATH fires the provider-exec guard. A fake that
+    # answers "nothing installed" keeps the walk hermetic.
+    executable = fake_bin / "claude"
+    executable.write_text(
+        f'''#!{sys.executable}
+import json
+import sys
+
+args = sys.argv[1:]
+if args[:2] == ["plugin", "list"]:
+    print(json.dumps([]))
+else:
+    print(f"fake-claude: unsupported args {{args}}", file=sys.stderr)
+    raise SystemExit(1)
+'''
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+
 def _fake_codex(fake_bin: Path) -> None:
     executable = fake_bin / "codex"
     executable.parent.mkdir(parents=True)
@@ -183,6 +205,7 @@ state_path.write_text(json.dumps(state))
 def _environment(tmp_path: Path, source: Path, state_path: Path) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     _fake_codex(fake_bin)
+    _fake_claude(fake_bin)
     live_home = tmp_path / "codex-home"
     return {
         **os.environ,
@@ -198,9 +221,29 @@ def _environment(tmp_path: Path, source: Path, state_path: Path) -> dict[str, st
     }
 
 
+def _run_setup_command() -> list[str]:
+    # The driver body `_run_setup` runs; kept as a list so the concurrency
+    # test can Popen it directly.
+    driver = (
+        "import sys, json\n"
+        "from fno.setup.codex_plugin import converge\n"
+        "argv = json.loads(sys.argv[1])\n"
+        "channel = argv[argv.index('--channel') + 1] if '--channel' in argv else 'dev'\n"
+        "result = converge(channel=channel, refresh='--refresh' in argv)\n"
+        "print(f'verified: channel={result.channel} action={result.action} "
+        "id={result.plugin_id} version={result.version}')\n"
+    )
+    return [sys.executable, "-c", driver, "[]"]
+
+
 def _run_setup(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    # The `fno config setup codex-plugin` door retired in favor of
+    # `fno config plugin install codex`, which hardcodes the dev channel and
+    # adds env-export side effects these hermetic fixtures must not touch.
+    # What these tests exercise is CONVERGE's executable boundary, so they
+    # drive the same function in a child process with the same env.
     return subprocess.run(
-        [sys.executable, "-m", "fno.cli", "setup", "codex-plugin", *args],
+        [*_run_setup_command()[:-1], json.dumps(list(args))],
         capture_output=True,
         text=True,
         env=env,
@@ -463,7 +506,7 @@ def test_concurrent_channel_selection_serializes_to_one_identity(tmp_path: Path)
     state_path = tmp_path / "state.json"
     _write_state(state_path, marketplaces=[], plugins=[])
     env = _environment(tmp_path, source, state_path)
-    command = [sys.executable, "-m", "fno.cli", "setup", "codex-plugin"]
+    command = _run_setup_command()
     processes = [
         subprocess.Popen(
             [*command, "--channel", channel],

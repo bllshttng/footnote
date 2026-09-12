@@ -15,7 +15,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-WORK="$(mktemp -d /tmp/fno-cap-gate.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/fno-cap-gate.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 # The journal lives in the space now, and the migration that once ferried a

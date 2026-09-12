@@ -1,41 +1,39 @@
 # Codex Provider Guide
 
 footnote ships one native Codex marketplace identity, `footnote`, and one plugin identity, `fno@footnote`.
-The release and dev channels select the source behind that identity; they never install side-by-side plugin names.
+The plugin installs from the filtered stage of your checkout: git-tracked files only, never build output or worktrees.
 
-## Plugin Channels
+## Plugin Install
 
-Use the release channel for normal Codex sessions.
-It installs `fno@footnote` from the Git-backed `bllshttng/footnote` marketplace and keeps the version in `.codex-plugin/plugin.json` authoritative.
-
-```bash
-fno config setup codex-plugin --channel release
-```
-
-Use the dev channel while changing plugin content locally.
-It installs `fno@footnote` from the durable canonical checkout rather than a disposable feature worktree.
+`fno config plugin install codex` converges Codex onto your checkout in one step.
+The installed identity is the dev one, because the source is a local stage.
+Run it from the durable canonical checkout for everyday use.
+For local plugin work, run it from your feature worktree instead.
 
 ```bash
-fno config setup codex-plugin --channel dev
+fno config plugin install codex
 ```
+
+A git-marketplace release install for Codex is not available yet.
 
 Codex caches plugins by version, so local edits at the same manifest version require an explicit refresh.
-Refresh removes and re-adds the selected copy through Codex, which deterministically rebuilds its cache without changing release version files.
+`--force` removes and re-adds the copy through Codex, which deterministically rebuilds its cache.
 
 ```bash
-fno config setup codex-plugin --channel dev --refresh
+fno config plugin install codex --force
 ```
 
-Setup first validates the requested marketplace and plugin in an isolated temporary `CODEX_HOME`, leaving the working channel untouched when the candidate is invalid.
+Install first validates the requested marketplace and plugin in an isolated temporary `CODEX_HOME`, leaving the working install untouched when the candidate is invalid.
 It then replaces the source behind `footnote`, verifies the installed version and complete loadable payload, and writes the channel marker only after that verification succeeds.
-Every failed live switch restores the previous marketplace registration, plugin, and exact marker bytes; a rollback failure is persisted and reported distinctly by `fno doctor`.
-Setup also migrates and removes legacy `footnote-dev` registrations, `fno@footnote-dev`, and their cache.
-An already-correct selection is a no-op unless `--refresh` is present.
+Every failed live switch restores the previous marketplace registration, plugin, and exact marker bytes.
+A rollback failure is persisted and reported distinctly by `fno doctor`.
+Install also migrates and removes legacy `footnote-dev` registrations, `fno@footnote-dev`, and their cache.
+An already-correct install is a no-op unless `--force` is present.
 Every mutation can require hook approval and takes effect in a new Codex session.
 Blocking `cli-ci` installs Codex 0.145 and runs the isolated real-binary containment and rollback regressions on every affected pull request.
 
 `fno doctor` reports Codex plugin freshness separately from Python and Rust CLI freshness.
-It compares the selected channel's loadable source payload with `CODEX_HOME/plugins/cache/<marketplace>/fno/<version>` and gives the exact refresh command for wrong-channel, missing-cache, version-mismatch, and payload-drift findings.
+It compares the installed loadable source payload with `CODEX_HOME/plugins/cache/<marketplace>/fno/<version>` and gives the exact refresh command for wrong-channel, missing-cache, version-mismatch, and payload-drift findings.
 
 The verified payload preserves one loaded set of:
 

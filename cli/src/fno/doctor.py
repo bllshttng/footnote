@@ -3614,7 +3614,7 @@ def _harness_surface_report() -> dict[str, Any]:
                 "status": "unknown",
                 "issue": "inspection-failed",
                 "detail": str(exc)[-500:],
-                "remedy": "fno config setup codex-plugin --channel release --refresh",
+                "remedy": "fno config plugin install codex --force",
             }
 
     # Surface codex hooks dual-representation in the MAIN run too, not only the

@@ -64,6 +64,14 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         {"hidden": True},
     ),
     "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard", {"hidden": True}),
+    # One local-dev install door for every plugin harness. VISIBLE on
+    # purpose and distinct from the hidden `plugins` function-pack group: this
+    # installs the footnote plugin itself, from the filtered stage, in one
+    # action per harness (claude|codex|opencode|agy).
+    "plugin": (
+        "fno.plugin_install_cli:plugin_app",
+        "Install the footnote plugin into a harness from the filtered stage.",
+    ),
 }
 
 app = typer.Typer(

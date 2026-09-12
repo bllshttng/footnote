@@ -109,6 +109,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "NO_COLOR",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
+    # Where cargo writes build intermediates. A developer shell that exports it
+    # would point test-built artifacts at an arbitrary tree; _child_env re-sets
+    # it deliberately from the fno build base after this scrub.
+    "CARGO_BUILD_BUILD_DIR",
     "STATE_FILE",
     "POSTMORTEMS_DIR",
     "POSTMORTEM_CORRECTIONS_LOG",

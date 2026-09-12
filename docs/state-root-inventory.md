@@ -97,6 +97,9 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `postmortems/` | the retro routine and stuck-terminal postmortem writer, via the `paths` accessor | permanent |
 | `provider-runtime-state.json`, `.update.lock` | `cli/src/fno/adapters/providers/runtime_state.py` via the `paths` accessor | permanent; the update lock lives for one write |
 | `providers/` | `cli/src/fno/adapters/providers/managed.py`, `staging.py` | permanent managed provider configs |
+| `cargo-build/<h2>/<hash>/` | cargo itself, via the tracked `build.build-dir` and the `CARGO_BUILD_BUILD_DIR` value `fno.paths.cargo_build_dir_value()` exports | per-workspace intermediates, one hash dir per workspace root; final binaries stay in the checkout's `crates/*/target`; reclaimed by `worktree cleanup --cargo-targets` (live workspaces' hash dirs are protected via `cargo metadata`) |
+| `plugin-stage/fno/` | `fno config plugin install` via the `fno-agents plugin-install` verb (`crates/fno-agents/src/plugin_install.rs::build_stage`) | a filtered copy of the checkout (git-tracked + untracked-but-not-ignored files only, no target/, worktrees or venvs); rebuilt wholesale on every install, so nothing in it outlives the next one |
+| `reclaim/last-run.json` | `fno doctor reclaim` via `crates/fno-agents/src/reclaim.rs::write_receipt` (the Python doctor verb shells to `fno-agents reclaim`) | overwritten per `--apply` run; records bytes reclaimed per lane; the daemon's daily sweep gates on its mtime |
 | `push-stamps/` | `hooks/git-protection.py` | one stamp per protected push |
 | `relay-claude/` | Claude Code itself, via a `CLAUDE_CONFIG_DIR` account alias | operator-managed harness home. Never fno state, never swept. |
 | `retro-pending/` | `paths.retro_pending_dir()`, written by `cli/src/fno/retro/sweep.py` | per-PR retro evidence awaiting harvest |

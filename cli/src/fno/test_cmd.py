@@ -331,6 +331,24 @@ def _child_env(root: Path) -> dict:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
+    # Cargo intermediates go under the SANDBOX's state root, never the
+    # operator's real one and never the checkout's target/. Computed from the
+    # sandbox, not cargo_build_dir_value(): that reads the PARENT's state
+    # root, and a value pointing at ~/.fno/cargo-build makes every cargo
+    # invocation inside a test write into operator state - the exact write
+    # the state canary refuses. Matches what the child itself would resolve
+    # (its HOME is the sandbox home). Set AFTER neutralise, which scrubs a
+    # developer's own value as ambient state.
+    env["CARGO_BUILD_BUILD_DIR"] = (
+        f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
+    )
+    # TMPDIR is deliberately left ambient. The fence allows journal roots
+    # under TMPDIR (fno.events._hermetic_allowed_roots), and the sandbox is
+    # created by mkdtemp under that same TMPDIR, so every sandbox path is
+    # already inside the allowed root without rewriting it. Rewriting it also
+    # pushes pytest's basetemp under the sandbox, and the lane-B keeper socket
+    # then crosses the 108-byte AF_UNIX limit on the runner (the reason
+    # neutralise's own ambient list refuses to touch TMPDIR).
     return env
 
 

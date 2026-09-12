@@ -126,7 +126,6 @@ agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
 agents workspace reap	T1	agents workspace reap	0
 agents workspace worktree archive	T1	agents workspace worktree archive	4
-agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
 agents workspace worktree ensure	T1	agents workspace worktree ensure	24
 agents workspace worktree overlap-record	T1	agents workspace worktree overlap-record	3
@@ -545,7 +544,8 @@ route unset	T1	route unset	1
 scoreboard	KEEP	scoreboard	13	single-leaf group
 setup cli-hooks	T1	setup cli-hooks	8
 setup cli-hooks-codex	T1	setup cli-hooks-codex	4
-setup codex-plugin	T1	setup codex-plugin	10
+config plugin	T1	config plugin	0
+doctor reclaim	T1	doctor reclaim	0
 setup github-cli	T1	setup github-cli	0
 setup migrate-config	T1	setup migrate-config	1
 setup migrate-paths	T1	setup migrate-paths	8
@@ -586,7 +586,6 @@ worker reconcile	T1	worker reconcile	0
 worker review	T1	worker review	0
 worker ship	T1	worker ship	2
 worktree archive	T1	worktree archive	2
-worktree cargo-offload	T1	worktree cargo-offload	0
 worktree cleanup	T1	worktree cleanup	6
 worktree ensure	T1	worktree ensure	30
 worktree overlap-record	T1	worktree overlap-record	3

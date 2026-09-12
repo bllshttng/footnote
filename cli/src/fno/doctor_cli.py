@@ -18,6 +18,7 @@ from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_graph import graph_app
 from fno.doctor_lanes import lanes_command
+from fno.doctor_reclaim import reclaim_command
 from fno.evals.cli import evals_app
 from fno.events.cli import cli as event_app
 from fno.lint_cli import lint
@@ -65,6 +66,8 @@ doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.add_typer(graph_app, name="graph")
 doctor_app.command("lint")(lint)
+# Machine janitor for dev-built disk bloat; hidden, `fno help doctor --all`.
+doctor_app.command("reclaim", hidden=True)(reclaim_command)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 # Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.
 doctor_app.command("bash-census", hidden=True)(bash_census_command)

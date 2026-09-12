@@ -71,6 +71,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "reap",
     "roster-reap",
     "reconcile",
+    "reclaim",
+    "plugin-install",
     "recover",
     "reentry-plan",
     "rename",
@@ -455,6 +457,20 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
+    }
+    // `reclaim`: the machine janitor, daemon-free. Not a routable
+    // `fno agents` verb; the Python surface is `fno doctor reclaim`, a thin
+    // wrapper that shells HERE, and the daemon's daily sweep calls the gate
+    // in-process.
+    if verb == "reclaim" {
+        return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
+    }
+    // `plugin-install`: the filtered-stage installer for the plugin
+    // harnesses, daemon-free. The Python surface `fno config plugin install`
+    // shells HERE for claude, opencode and agy; codex stays on the Python
+    // converge engine per the ship-phase ruling.
+    if verb == "plugin-install" {
+        return fno_agents::plugin_install::run_plugin_install(&args[1..]);
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);

@@ -736,7 +736,7 @@ def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
             f"the seed invokes {message.strip().split()[0]!r} but the footnote "
             "plugin is not enabled for codex on this machine, so the verb would "
             "not fire and the worker would read the seed as prose. Install it "
-            "with 'fno config setup codex-plugin' and spawn again."
+            "with 'fno config plugin install codex' and spawn again."
         )
     return None
 

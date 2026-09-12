@@ -33,7 +33,7 @@ def test_a_codex_seed_without_an_enabled_plugin_is_refused(status, _plugin_state
     reason = cannot_fire_refusal("$fno:target x-1", "codex")
     assert reason is not None
     assert "'$fno:target'" in reason
-    assert "fno config setup codex-plugin" in reason
+    assert "fno config plugin install codex" in reason
 
 
 @pytest.mark.parametrize("status", ["fresh", "stale", "unknown", "conflict", "error"])

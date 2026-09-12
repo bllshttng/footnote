@@ -154,8 +154,13 @@ def test_map_covers_current_surface_once():
     # x-77db allocates `agents incident` +
     # `agents fleet-incident` (the breaker adapter and its native verb) and
     # `agents mail team` + `mail team` (the fleet announcement fan-out):
-    # counted from the merged file, 600 -> 604.
-    assert len(mapped) == 604, (
+    # counted from the merged file, 600 -> 604. The build-dir ruling deleted
+    # the two retired `cargo-offload` rows (the verb moved caches cargo now
+    # writes outside the checkout): 604 -> 602. The
+    # one install verb for every harness allocates `config plugin` and
+    # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
+    # from the merged file, 602 -> 603.
+    assert len(mapped) == 603, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

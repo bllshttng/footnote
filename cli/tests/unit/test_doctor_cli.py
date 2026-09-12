@@ -29,6 +29,7 @@ def test_doctor_lists_direct_actions() -> None:
         "lint",
         "observer",
         "plugin-file",
+        "reclaim",
         "route",
         "scratch",
         "skill-diff",
