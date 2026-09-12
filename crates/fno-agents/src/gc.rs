@@ -934,12 +934,13 @@ pub fn maybe_retirement_sweep(
         // cadence (Locked Decision 6), so the operator never runs the manual
         // reap verb just to clear tabs.
         let mux = tab_sweep();
-        let detail = match &mux {
+        let mux_detail = match &mux {
             crate::reap_render::MuxSweep::Ran { receipt } => {
                 format!("mux=ran closed={}", receipt.closed)
             }
             other => format!("mux={}", other.state()),
         };
+        let detail = format!("{mux_detail} held={}", summary.holds.len());
         // A zero-acted tick says which zero it was: a sweep that could not
         // read its registry, nothing classified, or work judged and held.
         let skip_reason = if summary.retired.is_empty() {

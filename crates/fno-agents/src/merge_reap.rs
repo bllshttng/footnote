@@ -235,10 +235,12 @@ pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
 }
 
 /// The rows this request may remove: registry rows whose cwd IS the merged
-/// worktree or whose name was minted for one of the closed nodes. Sorted by
+/// worktree or whose name resolves to one of the closed nodes. Sorted by
 /// name. A request-named row the registry no longer carries is ALREADY gone,
 /// so it is not a candidate: a re-pass after a held tree must read the row set
-/// as settled, not wedged.
+/// as settled, not wedged. The name leg reads the shared `name_route`
+/// vocabulary, so the operator's `t-`/`bp-`/`king-`/`target-` worker names
+/// all join; a `target-{node}-` literal would see 5 of 29 rows.
 fn merge_cleanup_rows(
     home: &AgentsHome,
     request: &MergeCleanupRequest,
@@ -246,6 +248,7 @@ fn merge_cleanup_rows(
     let Ok(registry) = state::load_registry(&home.registry_json()) else {
         return Vec::new();
     };
+    let ids: HashSet<String> = request.node_ids.iter().cloned().collect();
     let mut rows: Vec<state::RegistryEntry> = registry
         .entries
         .into_iter()
@@ -254,10 +257,7 @@ fn merge_cleanup_rows(
                 .worktree
                 .as_deref()
                 .is_some_and(|worktree| entry.cwd == worktree)
-                || request
-                    .node_ids
-                    .iter()
-                    .any(|node| entry.name.starts_with(&format!("target-{node}-")))
+                || crate::node_route::name_route(&entry.name, &ids).is_some()
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -377,6 +377,10 @@ fn emit_hold_once_per_hour(
 /// stop -> rm -> tree sequence without shelling. Production wiring is in
 /// [`consume_merge_cleanup_requests`].
 struct RequestSeams<'a> {
+    /// The three finished witnesses for one row (transcript past grace, pid
+    /// gone, roster terminal). `false` keeps the row: a live and working
+    /// worker stays even when its node is done.
+    finished: &'a dyn Fn(&state::RegistryEntry) -> bool,
     /// Stop the row's harness. `Ok(short)` names the stopped session (empty
     /// for a pane row); `Err` holds the row for this pass.
     stop: &'a dyn Fn(&state::RegistryEntry) -> Result<String, &'static str>,
@@ -389,10 +393,11 @@ struct RequestSeams<'a> {
     take_tree: &'a dyn Fn(&str, &str) -> bool,
 }
 
-/// Settle one request past its grace window. Returns the acted count (rows
-/// removed + trees removed). Every step names itself in events.jsonl IN
-/// ORDER: merge_reaper_stopped, agent_row_reaped (emitted by the shared
-/// commit), worktree_removed, merge_cleanup_completed.
+/// Settle one request past its grace window. Returns `(acted, held)`: the
+/// acted count (rows removed + trees removed) and whether the request stays
+/// pending. Every step names itself in events.jsonl IN ORDER:
+/// merge_reaper_stopped, agent_row_reaped (emitted by the shared commit),
+/// worktree_removed, merge_cleanup_completed.
 fn run_request(
     home: &AgentsHome,
     emitter: &EventEmitter,
@@ -402,7 +407,7 @@ fn run_request(
     ledger: Option<&[Value]>,
     now: i64,
     seams: &RequestSeams,
-) -> u64 {
+) -> (u64, bool) {
     // 2. Doneness re-read: every named node must read done, with no recorded
     // merge_status that contradicts the merge. An ABSENT merge_status passes
     // (the gc sweep's rule: unrecorded is not a contradiction - both mint
@@ -413,7 +418,7 @@ fn run_request(
     // holds for the same reason.
     let Some(states) = states else {
         emit_hold_once_per_hour(home, emitter, request, "graph-unreadable", now);
-        return 0;
+        return (0, true);
     };
     let open: Vec<String> = request
         .node_ids
@@ -432,14 +437,16 @@ fn run_request(
             None => "no-node-ids".to_string(),
         };
         emit_hold_once_per_hour(home, emitter, request, &reason, now);
-        return 0;
+        return (0, true);
     }
     // 3. Candidates, with the crowned and operator-origin rows named out: an
     // idle king reads state=done, so exclusion is by NAME, never by roster
-    // state.
+    // state. Crowned/operator rows are settled keeps; a refusal below is a
+    // HOLD - the request matched the row and must come back for it.
+    let joined = merge_cleanup_rows(home, request);
     let mut kept: Vec<String> = Vec::new();
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
-    for entry in merge_cleanup_rows(home, request) {
+    for entry in joined {
         if entry.crown_level.is_some() {
             kept.push(format!("{}:kept_crowned", entry.name));
             continue;
@@ -458,6 +465,10 @@ fn run_request(
     // keeps its own row; the rest of the request still settles.
     let mut receipts = BTreeMap::new();
     let mut to_retire = BTreeMap::new();
+    // Refusals are holds, not completion-kept rows: the whole request comes
+    // back for them, because a completion tombstones it and the merge
+    // trigger never returns.
+    let mut held_rows: Vec<String> = Vec::new();
     // The merge path names its own stop in the journal: `merge_reaper_stopped`
     // is what puts the stop BEFORE the row drop in a reader's hands.
     let stop = |entry: &state::RegistryEntry| match (seams.stop)(entry) {
@@ -478,6 +489,12 @@ fn run_request(
         Err(_) => false,
     };
     for entry in &rows {
+        // The finished gate BEFORE any stop: a row that fails it stays, and
+        // the completion is never reached, so the request retries it.
+        if !(seams.finished)(entry) {
+            held_rows.push(format!("{}:still_writing", entry.name));
+            continue;
+        }
         match crate::gc_sweep::stage_session_retirement(
             home,
             entry,
@@ -509,7 +526,7 @@ fn run_request(
                     },
                 );
             }
-            Err(refusal) => kept.push(format!(
+            Err(refusal) => held_rows.push(format!(
                 "{name}:{reason}",
                 name = entry.name,
                 reason = match refusal {
@@ -554,7 +571,21 @@ fn run_request(
                 "reason": format!("row-not-removed:{name}"),
             }),
         );
-        return 0;
+        return (0, true);
+    }
+    // The request matched rows it did not finish (still writing, stop
+    // refused, an unverified effect): hold instead of completing, so a
+    // later pass returns to them. Rows already removed stay removed; the
+    // tree waits with the held rows.
+    if !held_rows.is_empty() {
+        emit_hold_once_per_hour(
+            home,
+            emitter,
+            request,
+            &format!("rows-kept:{}", held_rows[0]),
+            now,
+        );
+        return (report.retired_names.len() as u64, true);
     }
     let removed_rows: Vec<String> = report.retired_names.iter().cloned().collect();
     // 6. The tree, after the rows: whatever its git status, a done and
@@ -575,7 +606,7 @@ fn run_request(
                     "tree-held:unreachable-from-origin-main",
                     now,
                 );
-                return removed_rows.len() as u64;
+                return (removed_rows.len() as u64, true);
             }
             reclaimed_bytes =
                 crate::daemon::directory_bytes(std::path::Path::new(worktree)).unwrap_or(0);
@@ -600,7 +631,7 @@ fn run_request(
                 // A transient git failure retries on a later pass; tombstoning
                 // here would strand the tree the same way a hold would.
                 emit_hold_once_per_hour(home, emitter, request, "tree-held:removal-failed", now);
-                return removed_rows.len() as u64;
+                return (removed_rows.len() as u64, true);
             }
         }
     }
@@ -613,11 +644,23 @@ fn run_request(
             "reclaimed_bytes": reclaimed_bytes,
             "removed_rows": removed_rows,
             "kept": kept,
+            // The positive marker for a zero-row completion: "none-present"
+            // says the join found no row for this request's nodes, so the
+            // tombstone is honest. An empty removed_rows alone read both
+            // ways, and 89 of 117 completions read as held.
+            "rows": if rows.is_empty() && kept.is_empty() {
+                "none-present"
+            } else {
+                "present"
+            },
             "tree": tree_note,
         }),
     );
     let _ = std::fs::remove_file(hold_stamp_path(home, &request.request_id));
-    removed_rows.len() as u64 + u64::from(tree_note == "removed")
+    (
+        removed_rows.len() as u64 + u64::from(tree_note == "removed"),
+        false,
+    )
 }
 
 /// One pass: every pending request, in grace/doneness/stop/rm/tree order.
@@ -650,6 +693,7 @@ pub(crate) fn consume_merge_cleanup_requests(
     let mut total_requests = 0usize;
     let mut in_grace = 0usize;
     let mut acted: u64 = 0;
+    let mut held_requests = 0usize;
     // The agents snapshot is read at most once per reaper pass, on the first
     // claude row that reaches a stop seam - never rows x 15s on a degraded
     // roster.
@@ -681,6 +725,17 @@ pub(crate) fn consume_merge_cleanup_requests(
                 continue;
             }
             let seams = RequestSeams {
+                finished: &|entry| {
+                    let age = crate::gc::probe_row_age(entry);
+                    let terminal = if entry.harness_name() == "claude" {
+                        let mut memo = agents_memo.borrow_mut();
+                        let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
+                        crate::gc_sweep::claude_death_reason(entry, agents)
+                    } else {
+                        None
+                    };
+                    crate::gc_sweep::worker_finished(entry, age, grace_secs, terminal.as_deref())
+                },
                 stop: &|entry| {
                     let mut memo = agents_memo.borrow_mut();
                     let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
@@ -690,7 +745,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,
             };
-            acted += run_request(
+            let (acted_n, held) = run_request(
                 home,
                 emitter,
                 request,
@@ -700,6 +755,8 @@ pub(crate) fn consume_merge_cleanup_requests(
                 now,
                 &seams,
             );
+            acted += acted_n;
+            held_requests += usize::from(held);
         }
     }
 
@@ -722,7 +779,7 @@ pub(crate) fn consume_merge_cleanup_requests(
         "daemon",
         acted,
         skip_reason,
-        Some(&format!("requests={total_requests}")),
+        Some(&format!("requests={total_requests} held={held_requests}")),
         MERGE_REAP_INTERVAL_SECS,
     );
 }
@@ -987,12 +1044,13 @@ mod tests {
         request.worktree = None;
         request.node_ids = vec!["x-1".to_string(), "x-2".to_string()];
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1003,6 +1061,10 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 0);
+        assert!(
+            !held,
+            "no recorded merge_status passes the doneness re-read"
+        );
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         assert!(
             events.contains("\"type\":\"merge_cleanup_completed\""),
@@ -1026,12 +1088,13 @@ mod tests {
         let mut request = settled_request("/repo/wt");
         request.worktree = None;
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1042,6 +1105,7 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 0);
+        assert!(held, "a recorded non-merged status holds the request");
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         assert!(
             events.contains("merge-status:open:x-1"),
@@ -1173,6 +1237,7 @@ mod tests {
         let surface_calls = std::rc::Rc::clone(&calls);
         let tree_calls = std::rc::Rc::clone(&calls);
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| {
                 stop_calls.borrow_mut().push("stop".to_string());
                 Ok("abc123".to_string())
@@ -1189,7 +1254,7 @@ mod tests {
                 true
             },
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1200,6 +1265,7 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 2, "one row + one tree");
+        assert!(!held, "the settled request completed");
 
         let kinds: Vec<String> = std::fs::read_to_string(home.events_jsonl())
             .unwrap()
@@ -1252,6 +1318,7 @@ mod tests {
         );
         let request = settled_request("/repo/wt");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
@@ -1298,12 +1365,13 @@ mod tests {
         states.insert("x-1".to_string(), ("in_progress".to_string(), None));
         let request = settled_request("/repo/wt");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1314,6 +1382,7 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 0);
+        assert!(held, "an open node holds the request");
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         assert!(
             events.contains("\"type\":\"merge_cleanup_held\"") && events.contains("node-open:x-1"),
@@ -1338,12 +1407,13 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         let request = settled_request(wt.to_str().unwrap());
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1366,7 +1436,7 @@ mod tests {
         // Pass one really removed the row (the shared commit writes this
         // fixture's registry), so the second pass reads an empty candidate
         // set and takes no action.
-        let second = run_request(
+        let (second, held_second) = run_request(
             &home,
             &emitter,
             &request,
@@ -1377,6 +1447,7 @@ mod tests {
             &seams,
         );
         assert_eq!(second, 0, "nothing left to remove");
+        assert!(held_second, "the tree hold keeps the request pending");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 
@@ -1392,6 +1463,7 @@ mod tests {
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
         let request = settled_request("/repo/wt");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
@@ -1452,6 +1524,7 @@ mod tests {
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
         let request = settled_request("/repo/wt");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| {
                 crate::daemon::CascadeOutcome::Unverified("roster unreadable".into())
@@ -1459,7 +1532,7 @@ mod tests {
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1470,12 +1543,265 @@ mod tests {
             &seams,
         );
         assert_eq!(acted, 0, "no row removed on an unconfirmed native removal");
+        assert!(held, "an unverified effect holds the request");
         let registry = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(registry.entries.len(), 1, "the row is kept for retry");
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         assert!(
             events.contains("target-x-1-worker:native_removal_unconfirmed"),
             "the kept row must name the effect that held it, not the stop: {events}"
+        );
+        assert!(held, "an unverified effect holds the request");
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn merge_trigger_matches_every_worker_prefix() {
+        // The operator's naming convention mints t-, bp-, king- and target-
+        // rows; the join must read all four from the node hex. The cwd leg
+        // stays out of the way: no row's cwd matches the request worktree.
+        let home = temp_home("prefixes");
+        write_registry(
+            &home,
+            &[
+                claude_row("t-1a2b-idle-glm", false),
+                claude_row("bp-1a2b-arm-timeout", false),
+                claude_row("king-1a2b", false),
+                claude_row("target-x-1a2b-worker", false),
+                // Another node's worker: never a candidate.
+                claude_row("t-docs-3prs-glm", false),
+            ],
+        );
+        let mut request = settled_request("/elsewhere");
+        request.node_ids = vec!["x-1a2b".to_string()];
+        let rows = merge_cleanup_rows(&home, &request);
+        let names: Vec<String> = rows.iter().map(|e| e.name.clone()).collect();
+        for expected in [
+            "t-1a2b-idle-glm",
+            "bp-1a2b-arm-timeout",
+            "king-1a2b",
+            "target-x-1a2b-worker",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "the merge trigger must match {expected}: {names:?}"
+            );
+        }
+        assert!(
+            !names.iter().any(|n| n == "t-docs-3prs-glm"),
+            "another node's row is not a candidate: {names:?}"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn merge_pass_drops_the_finished_row_and_only_that_row() {
+        // The outcome test the node demands: the registry delta itself, with
+        // the untouched row as the positive control in the SAME read.
+        let home = temp_home("outcome");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let mut busy = claude_row("t-ffff-busy-glm", false);
+        busy["short_id"] = json!("fff001");
+        write_registry(&home, &[claude_row("t-1a2b-idle-glm", false), busy]);
+        let mut states = HashMap::new();
+        states.insert(
+            "x-1a2b".to_string(),
+            ("done".to_string(), Some("merged".to_string())),
+        );
+        states.insert("x-ffff".to_string(), ("in_progress".to_string(), None));
+        let mut request = settled_request("/no-such-worktree");
+        request.node_ids = vec!["x-1a2b".to_string()];
+        let seams = RequestSeams {
+            finished: &|_entry| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let before = state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len();
+        let (acted, held) = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 1, "one row removed");
+        assert!(!held, "the request completed");
+        let after = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            after.entries.len(),
+            before - 1,
+            "the count dropped by exactly one"
+        );
+        assert!(
+            !after.entries.iter().any(|e| e.name == "t-1a2b-idle-glm"),
+            "the finished row is gone BY NAME"
+        );
+        assert!(
+            after.entries.iter().any(|e| e.name == "t-ffff-busy-glm"),
+            "the positive control is still present BY NAME"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn one_request_holding_does_not_block_another() {
+        // The killed hypothesis, as a test: a request holding on an open
+        // node never gates a sibling request's removal in the same pass.
+        let home = temp_home("independence");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let mut open_row = claude_row("t-cccc-open-glm", false);
+        open_row["short_id"] = json!("cccc01");
+        write_registry(&home, &[open_row, claude_row("t-1a2b-idle-glm", false)]);
+        let mut states = HashMap::new();
+        states.insert(
+            "x-1a2b".to_string(),
+            ("done".to_string(), Some("merged".to_string())),
+        );
+        states.insert("x-cccc".to_string(), ("in_progress".to_string(), None));
+        let mut holding = settled_request("/no-such-worktree");
+        holding.node_ids = vec!["x-cccc".to_string()];
+        let mut clean = settled_request("/no-such-worktree");
+        clean.node_ids = vec!["x-1a2b".to_string()];
+        let seams = RequestSeams {
+            finished: &|_entry| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let (acted_a, held_a) = run_request(
+            &home,
+            &emitter,
+            &holding,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted_a, 0, "the holding request removes nothing");
+        assert!(held_a, "the open node holds its own request");
+        let (acted_b, held_b) = run_request(
+            &home,
+            &emitter,
+            &clean,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_001,
+            &seams,
+        );
+        assert_eq!(
+            acted_b, 1,
+            "the clean request removes its row in the same pass"
+        );
+        assert!(!held_b, "the clean request completes");
+        let after = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            after.entries.iter().any(|e| e.name == "t-cccc-open-glm"),
+            "the holding request's row is untouched"
+        );
+        assert!(
+            !after.entries.iter().any(|e| e.name == "t-1a2b-idle-glm"),
+            "the clean request's row is gone"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_writing_worker_survives_the_merge_pass() {
+        // Change 2's arm: a worker that wrote moments ago with no terminal
+        // roster state stays, the stop is never attempted, and the request
+        // holds instead of completing.
+        let home = temp_home("writing");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[claude_row("t-1-writing-glm", false)]);
+        let states = merged_states();
+        let mut request = settled_request("/no-such-worktree");
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let stop_calls = std::rc::Rc::clone(&calls);
+        let seams = RequestSeams {
+            finished: &|_entry| false,
+            stop: &|_entry| {
+                stop_calls.borrow_mut().push("stop".to_string());
+                Ok("abc123".to_string())
+            },
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let (acted, held) = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            states.as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0, "nothing removed");
+        assert!(held, "the request holds for the writing worker");
+        let after = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            after.entries.iter().any(|e| e.name == "t-1-writing-glm"),
+            "the writing worker's row stays"
+        );
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            !events.contains("merge_cleanup_completed"),
+            "no completion tombstones a held request: {events}"
+        );
+        assert!(
+            events.contains("still_writing"),
+            "the hold names the kept row: {events}"
+        );
+        assert!(
+            calls.borrow().is_empty(),
+            "the stop is never attempted on a writing worker"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_already_gone_row_completes_with_none_present() {
+        // Change 3's honest arm: a request whose join finds no row completes
+        // with the positive marker, not an ambiguous empty list.
+        let home = temp_home("none-present");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[]);
+        let request = settled_request("/no-such-worktree");
+        let seams = RequestSeams {
+            finished: &|_entry| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let (acted, held) = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0);
+        assert!(!held);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("\"rows\":\"none-present\""),
+            "the completion names the zero honestly: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
