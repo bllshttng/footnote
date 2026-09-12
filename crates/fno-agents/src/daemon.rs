@@ -5149,7 +5149,12 @@ const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+    F: Fn(
+        &[String],
+    ) -> (
+        std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+        crate::truth_probe::BatchOutcome,
+    ),
 {
     let all = req
         .params
@@ -5283,7 +5288,7 @@ where
             .filter(|h| seen.insert(h.clone()))
             .collect()
     };
-    let truths = truth_fn(&handles);
+    let (truths, batch_outcome) = truth_fn(&handles);
     // The instrument's own receipt (x-e3cc): a page where the probe answered
     // nothing must be readable AS that, not as 43 rows confidently `unknown`.
     // The rendered status word cannot carry the distinction (the vocabulary is
@@ -5298,6 +5303,24 @@ where
             // unanswered row that way.
             let truth = truths.get(&registry_truth_handle(e)).cloned();
             let rendered_status = rendered_status_from_truth(truth.as_ref());
+            // (x-6d16) The basis leg is worded by the batch outcome when the
+            // probe is absent: a handle the batch never measured reads
+            // `unmeasured`, a handle a clean batch resolved nothing for keeps
+            // the null an absent reading has always rendered (the
+            // `no-evidence` verdict lives on `progress_basis`, where
+            // `progress_from_truth` words it the same way). A probe that
+            // answered carries its own basis. `reachability` stays null on an
+            // unanswered probe - a verdict is never rendered from a run that
+            // did not run.
+            let basis_word = match truth.as_ref().and_then(|t| t.basis.clone()) {
+                Some(basis) => json!(basis),
+                None if truth.is_none()
+                    && batch_outcome == crate::truth_probe::BatchOutcome::NotMeasured =>
+                {
+                    json!("unmeasured")
+                }
+                None => Value::Null,
+            };
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
@@ -5307,7 +5330,7 @@ where
             // absent, never as no-evidence.
             let evidence = (
                 json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
-                json!(truth.as_ref().and_then(|t| t.basis.as_deref())),
+                basis_word,
                 json!(truth.as_ref().and_then(|t| t.last_activity_age_s)),
                 json!(truth.as_ref().and_then(|t| t.last_event_at.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.last_message.as_deref())),
@@ -5319,6 +5342,7 @@ where
             // reachability value.
             let (progress, progress_basis) = progress_from_truth(
                 truth.as_ref(),
+                batch_outcome,
                 e.harness_name(),
                 e.route_settings_path.as_deref(),
             );
@@ -12413,13 +12437,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// test against the raw seam.
     fn per_handle(
         f: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>
-    {
+    ) -> impl Fn(
+        &[String],
+    ) -> (
+        std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+        crate::truth_probe::BatchOutcome,
+    ) {
         move |handles: &[String]| {
-            handles
+            let map: std::collections::HashMap<String, crate::truth_probe::TruthProbe> = handles
                 .iter()
                 .filter_map(|h| Some((h.clone(), f(h)?)))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         }
     }
 
@@ -13467,10 +13496,11 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
             calls.borrow_mut().push(handles.to_vec());
-            handles
+            let map = handles
                 .iter()
                 .map(|h| (h.clone(), probe("working").unwrap()))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         });
 
         let calls = calls.into_inner();
@@ -13497,11 +13527,12 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
             // Answers for the first handle only; the second is simply missing.
-            handles
+            let map = handles
                 .iter()
                 .take(1)
                 .map(|h| (h.clone(), probe("working").unwrap()))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         });
 
         let agents = response.result().unwrap()["agents"].clone();
@@ -13514,6 +13545,41 @@ done
         assert!(missing["basis"].is_null());
         assert!(missing["last_activity_age_s"].is_null());
         assert_eq!(missing["observed_model"]["kind"], "no-transcript");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// x-6d16, end to end through the row projection: when the batch seam
+    /// reports the page was never measured, every row words it (`unmeasured`)
+    /// instead of rendering the `no-evidence` verdict the old lossy seam
+    /// published for a run that did not run. The measured-path twin is
+    /// `list_row_the_batch_did_not_answer_renders_exactly_as_an_unanswered_row`
+    /// above: same missing handle, clean batch, verdict unchanged.
+    #[test]
+    fn list_rows_word_a_page_the_batch_never_measured() {
+        let home = short_home("listbatchunmeasured");
+        seed_stream_row(&home, "never-probed", "aaaaaaaa");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handles: &[String]| {
+            // The timeout shape: the page comes back with NO answers
+            // (truth_probe.rs BoundedRun::NoOutput -> an empty map), not with
+            // answers plus a flag.
+            (
+                std::collections::HashMap::new(),
+                crate::truth_probe::BatchOutcome::NotMeasured,
+            )
+        });
+
+        let rows = response.result().unwrap()["agents"].as_array().unwrap();
+        assert!(!rows.is_empty(), "the seeded row must render");
+        for row in rows {
+            assert_eq!(row["basis"], "unmeasured", "row {}", row["name"]);
+            assert_eq!(row["progress_basis"], "unmeasured", "row {}", row["name"]);
+            assert!(row["reachability"].is_null(), "row {}", row["name"]);
+            assert!(row["last_activity_age_s"].is_null(), "row {}", row["name"]);
+            assert_eq!(row["status"], "unknown", "row {}", row["name"]);
+        }
         std::fs::remove_dir_all(home.root()).ok();
     }
 
